@@ -152,7 +152,12 @@ const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
 // Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The index-op backlog beyond this cap
 // carries forward in an `iq:` queue and drains over the next flushes, so a big burst never drops and
 // subrequests stay bounded.
-const MAX_INDEX_OPS_PER_FLUSH = 30;   // ~300 subrequests, leaving room for the shard writes
+// Raised 30 -> 150: index ops are GROUPED by bucket in applyIndexOps, so co-located ops collapse into
+// ONE read+write per bucket only WITHIN a single drain. Draining a small backlog whole (instead of 30
+// at a time across many flushes) stops a hot token/frag/avtr bucket from being read+rewritten once per
+// flush — the hot-bucket write amplification. Grouped, 150 ops touch far fewer than 150 buckets, so the
+// subrequest cost stays well under budget alongside MAX_SHARDS_PER_FLUSH (120) and purges.
+const MAX_INDEX_OPS_PER_FLUSH = 150;
 // Bound the CLONE-SHARD writes per flush too. Each distinct shard is 1 R2 read + 1 write, so a burst
 // of big USER contribution batches (a 136-avatar batch spans ~136 shards) could push a single flush
 // past Cloudflare's per-invocation subrequest limit → the invocation dies BEFORE clearing the `pend:`
@@ -161,6 +166,12 @@ const MAX_INDEX_OPS_PER_FLUSH = 30;   // ~300 subrequests, leaving room for the 
 // 1-min flush, so a backlog DRAINS over a few flushes. 120 shards ≈ 240 R2 ops, well under budget
 // alongside the index work + purges. Admin/bot pushes are separately bounded (WALK_BATCH).
 const MAX_SHARDS_PER_FLUSH = 120;
+// Coalesce _manifest.json writes. The LIVE entry count already rides `meta.entries` (which /health
+// max()es against the manifest), so the _manifest.json copy only needs periodic freshening, not a
+// write+purge on every count-moving flush during steady growth. Rewrite it at most every N ms OR once
+// the count has drifted by K from the last written manifest — whichever comes first.
+const MANIFEST_MIN_INTERVAL_MS = 5 * 60_000;   // at most one manifest write per 5 min from drift alone
+const MANIFEST_MIN_DELTA = 25;                 // ...unless the count moved by >=25, then write now
 
 // The search summary stored in a fragment bucket.
 function fragSummary(e, fileId) {
@@ -238,20 +249,33 @@ async function applyIndexOps(env, ops) {
       let cur = { v: 1, e: {} };
       try { const o = await env.CATALOG.get(`fragments/${p}.json`); if (o) cur = await o.json(); } catch (_) {}
       if (!cur || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
-      Object.assign(cur.e, fw.set);
-      for (const id of fw.del) delete cur.e[id];
-      try { await env.CATALOG.put(`fragments/${p}.json`, JSON.stringify({ v: 1, e: cur.e }), ttl);
-        if (base) changed.push(base + `/fragments/${p}.json`); } catch (_) {}
+      // NO-OP GUARD: only rewrite when a summary actually CHANGES (re-adding an already-indexed
+      // avatar whose summary is identical, or a delete of an absent id, must not rewrite the bucket).
+      // This is the frag/avtr/index equivalent of the shard `dirty` flag — the biggest wasted Class A.
+      let dirty = false;
+      for (const [id, summary] of Object.entries(fw.set)) {
+        if (JSON.stringify(cur.e[id]) !== JSON.stringify(summary)) { cur.e[id] = summary; dirty = true; }
+      }
+      for (const id of fw.del) { if (id in cur.e) { delete cur.e[id]; dirty = true; } }
+      if (dirty) {
+        try { await env.CATALOG.put(`fragments/${p}.json`, JSON.stringify({ v: 1, e: cur.e }), ttl);
+          if (base) changed.push(base + `/fragments/${p}.json`); } catch (_) {}
+      }
     }
     if (aw && (aw.add.size || aw.rem.size)) {
       let cur = { v: 1, ids: [] };
       try { const o = await env.CATALOG.get(`avtr/${p}.json`); if (o) cur = await o.json(); } catch (_) {}
       if (!cur || !Array.isArray(cur.ids)) cur = { v: 1, ids: [] };
       const s = new Set(cur.ids);
-      for (const id of aw.add) s.add(id);
-      for (const id of aw.rem) s.delete(id);
-      try { await env.CATALOG.put(`avtr/${p}.json`, JSON.stringify({ v: 1, ids: Array.from(s) }), ttl);
-        if (base) changed.push(base + `/avtr/${p}.json`); } catch (_) {}
+      // NO-OP GUARD: only dirty when a membership actually changes (add of an id already present /
+      // remove of an absent id rewrote the bucket identically — the reconcile re-add + requeue waste).
+      let dirty = false;
+      for (const id of aw.add) { if (!s.has(id)) { s.add(id); dirty = true; } }
+      for (const id of aw.rem) { if (s.has(id)) { s.delete(id); dirty = true; } }
+      if (dirty) {
+        try { await env.CATALOG.put(`avtr/${p}.json`, JSON.stringify({ v: 1, ids: Array.from(s) }), ttl);
+          if (base) changed.push(base + `/avtr/${p}.json`); } catch (_) {}
+      }
     }
   }
   // Index token lists.
@@ -259,16 +283,25 @@ async function applyIndexOps(env, ops) {
     let cur = { v: 1, t: {} };
     try { const o = await env.CATALOG.get(`index/${b}.json`); if (o) cur = await o.json(); } catch (_) {}
     if (!cur || typeof cur.t !== "object" || cur.t === null) cur = { v: 1, t: {} };
+    // NO-OP GUARD per token: only rewrite the bucket when at least one token's posting list actually
+    // changed (a re-emitted ADD for an already-listed id, common after reconcile/requeue, was
+    // rewriting the whole bucket identically).
+    let dirty = false;
     for (const [tok, ch] of Object.entries(toks)) {
       const s = new Set(Array.isArray(cur.t[tok]) ? cur.t[tok] : []);
-      for (const id of ch.add) s.add(id);
-      for (const id of ch.rem) s.delete(id);
+      let tdirty = false;
+      for (const id of ch.add) { if (!s.has(id)) { s.add(id); tdirty = true; } }
+      for (const id of ch.rem) { if (s.has(id)) { s.delete(id); tdirty = true; } }
+      if (!tdirty) continue;
       let ids = Array.from(s);
       if (ids.length > INDEX_HOT_TOKEN_CAP) ids = ids.slice(0, INDEX_HOT_TOKEN_CAP);
       if (ids.length) cur.t[tok] = ids; else delete cur.t[tok];
+      dirty = true;
     }
-    try { await env.CATALOG.put(`index/${b}.json`, JSON.stringify({ v: 1, t: cur.t }), ttl);
-      if (base) changed.push(base + `/index/${b}.json`); } catch (_) {}
+    if (dirty) {
+      try { await env.CATALOG.put(`index/${b}.json`, JSON.stringify({ v: 1, t: cur.t }), ttl);
+        if (base) changed.push(base + `/index/${b}.json`); } catch (_) {}
+    }
   }
   return changed;
 }
@@ -521,7 +554,7 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 8,   // bumped for the cost/exact-count/reconcile-hardening pass — /health reads 8 once deployed
+          version: 9,   // bumped for the cost pass: index no-op guards + larger drain + checked-only no-purge + manifest coalescing
         });
       }
 
@@ -860,7 +893,9 @@ async function flushR2(env) {
   const fillHintAdd = new Set();   // touched shards that still have an unfilled avatar
   const fillHintDone = new Set();  // touched shards that are now fully filled
   const prefixes = Object.keys(shardOps);
-  const dirtyPrefixes = [];        // shards we actually REWROTE (only these are put + purged)
+  const dirtyPrefixes = [];        // shards we actually REWROTE
+  const purgePrefixes = [];        // shards whose SERVED content changed (only these need a CDN purge —
+                                   // a `checked`-only rewrite doesn't change what a clone/search read sees)
   for (const sp of prefixes) {
     const ops = shardOps[sp];
     let cur;
@@ -879,10 +914,14 @@ async function flushR2(env) {
     // shard's write SUCCEEDS — so a write that fails (KV not cleared → retried next flush) can never
     // bump `entries` for a shard that didn't persist and then get RE-counted on the retry. That
     // double-count on partial failures was a source of the running count drifting off exact.
-    let dirty = false, sAdded = 0, sRemoved = 0, sUnfilled = 0;
+    // `dirty` = the shard must be REWRITTEN; `contentDirty` = its SERVED content changed so the edge
+    // cache must be PURGED. A `checked`-only bump sets `dirty` (the timestamp must persist for sweep
+    // pacing) but NOT `contentDirty` (no clone/search reader consults `checked`), so it never wastes a
+    // purge — the biggest recurring purge saving at the 30d recheck cadence.
+    let dirty = false, contentDirty = false, sAdded = 0, sRemoved = 0, sUnfilled = 0;
     const sIndexOps = [];
     for (const fid of Object.keys(ops.adds)) if (!e[fid]) {
-      const ne = ops.adds[fid]; e[fid] = ne; sAdded++; dirty = true;
+      const ne = ops.adds[fid]; e[fid] = ne; sAdded++; dirty = true; contentDirty = true;
       const op = buildIndexOp(null, ne, fid); if (op) sIndexOps.push(op);
       if (ne.filled !== true) sUnfilled++;
     }
@@ -898,11 +937,11 @@ async function flushR2(env) {
       // shouldn't rewrite the shard either. entryEquivalent compares the persisted fields.
       if (!prev || !entryEquivalent(prev, inc)) {
         const op = buildIndexOp(prev || null, inc, fid); if (op) sIndexOps.push(op);
-        e[fid] = inc; dirty = true;
+        e[fid] = inc; dirty = true; contentDirty = true;
       }
     }
     for (const fid of Object.keys(ops.renames)) if (e[fid] && e[fid].name !== ops.renames[fid]) {
-      const prev = { ...e[fid] }; e[fid].name = ops.renames[fid]; dirty = true;
+      const prev = { ...e[fid] }; e[fid].name = ops.renames[fid]; dirty = true; contentDirty = true;
       const op = buildIndexOp(prev, e[fid], fid); if (op) sIndexOps.push(op);
     }
     // `checked` bumps DO dirty the shard — the timestamp must persist so the liveness sweep can
@@ -912,7 +951,7 @@ async function flushR2(env) {
     // month — well under the R2 free tier — instead of the old 7d cadence's ~4x churn.
     for (const fid of ops.checked) if (e[fid]) { e[fid].checked = nowChecked; dirty = true; }
     for (const fid of ops.removes) if (e[fid]) {
-      const prev = e[fid]; delete e[fid]; sRemoved++; dirty = true;
+      const prev = e[fid]; delete e[fid]; sRemoved++; dirty = true; contentDirty = true;
       const op = buildIndexOp(prev, null, fid); if (op) sIndexOps.push(op);
       if (prev.filled !== true) sUnfilled--;
     }
@@ -930,14 +969,17 @@ async function flushR2(env) {
     } catch (_) { allShardsOk = false; }
     if (wrote) {   // fold the count deltas + index ops ONLY now that the shard actually persisted
       dirtyPrefixes.push(sp);
+      if (contentDirty) purgePrefixes.push(sp);   // checked-only writes persist but skip the purge
       added += sAdded; removed += sRemoved; unfilledDelta += sUnfilled;
       for (const op of sIndexOps) indexOps.push(op);
     }
   }
 
-  // Purge just the shards we actually REWROTE from the edge cache so a new avatar goes live
-  // within ~seconds instead of the TTL. No-op unless a purge token is configured.
-  if (allShardsOk && dirtyPrefixes.length > 0) await purgeShards(env, dirtyPrefixes);
+  // Purge just the shards whose SERVED content changed (adds/upserts/renames/removes) so a new avatar
+  // goes live within ~seconds instead of the TTL. A `checked`-only rewrite is skipped — a stale cached
+  // copy is functionally identical for clone/search (no reader consults `checked`). No-op unless a
+  // purge token is configured.
+  if (allShardsOk && purgePrefixes.length > 0) await purgeShards(env, purgePrefixes);
 
   // FULL incremental SEARCH INDEX (add / rename / remove + avtr presence) — computed above from the
   // SAME shard reads (no re-fetch). Drain any carried-over ops first, then this flush's, up to the
@@ -987,31 +1029,38 @@ async function flushR2(env) {
   // rebuild is ever run as an optional backstop, its authoritative counts are adopted once.
   const countMoved = added > 0 || removed > 0 || unfilledDelta !== 0;
   let entries = Math.max(0, (prevMeta.entries || 0) + added - removed);
-  let unfilled = 0;
+  let unfilled = typeof prevMeta.unfilled === "number" ? prevMeta.unfilled : 0;
   let adoptedRebuild = prevMeta.adoptedRebuild || null;
+  let manifestWritten = false;
   if (countMoved) {
-    let man = {};
-    try { const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json(); } catch (_) {}
-    if (!man || typeof man !== "object") man = {};
-    // Seed the running unfilled from KV meta, else from the manifest baseline (first run after this
-    // change / after an optional full rebuild), then apply this flush's delta.
-    const baseUnfilled = typeof prevMeta.unfilled === "number" ? prevMeta.unfilled
-      : (typeof man.unfilled === "number" ? man.unfilled : 0);
-    unfilled = Math.max(0, baseUnfilled + unfilledDelta);
-    if (man.lastFullRebuild && man.lastFullRebuild !== adoptedRebuild && typeof man.entryCount === "number") {
-      entries = Math.max(0, man.entryCount + added - removed);
-      if (typeof man.unfilled === "number") unfilled = Math.max(0, man.unfilled + unfilledDelta);
-      adoptedRebuild = man.lastFullRebuild;
-    }
-    man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
-      entryCount: entries, unfilled, searchReady: true, lastUpdate: new Date().toISOString() };
-    try {
-      await env.CATALOG.put("_manifest.json", JSON.stringify(man), {
-        httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" },
-      });
-    } catch (_) {}
-    if (allShardsOk && env.CATALOG_BASE) {
-      await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
+    // Decide whether to freshen _manifest.json THIS flush (coalesced — see MANIFEST_MIN_* above). The
+    // running unfilled tracks in meta regardless; the manifest read + adopt only run when we actually
+    // write, so a skipped flush also saves the manifest Class B read.
+    const sinceManifest = nowChecked - (prevMeta.lastManifestMs || 0);
+    const entryDelta = Math.abs(entries - (typeof prevMeta.lastManifestEntries === "number" ? prevMeta.lastManifestEntries : 0));
+    const writeManifest = !prevMeta.lastManifestMs || sinceManifest >= MANIFEST_MIN_INTERVAL_MS || entryDelta >= MANIFEST_MIN_DELTA;
+    unfilled = Math.max(0, unfilled + unfilledDelta);
+    if (writeManifest) {
+      let man = {};
+      try { const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json(); } catch (_) {}
+      if (!man || typeof man !== "object") man = {};
+      // A full rebuild (optional backstop) publishes authoritative counts once — adopt them.
+      if (man.lastFullRebuild && man.lastFullRebuild !== adoptedRebuild && typeof man.entryCount === "number") {
+        entries = Math.max(0, man.entryCount + added - removed);
+        if (typeof man.unfilled === "number") unfilled = Math.max(0, man.unfilled + unfilledDelta);
+        adoptedRebuild = man.lastFullRebuild;
+      }
+      man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
+        entryCount: entries, unfilled, searchReady: true, lastUpdate: new Date().toISOString() };
+      try {
+        await env.CATALOG.put("_manifest.json", JSON.stringify(man), {
+          httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" },
+        });
+        manifestWritten = true;
+      } catch (_) {}
+      if (manifestWritten && allShardsOk && env.CATALOG_BASE) {
+        await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
+      }
     }
   }
 
@@ -1049,6 +1098,7 @@ async function flushR2(env) {
     totalRemoved: (prevMeta.totalRemoved || 0) + removed,
     entries,
     ...(countMoved ? { unfilled } : {}),   // running Fill backlog (preserved when nothing moved)
+    ...(manifestWritten ? { lastManifestMs: nowChecked, lastManifestEntries: entries } : {}),
     ...(hintChanged || seeded ? { fillHint } : {}),  // bot fill worklist (seeded once, then maintained)
     adoptedRebuild,
     lastCommit: allShardsOk
