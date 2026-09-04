@@ -658,8 +658,6 @@ async function reconcileIndex(env) {
   }
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
-  let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
-  const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   const missing = [];          // ADD index ops for entries not yet indexed
   // Recount the AUTHORITATIVE entry + unfilled totals as we read every shard, to correct the running
   // incremental counts that drift with no full rebuild — a drifted `unfilled` makes the FILL bots
