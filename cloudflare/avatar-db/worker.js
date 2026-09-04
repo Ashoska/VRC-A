@@ -629,7 +629,11 @@ const RC_MAX_ATTEMPTS = 3;            // retry a tainted (read-failed) count pas
 // RECONCILE_REARM_MS: it re-walks the catalog, recomputes the TRUE entries/unfilled, and adopts them on
 // a clean lap — snapping "queued 74" back to reality so the bots stop chasing ghosts. Cheap: shard reads
 // (Class B) + zero index ops when the index is already healthy.
-const RECONCILE_REARM_MS = 7 * 24 * 60 * 60 * 1000;   // 7 days
+// Cost note: a recount lap is ~4,100 R2 CLASS B reads (the near-free tier — the same reads a clone
+// lookup uses) + ~1 manifest write; ZERO Class A writes on a healthy index (index ops are enqueued only
+// for genuinely-broken entries, which is the repair you'd want). That's ~$0.002 per lap. At 30 days it's
+// far under a cent a month — nowhere near the Class A write cost that caused the bill.
+const RECONCILE_REARM_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days (matches the recheck cadence)
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   // Re-arm a completed heal once it's older than the interval, so the count is periodically re-truthed.
