@@ -202,6 +202,11 @@ function entryEquivalent(a, b) {
   if ((a.desc || "") !== (b.desc || "")) return false;
   if ((a.filled === true) !== (b.filled === true)) return false;
   if (platMask(a.platforms) !== platMask(b.platforms)) return false;
+  // Perf rank can change on a re-upload (e.g. the creator optimised the avatar). It's shown as the
+  // search badge (fragSummary.pf), so a perf-only change MUST persist + re-index, not be skipped.
+  if ((a.perfPc ?? 5) !== (b.perfPc ?? 5)) return false;
+  if ((a.perfQuest ?? 5) !== (b.perfQuest ?? 5)) return false;
+  if ((a.perfIos ?? 5) !== (b.perfIos ?? 5)) return false;
   return true;
 }
 
@@ -214,7 +219,10 @@ function buildIndexOp(oldE, newE, fileId) {
   if (!newE.id) return null;
   if (!oldE) return { id: newE.id, del: false, frag: fragSummary(newE, fileId), add: [...tokensOf(newE)], rem: [], avtr: "a" };
   const relevant = (oldE.name || "") !== (newE.name || "") || (oldE.author || "") !== (newE.author || "") ||
-    (oldE.authorId || "") !== (newE.authorId || "") || platMask(oldE.platforms) !== platMask(newE.platforms);
+    (oldE.authorId || "") !== (newE.authorId || "") || platMask(oldE.platforms) !== platMask(newE.platforms) ||
+    // perf rank rides the fragment summary (search badge), so a perf-only change must refresh it too.
+    (oldE.perfPc ?? 5) !== (newE.perfPc ?? 5) || (oldE.perfQuest ?? 5) !== (newE.perfQuest ?? 5) ||
+    (oldE.perfIos ?? 5) !== (newE.perfIos ?? 5);
   if (!relevant) return null;
   const ot = tokensOf(oldE), nt = tokensOf(newE);
   return { id: newE.id, del: false, frag: fragSummary(newE, fileId),
@@ -575,7 +583,7 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 11,   // author-rename propagation + periodic reconcile re-arm (fixes phantom unfilled walk)
+          version: 12,   // perf-rank changes now persist + re-index (were dropped by entryEquivalent/buildIndexOp)
         });
       }
 
@@ -648,8 +656,6 @@ async function reconcileIndex(env) {
       return;   // heal current + within the window → the incremental flush maintains the index
     }
   }
-  let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
-  const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   const missing = [];          // ADD index ops for entries not yet indexed

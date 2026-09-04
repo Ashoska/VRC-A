@@ -255,17 +255,6 @@ object InstanceRosterManager {
     // budget (vs the generic transient retry), and watch BOTH signals — a real thumbnail OR the log's
     // name+author landing (either one resolves).
     private val loadingWatchKeys = ConcurrentHashMap.newKeySet<String>()
-    // Members that EXHAUSTED the loading watch (both signals still missing after the budget) — greyed but
-    // TAP-REPROBE-able (unlike noMatch/dead, which are definitive and stay tap-disabled). uid -> when it
-    // went quiet. Cleared when a new log avatar event / a successful tap re-arms resolution.
-    private val loadingGaveUp = ConcurrentHashMap<String, Long>()
-    // Per-uid last-attempt inputs so a tap-reprobe can tell whether NEW info actually loaded (worn
-    // thumbnail robot->real, or name/author blank->present) BEFORE spending any DB/avtrdb search.
-    private val lastResolveFileId = ConcurrentHashMap<String, String>()   // "" = none/unknown observed
-    private val lastResolveName = ConcurrentHashMap<String, String>()
-    private val lastResolveAuthor = ConcurrentHashMap<String, String>()
-    // Per-uid tap-reprobe rate limit (a manual retry is allowed at most once per minute per member).
-    private val lastTapReprobeAt = ConcurrentHashMap<String, Long>()
     // Per-uid time the current avatar NAME first appeared/changed — gates the speculative name+author
     // clone until the name is STABLE (a mid-switch stale name must not uniquely match the OLD avatar).
     private val avatarNameSince = ConcurrentHashMap<String, Long>()
@@ -290,12 +279,12 @@ object InstanceRosterManager {
     private const val LOADING_HARD_CAP_MS = 15 * 60_000L        // TRANSIENT unresolved (rate-limit/catalog): final grey after 15 min
     // LOADING watch (robot worn image + no unique name+author): watch BOTH signals (thumbnail landing OR
     // the log's name+author landing) on a cheaper cadence, bounded to a short budget — real avatars load
-    // within seconds, so if NEITHER signal arrives in ~3 min it's stuck/private → go quiet (grey, but the
-    // button becomes tap-reprobe-able). This is the rate-limit cut for big instances: no 15-min hammer.
+    // within seconds, so if NEITHER signal arrives in ~3 min it's stuck/private → HARD grey and stop. No
+    // manual re-check button (a "rescan" affordance read as pointless); the rare avatar that loads after
+    // the window is caught later by the liveness bots or an avatar switch. Rate-limit cut for big instances.
     private const val LOADING_WATCH_INTERVAL_MS = 25_000L       // loading watch: re-check every ~25s
-    private const val LOADING_WATCH_BUDGET_MS = 3 * 60_000L     // give up the loading watch after ~3 min → go quiet
+    private const val LOADING_WATCH_BUDGET_MS = 3 * 60_000L     // give up the loading watch after ~3 min → hard grey
     private const val MAX_RECHECK_PER_PASS = 6                  // cap re-checks per retry pass (spread big instances, no burst)
-    private const val TAP_REPROBE_MIN_INTERVAL_MS = 60_000L     // a manual retry is allowed at most once/min per member
     private const val NAME_STABLE_MS = 4_000L                   // speculative name+author clone waits for a stable name
     private val enrichAttempts = ConcurrentHashMap<String, Int>()
     // Per-user platform (/users/{id} -> last_platform) is the ONLY source for a
@@ -1042,8 +1031,7 @@ object InstanceRosterManager {
         avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear()
         avatarPlatformsCache.clear(); avatarResolveInFlight.clear()
         avatarLoadingSince.clear(); avatarSlowRetryAt.clear()
-        loadingWatchKeys.clear(); loadingGaveUp.clear()
-        lastResolveFileId.clear(); lastResolveName.clear(); lastResolveAuthor.clear(); lastTapReprobeAt.clear()
+        loadingWatchKeys.clear()
         avatarNameSince.clear()
         VrchatAuthManager.clearResolveTraces()
         com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
@@ -1071,49 +1059,6 @@ object InstanceRosterManager {
         return if (System.currentTimeMillis() - since >= LOADING_RESOLVE_WINDOW_MS) "" else null
     }
 
-    enum class RetryResult { REARMED, NOTHING_NEW, RATE_LIMITED, NOT_RETRIABLE }
-
-    /** True if [uid]'s greyed clone button is a LOADING give-up (tap-reprobe-able) vs a definitive
-     *  noMatch/dead grey (not). The roster UI uses this to show the manual-retry affordance. */
-    fun canRetryClone(uid: String): Boolean = loadingGaveUp.containsKey(uid)
-
-    /**
-     * Manual tap-reprobe of a greyed clone button (the escape hatch for a member that EXHAUSTED the
-     * loading watch — its avatar loaded after we went quiet). Cheap + guarded so it can't be abused:
-     *  - only acts on a LOADING give-up (noMatch/dead stay definitive → NOT_RETRIABLE, no DB/avtrdb),
-     *  - at most once per minute per member (RATE_LIMITED otherwise),
-     *  - does ONE cheap GET /users/{id} probe and only proceeds to the full DB/avtrdb resolve if NEW
-     *    info actually loaded since the last attempt (worn thumbnail robot->real, or the log's name/
-     *    author blank->present); nothing new → NOTHING_NEW, zero DB/avtrdb calls.
-     * On new info it re-arms resolution (fresh watch) and resolves immediately.
-     */
-    suspend fun retryClone(context: Context, uid: String): RetryResult = withContext(Dispatchers.IO) {
-        if (!loadingGaveUp.containsKey(uid)) return@withContext RetryResult.NOT_RETRIABLE
-        val now = System.currentTimeMillis()
-        if (now - (lastTapReprobeAt[uid] ?: 0L) < TAP_REPROBE_MIN_INTERVAL_MS) return@withContext RetryResult.RATE_LIMITED
-        lastTapReprobeAt[uid] = now
-        // ONE cheap /users probe (no DB work) to see if the worn thumbnail finally landed.
-        val info = try { VrchatAuthManager.fetchUserInfo(context, uid) } catch (e: Exception) { null }
-        val wornFid = info?.wornAvatarThumbUrl?.let { Regex("file_[0-9a-fA-F-]{36}").find(it)?.value } ?: ""
-        val entry = lastEntries.firstOrNull { it.userId == uid }
-        val curName = entry?.avatarName ?: ""
-        val curAuthor = entry?.avatarCreator ?: ""
-        // NEW info = a real (non-fallback) thumbnail that differs from last attempt, OR the log's
-        // name/author having appeared since (either one is enough to resolve).
-        val nowReal = wornFid.isNotBlank() && !com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(wornFid)
-        val thumbNewlyUsable = nowReal && wornFid != (lastResolveFileId[uid] ?: "")
-        val nameNewlyPresent = (curName.isNotBlank() && lastResolveName[uid].isNullOrBlank()) ||
-            (curAuthor.isNotBlank() && lastResolveAuthor[uid].isNullOrBlank())
-        if (!thumbNewlyUsable && !nameNewlyPresent) return@withContext RetryResult.NOTHING_NEW
-        // Re-arm: clear the give-up + decision so the resolve runs fresh, then resolve immediately.
-        loadingGaveUp.remove(uid)
-        avatarIdResolvedFor.remove(uid); avatarIdCache.remove(uid)
-        avatarLoadingSince["$uid|$curName"] = now
-        if (entry != null && resolvingAvatars.compareAndSet(false, true)) {
-            try { resolveAvatars(context, listOf(entry)) } finally { resolvingAvatars.set(false) }
-        }
-        RetryResult.REARMED
-    }
 
     /** Resolve each member's exact clone id in the background (paced, single-flight)
      *  and republish the row with it (or "" when nothing cloneable was found). */
@@ -1143,11 +1088,6 @@ object InstanceRosterManager {
             // broken until they switched avatars). Leave it unresolved so the next pass retries,
             // and only give up (grey) after a few real attempts.
             val tryKey = "$uid|$name"
-            // Record this attempt's INPUTS so a manual tap-reprobe can tell whether NEW info later loaded
-            // (worn thumbnail robot->real, or name/author blank->present) BEFORE spending any DB search.
-            lastResolveFileId[uid] = res.observedFileId ?: ""
-            lastResolveName[uid] = name
-            lastResolveAuthor[uid] = e.avatarCreator ?: ""
             if (res.avatarId != null) {
                 avatarIdCache[uid] = id
                 avatarIdResolvedFor[uid] = name
@@ -1156,13 +1096,13 @@ object InstanceRosterManager {
                 else avatarCloneFileIdCache.remove(uid)
                 avatarLoadingSince.remove(tryKey)
                 avatarSlowRetryAt.remove(tryKey)   // resolved (possibly in the slow phase) → un-grey
-                loadingWatchKeys.remove(tryKey); loadingGaveUp.remove(uid)
+                loadingWatchKeys.remove(tryKey)
             } else if (res.dead) {
                 // Confirmed dead/private (403/404) → grey DECISIVELY, don't spin/retry (already reported).
                 avatarIdCache[uid] = ""; avatarIdResolvedFor[uid] = name
                 avatarCloneFileIdCache.remove(uid)
                 avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey)
-                loadingWatchKeys.remove(tryKey); loadingGaveUp.remove(uid)   // definitive → tap disabled
+                loadingWatchKeys.remove(tryKey)
             } else if (res.noMatch) {
                 // DEFINITIVE no-match reached AFTER querying VRChat/the DBs (private/unindexed avatar,
                 // candidates confirmed different, or 0 candidates) → FINAL, grey once and STOP. This is
@@ -1170,32 +1110,29 @@ object InstanceRosterManager {
                 // min on a private avatar. It re-resolves on its own if they switch avatars (the name
                 // key changes → avatarIdResolvedFor no longer matches). Transient nulls (catalog
                 // unavailable / 429 / worn-thumb fetch failed) do NOT set noMatch, so they still retry.
-                // noMatch is DEFINITIVE (had the info, still denied) → NOT tap-reprobe-able.
                 avatarIdCache[uid] = ""; avatarIdResolvedFor[uid] = name
                 avatarCloneFileIdCache.remove(uid)
                 avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey)
-                loadingWatchKeys.remove(tryKey); loadingGaveUp.remove(uid)
+                loadingWatchKeys.remove(tryKey)
             } else {
                 // UNRESOLVED — two kinds, both spinner <40s then grey, retry loop re-resolves underneath:
                 //  - res.loading: worn image is the robot fallback AND no unique name+author yet. WATCH
                 //    BOTH signals (a real thumbnail OR the log's name+author landing — either resolves)
                 //    on the shorter loading cadence, bounded to LOADING_WATCH_BUDGET_MS (~3 min). Real
-                //    avatars load within seconds, so if NEITHER arrives it's stuck/private → go QUIET
-                //    (grey, but the button becomes tap-reprobe-able via loadingGaveUp). This is the big
-                //    rate-limit cut for large instances — no 15-min hammer on a stuck-on-robot player.
+                //    avatars load within seconds, so if NEITHER arrives it's stuck/private → HARD grey and
+                //    STOP (no tap-rescan). The rare avatar that loads later is caught by an avatar switch or
+                //    the liveness bots. This is the big rate-limit cut for large instances.
                 //  - transient (usersFailed / catalog unavailable / no-match-yet): keep the generic
                 //    retry to the 15-min hard cap (these genuinely might resolve on the next try).
                 if (res.loading) loadingWatchKeys.add(tryKey) else loadingWatchKeys.remove(tryKey)
-                loadingGaveUp.remove(uid)   // actively watching again → not a give-up (re-set only on expiry)
                 val budget = if (res.loading) LOADING_WATCH_BUDGET_MS else LOADING_HARD_CAP_MS
                 val since = avatarLoadingSince.getOrPut(tryKey) { System.currentTimeMillis() }
                 val elapsed = System.currentTimeMillis() - since
                 when {
-                    elapsed >= budget -> {                             // gave up → grey, stop retrying
+                    elapsed >= budget -> {                             // gave up → HARD grey, stop retrying
                         avatarIdCache[uid] = ""; avatarIdResolvedFor[uid] = name
                         avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey)
                         loadingWatchKeys.remove(tryKey)
-                        if (res.loading) loadingGaveUp[uid] = System.currentTimeMillis()  // enable tap-reprobe
                     }
                     elapsed >= LOADING_RESOLVE_WINDOW_MS ->            // grey, keep re-checking on its cadence
                         avatarSlowRetryAt[tryKey] = System.currentTimeMillis()
