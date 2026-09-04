@@ -851,6 +851,25 @@ object AvatarGlobalDb {
         SearchPage(out, page, pageSize, total, from + pageSize < total)
     }
 
+    /** Grab the WHOLE match set for a query in ONE go (capped), so the UI can filter + paginate
+     *  CLIENT-SIDE — toggling a platform filter never needs to re-search. Cheap: the candidate id list
+     *  is one index lookup, and the fragment summaries come in whole buckets (a bounded number of
+     *  CDN-cached reads regardless of how many matched). `hasMore` = there were MORE than the cap. */
+    suspend fun searchShardedAll(context: Context, query: String, cap: Int = 500): SearchPage = coroutineScope {
+        ensureCatalogBase(context)
+        if (!r2Serving) return@coroutineScope SearchPage(emptyList(), 0, cap, 0, false)
+        val base = catalogBase ?: return@coroutineScope SearchPage(emptyList(), 0, cap, 0, false)
+        val candidates = candidatesFor(base, query)
+        val total = candidates.size
+        val slice = if (total > cap) candidates.subList(0, cap) else candidates
+        val byBucket = slice.groupBy { fragBucketOf(it) }
+        val fetched = byBucket.keys.map { b -> async { b to (fetchFragments(base, b) ?: emptyMap()) } }
+            .awaitAll().toMap()
+        val out = ArrayList<Entry>(slice.size)
+        for (id in slice) { val frags = fetched[fragBucketOf(id)] ?: continue; frags[id]?.let { out.add(it) } }
+        SearchPage(out, 0, cap, total, total > cap)
+    }
+
     /** Drop the sharded-search caches (token/fragment JSON + per-query candidate lists). Called
      *  on tab-away from VRChat / a new search / app close so a query's shards don't linger. */
     fun evictSearchCache() {

@@ -45,7 +45,10 @@ object AvatarSearch {
          *  our own catalog do; avtrdb proxies its image, so null there). */
         val imageFileId: String? = null,
         /** Which source it came from (for the per-DB debug + ranking). */
-        val source: String = ""
+        val source: String = "",
+        /** Per-platform VRChat performance rank: 0=Excellent 1=Good 2=Medium 3=Poor 4=VeryPoor
+         *  5=unknown. Populated from our catalog (the FILL bot fetches it); other sources leave 5. */
+        val perfPc: Int = 5, val perfQuest: Int = 5, val perfIos: Int = 5
     )
 
     // avtrdb pages ~20 results each. We paginate to EXHAUSTION (no result cap — fetch
@@ -371,7 +374,8 @@ object AvatarSearch {
     private fun entryToResult(e: AvatarGlobalDb.Entry): Result = Result(
         id = e.avatarId, name = e.name, author = e.author,
         imageUrl = "https://api.vrchat.cloud/api/1/image/${e.fileId}/1/256",
-        platforms = e.platforms, authorId = e.authorId, imageFileId = e.fileId, source = "catalog"
+        platforms = e.platforms, authorId = e.authorId, imageFileId = e.fileId, source = "catalog",
+        perfPc = e.perfPc, perfQuest = e.perfQuest, perfIos = e.perfIos
     )
 
     private fun catalogResults(query: String): List<Result> =
@@ -395,6 +399,13 @@ object AvatarSearch {
      *  to this page's fragment buckets; `hasMore` is exact (candidate count known up-front). */
     suspend fun searchPage(context: Context, query: String, page: Int, pageSize: Int = 20): ResultPage {
         val p = AvatarGlobalDb.searchShardedPage(context, query, page, pageSize)
+        return ResultPage(p.results.map { entryToResult(it) }, p.page, p.total, p.hasMore)
+    }
+
+    /** The WHOLE match set for a query (capped) in one fetch — the UI filters + paginates client-side,
+     *  so toggling a platform filter never re-searches. `total`/`hasMore` say if the cap was hit. */
+    suspend fun searchAllMatches(context: Context, query: String, cap: Int = 500): ResultPage {
+        val p = AvatarGlobalDb.searchShardedAll(context, query, cap)
         return ResultPage(p.results.map { entryToResult(it) }, p.page, p.total, p.hasMore)
     }
 

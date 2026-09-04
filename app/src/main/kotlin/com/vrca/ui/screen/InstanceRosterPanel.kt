@@ -417,7 +417,7 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
  * Quest green, Apple light. Replaces the old text chip ("PC"/"Quest"/"iOS").
  */
 @Composable
-private fun PlatformSymbol(platform: String) {
+internal fun PlatformSymbol(platform: String) {
     val tint = when (platform) {
         "PC" -> androidx.compose.ui.graphics.Color(0xFF2196F3)   // Windows blue
         "Quest" -> androidx.compose.ui.graphics.Color(0xFF3DDC84) // Android brand green

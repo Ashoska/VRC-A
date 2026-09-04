@@ -763,6 +763,11 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
     var searchSeq by remember { mutableStateOf(0) }
     // Avatar ids confirmed dead (image 404 + existence check) — hidden from results.
     val deadIds = remember { androidx.compose.runtime.mutableStateListOf<String>() }
+    // Platform filter (null = all). Filters the SHOWN results by compatibility — CLIENT-side over the
+    // whole grabbed match set, so toggling it never re-searches. `searchCapped` = the match set hit the
+    // grab-all cap (very broad term), so there may be more beyond what was fetched.
+    var platFilter by remember { mutableStateOf<String?>(null) }
+    var searchCapped by remember { mutableStateOf(false) }
 
     // Paged (Google-style) search over the sharded catalog. `pageCache` holds each fetched
     // page's rows for this query; `pageTotal` is the exact candidate count (so Next is exact
@@ -819,12 +824,14 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
         if (paged) {
             scope.launch {
                 searching = true; results = emptyList()
-                fetchPage(seq, q, 0)                       // page 0 (shown)
+                // Grab the WHOLE match set once (cheap — see searchShardedAll), so the platform filter
+                // + "See more" run CLIENT-side and toggling a filter never re-searches.
+                val all = com.vrca.vrchat.AvatarSearch.searchAllMatches(ctx, q)
                 if (seq != searchSeq) return@launch
-                results = pageCache[0] ?: emptyList()
+                results = all.results
+                searchCapped = all.hasMore
                 searching = false
-                backgroundContribute(seq, q)               // absorb avtrdb extras silently
-                fetchPage(seq, q, 1)                        // prefetch page 1 (the "40 on first search")
+                backgroundContribute(seq, q)               // absorb avtrdb extras + insta-update rows
             }
             return
         }
@@ -892,6 +899,20 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                 ),
                 keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { runSearch() })
             )
+            // Platform filter — narrow the shown results by PC / Quest / iOS compatibility.
+            if (searched) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    FilterChip(selected = platFilter == null, onClick = { platFilter = null }, label = { Text("All") })
+                    listOf("PC", "Quest", "iOS").forEach { plat ->
+                        FilterChip(
+                            selected = platFilter == plat,
+                            onClick = { platFilter = if (platFilter == plat) null else plat },
+                            label = { Text(plat) },
+                            leadingIcon = { PlatformSymbol(plat) }
+                        )
+                    }
+                }
+            }
             when {
                 searching || loadingMore ->
                     androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -901,44 +922,34 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            val visible = results.filter { it.id !in deadIds }
-            if (paged) {
-                visible.forEach { r ->
-                    AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) })
-                }
-                // Google-style page bar: Prev / "Page N of M" / Next. Next is exact (candidate
-                // count known); the next page is already prefetched so it appears instantly.
-                if (searched && pageTotal > 0) {
-                    val totalPages = (pageTotal + pageSize - 1) / pageSize
-                    val hasNext = (pageIndex + 1) * pageSize < pageTotal
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.material3.TextButton(
-                            onClick = { goToPage(pageIndex - 1) },
-                            enabled = pageIndex > 0 && !searching
-                        ) { Text("Previous") }
-                        Spacer(Modifier.weight(1f))
-                        Text(
-                            "Page ${pageIndex + 1} of $totalPages",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.weight(1f))
-                        androidx.compose.material3.TextButton(
-                            onClick = { goToPage(pageIndex + 1) },
-                            enabled = hasNext && !searching
-                        ) { Text("Next") }
-                    }
-                }
-            } else {
-                visible.take(shown).forEach { r ->
-                    AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) })
-                }
-                if (visible.size > shown) {
-                    androidx.compose.material3.TextButton(
-                        onClick = { shown += 12 },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("See more (${visible.size - shown} more)") }
-                }
+            val visible = results.filter {
+                it.id !in deadIds && (platFilter == null || it.platforms.any { p -> p.equals(platFilter, true) })
+            }
+            // Whole match set is already grabbed — filter + "See more" are CLIENT-side, so changing the
+            // platform filter re-slices instantly with no re-search.
+            visible.take(shown).forEach { r ->
+                AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) })
+            }
+            if (visible.size > shown) {
+                androidx.compose.material3.TextButton(
+                    onClick = { shown += 12 },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("See more (${visible.size - shown} more)") }
+            }
+            // A no-results-after-filter hint (there ARE matches, just none for this platform).
+            if (searched && !searching && results.isNotEmpty() && visible.isEmpty() && platFilter != null) {
+                Text(
+                    "No $platFilter avatars in these results — tap All to see the rest.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (searched && searchCapped) {
+                Text(
+                    "Showing the first ${results.size} matches — narrow your search for more.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             androidx.compose.material3.Divider()
@@ -1009,6 +1020,32 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
     }
 }
 
+/** VRChat avatar performance rank badge (Excellent…Very Poor). Shows the rank for the user's own
+ *  platform (Quest on the headset build, else PC), falling back to any known one. Hidden when unknown. */
+@Composable
+private fun PerfBadge(r: com.vrca.vrchat.AvatarSearch.Result) {
+    val rank = when {
+        com.vrca.BuildConfig.IS_HEADSET_BUILD && r.perfQuest < 5 -> r.perfQuest
+        r.perfPc < 5 -> r.perfPc
+        r.perfQuest < 5 -> r.perfQuest
+        r.perfIos < 5 -> r.perfIos
+        else -> return
+    }
+    val (label, color) = when (rank) {
+        0 -> "Excellent" to Color(0xFF3CCF4E)
+        1 -> "Good" to Color(0xFF8CC63F)
+        2 -> "Medium" to Color(0xFFFFC107)
+        3 -> "Poor" to Color(0xFFFF7B42)
+        else -> "Very Poor" to Color(0xFFE53935)
+    }
+    Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp), color = color.copy(alpha = 0.18f)) {
+        Text(
+            label, style = MaterialTheme.typography.labelSmall, color = color,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+        )
+    }
+}
+
 @Composable
 private fun AvatarResultRow(
     ctx: android.content.Context,
@@ -1051,13 +1088,19 @@ private fun AvatarResultRow(
                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
             )
             Text(
-                "by ${r.author.ifBlank { "unknown" }}" +
-                    if (r.platforms.isNotEmpty()) "  ·  ${r.platforms.joinToString("/")}" else "",
+                "by ${r.author.ifBlank { "unknown" }}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
             )
+            // Platform SYMBOLS (same glyphs as the instance roster) + performance rank.
+            if (r.platforms.isNotEmpty() || r.perfPc < 5 || r.perfQuest < 5 || r.perfIos < 5) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    r.platforms.forEach { PlatformSymbol(it) }
+                    PerfBadge(r)
+                }
+            }
         }
         // Clone/wear this avatar directly (we have its id). Also contributes it to
         // the global catalog (fetching its file id if the search source lacked one).
