@@ -569,6 +569,8 @@ export default {
           // Liveness backlog (entries due a 30d recheck). Computed by the recount, drained live by the
           // flush as bots recheck — REPLACES the frozen legacy staleCount the removed GitHub Action left.
           stale: typeof meta.stale === "number" ? meta.stale : 0,
+          unfilled: typeof meta.unfilled === "number" ? meta.unfilled : 0,   // live Fill backlog (not just the coalesced manifest)
+          fillShards: Array.isArray(meta.fillHint) ? meta.fillHint.length : 0, // shards in _worklist.json (should track unfilled, not balloon)
           // Author-rename propagation: the author currently being applied across the catalog (null =
           // idle), its progress this pass, and the last completed one (how many entries it renamed).
           authorRenameActive: meta.arnActive || null,
@@ -586,7 +588,7 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 13,   // real Liveness backlog (staleCount) — was a FROZEN legacy value → permanent phantom "queued N"
+          version: 14,   // prune the bloated FILL worklist (761 filled shards vs ~47 real unfilled → bots swept ghosts)
         });
       }
 
@@ -613,7 +615,7 @@ export default {
     // replacement for the Action's full reconcile: it walks the clone shards a few per minute and
     // re-indexes any entry MISSING from the search index (fragments/avtr/index), healing avatars
     // that were cloneable-but-unsearchable because their index op was dropped in the past. No GitHub.
-    ctx.waitUntil((async () => { await flushR2(env); await reconcileIndex(env); await propagateAuthorRenames(env); })());
+    ctx.waitUntil((async () => { await flushR2(env); await reconcileIndex(env); await pruneFillWorklist(env); await propagateAuthorRenames(env); })());
   },
 };
 
@@ -781,6 +783,52 @@ async function reconcileIndex(env) {
 
 // ---- AUTHOR-RENAME propagation ------------------------------------------------------------------
 // When a creator changes their VRChat display name, every catalog entry by them still stores the OLD
+// ---- FILL worklist prune (fix the bloated _worklist.json) ---------------------------------------
+// _worklist.json lists the shards the FILL bots should walk (shards holding an unfilled avatar). It's
+// maintained incrementally in flushR2 (fillHintAdd/fillHintDone) — but fillHintDone only fires for a
+// shard the bots PUSH ops for, so a shard that becomes fully-filled AND all-fresh (no work → no ops)
+// never gets removed. Over time the worklist LEAKED (observed: 761 listed shards, ALL fully filled,
+// vs ~47 real unfilled avatars). The bots then sweep hundreds of already-done shards for nothing, so
+// the "queued" number sits flat (nothing is being filled to subtract). This checks the FRONT batch of
+// the worklist each cron and drops any shard with zero unfilled avatars, rotating checked-and-kept
+// shards to the back — so the whole worklist self-corrects to the true set in a few minutes. It runs
+// ONLY while the worklist is implausibly larger than the unfilled count (bloat present), so once clean
+// it costs nothing; it re-arms automatically if the leak recurs.
+const PRUNE_BATCH = 40;            // shards checked per cron (bounded — Class B reads, cheap)
+const PRUNE_SLACK = 20;           // don't bother pruning once length is within this of the unfilled count
+async function pruneFillWorklist(env) {
+  const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  let fill = Array.isArray(meta.fillHint) ? meta.fillHint : null;
+  if (!fill || fill.length === 0) return;                                // nothing to prune
+  const unfilled = typeof meta.unfilled === "number" ? meta.unfilled : 0;
+  if (fill.length <= unfilled + PRUNE_SLACK) return;                     // plausibly clean → skip (0 reads)
+  const batch = fill.slice(0, PRUNE_BATCH);
+  const rest = fill.slice(PRUNE_BATCH);
+  const kept = [];
+  let changed = false;
+  for (const sp of batch) {
+    let shard = null, failed = false;
+    try { const o = await env.CATALOG.get(`shard/${sp}.json`); if (o) shard = await o.json(); }
+    catch (_) { failed = true; }
+    if (failed) { kept.push(sp); continue; }                            // transient read fail → keep, re-check later
+    const e = (shard && shard.e) || {};
+    const hasUnfilled = Object.values(e).some((x) => x && x.id && String(x.id).startsWith("avtr_") && x.filled !== true);
+    if (hasUnfilled) kept.push(sp);                                     // still has work → keep
+    else changed = true;                                               // fully filled → drop it
+  }
+  fill = [...rest, ...kept];   // rotate: checked-kept go to the back so the next run checks fresh ones
+  meta.fillHint = fill;
+  if (changed) {
+    try {
+      await env.CATALOG.put("_worklist.json",
+        JSON.stringify({ v: 1, ts: new Date().toISOString(), fill, stale: [] }),
+        { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
+      if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_worklist.json"]);
+    } catch (_) {}
+  }
+  await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+}
+
 // `author`. The bots detect it authoritatively (their GET /avatars/{id} is real VRChat data) and queue
 // `arn:<authorId>` = newName. This walks the catalog (bounded per run, ONE author at a time, keyed on
 // the immutable authorId) and rewrites `author` on every matching entry — reusing buildIndexOp so the
