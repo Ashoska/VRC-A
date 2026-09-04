@@ -566,6 +566,9 @@ export default {
           rcReadFail: meta.rcReadFail || 0,
           rcAttempts: meta.rcAttempts || 0,
           rcAdoptSkipped: meta.rcAdoptSkipped || 0,
+          // Liveness backlog (entries due a 30d recheck). Computed by the recount, drained live by the
+          // flush as bots recheck — REPLACES the frozen legacy staleCount the removed GitHub Action left.
+          stale: typeof meta.stale === "number" ? meta.stale : 0,
           // Author-rename propagation: the author currently being applied across the catalog (null =
           // idle), its progress this pass, and the last completed one (how many entries it renamed).
           authorRenameActive: meta.arnActive || null,
@@ -583,7 +586,7 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 12,   // perf-rank changes now persist + re-index (were dropped by entryEquivalent/buildIndexOp)
+          version: 13,   // real Liveness backlog (staleCount) — was a FROZEN legacy value → permanent phantom "queued N"
         });
       }
 
@@ -642,20 +645,42 @@ const RC_MAX_ATTEMPTS = 3;            // retry a tainted (read-failed) count pas
 // for genuinely-broken entries, which is the repair you'd want). That's ~$0.002 per lap. At 30 days it's
 // far under a cent a month — nowhere near the Class A write cost that caused the bill.
 const RECONCILE_REARM_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days (matches the recheck cadence)
+// A catalog entry is "due for a liveness recheck" once its `checked` is older than this — MUST match
+// the app's RECHECK_INTERVAL_MS (30d). The recount tallies the TRUE count; the flush drains it live as
+// bots recheck/remove. This REPLACES the manifest's old `staleCount`, which was a FROZEN artifact from
+// the removed GitHub Action (the Worker never recomputed it → a permanent phantom liveness "queued N",
+// staleCount/4 ≈ 73 per bot, that could never drain).
+const STALE_CUTOFF_MS = 30 * 24 * 60 * 60 * 1000;
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  // ONE-TIME migration: zero the frozen legacy staleCount NOW (kills the phantom "queued" immediately)
+  // and re-arm the recount so the new stale tally computes the true value on its next clean lap.
+  if (meta.staleModel !== 1) {
+    meta.staleModel = 1; meta.stale = 0;
+    meta.rcDone = false; meta.rc = 0; meta.reconcileScanned = 0;
+    meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcAttempts = 0;
+    try {
+      let man = {}; const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json();
+      man = { ...man, staleCount: 0, lastUpdate: new Date().toISOString() };
+      await env.CATALOG.put("_manifest.json", JSON.stringify(man),
+        { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
+      if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
+    } catch (_) {}
+    // fall through → run the recount this run (rcDone is now false)
+  }
   // Re-arm a completed heal once it's older than the interval, so the count is periodically re-truthed.
   if (meta.rcDone) {
     const doneMs = meta.rcDoneAt ? (Date.parse(meta.rcDoneAt) || 0) : 0;
     if (doneMs && Date.now() - doneMs > RECONCILE_REARM_MS) {
       meta.rcDone = false;
-      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0;
+      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
       meta.rcReadFail = 0; meta.rcAttempts = 0;
       // fall through → run a fresh recount lap this run
     } else {
       return;   // heal current + within the window → the incremental flush maintains the index
     }
   }
+  const rcStaleBefore = Date.now() - STALE_CUTOFF_MS;   // recount stale cutoff for this lap
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   const missing = [];          // ADD index ops for entries not yet indexed
@@ -665,7 +690,7 @@ async function reconcileIndex(env) {
   // 0, stuck at a random number"). Accumulated across the pass into meta, adopted authoritatively on
   // completion. (Slightly high in the rare real-backlog case since fills happen during the ~day pass,
   // but for a PHANTOM count it finds the true near-zero and fixes the churn.)
-  let entriesSeen = 0, unfilledSeen = 0, stepped = 0, readFail = 0;
+  let entriesSeen = 0, unfilledSeen = 0, staleSeen = 0, stepped = 0, readFail = 0;
   for (let n = 0; n < RECONCILE_SHARDS_PER_RUN; n++) {
     const prefix = cursor.toString(16).padStart(3, "0");
     cursor = (cursor + 1) & 0xfff;   // 0..4095 wrap
@@ -684,6 +709,7 @@ async function reconcileIndex(env) {
       if (!id || !id.startsWith("avtr_")) continue;
       entriesSeen++;
       if (e.filled !== true) unfilledSeen++;
+      if (((e.checked || e.added || 0)) < rcStaleBefore) staleSeen++;   // due for a 30d liveness recheck
       const b = fragBucketFor(id);
       if (!(b in avtrCache)) {
         let ids = new Set();
@@ -709,6 +735,7 @@ async function reconcileIndex(env) {
   meta.reconcileFixed = (meta.reconcileFixed || 0) + missing.length; // entries re-indexed this pass
   meta.rcEntries = (meta.rcEntries || 0) + entriesSeen;             // authoritative recount (this pass)
   meta.rcUnfilled = (meta.rcUnfilled || 0) + unfilledSeen;
+  meta.rcStale = (meta.rcStale || 0) + staleSeen;                   // true Liveness backlog (this pass)
   meta.rcReadFail = (meta.rcReadFail || 0) + readFail;              // shards we couldn't read this pass
   // One full 4096-step lap → decide. ONLY adopt the recomputed counts when the whole lap read cleanly
   // (rcReadFail === 0) — a tainted pass would UNDER-count and show a phantom "lost N avatars" drop
@@ -722,29 +749,30 @@ async function reconcileIndex(env) {
       meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
       meta.entries = meta.rcEntries || 0;
       meta.unfilled = meta.rcUnfilled || 0;
+      meta.stale = meta.rcStale || 0;   // adopt the TRUE liveness backlog (drains live via the flush)
       meta.rcAdoptSkipped = 0;
       // Push the corrected counts straight to the manifest (what the admin/bots read) + purge.
       try {
         let man = {}; const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json();
         man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
-          entryCount: meta.entries, unfilled: meta.unfilled, searchReady: true, lastUpdate: new Date().toISOString() };
+          entryCount: meta.entries, unfilled: meta.unfilled, staleCount: meta.stale, searchReady: true, lastUpdate: new Date().toISOString() };
         await env.CATALOG.put("_manifest.json", JSON.stringify(man),
           { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
         if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
       } catch (_) {}
-      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0;
+      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
       meta.rcReadFail = 0; meta.rcAttempts = 0;   // reset accumulators for a future re-arm
     } else if (attempts < RC_MAX_ATTEMPTS) {
       // Tainted lap → retry a fresh full pass (index repairs already enqueued above are idempotent).
       meta.rcAttempts = attempts + 1;
-      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcReadFail = 0;
+      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0;
       // rcDone stays false → the next cron re-walks the whole catalog for a clean count.
     } else {
       // Couldn't get a clean read after the retries → give up and KEEP the incremental count
       // (never overwrite it with an under-counted recount). Re-arm manually later if desired.
       meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
       meta.rcAdoptSkipped = (meta.rcReadFail || 0);
-      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0;
+      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
       meta.rcReadFail = 0; meta.rcAttempts = 0;
     }
   }
@@ -1004,8 +1032,10 @@ async function flushR2(env) {
   }
 
   const nowChecked = Date.now();
+  const staleCutoff = nowChecked - STALE_CUTOFF_MS;   // entries checked before this are due a recheck
   let added = 0, removed = 0, allShardsOk = true;
   let unfilledDelta = 0;      // incremental Fill-backlog delta (Worker owns the count now)
+  let staleDelta = 0;         // incremental Liveness-backlog delta (drains as bots recheck/remove)
   const indexOps = [];        // search-index ops computed from the SAME shard read (no re-fetch)
   const fillHintAdd = new Set();   // touched shards that still have an unfilled avatar
   const fillHintDone = new Set();  // touched shards that are now fully filled
@@ -1035,7 +1065,7 @@ async function flushR2(env) {
     // cache must be PURGED. A `checked`-only bump sets `dirty` (the timestamp must persist for sweep
     // pacing) but NOT `contentDirty` (no clone/search reader consults `checked`), so it never wastes a
     // purge — the biggest recurring purge saving at the 30d recheck cadence.
-    let dirty = false, contentDirty = false, sAdded = 0, sRemoved = 0, sUnfilled = 0;
+    let dirty = false, contentDirty = false, sAdded = 0, sRemoved = 0, sUnfilled = 0, sStale = 0;
     const sIndexOps = [];
     for (const fid of Object.keys(ops.adds)) if (!e[fid]) {
       const ne = ops.adds[fid]; e[fid] = ne; sAdded++; dirty = true; contentDirty = true;
@@ -1066,11 +1096,16 @@ async function flushR2(env) {
     // every pass forever). The write volume is instead bounded by the RECHECK_INTERVAL_MS (widened
     // to 30d in the app): at 30d, re-verifying the whole catalog is ~1 shard write per avatar per
     // month — well under the R2 free tier — instead of the old 7d cadence's ~4x churn.
-    for (const fid of ops.checked) if (e[fid]) { e[fid].checked = nowChecked; dirty = true; }
+    for (const fid of ops.checked) if (e[fid]) {
+      // A recheck that lands on a DUE entry drains the liveness backlog by one.
+      if (((e[fid].checked || e[fid].added || 0)) < staleCutoff) sStale--;
+      e[fid].checked = nowChecked; dirty = true;
+    }
     for (const fid of ops.removes) if (e[fid]) {
       const prev = e[fid]; delete e[fid]; sRemoved++; dirty = true; contentDirty = true;
       const op = buildIndexOp(prev, null, fid); if (op) sIndexOps.push(op);
       if (prev.filled !== true) sUnfilled--;
+      if (((prev.checked || prev.added || 0)) < staleCutoff) sStale--;   // a due entry removed also drains it
     }
     // Bot FILL-hint (replaces the Action's worklist): does this shard, AFTER the ops, still hold
     // an unfilled avatar? Accurate + cheap (the shard is already in memory). Drives _worklist.json.
@@ -1087,7 +1122,7 @@ async function flushR2(env) {
     if (wrote) {   // fold the count deltas + index ops ONLY now that the shard actually persisted
       dirtyPrefixes.push(sp);
       if (contentDirty) purgePrefixes.push(sp);   // checked-only writes persist but skip the purge
-      added += sAdded; removed += sRemoved; unfilledDelta += sUnfilled;
+      added += sAdded; removed += sRemoved; unfilledDelta += sUnfilled; staleDelta += sStale;
       for (const op of sIndexOps) indexOps.push(op);
     }
   }
@@ -1144,9 +1179,10 @@ async function flushR2(env) {
   // entryCount and unfilled move by the deltas computed above; searchReady is always true. Written
   // only when something moved; short TTL + purge so the fresh number is live in ~1s. If a full
   // rebuild is ever run as an optional backstop, its authoritative counts are adopted once.
-  const countMoved = added > 0 || removed > 0 || unfilledDelta !== 0;
+  const countMoved = added > 0 || removed > 0 || unfilledDelta !== 0 || staleDelta !== 0;
   let entries = Math.max(0, (prevMeta.entries || 0) + added - removed);
   let unfilled = typeof prevMeta.unfilled === "number" ? prevMeta.unfilled : 0;
+  let staleTotal = typeof prevMeta.stale === "number" ? prevMeta.stale : 0;   // running Liveness backlog
   let adoptedRebuild = prevMeta.adoptedRebuild || null;
   let manifestWritten = false;
   if (countMoved) {
@@ -1157,6 +1193,7 @@ async function flushR2(env) {
     const entryDelta = Math.abs(entries - (typeof prevMeta.lastManifestEntries === "number" ? prevMeta.lastManifestEntries : 0));
     const writeManifest = !prevMeta.lastManifestMs || sinceManifest >= MANIFEST_MIN_INTERVAL_MS || entryDelta >= MANIFEST_MIN_DELTA;
     unfilled = Math.max(0, unfilled + unfilledDelta);
+    staleTotal = Math.max(0, staleTotal + staleDelta);
     if (writeManifest) {
       let man = {};
       try { const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json(); } catch (_) {}
@@ -1168,7 +1205,7 @@ async function flushR2(env) {
         adoptedRebuild = man.lastFullRebuild;
       }
       man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
-        entryCount: entries, unfilled, searchReady: true, lastUpdate: new Date().toISOString() };
+        entryCount: entries, unfilled, staleCount: staleTotal, searchReady: true, lastUpdate: new Date().toISOString() };
       try {
         await env.CATALOG.put("_manifest.json", JSON.stringify(man), {
           httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" },
@@ -1214,7 +1251,7 @@ async function flushR2(env) {
     totalAdded: (prevMeta.totalAdded || 0) + added,
     totalRemoved: (prevMeta.totalRemoved || 0) + removed,
     entries,
-    ...(countMoved ? { unfilled } : {}),   // running Fill backlog (preserved when nothing moved)
+    ...(countMoved ? { unfilled, stale: staleTotal } : {}),   // running Fill + Liveness backlogs (preserved when nothing moved)
     ...(manifestWritten ? { lastManifestMs: nowChecked, lastManifestEntries: entries } : {}),
     ...(hintChanged || seeded ? { fillHint } : {}),  // bot fill worklist (seeded once, then maintained)
     adoptedRebuild,
