@@ -802,13 +802,37 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
         }
     }
 
-    // Fetch one page into the cache (idempotent); returns its total so Next-enable is exact.
-    suspend fun fetchPage(seq: Int, q: String, p: Int) {
-        if (seq != searchSeq || pageCache.containsKey(p)) return
-        val rp = com.vrca.vrchat.AvatarSearch.searchPage(ctx, q, p, pageSize)
-        if (seq != searchSeq) return
-        pageCache[p] = rp.results
-        pageTotal = rp.total
+    // Count of currently-LOADED results that pass the dead + platform filter (for the fetch-until-enough
+    // loop below, so a filtered "See more" reveals a real batch instead of 0 new rows).
+    fun visibleLoaded(): Int = results.count {
+        it.id !in deadIds && (platFilter == null || it.platforms.any { p -> p.equals(platFilter, true) })
+    }
+
+    // PROGRESSIVE load: fetch the NEXT page of the (unbounded) match set and APPEND it — so browsing is
+    // infinite with a constant per-page cost + load time, no cap. All matching IDs were found by one
+    // cheap index lookup; only these ~20 avatars' details are fetched per tap. With a platform filter on,
+    // keep pulling pages until ~a dozen NEW matching rows appear (bounded), so the filter fills in without
+    // a re-search and without fetching the whole catalog up front.
+    fun loadMore() {
+        if (loadingMore) return
+        val seq = searchSeq; val q = query
+        scope.launch {
+            loadingMore = true
+            val filtered = platFilter != null
+            val startCount = results.size; val startVisible = visibleLoaded()
+            // Load the next CHUNK, streaming a page (~20) at a time so rows appear immediately.
+            // Unfiltered: ~1000 more. Filtered: keep going until ~12 new matching rows show.
+            while ((pageIndex + 1) * pageSize < pageTotal) {
+                pageIndex++
+                val rp = com.vrca.vrchat.AvatarSearch.searchPage(ctx, q, pageIndex, pageSize)
+                if (seq != searchSeq) { loadingMore = false; return@launch }
+                results = results + rp.results
+                pageTotal = rp.total
+                if (filtered) { if (visibleLoaded() - startVisible >= 12) break }
+                else { if (results.size - startCount >= 1000) break }
+            }
+            loadingMore = false
+        }
     }
 
     fun runSearch() {
@@ -823,13 +847,14 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
 
         if (paged) {
             scope.launch {
-                searching = true; results = emptyList()
-                // Grab the WHOLE match set once (cheap — see searchShardedAll), so the platform filter
-                // + "See more" run CLIENT-side and toggling a filter never re-searches.
-                val all = com.vrca.vrchat.AvatarSearch.searchAllMatches(ctx, q)
+                searching = true; results = emptyList(); pageIndex = 0; pageTotal = 0
+                // Load page 0 for an instant first paint; the rest streams in on "See more" (loadMore) —
+                // infinite, no cap, cost only when the user asks for more. All matching IDs are known
+                // up-front (one cheap index lookup = `pageTotal`), so the count is exact and the filter
+                // never re-searches.
+                val rp = com.vrca.vrchat.AvatarSearch.searchPage(ctx, q, 0, pageSize)
                 if (seq != searchSeq) return@launch
-                results = all.results
-                searchCapped = all.hasMore
+                results = rp.results; pageTotal = rp.total; pageIndex = 0
                 searching = false
                 backgroundContribute(seq, q)               // absorb avtrdb extras + insta-update rows
             }
@@ -855,21 +880,6 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
             results = merged.values.toList()
             searching = false; loadingMore = false
             com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, results, ::refreshResult)
-        }
-    }
-
-    // Move to a page: show its cached rows instantly (fetch if missing), then prefetch the next.
-    fun goToPage(p: Int) {
-        if (p < 0) return
-        val seq = searchSeq
-        val q = query
-        scope.launch {
-            if (!pageCache.containsKey(p)) { searching = true; fetchPage(seq, q, p) }
-            if (seq != searchSeq) return@launch
-            pageIndex = p
-            results = pageCache[p] ?: emptyList()
-            searching = false
-            fetchPage(seq, q, p + 1)                        // always keep one page ahead
         }
     }
 
@@ -913,41 +923,45 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                     }
                 }
             }
-            when {
-                searching || loadingMore ->
-                    androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
-                searched && results.isEmpty() -> Text(
-                    "No results.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            if (searching) androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+            else if (searched && results.isEmpty() && !loadingMore) Text(
+                "No results.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            // The platform filter is CLIENT-side over the LOADED results, so toggling it re-slices
+            // instantly with no re-search. More load progressively via "See more" (loadMore).
             val visible = results.filter {
                 it.id !in deadIds && (platFilter == null || it.platforms.any { p -> p.equals(platFilter, true) })
             }
-            // Whole match set is already grabbed — filter + "See more" are CLIENT-side, so changing the
-            // platform filter re-slices instantly with no re-search.
-            visible.take(shown).forEach { r ->
+            val shownList = if (paged) visible else visible.take(shown)
+            shownList.forEach { r ->
                 AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) })
             }
-            if (visible.size > shown) {
+            val moreToLoad = if (paged) (pageIndex + 1) * pageSize < pageTotal else visible.size > shown
+            if (moreToLoad) {
                 androidx.compose.material3.TextButton(
-                    onClick = { shown += 12 },
+                    onClick = { if (paged) loadMore() else shown += 12 },
+                    enabled = !loadingMore,
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("See more (${visible.size - shown} more)") }
+                ) {
+                    if (loadingMore) androidx.compose.material3.CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    else Text("See more" + if (platFilter != null) " ($platFilter)" else "")
+                }
             }
-            // A no-results-after-filter hint (there ARE matches, just none for this platform).
-            if (searched && !searching && results.isNotEmpty() && visible.isEmpty() && platFilter != null) {
+            // Exact total match count (from the one index lookup) + how many are loaded/shown.
+            if (searched && paged && pageTotal > 0) {
                 Text(
-                    "No $platFilter avatars in these results — tap All to see the rest.",
-                    style = MaterialTheme.typography.bodySmall,
+                    "${visible.size} shown · $pageTotal ${if (platFilter != null) "total matches" else "matches"}",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            if (searched && searchCapped) {
+            // Filtered but nothing of this platform in what's LOADED and nothing left to load → tell them.
+            if (searched && !searching && !loadingMore && results.isNotEmpty() && visible.isEmpty() && platFilter != null && !moreToLoad) {
                 Text(
-                    "Showing the first ${results.size} matches — narrow your search for more.",
-                    style = MaterialTheme.typography.labelSmall,
+                    "No $platFilter avatars in these matches — tap All to see the rest.",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
