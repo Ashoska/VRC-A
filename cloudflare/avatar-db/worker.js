@@ -426,7 +426,20 @@ export default {
           meta.reports = Math.max(0, (meta.reports || 0) - repsResolved);
           await env.AVATAR_KV.put("meta", JSON.stringify(meta));
         }
-        return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length });
+        // AUTHOR RENAMES (bot-verified): the bot's GET /avatars/{id} is authoritative VRChat data, so a
+        // detected author display-name change (same authorId, new name) is queued here as `arn:<authorId>`.
+        // The cron (propagateAuthorRenames) bulk-applies it to EVERY entry by that author over a bounded
+        // shard walk — so all of a creator's avatars pick up the new name instead of waiting for the
+        // liveness sweep to reach each one. Keyed by the IMMUTABLE authorId; avtrdb names never reach here.
+        const authorRenames = Array.isArray(body.authorRenames)
+          ? body.authorRenames.filter((x) => x && typeof x.authorId === "string" && x.authorId.startsWith("usr_") &&
+              typeof x.name === "string" && x.name.trim().length > 0).slice(0, 100)
+          : [];
+        for (const rn of authorRenames) {
+          // 30-day TTL so an unprocessed rename can't linger forever; the cron deletes it on completion.
+          await env.AVATAR_KV.put("arn:" + rn.authorId, rn.name.slice(0, 100), { expirationTtl: 30 * 86400 });
+        }
+        return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length, authorRenames: authorRenames.length });
       }
 
       if (req.method === "GET" && url.pathname === "/admin/reconcile") {
@@ -545,6 +558,14 @@ export default {
           rcReadFail: meta.rcReadFail || 0,
           rcAttempts: meta.rcAttempts || 0,
           rcAdoptSkipped: meta.rcAdoptSkipped || 0,
+          // Author-rename propagation: the author currently being applied across the catalog (null =
+          // idle), its progress this pass, and the last completed one (how many entries it renamed).
+          authorRenameActive: meta.arnActive || null,
+          authorRenameCursor: meta.arnCursor || 0,
+          authorRenameFixed: meta.arnFixed || 0,
+          authorRenameLast: meta.arnLast || null,
+          authorRenameLastFixed: meta.arnLastFixed || 0,
+          authorRenameLastAt: meta.arnLastAt || null,
           purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 is the only backend now. `catalogBase` is what the app appends
           // /shard/<prefix>.json etc. to (learned from here, so a serving change needs no
@@ -554,7 +575,7 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 9,   // bumped for the cost pass: index no-op guards + larger drain + checked-only no-purge + manifest coalescing
+          version: 11,   // author-rename propagation + periodic reconcile re-arm (fixes phantom unfilled walk)
         });
       }
 
@@ -581,7 +602,7 @@ export default {
     // replacement for the Action's full reconcile: it walks the clone shards a few per minute and
     // re-indexes any entry MISSING from the search index (fragments/avtr/index), healing avatars
     // that were cloneable-but-unsearchable because their index op was dropped in the past. No GitHub.
-    ctx.waitUntil((async () => { await flushR2(env); await reconcileIndex(env); })());
+    ctx.waitUntil((async () => { await flushR2(env); await reconcileIndex(env); await propagateAuthorRenames(env); })());
   },
 };
 
@@ -600,9 +621,31 @@ const RECONCILE_SHARDS_PER_RUN = 8;   // one-time pass → go a bit faster (~8.5
                                       // the subrequest budget alongside flushR2
 const RC_MAX_ATTEMPTS = 3;            // retry a tainted (read-failed) count pass this many times, then
                                       // give up and keep the incremental count (never adopt a bad one)
+// PERIODIC RE-ARM: the incremental `unfilled`/`entries` counts DRIFT over time (a fill that doesn't
+// decrement, a contribution counted unfilled but filled elsewhere), and a drifted `unfilled` makes the
+// FILL bots blind-walk the WHOLE catalog forever chasing a PHANTOM backlog they can never drain
+// ("shards 7000+, filled 0, checked 0, queued 74 stuck"). The one-time heal corrected it once then set
+// rcDone; after that the count could drift again with nothing to fix it. So re-arm the recount every
+// RECONCILE_REARM_MS: it re-walks the catalog, recomputes the TRUE entries/unfilled, and adopts them on
+// a clean lap — snapping "queued 74" back to reality so the bots stop chasing ghosts. Cheap: shard reads
+// (Class B) + zero index ops when the index is already healthy.
+const RECONCILE_REARM_MS = 7 * 24 * 60 * 60 * 1000;   // 7 days
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
-  if (meta.rcDone) return;   // one-time heal already completed → the incremental flush maintains it
+  // Re-arm a completed heal once it's older than the interval, so the count is periodically re-truthed.
+  if (meta.rcDone) {
+    const doneMs = meta.rcDoneAt ? (Date.parse(meta.rcDoneAt) || 0) : 0;
+    if (doneMs && Date.now() - doneMs > RECONCILE_REARM_MS) {
+      meta.rcDone = false;
+      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0;
+      meta.rcReadFail = 0; meta.rcAttempts = 0;
+      // fall through → run a fresh recount lap this run
+    } else {
+      return;   // heal current + within the window → the incremental flush maintains the index
+    }
+  }
+  let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
+  const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   const missing = [];          // ADD index ops for entries not yet indexed
@@ -694,6 +737,70 @@ async function reconcileIndex(env) {
       meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0;
       meta.rcReadFail = 0; meta.rcAttempts = 0;
     }
+  }
+  await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+}
+
+// ---- AUTHOR-RENAME propagation ------------------------------------------------------------------
+// When a creator changes their VRChat display name, every catalog entry by them still stores the OLD
+// `author`. The bots detect it authoritatively (their GET /avatars/{id} is real VRChat data) and queue
+// `arn:<authorId>` = newName. This walks the catalog (bounded per run, ONE author at a time, keyed on
+// the immutable authorId) and rewrites `author` on every matching entry — reusing buildIndexOp so the
+// search index (fragment `au` + author tokens) updates through the normal iq: pipeline. Dirty-only
+// writes; runs ONLY while a rename is pending, so steady-state cost is zero. Rare event → slow is fine.
+const RENAME_SHARDS_PER_RUN = 8;   // ~8.5h to sweep the whole catalog for one author's rename
+async function propagateAuthorRenames(env) {
+  const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  // Continue the active rename, or pick the next pending one (nothing pending → zero cost, just a list).
+  if (!meta.arnActive) {
+    const list = await env.AVATAR_KV.list({ prefix: "arn:", limit: 1 });
+    if (!list.keys || list.keys.length === 0) return;
+    const authorId = list.keys[0].name.slice(4);
+    const newName = await env.AVATAR_KV.get("arn:" + authorId);
+    if (!newName) { await env.AVATAR_KV.delete("arn:" + authorId); return; }  // empty/stale → drop
+    meta.arnActive = authorId; meta.arnName = newName;
+    meta.arnCursor = 0; meta.arnStepped = 0; meta.arnFixed = 0;
+  }
+  const authorId = meta.arnActive, newName = meta.arnName;
+  let cursor = (typeof meta.arnCursor === "number" ? meta.arnCursor : 0) & 0xfff;
+  const indexOps = [], purge = [];
+  for (let n = 0; n < RENAME_SHARDS_PER_RUN; n++) {
+    const prefix = cursor.toString(16).padStart(3, "0");
+    cursor = (cursor + 1) & 0xfff;
+    meta.arnStepped = (meta.arnStepped || 0) + 1;
+    let shard = null;
+    try { const o = await env.CATALOG.get(`shard/${prefix}.json`); if (o) shard = await o.json(); } catch (_) { continue; }
+    if (!shard || !shard.e) continue;
+    let dirty = false;
+    for (const [fid, e] of Object.entries(shard.e)) {
+      if (e && e.authorId === authorId && e.author !== newName) {
+        const before = { ...e };
+        e.author = newName;
+        dirty = true;
+        meta.arnFixed = (meta.arnFixed || 0) + 1;
+        const op = buildIndexOp(before, e, fid);   // author is search-relevant → updates fragment + tokens
+        if (op) indexOps.push(op);
+      }
+    }
+    if (dirty) {
+      try {
+        await env.CATALOG.put(`shard/${prefix}.json`, JSON.stringify({ v: 1, e: shard.e }), {
+          httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
+        });
+        purge.push(prefix);
+      } catch (_) {}
+    }
+  }
+  for (let i = 0; i < indexOps.length; i += MAX_INDEX_OPS_PER_FLUSH)
+    await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(indexOps.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
+  if (purge.length) await purgeShards(env, purge);
+  meta.arnCursor = cursor;
+  // One full 4096-step lap for this author → done: drop the pending key + clear the active slot so the
+  // next run picks the next queued rename.
+  if ((meta.arnStepped || 0) >= 4096) {
+    await env.AVATAR_KV.delete("arn:" + authorId);
+    meta.arnLast = authorId; meta.arnLastFixed = meta.arnFixed || 0; meta.arnLastAt = new Date().toISOString();
+    meta.arnActive = null; meta.arnName = null; meta.arnCursor = 0; meta.arnStepped = 0; meta.arnFixed = 0;
   }
   await env.AVATAR_KV.put("meta", JSON.stringify(meta));
 }

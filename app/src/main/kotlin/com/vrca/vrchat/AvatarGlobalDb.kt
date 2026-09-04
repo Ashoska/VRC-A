@@ -364,11 +364,17 @@ object AvatarGlobalDb {
     suspend fun adminPush(
         context: Context, adminKey: String,
         upserts: List<Entry>, removeFileIds: List<String>,
-        clearReports: List<String> = emptyList(), checkedFileIds: List<String> = emptyList()
+        clearReports: List<String> = emptyList(), checkedFileIds: List<String> = emptyList(),
+        authorRenames: Map<String, String> = emptyMap()
     ): Boolean {
         if (adminKey.isBlank()) return false
         val body = JSONObject().apply {
             put("key", adminKey)
+            // Bot-detected author display-name changes (authorId -> new name), applied catalog-wide by
+            // the Worker cron. Bot GET /avatars/{id} is authoritative, so no extra verification is needed.
+            if (authorRenames.isNotEmpty()) put("authorRenames", JSONArray().apply {
+                authorRenames.forEach { (aid, nm) -> put(JSONObject().apply { put("authorId", aid); put("name", nm) }) }
+            })
             put("upserts", JSONArray().apply {
                 upserts.forEach { e ->
                     put(JSONObject().apply {
