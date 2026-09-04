@@ -364,11 +364,17 @@ object AvatarGlobalDb {
     suspend fun adminPush(
         context: Context, adminKey: String,
         upserts: List<Entry>, removeFileIds: List<String>,
-        clearReports: List<String> = emptyList(), checkedFileIds: List<String> = emptyList()
+        clearReports: List<String> = emptyList(), checkedFileIds: List<String> = emptyList(),
+        authorRenames: Map<String, String> = emptyMap()
     ): Boolean {
         if (adminKey.isBlank()) return false
         val body = JSONObject().apply {
             put("key", adminKey)
+            // Bot-detected author display-name changes (authorId -> new name), applied catalog-wide by
+            // the Worker cron. Bot GET /avatars/{id} is authoritative, so no extra verification is needed.
+            if (authorRenames.isNotEmpty()) put("authorRenames", JSONArray().apply {
+                authorRenames.forEach { (aid, nm) -> put(JSONObject().apply { put("authorId", aid); put("name", nm) }) }
+            })
             put("upserts", JSONArray().apply {
                 upserts.forEach { e ->
                     put(JSONObject().apply {
@@ -843,6 +849,25 @@ object AvatarGlobalDb {
         val out = ArrayList<Entry>(slice.size)
         for (id in slice) { val frags = fetched[fragBucketOf(id)] ?: continue; frags[id]?.let { out.add(it) } }
         SearchPage(out, page, pageSize, total, from + pageSize < total)
+    }
+
+    /** Grab the WHOLE match set for a query in ONE go (capped), so the UI can filter + paginate
+     *  CLIENT-SIDE — toggling a platform filter never needs to re-search. Cheap: the candidate id list
+     *  is one index lookup, and the fragment summaries come in whole buckets (a bounded number of
+     *  CDN-cached reads regardless of how many matched). `hasMore` = there were MORE than the cap. */
+    suspend fun searchShardedAll(context: Context, query: String, cap: Int = 2000): SearchPage = coroutineScope {
+        ensureCatalogBase(context)
+        if (!r2Serving) return@coroutineScope SearchPage(emptyList(), 0, cap, 0, false)
+        val base = catalogBase ?: return@coroutineScope SearchPage(emptyList(), 0, cap, 0, false)
+        val candidates = candidatesFor(base, query)
+        val total = candidates.size
+        val slice = if (total > cap) candidates.subList(0, cap) else candidates
+        val byBucket = slice.groupBy { fragBucketOf(it) }
+        val fetched = byBucket.keys.map { b -> async { b to (fetchFragments(base, b) ?: emptyMap()) } }
+            .awaitAll().toMap()
+        val out = ArrayList<Entry>(slice.size)
+        for (id in slice) { val frags = fetched[fragBucketOf(id)] ?: continue; frags[id]?.let { out.add(it) } }
+        SearchPage(out, 0, cap, total, total > cap)
     }
 
     /** Drop the sharded-search caches (token/fragment JSON + per-query candidate lists). Called
@@ -1490,7 +1515,14 @@ object AvatarGlobalDb {
     /** Fill the catalog from SEARCH results that lacked a file id (avtrdb proxies its
      *  images). Resolves each via GET /avatars/{id} (public-only, also fills platforms)
      *  paced + capped, so searching slowly absorbs avtrdb too. Fire-and-forget. */
-    fun harvestSearchResults(context: Context, results: List<AvatarSearch.Result>) {
+    /** [onRefresh] is invoked (with an UPDATED Result) when a candidate's LIVE VRChat metadata
+     *  (name/author/platforms) differs from what the search UI is showing — so the search row can
+     *  insta-update, the same way a dead result hides. Costs nothing extra: the metadata comes from
+     *  the SAME GET /avatars/{id} the harvest already makes to resolve the file id. Default no-op. */
+    fun harvestSearchResults(
+        context: Context, results: List<AvatarSearch.Result>,
+        onRefresh: (AvatarSearch.Result) -> Unit = {}
+    ) {
         val app = context.applicationContext
         scope.launch {
             // NO count cap — an avtrdb query matches name/author only (no bios), so a term's
@@ -1508,12 +1540,27 @@ object AvatarGlobalDb {
             var nulls = 0
             for (r in candidates) {
                 if (knownIds.contains(r.id)) continue          // already in catalog — no VRChat call
-                val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
+                val ce = try { VrchatAuthManager.avatarCatalogEntry(app, r.id) }
                     catch (e: Exception) { null }
-                if (fid == null) { if (++nulls >= HARVEST_RL_BACKOFF) break; delay(600); continue }
+                val fid = ce?.fileId
+                if (ce == null || fid == null) { if (++nulls >= HARVEST_RL_BACKOFF) break; delay(600); continue }
                 nulls = 0
-                if (map.containsKey(fid)) continue
-                contribute(app, fid, r.id, r.name, r.author, r.authorId, r.platforms)
+                // Use the FRESH VRChat metadata (name/author/authorId/platforms/desc) — not the possibly
+                // -stale search-source data — so a renamed/re-tagged avatar corrects the catalog on harvest.
+                val fName = ce.name.ifBlank { r.name }; val fAuthor = ce.author.ifBlank { r.author }
+                val fAuthorId = ce.authorId.ifBlank { r.authorId }; val fPlat = ce.platforms.ifEmpty { r.platforms }
+                if (!map.containsKey(fid)) {
+                    contribute(app, fid, r.id, fName, fAuthor, fAuthorId, fPlat, ce.description)
+                } else if (fName.isNotBlank() && fName != r.name) {
+                    // Already in the catalog but the live NAME differs (renamed) → REPORT it so the bot
+                    // verifies + the Worker corrects the catalog authoritatively, the same pipeline dead
+                    // avatars go through (report → bot re-check → update/cull). Deduped per file id.
+                    report(app, fid, r.id, "renamed", fName)
+                }
+                // INSTA-UPDATE the search row when the live metadata differs from what it's showing.
+                if (fName != r.name || fAuthor != r.author || fPlat != r.platforms || fid != r.imageFileId) {
+                    onRefresh(r.copy(name = fName, author = fAuthor, authorId = fAuthorId, platforms = fPlat, imageFileId = fid))
+                }
                 delay(600)  // pace VRChat REST
             }
         }

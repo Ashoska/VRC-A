@@ -142,9 +142,15 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
     val health by BotController.health.collectAsState()
     val status = if (health != null) "live" else "loading…"
     val entries = health?.optInt("entries")?.toString() ?: "—"
-    val pending = health?.let { "${it.optInt("pendingBatches")} batch / ${it.optInt("reports")} rep" } ?: "—"
+    val pending = health?.let { "${it.optInt("pendingBatches")} batches · ${it.optInt("reports")} reports" } ?: "—"
     val totals = health?.let { "＋${it.optInt("totalAdded")}  ·  －${it.optInt("totalRemoved")}" } ?: "—"
     val lastFlush = health?.optString("lastFlush", "—") ?: "—"
+    // Recount status — visible so you can watch the periodic reconcile correct a drifted "unfilled"
+    // (phantom-backlog) count. "idle" = count is current; "running N/4096" = a recount lap is in progress.
+    val recount = health?.let {
+        if (it.optBoolean("reconcileDone")) "idle (count current)"
+        else "running ${"%,d".format(it.optInt("reconcileScanned"))}/4096"
+    } ?: "—"
     val adminKeySet = health?.let { if (it.optBoolean("adminKeySet")) "set" else "NOT set" } ?: "—"
     var recent by remember { mutableStateOf<List<RecentBatch>>(emptyList()) }
     var expanded by remember { mutableStateOf<Int?>(null) }
@@ -200,6 +206,7 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
             AdminLabeledRow("Totals", totals)
             AdminLabeledRow("Pending", pending)
             AdminLabeledRow("Last flush", lastFlush)
+            AdminLabeledRow("Recount", recount)
             AdminLabeledRow("Admin key", adminKeySet)
             lastPush?.let { (info, atMs) ->
                 Text("Last bot push (${agoLabel(atMs, nowMs)})", style = MaterialTheme.typography.labelSmall,
@@ -583,22 +590,37 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             )
             StatusPill("queued ${v.queued}", queuedTone)
         }
-        // Every bot shows shard throughput (the real cheap unit). A folded walk row shows BOTH filled
-        // AND refreshed (a bot does both — showing only one hid half its work); the reports bot also
-        // shows reports verified/culled so its work is visible even while it loans to the walk.
-        val detail = if (v.walkFolded) {
-            val walk = "shards ${v.shards} · filled ${v.filled} · refreshed ${v.refreshed} · checked ${v.checked} · removed ${v.removed}"
-            if (v.isReportsBot) "reports ${v.reportsVerified} · culled ${v.reportsRemoved} · $walk" else walk
-        } else if (v.role == AvatarCatalogSweep.Role.REPORTS) {
-            "reports ${v.reportsVerified} · culled ${v.reportsRemoved} · shards ${v.shards} · checked ${v.checked}"
-        } else {
-            val processedLabel = if (v.role == AvatarCatalogSweep.Role.FILL || v.helping == "Fill") "filled" else "refreshed"
-            "shards ${v.shards} · checked ${v.checked} · removed ${v.removed} · $processedLabel ${v.refreshedOrFilled}"
+        // Clean, readable detail: lead with the cheap unit (shards swept), then list ONLY the work that
+        // actually happened — comma-formatted, zero counters hidden — so an idle bot reads "7,235 shards
+        // swept · no changes yet" instead of a wall of "· 0 · 0 · 0 · 0". Reports bot adds its own line.
+        fun n(x: Int) = "%,d".format(x)
+        val work = buildList {
+            if (v.filled > 0) add("${n(v.filled)} filled")
+            if (v.refreshed > 0) add("${n(v.refreshed)} refreshed")
+            if (!v.walkFolded && v.role != AvatarCatalogSweep.Role.REPORTS && v.refreshedOrFilled > 0 &&
+                v.filled == 0 && v.refreshed == 0) {
+                add("${n(v.refreshedOrFilled)} ${if (v.role == AvatarCatalogSweep.Role.FILL || v.helping == "Fill") "filled" else "refreshed"}")
+            }
+            if (v.checked > 0) add("${n(v.checked)} checked")
+            if (v.removed > 0) add("${n(v.removed)} removed")
         }
+        val detail = "${n(v.shards)} shards swept" + if (work.isEmpty()) " · no changes yet" else " · " + work.joinToString(" · ")
         Text(
             detail,
-            style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        // Reports bot: its verify/cull work on its own line so it's never lost in the walk stats.
+        if (v.isReportsBot || v.role == AvatarCatalogSweep.Role.REPORTS) {
+            val rep = buildList {
+                if (v.reportsVerified > 0) add("${n(v.reportsVerified)} verified")
+                if (v.reportsRemoved > 0) add("${n(v.reportsRemoved)} culled")
+            }
+            Text(
+                "Reports: " + if (rep.isEmpty()) "none pending" else rep.joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }

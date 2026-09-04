@@ -220,6 +220,9 @@ object AvatarCatalogSweep {
     private val pendingRemoves = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val pendingClears = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val pendingChecked = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    // Bot-detected author display-name changes (authorId -> new name), flushed to /admin so the Worker
+    // renames ALL of that creator's avatars catalog-wide. Authoritative (bot GET /avatars/{id}).
+    private val pendingAuthorRenames = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val flushMutex = Mutex()
     private val flusherStarted = AtomicBoolean(false)
     @Volatile private var flushCtx: Context? = null
@@ -1056,6 +1059,14 @@ object AvatarCatalogSweep {
                 }
                 nulls = 0; clearFillAttempt(e.fileId); markProcessed(e.fileId)
                 if (chk.alive) noteAlive()
+                // AUTHOR RENAME: a live avatar whose authorId matches the stored one but whose author
+                // NAME differs = the creator renamed. Authoritative (VRChat GET). Queue a catalog-wide
+                // rename (the Worker applies it to ALL their avatars); the local liveRefresh below still
+                // fixes THIS entry immediately.
+                if (chk.alive && chk.authorId.isNotBlank() && chk.authorId == e.authorId &&
+                    chk.author.isNotBlank() && chk.author != e.author) {
+                    pendingAuthorRenames[chk.authorId] = chk.author
+                }
                 if (!chk.alive) {
                     if (canRemove()) { removes.add(e.fileId); p.removed++
                         // L7: an entry can be BOTH unfilled and stale — decrement whichever backlog(s)
@@ -1145,7 +1156,11 @@ object AvatarCatalogSweep {
             val clears = ArrayDeque(clearKeys)
             val checkedKeys = pendingChecked.toList(); pendingChecked.removeAll(checkedKeys.toSet())
             val checked = ArrayDeque(checkedKeys)
-            if (upserts.isEmpty() && removes.isEmpty() && clears.isEmpty() && checked.isEmpty()) { pushError = ""; return }
+            // Snapshot author renames the same way (remove exactly the snapshotted keys, never clear()).
+            val renameKeys = pendingAuthorRenames.keys.toList()
+            val renames = HashMap<String, String>().apply { renameKeys.forEach { k -> pendingAuthorRenames.remove(k)?.let { put(k, it) } } }
+            var renamesSent = renames.isEmpty()
+            if (upserts.isEmpty() && removes.isEmpty() && clears.isEmpty() && checked.isEmpty() && renames.isEmpty()) { pushError = ""; return }
             // FREE batch-contents readout: capture the counts + a few names BEFORE the deques are
             // drained, so the admin can see what just went up (no network — it's already in hand).
             val flAdd = upserts.size; val flRem = removes.size; val flChk = checked.size
@@ -1157,13 +1172,24 @@ object AvatarCatalogSweep {
                 val c = ArrayList<String>(); repeat(FLUSH_CHUNK) { clears.removeFirstOrNull()?.let(c::add) }
                 val k = ArrayList<String>(); repeat(FLUSH_CHUNK) { checked.removeFirstOrNull()?.let(k::add) }
                 if (u.isEmpty() && r.isEmpty() && c.isEmpty() && k.isEmpty()) break
-                if (!AvatarGlobalDb.adminPush(ctx, flushKey, u, r, c, k)) {
+                // Piggyback the (rare, small) author renames on the FIRST chunk — one push, one KV write.
+                val rn = if (!renamesSent) renames else emptyMap()
+                if (!AvatarGlobalDb.adminPush(ctx, flushKey, u, r, c, k, rn)) {
                     // Re-queue this chunk + everything still pending, retry next flush.
                     (u + upserts).forEach { pendingUpserts.putIfAbsent(it.fileId, it) }
                     (r + removes).forEach { pendingRemoves.add(it) }
                     (c + clears).forEach { pendingClears.add(it) }
                     (k + checked).forEach { if (!pendingUpserts.containsKey(it) && !pendingRemoves.contains(it)) pendingChecked.add(it) }
+                    if (!renamesSent) renames.forEach { (a, n) -> pendingAuthorRenames.putIfAbsent(a, n) }
                     failed = true; break
+                }
+                renamesSent = true
+            }
+            // Renames pending but no ops chunk carried them (ops were all empty) → one standalone push.
+            if (!failed && !renamesSent && renames.isNotEmpty()) {
+                if (!AvatarGlobalDb.adminPush(ctx, flushKey, emptyList(), emptyList(), emptyList(), emptyList(), renames)) {
+                    renames.forEach { (a, n) -> pendingAuthorRenames.putIfAbsent(a, n) }
+                    failed = true
                 }
             }
             pushError = if (failed) "PUSH REJECTED — set ADMIN_KEY as a Secret on Cloudflare matching the app key" else ""
