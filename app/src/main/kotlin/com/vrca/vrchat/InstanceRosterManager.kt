@@ -1064,6 +1064,16 @@ object InstanceRosterManager {
                 avatarIdCache[uid] = ""; avatarIdResolvedFor[uid] = name
                 avatarCloneFileIdCache.remove(uid)
                 avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey)
+            } else if (res.noMatch) {
+                // DEFINITIVE no-match reached AFTER querying VRChat/the DBs (private/unindexed avatar,
+                // candidates confirmed different, or 0 candidates) → FINAL, grey once and STOP. This is
+                // what stops the expensive 6-candidate confirm from re-running every slow-retry for 15
+                // min on a private avatar. It re-resolves on its own if they switch avatars (the name
+                // key changes → avatarIdResolvedFor no longer matches). Transient nulls (catalog
+                // unavailable / 429 / worn-thumb fetch failed) do NOT set noMatch, so they still retry.
+                avatarIdCache[uid] = ""; avatarIdResolvedFor[uid] = name
+                avatarCloneFileIdCache.remove(uid)
+                avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey)
             } else {
                 // UNRESOLVED (loading fallback / transient rate-limit / no-match-yet) — ONE time-based
                 // path for all of them so the button ALWAYS decides within ~40s (no >40s spinner, no
