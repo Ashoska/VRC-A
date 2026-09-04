@@ -989,7 +989,18 @@ object AvatarCatalogSweep {
     // Reset the optimistic decrement ONLY when the value actually CHANGES (a fresh Action rebuild),
     // not on every 30s poll of the same value — otherwise each poll snapped the live-decremented
     // queue back up to the manifest number (the "keeps jumping to ~8200" sawtooth).
-    fun setManifestUnfilled(n: Int) { if (n != manifestUnfilled) { manifestUnfilled = n; filledSinceManifest.set(0); if (n > 0) fillScanStartMs = System.currentTimeMillis() } }
+    fun setManifestUnfilled(n: Int) {
+        if (n == manifestUnfilled) return
+        val grew = n > manifestUnfilled     // manifestUnfilled starts at -1, so the first real value "grows"
+        manifestUnfilled = n
+        filledSinceManifest.set(0)
+        // Start a fresh whole-catalog fill pass ONLY when the backlog GREW (genuinely new unfilled work
+        // arrived) — NOT when it shrank as the bots drain it. The old "reset on any change" restarted the
+        // bounded pass every few minutes (the count moves as bots fill), so a pass never completed and the
+        // walk re-covered the whole catalog forever ("shard walk running for days, never finished"). A
+        // draining count now lets the in-progress pass finish, then falls to the idle liveness trickle.
+        if (n > 0 && grew) fillScanStartMs = System.currentTimeMillis()
+    }
     /** Liveness backlog (entries due a recheck) from the manifest — so the Liveness bots show a
      *  real "queued" number in shard-walk mode instead of a confusing 0 while they're working. */
     @Volatile var manifestStale = -1; private set
