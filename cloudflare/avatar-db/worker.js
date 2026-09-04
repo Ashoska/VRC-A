@@ -615,7 +615,15 @@ export default {
     // replacement for the Action's full reconcile: it walks the clone shards a few per minute and
     // re-indexes any entry MISSING from the search index (fragments/avtr/index), healing avatars
     // that were cloneable-but-unsearchable because their index op was dropped in the past. No GitHub.
-    ctx.waitUntil((async () => { await flushR2(env); await reconcileIndex(env); await pruneFillWorklist(env); await propagateAuthorRenames(env); })());
+    // Each task is independent + isolated: one throwing (e.g. a recount KV hiccup) must NOT skip the
+    // others (the worklist prune was intermittently skipped when it ran AFTER a slow/erroring recount).
+    // flushR2 first (drains queues + maintains fillHint), then the cheap prune, then the heavier recount.
+    ctx.waitUntil((async () => {
+      try { await flushR2(env); } catch (e) { console.log("flushR2 err", e); }
+      try { await pruneFillWorklist(env); } catch (e) { console.log("prune err", e); }
+      try { await reconcileIndex(env); } catch (e) { console.log("reconcile err", e); }
+      try { await propagateAuthorRenames(env); } catch (e) { console.log("arn err", e); }
+    })());
   },
 };
 
