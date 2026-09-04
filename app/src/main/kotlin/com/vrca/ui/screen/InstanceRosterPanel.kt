@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PeopleAlt
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -276,6 +277,49 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                         modifier = Modifier.size(14.dp)
                     )
+                }
+                // Greyed. Two kinds: a LOADING give-up (their avatar hadn't loaded when we went quiet —
+                // TAP-REPROBE-able, shows a refresh glyph) vs a DEFINITIVE noMatch/dead (not retriable,
+                // shows the muted clone glyph). The tap does ONE cheap /users probe and only re-searches
+                // the DBs if new info actually loaded — and is rate-limited to once/min per member.
+                avaId.isBlank() && m.userId != null &&
+                    com.vrca.vrchat.InstanceRosterManager.canRetryClone(m.userId) -> {
+                    var probing by remember(m.userId, m.avatarName) { mutableStateOf(false) }
+                    val uid = m.userId
+                    IconButton(
+                        onClick = {
+                            if (probing) return@IconButton
+                            probing = true
+                            scope.launch {
+                                val r = com.vrca.vrchat.InstanceRosterManager.retryClone(ctx, uid)
+                                val msg = when (r) {
+                                    com.vrca.vrchat.InstanceRosterManager.RetryResult.REARMED -> "Checking again…"
+                                    com.vrca.vrchat.InstanceRosterManager.RetryResult.NOTHING_NEW -> "Nothing new loaded yet"
+                                    com.vrca.vrchat.InstanceRosterManager.RetryResult.RATE_LIMITED -> "Try again in a moment"
+                                    com.vrca.vrchat.InstanceRosterManager.RetryResult.NOT_RETRIABLE -> "No cloneable avatar"
+                                }
+                                android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show()
+                                probing = false
+                            }
+                        },
+                        enabled = !probing,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        if (probing) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.Refresh,
+                                contentDescription = "Retry clone lookup",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
                 }
                 avaId.isBlank() -> IconButton(
                     onClick = {}, enabled = false, modifier = Modifier.size(28.dp)
