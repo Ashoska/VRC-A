@@ -1583,7 +1583,11 @@ object VrchatAuthManager {
     // it's a private/unindexed avatar. Unlike a TRANSIENT null (catalog UNAVAILABLE / 429 / worn-thumb
     // fetch failed — which must keep retrying), a noMatch is FINAL until the member switches avatars, so
     // the roster greys it ONCE and stops re-running the expensive 6-candidate confirm every retry.
-    data class WornAvatarResult(val avatarId: String?, val platforms: List<String> = emptyList(), val loading: Boolean = false, val fileId: String? = null, val dead: Boolean = false, val noMatch: Boolean = false)
+    // [observedFileId] = the worn image file id SEEN this pass (a system/robot id, a real file_ id, or
+    // null if hidden/absent). The roster uses it to detect "new info loaded since last attempt" for the
+    // bounded loading-watch + tap-reprobe (thumbnail robot->real). [usersFailed] = the GET /users/{id}
+    // fetch failed (rate-limited/network) so the worn image is UNKNOWN this pass (transient — retry).
+    data class WornAvatarResult(val avatarId: String?, val platforms: List<String> = emptyList(), val loading: Boolean = false, val fileId: String? = null, val dead: Boolean = false, val noMatch: Boolean = false, val observedFileId: String? = null, val usersFailed: Boolean = false)
 
     // ---- per-user resolve TRACE (roster diagnostics) -------------------------------------------
     // Every step resolveWornAvatarId walks for a member — what it tried, what each DB/confirm returned,
@@ -1633,7 +1637,7 @@ object VrchatAuthManager {
      * clone button for a PC/iOS-only avatar on a Quest device.
      */
     suspend fun resolveWornAvatarId(
-        context: Context, userId: String, avatarName: String, author: String
+        context: Context, userId: String, avatarName: String, author: String, nameStable: Boolean = true
     ): WornAvatarResult = withContext(Dispatchers.IO) {
         // Trace collector — records EVERY stage so the roster UI can show the whole resolve process
         // per user. `step` = an intermediate note; the terminal Diag.lastReason is appended in finally.
@@ -1663,7 +1667,7 @@ object VrchatAuthManager {
         // pass. (Returning without noMatch keeps the roster retrying instead of greying it as final.)
         if (fetchFailed) {
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "GET /users failed (rate-limited) — retry"
-            return@withContext WornAvatarResult(null)
+            return@withContext WornAvatarResult(null, usersFailed = true)
         }
         // NAME-OPTIONAL: resolve purely from the worn image file id when there's no
         // log name (impostor'd player in a big instance).
@@ -1674,18 +1678,23 @@ object VrchatAuthManager {
         // Without this, a loading player resolves to the Robot (which the harvest had put in the
         // catalog) and the clone turns the user into the Robot.
         if (com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(wornFileId)) {
-            step("worn image is a VRChat FALLBACK (avatar still loading) → try unique name+author")
+            step("worn image is a VRChat FALLBACK (avatar still loading)" +
+                if (nameStable) " → try unique name+author" else " → name not yet stable, waiting")
             // The worn image is the fallback, so we can't image-confirm — BUT the log has their REAL
             // avatar name + author. Resolve by a UNIQUE name+author match (the author locks it to the
             // same avatar; a unique match is a lookup, not a guess). This clones a loading/hidden
             // avatar (PROJECT NOBLE SPARTAN etc.) instead of greying or robot-ing it.
-            resolveByNameAndAuthor(context, avatarName, author)?.let {
+            // GUARD: only when the log name has been STABLE — a name captured mid-switch could be the
+            // PREVIOUS avatar's, which would uniquely match (and clone) the wrong avatar. When it's not
+            // yet stable we keep watching (loading) until it settles or the real thumbnail lands.
+            if (nameStable) resolveByNameAndAuthor(context, avatarName, author)?.let {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name+author (worn image is fallback)"
                 return@withContext it
             }
-            // No unique name+author match → keep retrying (their real image may still land).
+            // No unique name+author match → keep retrying (their real image may still land, or the
+            // log's name+author may still land — the roster watches BOTH signals within a bounded window).
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "avatar still loading (VRChat fallback) — retrying"
-            return@withContext WornAvatarResult(null, loading = true)
+            return@withContext WornAvatarResult(null, loading = true, observedFileId = wornFileId)
         }
         // GLOBAL crowdsourced catalog first — exact, offline, zero network.
         step("→ local catalog (offline map) lookup by fileId")
