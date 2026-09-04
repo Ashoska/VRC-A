@@ -1496,7 +1496,14 @@ object AvatarGlobalDb {
     /** Fill the catalog from SEARCH results that lacked a file id (avtrdb proxies its
      *  images). Resolves each via GET /avatars/{id} (public-only, also fills platforms)
      *  paced + capped, so searching slowly absorbs avtrdb too. Fire-and-forget. */
-    fun harvestSearchResults(context: Context, results: List<AvatarSearch.Result>) {
+    /** [onRefresh] is invoked (with an UPDATED Result) when a candidate's LIVE VRChat metadata
+     *  (name/author/platforms) differs from what the search UI is showing — so the search row can
+     *  insta-update, the same way a dead result hides. Costs nothing extra: the metadata comes from
+     *  the SAME GET /avatars/{id} the harvest already makes to resolve the file id. Default no-op. */
+    fun harvestSearchResults(
+        context: Context, results: List<AvatarSearch.Result>,
+        onRefresh: (AvatarSearch.Result) -> Unit = {}
+    ) {
         val app = context.applicationContext
         scope.launch {
             // NO count cap — an avtrdb query matches name/author only (no bios), so a term's
@@ -1514,12 +1521,20 @@ object AvatarGlobalDb {
             var nulls = 0
             for (r in candidates) {
                 if (knownIds.contains(r.id)) continue          // already in catalog — no VRChat call
-                val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
+                val ce = try { VrchatAuthManager.avatarCatalogEntry(app, r.id) }
                     catch (e: Exception) { null }
-                if (fid == null) { if (++nulls >= HARVEST_RL_BACKOFF) break; delay(600); continue }
+                val fid = ce?.fileId
+                if (ce == null || fid == null) { if (++nulls >= HARVEST_RL_BACKOFF) break; delay(600); continue }
                 nulls = 0
-                if (map.containsKey(fid)) continue
-                contribute(app, fid, r.id, r.name, r.author, r.authorId, r.platforms)
+                // Use the FRESH VRChat metadata (name/author/authorId/platforms/desc) — not the possibly
+                // -stale search-source data — so a renamed/re-tagged avatar corrects the catalog on harvest.
+                val fName = ce.name.ifBlank { r.name }; val fAuthor = ce.author.ifBlank { r.author }
+                val fAuthorId = ce.authorId.ifBlank { r.authorId }; val fPlat = ce.platforms.ifEmpty { r.platforms }
+                if (!map.containsKey(fid)) contribute(app, fid, r.id, fName, fAuthor, fAuthorId, fPlat, ce.description)
+                // INSTA-UPDATE the search row when the live metadata differs from what it's showing.
+                if (fName != r.name || fAuthor != r.author || fPlat != r.platforms || fid != r.imageFileId) {
+                    onRefresh(r.copy(name = fName, author = fAuthor, authorId = fAuthorId, platforms = fPlat, imageFileId = fid))
+                }
                 delay(600)  // pace VRChat REST
             }
         }

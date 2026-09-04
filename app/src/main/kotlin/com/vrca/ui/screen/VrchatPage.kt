@@ -774,6 +774,18 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
     val pageCache = remember { androidx.compose.runtime.mutableStateMapOf<Int, List<com.vrca.vrchat.AvatarSearch.Result>>() }
     var pageTotal by remember { mutableStateOf(0) }
 
+    // INSTA-UPDATE a shown search row when the harvest finds its live metadata changed (name/author/
+    // platform) — mirrors the dead-hiding, but for a changed avatar. Patches the flat list AND any
+    // cached page holding it. Dispatched to the composable (main) scope for safe Compose state writes.
+    fun refreshResult(u: com.vrca.vrchat.AvatarSearch.Result) {
+        scope.launch {
+            results = results.map { if (it.id == u.id) u else it }
+            pageCache.keys.toList().forEach { p ->
+                pageCache[p]?.let { list -> if (list.any { it.id == u.id }) pageCache[p] = list.map { if (it.id == u.id) u else it } }
+            }
+        }
+    }
+
     // Silently absorb avatars from the external sources (avtrdb/mirrors) so the sharded
     // catalog fills over time — NOT shown inline (the paged view is our catalog only, to keep
     // pages stable). No UI gating; contribute-back happens in the background.
@@ -781,7 +793,7 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
         scope.launch {
             val remote = com.vrca.vrchat.AvatarSearch.remoteFill(ctx, q)
             if (seq != searchSeq) return@launch
-            com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, remote)
+            com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, remote, ::refreshResult)
         }
     }
 
@@ -835,7 +847,7 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
             }
             results = merged.values.toList()
             searching = false; loadingMore = false
-            com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, results)
+            com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, results, ::refreshResult)
         }
     }
 
