@@ -404,7 +404,7 @@ object AvatarSearch {
 
     /** The WHOLE match set for a query (capped) in one fetch — the UI filters + paginates client-side,
      *  so toggling a platform filter never re-searches. `total`/`hasMore` say if the cap was hit. */
-    suspend fun searchAllMatches(context: Context, query: String, cap: Int = 500): ResultPage {
+    suspend fun searchAllMatches(context: Context, query: String, cap: Int = 2000): ResultPage {
         val p = AvatarGlobalDb.searchShardedAll(context, query, cap)
         return ResultPage(p.results.map { entryToResult(it) }, p.page, p.total, p.hasMore)
     }

@@ -855,7 +855,7 @@ object AvatarGlobalDb {
      *  CLIENT-SIDE — toggling a platform filter never needs to re-search. Cheap: the candidate id list
      *  is one index lookup, and the fragment summaries come in whole buckets (a bounded number of
      *  CDN-cached reads regardless of how many matched). `hasMore` = there were MORE than the cap. */
-    suspend fun searchShardedAll(context: Context, query: String, cap: Int = 500): SearchPage = coroutineScope {
+    suspend fun searchShardedAll(context: Context, query: String, cap: Int = 2000): SearchPage = coroutineScope {
         ensureCatalogBase(context)
         if (!r2Serving) return@coroutineScope SearchPage(emptyList(), 0, cap, 0, false)
         val base = catalogBase ?: return@coroutineScope SearchPage(emptyList(), 0, cap, 0, false)
@@ -1549,7 +1549,14 @@ object AvatarGlobalDb {
                 // -stale search-source data — so a renamed/re-tagged avatar corrects the catalog on harvest.
                 val fName = ce.name.ifBlank { r.name }; val fAuthor = ce.author.ifBlank { r.author }
                 val fAuthorId = ce.authorId.ifBlank { r.authorId }; val fPlat = ce.platforms.ifEmpty { r.platforms }
-                if (!map.containsKey(fid)) contribute(app, fid, r.id, fName, fAuthor, fAuthorId, fPlat, ce.description)
+                if (!map.containsKey(fid)) {
+                    contribute(app, fid, r.id, fName, fAuthor, fAuthorId, fPlat, ce.description)
+                } else if (fName.isNotBlank() && fName != r.name) {
+                    // Already in the catalog but the live NAME differs (renamed) → REPORT it so the bot
+                    // verifies + the Worker corrects the catalog authoritatively, the same pipeline dead
+                    // avatars go through (report → bot re-check → update/cull). Deduped per file id.
+                    report(app, fid, r.id, "renamed", fName)
+                }
                 // INSTA-UPDATE the search row when the live metadata differs from what it's showing.
                 if (fName != r.name || fAuthor != r.author || fPlat != r.platforms || fid != r.imageFileId) {
                     onRefresh(r.copy(name = fName, author = fAuthor, authorId = fAuthorId, platforms = fPlat, imageFileId = fid))
