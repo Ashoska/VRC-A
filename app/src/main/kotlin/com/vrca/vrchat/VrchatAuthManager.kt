@@ -1342,9 +1342,22 @@ object VrchatAuthManager {
 
     // The author-public-avatars listing (below) is the potential OFFICIAL 100%
     // path, but VRChat may block enumerating another user's avatars. If it ever
-    // returns 403/401 we set this so we stop attempting it for the session (never
-    // burn rate limit on a blocked endpoint). Reset on process restart.
+    // returns 403/401 we set this so we stop attempting it (never burn rate limit
+    // on a blocked endpoint). PERSISTED across sessions (prefs) with a 7-day TTL so
+    // we don't re-probe the dead endpoint (~2 calls) on every launch, but still
+    // re-check weekly in case VRChat ever un-blocks it.
     @Volatile private var authorAvatarsListingBlocked = false
+    @Volatile private var authorBlockLoaded = false
+    private const val KEY_AUTHOR_LISTING_BLOCKED_AT = "author_listing_blocked_at"
+    private const val AUTHOR_LISTING_BLOCK_TTL_MS = 7L * 24 * 60 * 60 * 1000
+
+    /** Lazy-load the persisted author-listing-blocked state once per process. */
+    private fun ensureAuthorBlockLoaded(context: Context) {
+        if (authorBlockLoaded) return
+        val at = getPrefs(context)?.getLong(KEY_AUTHOR_LISTING_BLOCKED_AT, 0L) ?: 0L
+        authorAvatarsListingBlocked = at > 0L && (System.currentTimeMillis() - at) < AUTHOR_LISTING_BLOCK_TTL_MS
+        authorBlockLoaded = true
+    }
 
     /** The `ownerId` (avatar AUTHOR's usr id) for a file, via `GET /file/{id}`.
      *  File objects are readable, so this gives the exact author even for another
@@ -1372,8 +1385,9 @@ object VrchatAuthManager {
      */
     private suspend fun resolveViaAuthorAvatars(context: Context, wornFileId: String): Pair<String, List<String>>? =
         withContext(Dispatchers.IO) {
+            ensureAuthorBlockLoaded(context)
             if (authorAvatarsListingBlocked) {
-                com.vrca.vrchat.AvatarSearch.Diag.authorListing = "disabled for session (was blocked earlier)"
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing = "disabled (blocked earlier, persisted <7d)"
                 return@withContext null
             }
             val cookie = getCookieHeader(context)
@@ -1395,8 +1409,9 @@ object VrchatAuthManager {
                 if (code == 200) captureRolledCookies(context, raw)
                 if (code == 401 || code == 403) {
                     authorAvatarsListingBlocked = true
+                    getPrefs(context)?.edit()?.putLong(KEY_AUTHOR_LISTING_BLOCKED_AT, System.currentTimeMillis())?.apply()
                     com.vrca.vrchat.AvatarSearch.Diag.authorListing =
-                        "BLOCKED — HTTP $code listing author's avatars (disabled for session). VRChat forbids it."
+                        "BLOCKED — HTTP $code listing author's avatars (persisted 7d). VRChat forbids it."
                     Log.i(TAG, "author-avatars listing blocked ($code) — disabling for session")
                     return@withContext null
                 }
