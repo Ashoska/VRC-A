@@ -632,6 +632,10 @@ object AvatarGlobalDb {
             try {
                 conn = (URL("$base/_manifest.json").openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    // NEVER serve a stale manifest: the bots' unfilled/stale backlog is driven by this,
+                    // and a stale copy pins a phantom "queued N" + an endless fill re-cover. The CDN sets
+                    // max-age=30, so bypass any Android HttpURLConnection cache to always read fresh.
+                    useCaches = false; setRequestProperty("Cache-Control", "no-cache")
                     connectTimeout = 10_000; readTimeout = 10_000
                 }
                 if (conn.responseCode != 200) null else JSONObject(conn.inputStream.bufferedReader().readText())
@@ -650,6 +654,7 @@ object AvatarGlobalDb {
             try {
                 conn = (URL("$base/_worklist.json").openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    useCaches = false; setRequestProperty("Cache-Control", "no-cache")   // always fresh work shards
                     connectTimeout = 10_000; readTimeout = 10_000
                 }
                 if (conn.responseCode != 200) return@withContext null
