@@ -163,9 +163,16 @@ const MAX_INDEX_OPS_PER_FLUSH = 150;
 // past Cloudflare's per-invocation subrequest limit → the invocation dies BEFORE clearing the `pend:`
 // keys → the same batches retry and die every minute ("pending batches stuck at N"). The pend loop
 // consumes batches only until this many distinct shards are queued, then leaves the rest for the next
-// 1-min flush, so a backlog DRAINS over a few flushes. 120 shards ≈ 240 R2 ops, well under budget
-// alongside the index work + purges. Admin/bot pushes are separately bounded (WALK_BATCH).
-const MAX_SHARDS_PER_FLUSH = 120;
+// flush, so a backlog DRAINS over a few flushes.
+// Raised 120 -> 180: a large pending backlog (thousands of queued avatars) was drip-fed into
+// processable "unfilled" at only 120 shards/2-min cron, so the fill bots drained the ~400 that made it
+// through and then sat IDLE waiting for the next flush while thousands of batches waited. This is NOT a
+// cost increase — it's the SAME set of dirty shards written once each, just drained in fewer crons
+// instead of starving the bots (a no-op dupe shard costs only a Class B read). 180 shards ≈ 360 R2 ops;
+// with the grouped index work (≤150 ops), prune (40 reads), reconcile (8) and rename (8) in the same
+// cron chain the worst case is ~700 subrequests, still comfortably under the ~1000/invocation budget.
+// Admin/bot pushes are separately bounded (WALK_BATCH).
+const MAX_SHARDS_PER_FLUSH = 180;
 // Coalesce _manifest.json writes. The LIVE entry count already rides `meta.entries` (which /health
 // max()es against the manifest), so the _manifest.json copy only needs periodic freshening, not a
 // write+purge on every count-moving flush during steady growth. Rewrite it at most every N ms OR once
@@ -588,7 +595,7 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 14,   // prune the bloated FILL worklist (761 filled shards vs ~47 real unfilled → bots swept ghosts)
+          version: 16,   // MAX_SHARDS_PER_FLUSH 120 -> 180: drain pending into processable unfilled faster so fill bots aren't starved (no cost increase — same writes, fewer crons)
         });
       }
 
@@ -668,7 +675,7 @@ async function reconcileIndex(env) {
   if (meta.staleModel !== 1) {
     meta.staleModel = 1; meta.stale = 0;
     meta.rcDone = false; meta.rc = 0; meta.reconcileScanned = 0;
-    meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcAttempts = 0;
+    meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
     try {
       let man = {}; const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json();
       man = { ...man, staleCount: 0, lastUpdate: new Date().toISOString() };
@@ -684,7 +691,7 @@ async function reconcileIndex(env) {
     if (doneMs && Date.now() - doneMs > RECONCILE_REARM_MS) {
       meta.rcDone = false;
       meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
-      meta.rcReadFail = 0; meta.rcAttempts = 0;
+      meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
       // fall through → run a fresh recount lap this run
     } else {
       return;   // heal current + within the window → the incremental flush maintains the index
@@ -694,6 +701,15 @@ async function reconcileIndex(env) {
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   const missing = [];          // ADD index ops for entries not yet indexed
+  // Accumulate (across the multi-run lap) EVERY shard prefix that still holds an unfilled avatar. On
+  // lap completion this becomes the AUTHORITATIVE fill worklist — the fix for the endless whole-catalog
+  // "shard walk". The incremental flush only ever added a shard to the worklist when a fresh CONTRIBUTION
+  // touched it (fillHintAdd), so PRE-EXISTING unfilled avatars sitting in un-touched shards were never
+  // listed. The client, seeing manifestUnfilled > 0 with those shards absent from the worklist, fell back
+  // to blind-walking all 4096 shards to FIND them — and re-armed that walk every time the recount grew
+  // the count, so it looped forever. With the recount (which reads every shard anyway) writing them into
+  // the worklist, the bots walk ONLY the worklist and the walk terminates when it drains.
+  const fillSeen = new Set(Array.isArray(meta.rcFill) ? meta.rcFill : []);
   // Recount the AUTHORITATIVE entry + unfilled totals as we read every shard, to correct the running
   // incremental counts that drift with no full rebuild — a drifted `unfilled` makes the FILL bots
   // churn the whole catalog forever on a phantom backlog they can never drain ("queued 247, checked
@@ -714,11 +730,12 @@ async function reconcileIndex(env) {
     stepped++;                             // one shard VISITED (completion is a full 4096-step lap)
     if (failed) { readFail++; continue; }  // undercount risk — tallied, pass won't be adopted if >0
     if (!shard || !shard.e) continue;      // genuinely absent/empty → 0 entries (fine)
+    let shardHasUnfilled = false;
     for (const [fid, e] of Object.entries(shard.e)) {
       const id = e && e.id;
       if (!id || !id.startsWith("avtr_")) continue;
       entriesSeen++;
-      if (e.filled !== true) unfilledSeen++;
+      if (e.filled !== true) { unfilledSeen++; shardHasUnfilled = true; }
       if (((e.checked || e.added || 0)) < rcStaleBefore) staleSeen++;   // due for a 30d liveness recheck
       const b = fragBucketFor(id);
       if (!(b in avtrCache)) {
@@ -731,10 +748,12 @@ async function reconcileIndex(env) {
         if (op) { missing.push(op); avtrCache[b].add(id); }   // add to cache so siblings this run aren't re-flagged
       }
     }
+    if (shardHasUnfilled) fillSeen.add(prefix);   // this shard belongs in the fill worklist
   }
   // Enqueue the repairs (TTL-free) — the normal flush drains them via applyIndexOps.
   for (let i = 0; i < missing.length; i += MAX_INDEX_OPS_PER_FLUSH)
     await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(missing.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
+  meta.rcFill = Array.from(fillSeen);   // accumulate the fill-shard set across the lap (adopted on completion)
   meta.rc = cursor;
   meta.lastReconcile = new Date().toISOString();
   // reconcileScanned now counts STEPS (shards visited), so completion is exactly one 4096-shard lap —
@@ -770,12 +789,26 @@ async function reconcileIndex(env) {
           { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
         if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
       } catch (_) {}
+      // AUTHORITATIVE fill worklist: union every shard the (clean) lap saw holding an unfilled avatar
+      // into fillHint and publish _worklist.json. This lists the PRE-EXISTING unfilled shards the
+      // incremental flush never added, so the bots stop blind-walking the whole catalog to find them.
+      // Union (not replace) preserves shards a mid-lap contribution added; the prune trims any that got
+      // filled during the lap → converges to the exact set.
+      try {
+        const fh = new Set(Array.isArray(meta.fillHint) ? meta.fillHint : []);
+        for (const p of (Array.isArray(meta.rcFill) ? meta.rcFill : [])) fh.add(p);
+        meta.fillHint = Array.from(fh).slice(0, 4096);
+        await env.CATALOG.put("_worklist.json",
+          JSON.stringify({ v: 1, ts: new Date().toISOString(), fill: meta.fillHint, stale: [] }),
+          { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
+        if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_worklist.json"]);
+      } catch (_) {}
       meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
-      meta.rcReadFail = 0; meta.rcAttempts = 0;   // reset accumulators for a future re-arm
+      meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];   // reset accumulators for a future re-arm
     } else if (attempts < RC_MAX_ATTEMPTS) {
       // Tainted lap → retry a fresh full pass (index repairs already enqueued above are idempotent).
       meta.rcAttempts = attempts + 1;
-      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0;
+      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcFill = [];
       // rcDone stays false → the next cron re-walks the whole catalog for a clean count.
     } else {
       // Couldn't get a clean read after the retries → give up and KEEP the incremental count
@@ -783,7 +816,7 @@ async function reconcileIndex(env) {
       meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
       meta.rcAdoptSkipped = (meta.rcReadFail || 0);
       meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
-      meta.rcReadFail = 0; meta.rcAttempts = 0;
+      meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
     }
   }
   await env.AVATAR_KV.put("meta", JSON.stringify(meta));
