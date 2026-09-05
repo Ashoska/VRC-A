@@ -163,9 +163,16 @@ const MAX_INDEX_OPS_PER_FLUSH = 150;
 // past Cloudflare's per-invocation subrequest limit → the invocation dies BEFORE clearing the `pend:`
 // keys → the same batches retry and die every minute ("pending batches stuck at N"). The pend loop
 // consumes batches only until this many distinct shards are queued, then leaves the rest for the next
-// 1-min flush, so a backlog DRAINS over a few flushes. 120 shards ≈ 240 R2 ops, well under budget
-// alongside the index work + purges. Admin/bot pushes are separately bounded (WALK_BATCH).
-const MAX_SHARDS_PER_FLUSH = 120;
+// flush, so a backlog DRAINS over a few flushes.
+// Raised 120 -> 180: a large pending backlog (thousands of queued avatars) was drip-fed into
+// processable "unfilled" at only 120 shards/2-min cron, so the fill bots drained the ~400 that made it
+// through and then sat IDLE waiting for the next flush while thousands of batches waited. This is NOT a
+// cost increase — it's the SAME set of dirty shards written once each, just drained in fewer crons
+// instead of starving the bots (a no-op dupe shard costs only a Class B read). 180 shards ≈ 360 R2 ops;
+// with the grouped index work (≤150 ops), prune (40 reads), reconcile (8) and rename (8) in the same
+// cron chain the worst case is ~700 subrequests, still comfortably under the ~1000/invocation budget.
+// Admin/bot pushes are separately bounded (WALK_BATCH).
+const MAX_SHARDS_PER_FLUSH = 180;
 // Coalesce _manifest.json writes. The LIVE entry count already rides `meta.entries` (which /health
 // max()es against the manifest), so the _manifest.json copy only needs periodic freshening, not a
 // write+purge on every count-moving flush during steady growth. Rewrite it at most every N ms OR once
@@ -588,7 +595,7 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 15,   // reconcile now writes PRE-EXISTING unfilled shards into the worklist → bots walk the worklist, not the whole catalog forever
+          version: 16,   // MAX_SHARDS_PER_FLUSH 120 -> 180: drain pending into processable unfilled faster so fill bots aren't starved (no cost increase — same writes, fewer crons)
         });
       }
 
