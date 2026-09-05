@@ -894,17 +894,14 @@ object AvatarCatalogSweep {
             return best
         }
     }
-    /** Oldest shard eligible for FILL work: the whole catalog while a fill backlog is known, bounded
-     *  to ONE pass per manifest-value (fillScanStartMs) so a STICKY manifestUnfilled > 0 (poison
-     *  entries) can't make the bots blind-walk all 4096 shards forever; after one pass it falls back
-     *  to the due (liveness) trickle. */
-    private fun fillOrLivenessPrefix(context: Context, fillBacklog: Boolean): String? {
-        if (fillBacklog) {
-            if (fillScanStartMs == 0L) fillScanStartMs = System.currentTimeMillis()
-            oldestSweptPrefix(context, dueOnly = false, coverBeforeMs = fillScanStartMs)?.let { return it }
-        }
-        return oldestSweptPrefix(context, dueOnly = true)
-    }
+    /** Fallback shard when the shared work-list is empty: the LIVENESS due-only trickle (entries past
+     *  their 30-day recheck), NOT a whole-catalog fill sweep. Fill work now comes ENTIRELY from
+     *  `_worklist.json`, which the Worker's reconcile keeps AUTHORITATIVE for every unfilled shard
+     *  (freshly-contributed AND pre-existing). So an empty work-list means there is no fill work to
+     *  find — blind-walking all 4096 shards to hunt for unfilled avatars (which re-armed forever as the
+     *  count grew) is gone. The bots walk the work-list, fill it, and the walk TERMINATES when it drains. */
+    private fun livenessPrefix(context: Context): String? =
+        oldestSweptPrefix(context, dueOnly = true)
     /** True while there are still queued shards to walk — slotLoop uses a SHORT pause then
      *  (keep moving through the backlog) instead of the 20s idle sleep. */
     fun workRemaining(): Boolean = workQueue.isNotEmpty()
@@ -926,31 +923,26 @@ object AvatarCatalogSweep {
         // catalog every ~1.5s for the rest of the 30-min window after coverage was already complete.
         if (blitzActive()) return oldestSweptPrefix(context, dueOnly = false, coverBeforeMs = blitzStartMs)
         workQueue.poll()?.let { return it }
-        // When the manifest reports a real FILL backlog (unfilled avatars exist) but the
-        // worklist is empty, those unfilled entries live in shards NOT touched by recent
-        // contributions — so the Worker's incremental `_worklist.json` never lists them, AND
-        // a recent walk/blitz stamped every shard "swept < 7 days ago" so the due-only liveness
-        // trickle returns null → the bots go IDLE with a nonzero backlog (the "queued 368,
-        // checked 0" bug). While a fill backlog is known, walk the WHOLE catalog oldest-swept
-        // first (dueOnly=false) so walkPass's needsFill() filter finds and fills them; it
-        // reverts to the weekly liveness trickle once the backlog drains to 0.
-        val fillBacklog = manifestUnfilled > 0
+        // FILL work comes ENTIRELY from `_worklist.json` now — the Worker's reconcile keeps it
+        // authoritative for EVERY unfilled shard (freshly-contributed AND pre-existing), so an empty
+        // work-list genuinely means no fill work. We no longer blind-walk the whole catalog to "find"
+        // unfilled avatars the incremental list missed (that re-armed on every manifestUnfilled growth
+        // and looped the 4096-shard walk forever). When the list is empty we fall back only to the
+        // LIVENESS due-trickle; the fill walk terminates when the work-list drains.
         return worklistMutex.withLock {
             workQueue.poll()?.let { return@withLock it }   // another bot refilled while we waited
-            // If we recently learned the worklist is empty, don't re-hit the CDN this cycle — but
-            // instead of idling, walk oldest-swept: the WHOLE catalog while a fill backlog is
-            // known (find the unfilled), else just the due (weekly) shards (liveness trickle).
+            // If we recently learned the worklist is empty, don't re-hit the CDN this cycle — just
+            // run the liveness due-trickle (no whole-catalog fill sweep).
             if (worklistEmpty && System.currentTimeMillis() - worklistFetchedMs < WORKLIST_TTL_MS)
-                return@withLock fillOrLivenessPrefix(context, fillBacklog)
+                return@withLock livenessPrefix(context)
             val wl = AvatarGlobalDb.fetchWorklist(context)
             worklistFetchedMs = System.currentTimeMillis()
-            if (wl == null) { worklistEmpty = false; return@withLock fillOrLivenessPrefix(context, fillBacklog) }  // read failed → bounded fallback
+            if (wl == null) { worklistEmpty = false; return@withLock livenessPrefix(context) }  // read failed → liveness trickle
             val (fill, stale) = wl
             worklistEmpty = fill.isEmpty() && stale.isEmpty()
             workQueue.addAll(fill); workQueue.addAll(stale)   // fill first, then stale (liveness)
-            // Worklist empty → oldest-swept: bounded whole-catalog pass while a fill backlog is known,
-            // else the due (liveness) trickle.
-            workQueue.poll() ?: fillOrLivenessPrefix(context, fillBacklog)
+            // Worklist empty → liveness due-trickle only (fill is fully work-list-driven now).
+            workQueue.poll() ?: livenessPrefix(context)
         }
     }
     // Skip re-checking an avatar within the flush-lag window: the bot's fill/check reaches the
@@ -985,24 +977,15 @@ object AvatarCatalogSweep {
     private val filledSinceManifest = java.util.concurrent.atomic.AtomicInteger(0)
     private val recheckedSinceManifest = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile var manifestUnfilled = -1; private set
-    // Start of the CURRENT bounded fill-scan pass — reset whenever manifestUnfilled changes to a new
-    // value, so each genuine backlog change gets ONE fresh whole-catalog pass; a sticky value doesn't
-    // re-trigger endless passes (H2). fillOrLivenessPrefix bounds the pass to shards swept before this.
-    @Volatile private var fillScanStartMs = 0L
     // Reset the optimistic decrement ONLY when the value actually CHANGES (a fresh Action rebuild),
     // not on every 30s poll of the same value — otherwise each poll snapped the live-decremented
-    // queue back up to the manifest number (the "keeps jumping to ~8200" sawtooth).
+    // queue back up to the manifest number (the "keeps jumping to ~8200" sawtooth). No whole-catalog
+    // fill-scan is armed from here anymore — fill is fully work-list-driven (the Worker's reconcile
+    // keeps `_worklist.json` authoritative for every unfilled shard), so this only tracks the display.
     fun setManifestUnfilled(n: Int) {
         if (n == manifestUnfilled) return
-        val grew = n > manifestUnfilled     // manifestUnfilled starts at -1, so the first real value "grows"
         manifestUnfilled = n
         filledSinceManifest.set(0)
-        // Start a fresh whole-catalog fill pass ONLY when the backlog GREW (genuinely new unfilled work
-        // arrived) — NOT when it shrank as the bots drain it. The old "reset on any change" restarted the
-        // bounded pass every few minutes (the count moves as bots fill), so a pass never completed and the
-        // walk re-covered the whole catalog forever ("shard walk running for days, never finished"). A
-        // draining count now lets the in-progress pass finish, then falls to the idle liveness trickle.
-        if (n > 0 && grew) fillScanStartMs = System.currentTimeMillis()
     }
     /** Liveness backlog (entries due a recheck) from the manifest — so the Liveness bots show a
      *  real "queued" number in shard-walk mode instead of a confusing 0 while they're working. */
