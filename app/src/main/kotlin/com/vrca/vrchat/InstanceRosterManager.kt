@@ -949,7 +949,18 @@ object InstanceRosterManager {
                             // resolver), so it stays ~instant and never double-charges.
                             val conf = VrchatAuthManager.confirmAvatarLive(context, hit.avatarId)
                             when (conf.live) {
-                                true -> if (wornFid in conf.fileIds || conf.fileIds.isEmpty()) {
+                                // Serve ONLY when the live avatar's CURRENT thumbnail actually contains the
+                                // worn file id — i.e. the catalog's fileId->avatarId mapping is confirmed to
+                                // be THIS worn avatar. The old `|| conf.fileIds.isEmpty()` bypass served the
+                                // mapped id WITHOUT that image check whenever `/avatars/{id}` returned no
+                                // parseable thumbnail file id, so a mismapped / re-keyed catalog entry
+                                // (wornFid -> a DIFFERENT but live avatar) got pinned + cloned — the reported
+                                // "private avatar's own thumbnail matched nothing yet showed clonable and
+                                // cloned a random avatar" bug. No bypass now: an unverifiable confirm leaves
+                                // this member UNPINNED so the guarded resolveAvatars pass (equally strict —
+                                // `verifyCatalogHit`/image-fileid match) decides, greying it if it can't
+                                // image-confirm. Matches every other serve path (all require the fileId match).
+                                true -> if (wornFid in conf.fileIds) {
                                     val plats = conf.platforms.ifEmpty { hit.platforms }
                                     val gated = gateCloneId(hit.avatarId, plats)  // "" if PC-only on Quest
                                     avatarPlatformsCache[id] = plats
