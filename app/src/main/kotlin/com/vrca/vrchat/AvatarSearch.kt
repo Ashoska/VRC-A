@@ -279,7 +279,7 @@ object AvatarSearch {
         for (r in list) {
             val fid = r.imageFileId
             if (fid != null && r.source != "catalog") {
-                AvatarGlobalDb.contribute(context, fid, r.id, r.name, r.author, r.authorId, r.platforms)
+                AvatarGlobalDb.contribute(context, fid, r.id, r.name, r.author, r.authorId, r.platforms, bulk = true)
             }
         }
         // HARVEST the avtrdb (and any other) results that DON'T carry a file id — resolve each one's
@@ -334,7 +334,7 @@ object AvatarSearch {
         for (r in list) {
             val fid = r.imageFileId
             if (fid != null && r.source != "catalog") {
-                AvatarGlobalDb.contribute(context, fid, r.id, r.name, r.author, r.authorId, r.platforms)
+                AvatarGlobalDb.contribute(context, fid, r.id, r.name, r.author, r.authorId, r.platforms, bulk = true)
             }
         }
         // When the sharded index is live, OUR catalog results come from here too (there is no

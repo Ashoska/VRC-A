@@ -1031,7 +1031,8 @@ object AvatarGlobalDb {
     fun contribute(
         context: Context, fileId: String, avatarId: String,
         name: String, author: String, authorId: String = "", platforms: List<String> = emptyList(),
-        description: String = "", localInsert: Boolean = true, bypassLocalDedup: Boolean = false
+        description: String = "", localInsert: Boolean = true, bypassLocalDedup: Boolean = false,
+        bulk: Boolean = false
     ): Boolean {
         // Only add entries we ACTUALLY have a valid avatar id + file id for.
         // Returns TRUE only when this call adds a genuinely NEW entry — so harvest
@@ -1084,7 +1085,17 @@ object AvatarGlobalDb {
             // UNAVAILABLE (not-in-catalog or a transient read) still queues — nothing new is dropped.
             // R2-only membership (checkLocalMap=false): our own localInsert above must NOT count as a
             // HIT here, or the contribution is never queued (the batches regression).
-            if (lookupShardedResult(app, fileId, checkLocalMap = false).status == ShardStatus.HIT) return@launch
+            val sh = lookupShardedResult(app, fileId, checkLocalMap = false)
+            if (sh.status == ShardStatus.HIT) return@launch
+            // BULK harvest (search/candidate/avtrdb re-scans): only queue on a DEFINITIVE miss. An
+            // UNAVAILABLE is a rate-limited/failed clone-shard read under harvest load — membership is
+            // UNKNOWN, and re-POSTing an unverifiable avatar is exactly how already-known avatars flooded
+            // the Worker as +0 duplicate `pend:` batches (each 200-avatar batch spans ~all the per-flush
+            // shard budget, so one dupe batch = one whole wasted flush). Defer instead; the next harvest
+            // cycle retries when reads are calm. A genuinely-new avatar returns MISS and still sends NOW.
+            // User-facing contributes (own upload / clone tap, bulk=false) keep failing OPEN so they never
+            // get dropped by a transient read.
+            if (bulk && sh.status != ShardStatus.MISS) return@launch
             var overCap = false
             var queueSize = 0
             queueMutex.withLock {
@@ -1555,7 +1566,7 @@ object AvatarGlobalDb {
                 val fName = ce.name.ifBlank { r.name }; val fAuthor = ce.author.ifBlank { r.author }
                 val fAuthorId = ce.authorId.ifBlank { r.authorId }; val fPlat = ce.platforms.ifEmpty { r.platforms }
                 if (!map.containsKey(fid)) {
-                    contribute(app, fid, r.id, fName, fAuthor, fAuthorId, fPlat, ce.description)
+                    contribute(app, fid, r.id, fName, fAuthor, fAuthorId, fPlat, ce.description, bulk = true)
                 } else if (fName.isNotBlank() && fName != r.name) {
                     // Already in the catalog but the live NAME differs (renamed) → REPORT it so the bot
                     // verifies + the Worker corrects the catalog authoritatively, the same pipeline dead
@@ -1597,7 +1608,7 @@ object AvatarGlobalDb {
             for (c in candidates) {
                 val fid = c.imageFileId ?: continue
                 if (!harvestedCandidates.add(c.id)) continue
-                contribute(app, fid, c.id, c.name, c.author, c.authorId)
+                contribute(app, fid, c.id, c.name, c.author, c.authorId, bulk = true)
             }
         }
         // (b) avtrdb candidates (no file id) → resolve the file id via VRChat + contribute (paced,
@@ -1621,7 +1632,7 @@ object AvatarGlobalDb {
                 val e = try { VrchatAuthManager.avatarCatalogEntry(app, id) } catch (ex: Exception) { null }
                     ?: continue                               // null = private/dead/transient (skipped)
                 if (map.containsKey(e.fileId)) continue
-                contribute(app, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+                contribute(app, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description, bulk = true)
                 n++
                 delay(700)  // pace VRChat REST (low-priority background)
             }
