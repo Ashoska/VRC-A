@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.clickable
@@ -22,7 +23,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -196,19 +196,24 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
     val scope = rememberCoroutineScope()
     // Tap the row to reveal the step-by-step clone-resolution trace for this member (diagnostics).
     var traceOpen by remember(m.userId) { mutableStateOf(false) }
-    // Each member is its OWN rounded card. The roster card itself is surfaceVariant, so the
-    // rows use `surface` (a DIFFERENT shade) to actually stand out — the earlier
-    // surfaceVariant-with-alpha was the same colour as the card and blended in.
-    val rowBg = MaterialTheme.colorScheme.surface
+    // Each member is its OWN rounded card. The roster card itself is surfaceVariant; a plain
+    // `surface` row read DARKER than the card in dark mode (rows receded instead of popping). Rows
+    // now sit a touch LIGHTER than the card (raised, "less dark") with a subtle shadow, so they read
+    // as above the card without a heavy fill.
+    val rowBg = if (isSystemInDarkTheme())
+        androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.surfaceVariant, androidx.compose.ui.graphics.Color.White, 0.07f)
+    else
+        MaterialTheme.colorScheme.surface
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        color = rowBg
+        shape = RoundedCornerShape(12.dp),
+        color = rowBg,
+        shadowElevation = 1.dp
     ) {
       Column(
           Modifier.fillMaxWidth()
               .clickable { traceOpen = !traceOpen }
-              .padding(horizontal = 10.dp, vertical = 7.dp)
+              .padding(horizontal = 10.dp, vertical = 5.dp)
       ) {
         Row(
             Modifier.fillMaxWidth(),
@@ -498,8 +503,8 @@ private fun AvatarWithBadges(
     ctx: android.content.Context,
     ring: androidx.compose.ui.graphics.Color
 ) {
-    Box(Modifier.size(38.dp)) {
-        val pfpMod = Modifier.size(34.dp).align(Alignment.Center).clip(CircleShape)
+    Box(Modifier.size(36.dp)) {
+        val pfpMod = Modifier.size(32.dp).align(Alignment.Center).clip(CircleShape)
         if (m.profilePicUrl.isNotBlank()) {
             coil.compose.AsyncImage(
                 model = coil.request.ImageRequest.Builder(ctx)
@@ -530,13 +535,13 @@ private fun AvatarWithBadges(
 
 @Composable
 private fun TrustCornerBadge(trustRank: String, ring: androidx.compose.ui.graphics.Color) {
-    Surface(shape = CircleShape, color = ring, modifier = Modifier.size(16.dp)) {
+    Surface(shape = CircleShape, color = ring, modifier = Modifier.size(15.dp)) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Icon(
-                Icons.Filled.Shield,
+                painterResource(com.vrca.R.drawable.ic_trust_shield),
                 contentDescription = "Trust rank",
                 tint = rosterTrustColor(trustRank),
-                modifier = Modifier.size(12.dp)
+                modifier = Modifier.size(11.dp)
             )
         }
     }
@@ -550,20 +555,20 @@ private fun PlatformCornerBadge(platform: String, ring: androidx.compose.ui.grap
         "iOS" -> androidx.compose.ui.graphics.Color(0xFFE0E0E0)
         else -> return
     }
-    Surface(shape = CircleShape, color = ring, modifier = Modifier.size(16.dp)) {
+    Surface(shape = CircleShape, color = ring, modifier = Modifier.size(15.dp)) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             when (platform) {
                 "PC" -> Icon(
                     painterResource(com.vrca.R.drawable.ic_platform_windows),
-                    contentDescription = "PC", tint = tint, modifier = Modifier.size(10.dp)
+                    contentDescription = "PC", tint = tint, modifier = Modifier.size(9.dp)
                 )
                 "Quest" -> Icon(
                     Icons.Filled.Android,
-                    contentDescription = "Quest", tint = tint, modifier = Modifier.size(11.dp)
+                    contentDescription = "Quest", tint = tint, modifier = Modifier.size(10.dp)
                 )
                 else -> Icon(
                     painterResource(com.vrca.R.drawable.ic_platform_apple),
-                    contentDescription = "iOS", tint = tint, modifier = Modifier.size(10.dp)
+                    contentDescription = "iOS", tint = tint, modifier = Modifier.size(9.dp)
                 )
             }
         }

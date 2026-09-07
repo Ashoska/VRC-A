@@ -1,7 +1,8 @@
-<!-- Clone / "wear this avatar" glyph: two overlapping person silhouettes (a solid FRONT
-     person with a BACK person peeking behind, upper-left), matching VRChat's clone mark.
-     One evenOdd path so where the bodies overlap the intersection carves a clean separation
-     outline — single fill colour so Icon(tint=…) themes it in both light/dark. -->
+<!-- Clone / "wear this avatar" glyph: two people — a solid FRONT person (larger, lower-right)
+     with a BACK person peeking upper-left. Two solid, NON-overlapping sub-shapes with a thin gap
+     between them (default nonZero winding — NO evenOdd), so there is no hollow "clipping" ring where
+     the bodies meet (the earlier evenOdd carve left an empty gap between them). Single fill colour so
+     Icon(tint=…) themes it in both light/dark. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -9,9 +10,8 @@
     android:viewportHeight="24">
     <path
         android:fillColor="#FFFFFFFF"
-        android:fillType="evenOdd"
-        android:pathData="M4.6,6 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0 z
-                          M1.8,16 c0,-3.2 2.4,-5.7 5.4,-5.7 s5.4,2.5 5.4,5.7 z
-                          M10.3,8 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0 z
-                          M7.7,19 c0,-3.5 2.6,-6.2 5.8,-6.2 s5.8,2.7 5.8,6.2 z" />
+        android:pathData="M5,8 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0 z
+                          M2.4,17.4 c0,-3.4 1.9,-5.9 4.6,-5.9 c0.5,0 0.98,0.08 1.42,0.22 c-1.5,1.05 -2.42,3.1 -2.42,5.68 z
+                          M11.5,9 a3.4,3.4 0 1,0 6.8,0 a3.4,3.4 0 1,0 -6.8,0 z
+                          M8.6,20 c0,-3.7 2.55,-6.4 6.3,-6.4 s6.3,2.7 6.3,6.4 z" />
 </vector>
