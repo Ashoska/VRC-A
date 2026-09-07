@@ -1,0 +1,17 @@
+<!-- Clone / "wear this avatar" glyph: two overlapping person silhouettes matching the
+     instance-roster clone button. fillType="evenOdd" so where the front person overlaps
+     the back one the intersection is carved out, leaving a clean separation outline with a
+     SINGLE fill colour (so Icon(tint=…) themes it correctly in both light/dark). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M7.8,8.2 m-2.6,0 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0 z
+                          M7.8,11.4 c-3.0,0 -5.4,1.7 -5.4,3.8 L2.4,17.4 l10.8,0 l0,-2.2 c0,-2.1 -2.4,-3.8 -5.4,-3.8 z
+                          M14.6,9.4 m-3.0,0 a3.0,3.0 0 1,0 6.0,0 a3.0,3.0 0 1,0 -6.0,0 z
+                          M14.6,13.2 c-3.4,0 -6.1,1.9 -6.1,4.3 L8.5,19.6 l12.2,0 l0,-2.1 c0,-2.4 -2.7,-4.3 -6.1,-4.3 z" />
+</vector>

@@ -1665,6 +1665,15 @@ class VrchatPipelineService : Service() {
         )
         persistFriendsCache()
 
+        // Tier-2 live status: push the friend's new status straight into the instance
+        // roster (if they're in our instance) so their status dot/text updates instantly
+        // with no REST poll. statusDescription is only passed when the payload carries it
+        // (partial friend-updates omit it), so a status-only event never blanks the text.
+        InstanceRosterManager.onFriendStatusUpdate(
+            userId, newStatus,
+            if (user.has("statusDescription")) user.optString("statusDescription", "") else null
+        )
+
         if (isInWarmup()) return
 
         val locationChanged = newLocation != previous.location

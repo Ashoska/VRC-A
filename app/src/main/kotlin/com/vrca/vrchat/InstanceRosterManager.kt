@@ -113,6 +113,12 @@ object InstanceRosterManager {
         /** VRChat+ icon / worn-avatar thumbnail for the row (temporary, evicts on
          *  leave). Self reuses the VRChat tab's pic; others come from the API. */
         val profilePicUrl: String = "",
+        /** VRChat presence status: "active"/"join me"/"ask me"/"busy"/"offline"/"".
+         *  Drives the coloured status dot. From /users/{id} (poll-diff, free) and,
+         *  for friends, live via the pipeline WS friend-update (see onFriendStatusUpdate). */
+        val status: String = "",
+        /** The user's free-text status line (e.g. "doing nothin"). Shown next to the dot. */
+        val statusDescription: String = "",
         /** DIAGNOSTIC: the step-by-step clone-resolution trace for this member's CURRENT avatar —
          *  what was tried, what each DB/confirm returned, and the terminal outcome. Surfaced under
          *  the row so the whole resolve process is visible for every user in the instance. */
@@ -224,6 +230,11 @@ object InstanceRosterManager {
     // Cleared on leaving an instance so nothing lingers; the images themselves
     // load memory-only (no disk) so they're truly temporary — see the panel.
     private val pfpCache = ConcurrentHashMap<String, String>()
+    // Per-user VRChat status + status description (from the SAME /users/{id} call).
+    // Refreshed for free by the pfp poll-diff (refetchPfp / the 3-min sweep) and, for
+    // friends, live via the pipeline WS (onFriendStatusUpdate). Cleared on leave.
+    private val statusCache = ConcurrentHashMap<String, String>()
+    private val statusDescCache = ConcurrentHashMap<String, String>()
     private val enrichInFlight = ConcurrentHashMap.newKeySet<String>()
     // avatarName last seen per user → detect a SWITCH to refetch that pic 5s later.
     private val lastAvatarByUser = ConcurrentHashMap<String, String>()
@@ -822,6 +833,10 @@ object InstanceRosterManager {
             }
             val pfp = if (isSelfMember) (selfPresence?.profilePicUrl ?: "")
                       else e.userId?.let { pfpCache[it] } ?: ""
+            val stat = if (isSelfMember) (selfPresence?.status ?: "")
+                       else e.userId?.let { statusCache[it] } ?: ""
+            val statDesc = if (isSelfMember) (selfPresence?.statusDescription ?: "")
+                           else e.userId?.let { statusDescCache[it] } ?: ""
             // Pre-resolved clone target — the SAME source of truth resolveAvatars publishes with, so the
             // button can't flicker between spinner and grey/blue as the two loops interleave: null =
             // still resolving (spinner, only for the first ~40s), "" = decided grey, non-blank = ready.
@@ -838,6 +853,8 @@ object InstanceRosterManager {
                 isFriend = e.userId != null && friends.contains(e.userId),
                 isSelf = isSelfMember,
                 profilePicUrl = pfp,
+                status = stat,
+                statusDescription = statDesc,
                 // Carry the resolver's step trace (kept per-uid in VrchatAuthManager until the roster
                 // caches clear) so it survives the ~1s publish rebuild instead of blanking each cycle.
                 resolveTrace = if (!isSelfMember) e.userId?.let { VrchatAuthManager.lastResolveTrace(it) } ?: emptyList() else emptyList()
@@ -918,6 +935,8 @@ object InstanceRosterManager {
                 val plat = VrchatAuthManager.prettyPlatform(info.platform)
                 platformCache[id] = plat
                 pfpCache[id] = info.profilePicUrl
+                statusCache[id] = info.status
+                statusDescCache[id] = info.statusDescription
                 enrichAttempts.remove(id)
                 // INSTANT clone id for catalog-backed avatars: the worn file id is in
                 // the SAME /users/{id} response as the pic, so a catalog hit resolves
@@ -998,6 +1017,7 @@ object InstanceRosterManager {
                             members = cur.members.map { m ->
                                 if (m.userId == id) m.copy(
                                     platform = plat, profilePicUrl = info.profilePicUrl,
+                                    status = info.status, statusDescription = info.statusDescription,
                                     avatarId = catalogAvatarId ?: m.avatarId,
                                     cloneFileId = avatarCloneFileIdCache[id] ?: m.cloneFileId,
                                     resolveTrace = VrchatAuthManager.lastResolveTrace(id).ifEmpty { m.resolveTrace }
@@ -1038,6 +1058,7 @@ object InstanceRosterManager {
      *  eviction also drops any shard fetched for the previous instance's avatars. */
     private fun clearRosterCaches() {
         platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
+        statusCache.clear(); statusDescCache.clear()
         lastAvatarByUser.clear(); lastEntries = emptyList()
         avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear()
         avatarPlatformsCache.clear(); avatarResolveInFlight.clear()
@@ -1168,19 +1189,55 @@ object InstanceRosterManager {
         }
     }
 
-    /** Re-fetch one member's profile pic and republish their row if it changed. */
+    /** Re-fetch one member's profile pic AND status, republishing their row if either
+     *  changed. Tier-1 status refresh: the /users/{id} call already carries status +
+     *  statusDescription, so diffing them here costs ZERO extra REST (this call fires
+     *  5s after an avatar switch and on the 3-min ≥10-min sweep). */
     private suspend fun refetchPfp(context: Context, userId: String) {
         val info = try { VrchatAuthManager.fetchUserInfo(context, userId) } catch (e: Exception) { null } ?: return
         val newPfp = info.profilePicUrl
-        if (newPfp.isBlank() || newPfp == pfpCache[userId]) return
-        pfpCache[userId] = newPfp
+        val pfpChanged = newPfp.isNotBlank() && newPfp != pfpCache[userId]
+        val statusChanged = info.status != statusCache[userId] || info.statusDescription != statusDescCache[userId]
+        if (!pfpChanged && !statusChanged) return
+        if (pfpChanged) pfpCache[userId] = newPfp
+        statusCache[userId] = info.status
+        statusDescCache[userId] = info.statusDescription
         _flow.value.let { cur ->
             if (cur.members.any { it.userId == userId }) {
                 _flow.value = cur.copy(
-                    members = cur.members.map { m -> if (m.userId == userId) m.copy(profilePicUrl = newPfp) else m }
+                    members = cur.members.map { m ->
+                        if (m.userId == userId) m.copy(
+                            profilePicUrl = if (pfpChanged) newPfp else m.profilePicUrl,
+                            status = info.status, statusDescription = info.statusDescription
+                        ) else m
+                    }
                 )
             }
         }
+    }
+
+    /** Tier-2 LIVE status: the pipeline WS pushes friend-update / friend-active status
+     *  for FRIENDS the instant it changes. VrchatPipelineService routes it here so a
+     *  friend in our instance updates their status dot/text with no REST poll. Safe to
+     *  call on any build / when the roster isn't running — it only touches the cache and
+     *  republishes if that user is currently a member (a cheap no-op otherwise).
+     *  [statusDescription] null = leave the existing description unchanged (partial
+     *  friend-update payloads carry status without the description). */
+    fun onFriendStatusUpdate(userId: String, status: String, statusDescription: String?) {
+        if (userId.isBlank()) return
+        if (status.isBlank() && statusDescription == null) return
+        if (status.isNotBlank()) statusCache[userId] = status
+        if (statusDescription != null) statusDescCache[userId] = statusDescription
+        val cur = _flow.value
+        if (cur.status != Status.LIVE || cur.members.none { it.userId == userId }) return
+        _flow.value = cur.copy(
+            members = cur.members.map { m ->
+                if (m.userId == userId) m.copy(
+                    status = if (status.isNotBlank()) status else m.status,
+                    statusDescription = statusDescription ?: m.statusDescription
+                ) else m
+            }
+        )
     }
 
     /** Periodic pfp sweep for VRChat+/gallery pic changes (no avatar switch fires
