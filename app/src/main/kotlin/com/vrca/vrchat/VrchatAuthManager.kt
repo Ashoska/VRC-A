@@ -1302,8 +1302,36 @@ object VrchatAuthManager {
          *  VRC+/avatar-hidden case where VRChat robots the THUMBNAIL field but still
          *  carries the user's real worn avatar here — its file id then resolves the
          *  avatar via the mirror/author-listing paths (which match on imageUrl too). */
-        val wornAvatarImageUrl: String = ""
+        val wornAvatarImageUrl: String = "",
+        /** DIAGNOSTIC: compact list of every avatar/image/icon/pic field VRChat returned for this
+         *  user with its `file_…` id (short) — so the roster trace can reveal WHERE the real worn
+         *  avatar thumbnail lives when the standard fields are the Robot fallback (VRC+ case). */
+        val imageFieldsDiag: String = ""
     )
+
+    /** Scan a `/users/{id}` JSON for EVERY key that looks image-bearing and pull its `file_…` id
+     *  (shortened). Surfaces a field we might not be reading — the honest way to answer "is the real
+     *  avatar thumbnail hiding somewhere in the response?" for a VRC+/loading user. */
+    private fun buildImageFieldsDiag(j: org.json.JSONObject): String {
+        val out = StringBuilder()
+        val keys = j.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val lk = k.lowercase()
+            if (!(lk.contains("avatar") || lk.contains("image") || lk.contains("icon") || lk.contains("pic"))) continue
+            val v = j.optString(k, "")
+            if (v.isBlank()) continue
+            val fid = fileIdOf(v)
+            val shown = when {
+                fid != null -> fid.removePrefix("file_").take(8)
+                v.startsWith("http") -> "url(no-fileid)"
+                else -> v.take(12)
+            }
+            if (out.isNotEmpty()) out.append("  ")
+            out.append(k).append('=').append(shown)
+        }
+        return if (out.isEmpty()) "(no image fields)" else out.toString()
+    }
 
     suspend fun fetchUserInfo(context: Context, userId: String): VrcUserInfo? = withContext(Dispatchers.IO) {
         if (userId.isBlank() || !userId.startsWith("usr_")) return@withContext null
@@ -1333,8 +1361,9 @@ object VrchatAuthManager {
                     .ifBlank { j.optString("userIcon", "") }
                     .ifBlank { j.optString("currentAvatarThumbnailImageUrl", "") },
                 wornAvatarThumbUrl = j.optString("currentAvatarThumbnailImageUrl", ""),
-                wornAvatarImageUrl = j.optString("currentAvatarImageUrl", "")
-            ).also { cacheWornThumb(userId, it.wornAvatarThumbUrl, it.wornAvatarImageUrl) }
+                wornAvatarImageUrl = j.optString("currentAvatarImageUrl", ""),
+                imageFieldsDiag = buildImageFieldsDiag(j)
+            ).also { cacheWornThumb(userId, it.wornAvatarThumbUrl, it.wornAvatarImageUrl, it.imageFieldsDiag) }
         } catch (e: Exception) {
             Log.w(TAG, "fetchUserInfo($userId) failed", e)
             null
@@ -1618,14 +1647,14 @@ object VrchatAuthManager {
     private const val WORN_THUMB_TTL_MS = 12_000L
     // (thumbnailUrl, fullImageUrl, stampMs) — both worn urls so the robot-thumb→full-image
     // substitution below survives a cache reuse without a second /users/{id} fetch.
-    private data class WornCacheEntry(val thumbUrl: String, val imageUrl: String, val ts: Long)
+    private data class WornCacheEntry(val thumbUrl: String, val imageUrl: String, val diag: String, val ts: Long)
     private val wornThumbCache = java.util.concurrent.ConcurrentHashMap<String, WornCacheEntry>()
-    private fun cacheWornThumb(userId: String, thumbUrl: String, imageUrl: String = "") {
-        if (userId.startsWith("usr_")) wornThumbCache[userId] = WornCacheEntry(thumbUrl, imageUrl, System.currentTimeMillis())
+    private fun cacheWornThumb(userId: String, thumbUrl: String, imageUrl: String = "", diag: String = "") {
+        if (userId.startsWith("usr_")) wornThumbCache[userId] = WornCacheEntry(thumbUrl, imageUrl, diag, System.currentTimeMillis())
     }
-    /** Fresh worn (thumbnail, fullImage) URLs for this user, or null if not cached within the TTL. */
-    private fun cachedWornThumb(userId: String): Pair<String, String>? =
-        wornThumbCache[userId]?.let { e -> if (System.currentTimeMillis() - e.ts < WORN_THUMB_TTL_MS) (e.thumbUrl to e.imageUrl) else null }
+    /** Fresh worn (thumbnail, fullImage, imageFieldsDiag) for this user, or null if not cached within the TTL. */
+    private fun cachedWornThumb(userId: String): Triple<String, String, String>? =
+        wornThumbCache[userId]?.let { e -> if (System.currentTimeMillis() - e.ts < WORN_THUMB_TTL_MS) Triple(e.thumbUrl, e.imageUrl, e.diag) else null }
 
     /**
      * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
@@ -1662,6 +1691,7 @@ object VrchatAuthManager {
         val fetchFailed = reused == null && freshInfo == null
         val wornThumbUrl = reused?.first ?: freshInfo?.wornAvatarThumbUrl.orEmpty()
         val wornImageUrl = reused?.second ?: freshInfo?.wornAvatarImageUrl.orEmpty()
+        val imageFieldsDiag = reused?.third ?: freshInfo?.imageFieldsDiag.orEmpty()
         val thumbFileId = fileIdOf(wornThumbUrl)
         val imageFileId = fileIdOf(wornImageUrl)
         // The worn THUMBNAIL is VRChat's Robot fallback for some players — notably users with a
@@ -1707,6 +1737,10 @@ object VrchatAuthManager {
         if (com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(wornFileId)) {
             step("worn image is a VRChat FALLBACK (avatar still loading)" +
                 if (nameStable) " → try unique name+author" else " → name not yet stable, waiting")
+            // DIAGNOSTIC (the "where does VRChat keep the real avatar for a VRC+ user?" hunt): show
+            // EVERY image/avatar/icon/pic field VRChat returned for this member + its file id, so we
+            // can see whether the real worn thumbnail is hiding in a field we don't read.
+            if (imageFieldsDiag.isNotBlank()) step("  /users image fields: $imageFieldsDiag")
             // The worn image is the fallback, so we can't image-confirm — BUT the log has their REAL
             // avatar name + author. Resolve by a UNIQUE name+author match (the author locks it to the
             // same avatar; a unique match is a lookup, not a guess). This clones a loading/hidden
