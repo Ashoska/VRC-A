@@ -1296,7 +1296,13 @@ object VrchatAuthManager {
         /** RAW `currentAvatarThumbnailImageUrl` (an api/1/file/file_… url). Its
          *  file id is a UNIQUE 1:1 key for the worn avatar — used to CONFIRM an
          *  avatar-database match exactly (not a fuzzy name guess). */
-        val wornAvatarThumbUrl: String = ""
+        val wornAvatarThumbUrl: String = "",
+        /** RAW full-size `currentAvatarImageUrl`. For most users this is the SAME
+         *  avatar as the thumbnail (a DIFFERENT file id though). It matters for the
+         *  VRC+/avatar-hidden case where VRChat robots the THUMBNAIL field but still
+         *  carries the user's real worn avatar here — its file id then resolves the
+         *  avatar via the mirror/author-listing paths (which match on imageUrl too). */
+        val wornAvatarImageUrl: String = ""
     )
 
     suspend fun fetchUserInfo(context: Context, userId: String): VrcUserInfo? = withContext(Dispatchers.IO) {
@@ -1326,8 +1332,9 @@ object VrchatAuthManager {
                 profilePicUrl = j.optString("iconUrl", "")
                     .ifBlank { j.optString("userIcon", "") }
                     .ifBlank { j.optString("currentAvatarThumbnailImageUrl", "") },
-                wornAvatarThumbUrl = j.optString("currentAvatarThumbnailImageUrl", "")
-            ).also { cacheWornThumb(userId, it.wornAvatarThumbUrl) }
+                wornAvatarThumbUrl = j.optString("currentAvatarThumbnailImageUrl", ""),
+                wornAvatarImageUrl = j.optString("currentAvatarImageUrl", "")
+            ).also { cacheWornThumb(userId, it.wornAvatarThumbUrl, it.wornAvatarImageUrl) }
         } catch (e: Exception) {
             Log.w(TAG, "fetchUserInfo($userId) failed", e)
             null
@@ -1609,13 +1616,16 @@ object VrchatAuthManager {
     // re-fetching. Short TTL so an avatar SWITCH still surfaces quickly (the log drives re-resolve;
     // this only avoids the redundant back-to-back fetch). Cleared on instance leave with the traces.
     private const val WORN_THUMB_TTL_MS = 12_000L
-    private val wornThumbCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
-    private fun cacheWornThumb(userId: String, url: String) {
-        if (userId.startsWith("usr_")) wornThumbCache[userId] = url to System.currentTimeMillis()
+    // (thumbnailUrl, fullImageUrl, stampMs) — both worn urls so the robot-thumb→full-image
+    // substitution below survives a cache reuse without a second /users/{id} fetch.
+    private data class WornCacheEntry(val thumbUrl: String, val imageUrl: String, val ts: Long)
+    private val wornThumbCache = java.util.concurrent.ConcurrentHashMap<String, WornCacheEntry>()
+    private fun cacheWornThumb(userId: String, thumbUrl: String, imageUrl: String = "") {
+        if (userId.startsWith("usr_")) wornThumbCache[userId] = WornCacheEntry(thumbUrl, imageUrl, System.currentTimeMillis())
     }
-    /** Fresh worn-thumb URL for this user, or null if not cached within the TTL. */
-    private fun cachedWornThumb(userId: String): String? =
-        wornThumbCache[userId]?.let { (url, ts) -> if (System.currentTimeMillis() - ts < WORN_THUMB_TTL_MS) url else null }
+    /** Fresh worn (thumbnail, fullImage) URLs for this user, or null if not cached within the TTL. */
+    private fun cachedWornThumb(userId: String): Pair<String, String>? =
+        wornThumbCache[userId]?.let { e -> if (System.currentTimeMillis() - e.ts < WORN_THUMB_TTL_MS) (e.thumbUrl to e.imageUrl) else null }
 
     /**
      * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
@@ -1647,20 +1657,37 @@ object VrchatAuthManager {
         // Reuse the worn thumbnail enrichPlatforms just fetched for this member (within the TTL)
         // instead of a second identical GET /users/{id}. `reused` is surfaced in the trace so the
         // diagnostics show when a call was saved vs a fresh fetch made.
-        val reusedThumb = cachedWornThumb(userId)
-        val freshInfo = if (reusedThumb != null) null else fetchUserInfo(context, userId)
-        val fetchFailed = reusedThumb == null && freshInfo == null
-        val wornThumbUrl = reusedThumb ?: freshInfo?.wornAvatarThumbUrl.orEmpty()
-        val wornFileId = fileIdOf(wornThumbUrl)
+        val reused = cachedWornThumb(userId)
+        val freshInfo = if (reused != null) null else fetchUserInfo(context, userId)
+        val fetchFailed = reused == null && freshInfo == null
+        val wornThumbUrl = reused?.first ?: freshInfo?.wornAvatarThumbUrl.orEmpty()
+        val wornImageUrl = reused?.second ?: freshInfo?.wornAvatarImageUrl.orEmpty()
+        val thumbFileId = fileIdOf(wornThumbUrl)
+        val imageFileId = fileIdOf(wornImageUrl)
+        // The worn THUMBNAIL is VRChat's Robot fallback for some players — notably users with a
+        // VRC+ custom profile picture / avatar-hidden privacy — even though their REAL worn avatar is
+        // still carried in the full-size `currentAvatarImageUrl`. In that case the thumbnail file id is
+        // useless (robot), so fall back to the full-image file id: the mirror + author-listing paths
+        // match the worn id against the avatar's imageUrl too, so the real avatar resolves by file id
+        // WITHOUT needing an unreliable name+author guess. (For a normal user the thumbnail id is real
+        // and used unchanged — zero behaviour change.)
+        val thumbIsRobot = com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(thumbFileId)
+        val substituted = thumbIsRobot && imageFileId != null && !com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(imageFileId)
+        val wornFileId = when {
+            thumbFileId != null && !thumbIsRobot -> thumbFileId              // normal: real thumbnail
+            substituted -> imageFileId                                        // robot thumb → real full image
+            else -> thumbFileId                                               // both robot/absent → loading branch
+        }
         // Distinguish a FAILED /users/{id} (rate-limited/network → worn image unknown, retry) from a
         // genuinely absent thumbnail (hidden/impostor) — they used to look identical ("none") in the
         // trace, hiding the #1 reason a resolve fails: rate-limiting.
         step(when {
-            reusedThumb != null -> "worn image fileId: ${wornFileId ?: "none"}  [reused /users cache — saved a call]"
+            reused != null -> "worn image fileId: ${wornFileId ?: "none"}  [reused /users cache — saved a call]"
             fetchFailed -> "GET /users/$userId FAILED (rate-limited / network) — worn image UNKNOWN this pass"
             wornFileId != null -> "worn image fileId: $wornFileId  [fresh /users fetch]"
             else -> "worn image: none (hidden thumb / impostor / no worn avatar)  [fresh /users fetch]"
         })
+        if (substituted) step("thumbnail was the VRChat Robot fallback (VRC+/avatar-hidden) → using full worn image fileId $imageFileId instead")
         if (avatarName.isNotBlank()) step("log avatar name: \"$avatarName\"${if (author.isNotBlank()) " by $author" else ""}")
         // /users FAILED (rate-limited/network): the worn image is UNKNOWN, so don't waste the name
         // search + 6 VRChat confirms on a guess we can't image-verify — that's transient, retry next
@@ -1789,7 +1816,8 @@ object VrchatAuthManager {
                 // still-public avatar whose CURRENT live thumbnail equals the worn file id; otherwise
                 // fall through (don't offer / don't pollute the catalog with a private avatar).
                 val info = fetchAvatarInfo(context, cand.id)
-                if (info != null && wornFileId in info.first) {
+                if (info != null && wornFileId in info.first &&
+                    !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(cand.author, cand.id, wornFileId)) {
                     step("  mirror match ${cand.id} confirmed live + image matches ✓")
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
                     com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, cand.id, avatarName, author, cand.authorId, info.second)
@@ -1804,9 +1832,12 @@ object VrchatAuthManager {
             val authorRes = resolveViaAuthorAvatars(context, wornFileId)
             step("  " + com.vrca.vrchat.AvatarSearch.Diag.authorListing)   // WORKS/BLOCKED/IGNORED + counts
             authorRes?.let { (id, plats) ->
-                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via author listing"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, id, avatarName, author, "", plats)
-                return@withContext WornAvatarResult(id, plats, fileId = wornFileId)
+                if (!com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(null, id, wornFileId)) {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via author listing"
+                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, id, avatarName, author, "", plats)
+                    return@withContext WornAvatarResult(id, plats, fileId = wornFileId)
+                }
+                step("  author-listing match $id is a VRChat fallback — ignored")
             }
         }
         // No log name (impostor'd player) — the file-id/catalog/author paths above were

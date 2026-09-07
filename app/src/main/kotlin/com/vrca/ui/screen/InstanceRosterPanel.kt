@@ -3,6 +3,8 @@ package com.vrca.ui.screen
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.clickable
@@ -10,21 +12,21 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.res.painterResource
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.PeopleAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -124,7 +126,9 @@ fun InstanceRosterPanel(modifier: Modifier = Modifier) {
                     if (ui.members.isEmpty()) {
                         HintState("You're the only one here so far.")
                     } else {
-                        ui.members.forEach { m -> MemberRow(m) }
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ui.members.forEach { m -> MemberRow(m) }
+                        }
                     }
                 }
             }
@@ -192,156 +196,79 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
     val scope = rememberCoroutineScope()
     // Tap the row to reveal the step-by-step clone-resolution trace for this member (diagnostics).
     var traceOpen by remember(m.userId) { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth()) {
-    Row(
-        Modifier.fillMaxWidth().clickable { traceOpen = !traceOpen },
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    // Each member is its OWN rounded card. The roster card itself is surfaceVariant; a plain
+    // `surface` row read DARKER than the card in dark mode (rows receded instead of popping). Rows
+    // now sit a touch LIGHTER than the card (raised, "less dark") with a subtle shadow, so they read
+    // as above the card without a heavy fill.
+    val rowBg = if (isSystemInDarkTheme())
+        androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.surfaceVariant, androidx.compose.ui.graphics.Color.White, 0.07f)
+    else
+        MaterialTheme.colorScheme.surface
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = rowBg,
+        shadowElevation = 1.dp
     ) {
-        // Avatar: the VRChat pic when we have one, loaded through the session-authed
-        // loader with DISK cache DISABLED — it lives only in Coil's bounded memory
-        // cache (temporary, evicts when the user leaves / on memory pressure), so
-        // nothing builds up on disk. Initial-circle fallback while blank/loading.
-        if (m.profilePicUrl.isNotBlank()) {
-            coil.compose.AsyncImage(
-                model = coil.request.ImageRequest.Builder(ctx)
-                    .data(m.profilePicUrl)
-                    .diskCachePolicy(coil.request.CachePolicy.DISABLED)
-                    .crossfade(true)
-                    .build(),
-                imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.size(30.dp).clip(CircleShape)
-            )
-        } else {
-            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(30.dp)) {
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Text(
-                        m.displayName.firstOrNull()?.uppercase() ?: "?",
-                        style = MaterialTheme.typography.labelMedium
-                    )
-                }
-            }
-        }
-        Text(
-            m.displayName,
-            style = MaterialTheme.typography.bodyMedium,
-            // You = purple (pinned top), friends = yellow, everyone else default.
-            color = when {
-                m.isSelf -> androidx.compose.ui.graphics.Color(0xFFB388FF)
-                m.isFriend -> androidx.compose.ui.graphics.Color(0xFFFFD54F)
-                else -> MaterialTheme.colorScheme.onSurface
-            },
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-        if (m.platform.isNotBlank()) {
-            PlatformSymbol(m.platform)
-        } else if (m.userId == null) {
-            // Older name-only log format: no id to resolve a platform from.
-            Icon(
-                Icons.Filled.Lock,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                modifier = Modifier.size(12.dp)
-            )
-        }
-        // Clone/wear button — shown for EVERY non-self member (no gaps). The exact
-        // avatar id is resolved by the worn image FILE ID (name-optional, so even an
-        // impostor'd player with no log avatar name gets one). States:
-        //  - no userId  -> greyed/disabled (unresolvable),
-        //  - avatarId null -> spinner (still resolving),
-        //  - avatarId ""   -> greyed (no cloneable match anywhere),
-        //  - avatarId set  -> ready (tap to clone). A failed clone (avatar now private/
-        //    deleted) confirms + reports it, then greys out.
-        if (!m.isSelf) {
-            val avaId = m.avatarId
-            var deadLocally by remember(m.userId, m.avatarName, avaId) { mutableStateOf(false) }
-            when {
-                m.userId == null || deadLocally -> IconButton(
-                    onClick = {}, enabled = false, modifier = Modifier.size(28.dp)
-                ) {
-                    Icon(
-                        Icons.Filled.PeopleAlt,
-                        contentDescription = "No cloneable avatar",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                        modifier = Modifier.size(17.dp)
-                    )
-                }
-                avaId == null -> Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
-                    androidx.compose.material3.CircularProgressIndicator(
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.size(14.dp)
-                    )
-                }
-                // Greyed — no cloneable match (or the avatar never finished loading within the ~3-min
-                // watch → hard grey). No tap-rescan affordance; it re-resolves on its own if they switch
-                // avatars, and the liveness bots pick up a since-indexed avatar later.
-                avaId.isBlank() -> IconButton(
-                    onClick = {}, enabled = false, modifier = Modifier.size(28.dp)
-                ) {
-                    Icon(
-                        Icons.Filled.PeopleAlt,
-                        contentDescription = "No cloneable avatar found",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                        modifier = Modifier.size(17.dp)
-                    )
-                }
-                else -> {
-                    var busy by remember(avaId) { mutableStateOf(false) }
-                    IconButton(
-                        onClick = {
-                            if (busy) return@IconButton
-                            busy = true
-                            val name = m.avatarName
-                            val fid = m.cloneFileId   // the EXACT catalog shard key this id resolved from
-                            scope.launch {
-                                val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, avaId)
-                                android.widget.Toast.makeText(
-                                    ctx,
-                                    if (res.ok) "Cloned ${name ?: "avatar"} — shows on your next avatar reload"
-                                    else (res.error ?: "Couldn't wear this avatar"),
-                                    android.widget.Toast.LENGTH_LONG
-                                ).show()
-                                // VRChat DEFINITIVELY rejected the select: 404 = deleted, 403 = private /
-                                // not accessible. Either way it's not wearable by anyone but the owner, so
-                                // it must not keep showing as clonable. Report the EXACT resolved shard key
-                                // (m.cloneFileId — reliable; the target's live worn thumbnail may be the
-                                // fallback by now, which is why we don't re-derive it here) so the Worker
-                                // culls it on quorum, and grey the button locally right away. A transient
-                                // failure (429/5xx/network) is NOT reported — the entry stays, tap retries.
-                                if (!res.ok && (res.code == 403 || res.code == 404)) {
-                                    if (fid != null) com.vrca.vrchat.AvatarGlobalDb.report(ctx, fid, avaId, "dead")
-                                    deadLocally = true
-                                }
-                                busy = false
-                            }
-                        },
-                        enabled = !busy,
-                        modifier = Modifier.size(28.dp)
+      Column(
+          Modifier.fillMaxWidth()
+              .clickable { traceOpen = !traceOpen }
+              .padding(horizontal = 10.dp, vertical = 5.dp)
+      ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp)
+        ) {
+            // Avatar with Discord-style corner badges: trust-rank shield bottom-right (where
+            // Discord shows the presence dot), platform brand glyph bottom-left.
+            AvatarWithBadges(m, ctx, rowBg)
+            // Name + status line (dot coloured by status; text = status description, else label).
+            Column(Modifier.weight(1f)) {
+                Text(
+                    m.displayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    // You = purple (pinned top), friends = yellow, everyone else default.
+                    color = when {
+                        m.isSelf -> androidx.compose.ui.graphics.Color(0xFFB388FF)
+                        m.isFriend -> androidx.compose.ui.graphics.Color(0xFFFFD54F)
+                        else -> MaterialTheme.colorScheme.onSurface
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                val statusText = m.statusDescription.ifBlank { rosterStatusLabel(m.status) }
+                if (statusText.isNotBlank()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
-                        if (busy) {
-                            androidx.compose.material3.CircularProgressIndicator(
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        } else {
-                            Icon(
-                                Icons.Filled.PeopleAlt,
-                                contentDescription = "Clone avatar",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(17.dp)
-                            )
-                        }
+                        Box(
+                            Modifier.size(7.dp).clip(CircleShape)
+                                .background(rosterStatusColor(m.status))
+                        )
+                        Text(
+                            statusText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
+            // Action cluster (right) — non-self only. Exact order: friend request, clone,
+            // block, mute. Friend request + clone are live; block + mute are visual for now.
+            if (!m.isSelf) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FriendButton(m, ctx, scope)
+                    CloneButton(m, ctx, scope)
+                }
+            }
         }
-    }
         // Expandable per-user resolution trace: every step the clone resolver walked for this
         // member's current avatar + the terminal outcome ("result: via …" / "result: 0 candidates").
         if (traceOpen) {
@@ -367,7 +294,297 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                 }
             }
         }
+      }
     }
+}
+
+/** Rounded-square tonal action button used in the roster row's right-side cluster
+ *  (friend request / clone / block / mute). Uses Modifier.clickable (NOT
+ *  Surface(onClick=…), which forces a 48dp min interactive size and would blow up
+ *  the spacing) so the button stays exactly 34dp. */
+@Composable
+private fun RosterActionButton(
+    enabled: Boolean,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(7.dp),
+        color = if (enabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.06f),
+        modifier = Modifier.size(26.dp)
+    ) {
+        Box(
+            Modifier.fillMaxSize().clickable(enabled = enabled, onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) { content() }
+    }
+}
+
+/** Friend button — LIVE toggle. No user id → greyed. Already a friend → PersonRemove
+ *  (tap unfriends). Not a friend → PersonAdd (tap sends a request, then shows sent/dimmed
+ *  since a request isn't friendship yet). Unfriend flips optimistically (the friends cache
+ *  catches up via the pipeline WS). */
+@Composable
+private fun FriendButton(
+    m: InstanceRosterManager.Member,
+    ctx: android.content.Context,
+    scope: kotlinx.coroutines.CoroutineScope
+) {
+    if (m.userId == null) {
+        RosterActionButton(enabled = false, onClick = {}) {
+            Icon(
+                painterResource(com.vrca.R.drawable.ic_friend_add),
+                contentDescription = "Cannot add",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+                modifier = Modifier.size(15.dp)
+            )
+        }
+        return
+    }
+    var busy by remember(m.userId) { mutableStateOf(false) }
+    var unfriended by remember(m.userId) { mutableStateOf(false) }
+    var sent by remember(m.userId) { mutableStateOf(false) }
+    val isFriend = m.isFriend && !unfriended
+    val justSent = sent && !isFriend
+    RosterActionButton(enabled = !busy && !justSent, onClick = {
+        if (!busy) {
+            busy = true
+            scope.launch {
+                val res = if (isFriend)
+                    com.vrca.vrchat.VrchatAuthManager.unfriendUser(ctx, m.userId)
+                else
+                    com.vrca.vrchat.VrchatAuthManager.sendFriendRequest(ctx, m.userId)
+                android.widget.Toast.makeText(
+                    ctx,
+                    if (res.ok) {
+                        if (isFriend) "Unfriended ${m.displayName}"
+                        else "Friend request sent to ${m.displayName}"
+                    } else (res.error ?: "Couldn't complete that"),
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+                if (res.ok) { if (isFriend) unfriended = true else sent = true }
+                busy = false
+            }
+        }
+    }) {
+        if (busy) {
+            androidx.compose.material3.CircularProgressIndicator(
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp)
+            )
+        } else {
+            Icon(
+                painterResource(
+                    if (isFriend) com.vrca.R.drawable.ic_friend_remove
+                    else com.vrca.R.drawable.ic_friend_add
+                ),
+                contentDescription = if (isFriend) "Unfriend" else "Send friend request",
+                tint = if (justSent) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+                       else MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(15.dp)
+            )
+        }
+    }
+}
+
+/** Clone / "wear this avatar" button — LIVE (unchanged behaviour, restyled into the
+ *  tonal square with the custom overlapping-people glyph). States:
+ *   - no userId / dead   -> greyed/disabled,
+ *   - avatarId null       -> spinner (still resolving),
+ *   - avatarId ""         -> greyed (no cloneable match),
+ *   - avatarId set        -> ready (tap to clone; a 403/404 reports + greys). */
+@Composable
+private fun CloneButton(
+    m: InstanceRosterManager.Member,
+    ctx: android.content.Context,
+    scope: kotlinx.coroutines.CoroutineScope
+) {
+    val avaId = m.avatarId
+    var deadLocally by remember(m.userId, m.avatarName, avaId) { mutableStateOf(false) }
+    when {
+        m.userId == null || deadLocally -> RosterActionButton(enabled = false, onClick = {}) {
+            Icon(
+                painterResource(com.vrca.R.drawable.ic_clone_people),
+                contentDescription = "No cloneable avatar",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+                modifier = Modifier.size(15.dp)
+            )
+        }
+        avaId == null -> RosterActionButton(enabled = false, onClick = {}) {
+            androidx.compose.material3.CircularProgressIndicator(
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.size(15.dp)
+            )
+        }
+        avaId.isBlank() -> RosterActionButton(enabled = false, onClick = {}) {
+            Icon(
+                painterResource(com.vrca.R.drawable.ic_clone_people),
+                contentDescription = "No cloneable avatar found",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+                modifier = Modifier.size(15.dp)
+            )
+        }
+        else -> {
+            var busy by remember(avaId) { mutableStateOf(false) }
+            RosterActionButton(enabled = !busy, onClick = {
+                if (!busy) {
+                    busy = true
+                    val name = m.avatarName
+                    val fid = m.cloneFileId   // the EXACT catalog shard key this id resolved from
+                    scope.launch {
+                        val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, avaId)
+                        android.widget.Toast.makeText(
+                            ctx,
+                            if (res.ok) "Cloned ${name ?: "avatar"} — shows on your next avatar reload"
+                            else (res.error ?: "Couldn't wear this avatar"),
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                        // 403 = private/not accessible, 404 = deleted → not wearable by anyone but the
+                        // owner. Report the EXACT resolved shard key (reliable; the live worn thumb may be
+                        // the fallback by now) so the Worker culls it on quorum, and grey locally. A
+                        // transient failure (429/5xx/network) is NOT reported — entry stays, tap retries.
+                        if (!res.ok && (res.code == 403 || res.code == 404)) {
+                            if (fid != null) com.vrca.vrchat.AvatarGlobalDb.report(ctx, fid, avaId, "dead")
+                            deadLocally = true
+                        }
+                        busy = false
+                    }
+                }
+            }) {
+                if (busy) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                } else {
+                    Icon(
+                        painterResource(com.vrca.R.drawable.ic_clone_people),
+                        contentDescription = "Clone avatar",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** VRChat status → dot colour (active green / join-me blue / ask-me orange / busy red /
+ *  offline·unknown grey). */
+private fun rosterStatusColor(status: String): androidx.compose.ui.graphics.Color =
+    when (status.lowercase()) {
+        "active" -> androidx.compose.ui.graphics.Color(0xFF4CAF50)
+        "join me" -> androidx.compose.ui.graphics.Color(0xFF2196F3)
+        "ask me" -> androidx.compose.ui.graphics.Color(0xFFFF9800)
+        "busy" -> androidx.compose.ui.graphics.Color(0xFFE53935)
+        else -> androidx.compose.ui.graphics.Color(0xFF9E9E9E)
+    }
+
+/** VRChat status → human label (shown only when there's no free-text status description). */
+private fun rosterStatusLabel(status: String): String = when (status.lowercase()) {
+    "active" -> "Online"
+    "join me" -> "Join Me"
+    "ask me" -> "Ask Me"
+    "busy" -> "Busy"
+    "offline" -> "Offline"
+    else -> ""
+}
+
+/** The pfp with two Discord-style corner badges overlaid: the platform brand glyph at the
+ *  bottom-LEFT and the trust-rank shield at the bottom-RIGHT (where Discord puts its presence
+ *  dot). Each badge sits in a small ring the colour of the row so it reads as cut out of the pfp. */
+@Composable
+private fun AvatarWithBadges(
+    m: InstanceRosterManager.Member,
+    ctx: android.content.Context,
+    ring: androidx.compose.ui.graphics.Color
+) {
+    Box(Modifier.size(36.dp)) {
+        val pfpMod = Modifier.size(32.dp).align(Alignment.Center).clip(CircleShape)
+        if (m.profilePicUrl.isNotBlank()) {
+            coil.compose.AsyncImage(
+                model = coil.request.ImageRequest.Builder(ctx)
+                    .data(m.profilePicUrl)
+                    .diskCachePolicy(coil.request.CachePolicy.DISABLED)
+                    .crossfade(true)
+                    .build(),
+                imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = pfpMod
+            )
+        } else {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant, modifier = pfpMod) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text(m.displayName.firstOrNull()?.uppercase() ?: "?", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+        // Platform brand glyph, bottom-left (only when known).
+        if (m.platform.isNotBlank()) {
+            Box(Modifier.align(Alignment.BottomStart)) { PlatformCornerBadge(m.platform, ring) }
+        }
+        // Trust-rank shield, bottom-right (always — Visitor grey when unknown).
+        Box(Modifier.align(Alignment.BottomEnd)) { TrustCornerBadge(m.trustRank, ring) }
+    }
+}
+
+@Composable
+private fun TrustCornerBadge(trustRank: String, ring: androidx.compose.ui.graphics.Color) {
+    Surface(shape = CircleShape, color = ring, modifier = Modifier.size(15.dp)) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Icon(
+                painterResource(com.vrca.R.drawable.ic_trust_shield),
+                contentDescription = "Trust rank",
+                tint = rosterTrustColor(trustRank),
+                modifier = Modifier.size(11.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlatformCornerBadge(platform: String, ring: androidx.compose.ui.graphics.Color) {
+    val tint = when (platform) {
+        "PC" -> androidx.compose.ui.graphics.Color(0xFF2196F3)
+        "Quest" -> androidx.compose.ui.graphics.Color(0xFF3DDC84)
+        "iOS" -> androidx.compose.ui.graphics.Color(0xFFE0E0E0)
+        else -> return
+    }
+    Surface(shape = CircleShape, color = ring, modifier = Modifier.size(15.dp)) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            when (platform) {
+                "PC" -> Icon(
+                    painterResource(com.vrca.R.drawable.ic_platform_windows),
+                    contentDescription = "PC", tint = tint, modifier = Modifier.size(9.dp)
+                )
+                "Quest" -> Icon(
+                    Icons.Filled.Android,
+                    contentDescription = "Quest", tint = tint, modifier = Modifier.size(10.dp)
+                )
+                else -> Icon(
+                    painterResource(com.vrca.R.drawable.ic_platform_apple),
+                    contentDescription = "iOS", tint = tint, modifier = Modifier.size(9.dp)
+                )
+            }
+        }
+    }
+}
+
+/** VRChat trust tag → shield colour, per VRChat's displayed ranks (tag names are offset one step
+ *  from the label): veteran="Trusted User" purple, trusted="Known User" orange, known="User" green,
+ *  basic="New User" blue, none="Visitor" grey; legend="Veteran" gold. */
+private fun rosterTrustColor(rank: String): androidx.compose.ui.graphics.Color = when {
+    rank.contains("legend") -> androidx.compose.ui.graphics.Color(0xFFFFD000)
+    rank.contains("veteran") -> androidx.compose.ui.graphics.Color(0xFF8B5CF6)
+    rank.contains("trusted") -> androidx.compose.ui.graphics.Color(0xFFF0803C)
+    rank.contains("known") -> androidx.compose.ui.graphics.Color(0xFF2BCF5C)
+    rank.contains("basic") -> androidx.compose.ui.graphics.Color(0xFF1F6FEB)
+    else -> androidx.compose.ui.graphics.Color(0xFFB0B8C4)
 }
 
 /**
