@@ -21,13 +21,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.res.painterResource
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
-import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MicOff
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -293,45 +288,11 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
             // block, mute. Friend request + clone are live; block + mute are visual for now.
             if (!m.isSelf) {
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     FriendButton(m, ctx, scope)
                     CloneButton(m, ctx, scope)
-                    // Block — LIVE toggle. Icon reflects state (custom blocked glyph when blocked);
-                    // the manager flips it optimistically on tap, then re-reads the authoritative
-                    // playermoderations list 5s later to confirm.
-                    RosterActionButton(enabled = m.userId != null, onClick = {
-                        m.userId?.let { InstanceRosterManager.toggleBlock(ctx, it) }
-                    }) {
-                        if (m.isBlocked) {
-                            Icon(
-                                painterResource(com.vrca.R.drawable.ic_blocked_user),
-                                contentDescription = "Unblock",
-                                tint = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        } else {
-                            Icon(
-                                Icons.Filled.Block,
-                                contentDescription = "Block",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-                    // Mute — LIVE toggle. Mic ⇄ MicOff, same optimistic-flip + 5s confirm model.
-                    RosterActionButton(enabled = m.userId != null, onClick = {
-                        m.userId?.let { InstanceRosterManager.toggleMute(ctx, it) }
-                    }) {
-                        Icon(
-                            if (m.isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
-                            contentDescription = if (m.isMuted) "Unmute" else "Mute",
-                            tint = if (m.isMuted) MaterialTheme.colorScheme.error
-                                   else MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
                 }
             }
         }
@@ -375,10 +336,10 @@ private fun RosterActionButton(
     content: @Composable () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(9.dp),
+        shape = RoundedCornerShape(7.dp),
         color = if (enabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
                 else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.06f),
-        modifier = Modifier.size(34.dp)
+        modifier = Modifier.size(26.dp)
     ) {
         Box(
             Modifier.fillMaxSize().clickable(enabled = enabled, onClick = onClick),
@@ -400,10 +361,10 @@ private fun FriendButton(
     if (m.userId == null) {
         RosterActionButton(enabled = false, onClick = {}) {
             Icon(
-                Icons.Filled.PersonAdd,
+                painterResource(com.vrca.R.drawable.ic_friend_add),
                 contentDescription = "Cannot add",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier.size(15.dp)
             )
         }
         return
@@ -442,11 +403,14 @@ private fun FriendButton(
             )
         } else {
             Icon(
-                if (isFriend) Icons.Filled.PersonRemove else Icons.Filled.PersonAdd,
+                painterResource(
+                    if (isFriend) com.vrca.R.drawable.ic_friend_remove
+                    else com.vrca.R.drawable.ic_friend_add
+                ),
                 contentDescription = if (isFriend) "Unfriend" else "Send friend request",
                 tint = if (justSent) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
                        else MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier.size(15.dp)
             )
         }
     }
@@ -472,7 +436,7 @@ private fun CloneButton(
                 painterResource(com.vrca.R.drawable.ic_clone_people),
                 contentDescription = "No cloneable avatar",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier.size(15.dp)
             )
         }
         avaId == null -> RosterActionButton(enabled = false, onClick = {}) {
@@ -487,7 +451,7 @@ private fun CloneButton(
                 painterResource(com.vrca.R.drawable.ic_clone_people),
                 contentDescription = "No cloneable avatar found",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier.size(15.dp)
             )
         }
         else -> {
@@ -528,7 +492,7 @@ private fun CloneButton(
                         painterResource(com.vrca.R.drawable.ic_clone_people),
                         contentDescription = "Clone avatar",
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(15.dp)
                     )
                 }
             }

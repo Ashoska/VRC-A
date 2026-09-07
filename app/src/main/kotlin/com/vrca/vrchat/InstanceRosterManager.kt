@@ -119,12 +119,6 @@ object InstanceRosterManager {
         val status: String = "",
         /** The user's free-text status line (e.g. "doing nothin"). Shown next to the dot. */
         val statusDescription: String = "",
-        /** This account has MUTED this user (from the playermoderations list). Drives the
-         *  mute button's active icon (MicOff). */
-        val isMuted: Boolean = false,
-        /** This account has BLOCKED this user (from the playermoderations list). Drives the
-         *  block button's active icon. */
-        val isBlocked: Boolean = false,
         /** DIAGNOSTIC: the step-by-step clone-resolution trace for this member's CURRENT avatar —
          *  what was tried, what each DB/confirm returned, and the terminal outcome. Surfaced under
          *  the row so the whole resolve process is visible for every user in the instance. */
@@ -241,13 +235,6 @@ object InstanceRosterManager {
     // friends, live via the pipeline WS (onFriendStatusUpdate). Cleared on leave.
     private val statusCache = ConcurrentHashMap<String, String>()
     private val statusDescCache = ConcurrentHashMap<String, String>()
-    // Muted / blocked user ids for THIS account (from VrchatAuthManager.fetchPlayerModerations —
-    // one cheap call for the whole "Blocks & Mutes" list). Refreshed every 60s + on instance
-    // join + 5s after our own toggle (VRChat is slow to reflect it). NOT cleared on hop (account-
-    // wide, instance-independent) — only when the roster stops. @Volatile refs swapped whole.
-    @Volatile private var mutedIds: Set<String> = emptySet()
-    @Volatile private var blockedIds: Set<String> = emptySet()
-    private val moderationLoopStarted = AtomicBoolean(false)
     private val enrichInFlight = ConcurrentHashMap.newKeySet<String>()
     // avatarName last seen per user → detect a SWITCH to refetch that pic 5s later.
     private val lastAvatarByUser = ConcurrentHashMap<String, String>()
@@ -352,7 +339,6 @@ object InstanceRosterManager {
         scope.launch { runLoop(app) }
         startPfpRefreshLoop(app)
         startAvatarLoadingRetryLoop(app)
-        startModerationLoop(app)
     }
 
     /** Re-resolve members still on the VRChat FALLBACK. FAST phase (<40s): every tick, spinner.
@@ -869,8 +855,6 @@ object InstanceRosterManager {
                 profilePicUrl = pfp,
                 status = stat,
                 statusDescription = statDesc,
-                isMuted = e.userId != null && mutedIds.contains(e.userId),
-                isBlocked = e.userId != null && blockedIds.contains(e.userId),
                 // Carry the resolver's step trace (kept per-uid in VrchatAuthManager until the roster
                 // caches clear) so it survives the ~1s publish rebuild instead of blanking each cycle.
                 resolveTrace = if (!isSelfMember) e.userId?.let { VrchatAuthManager.lastResolveTrace(it) } ?: emptyList() else emptyList()
@@ -1256,72 +1240,23 @@ object InstanceRosterManager {
         )
     }
 
-    // ---- mute / block (player moderations) --------------------------------------------------
-    private const val MODERATION_POLL_MS = 60_000L        // re-read the whole list every 60s
-    private const val MODERATION_CONFIRM_DELAY_MS = 5_000L // VRChat is slow to reflect our own toggle
-
-    /** Poll the account's mute/block list every 60s so a change made ANYWHERE (website / in-game /
-     *  another device) reflects on the roster. One cheap call for the whole list. Runs while LIVE. */
-    private fun startModerationLoop(context: Context) {
-        if (!moderationLoopStarted.compareAndSet(false, true)) return
-        scope.launch {
-            // First pass immediately so state is right as the roster fills; then every 60s.
-            while (scope.isActive) {
-                if (_flow.value.status == Status.LIVE) refreshModerations(context)
-                delay(MODERATION_POLL_MS)
-            }
-        }
-    }
-
-    /** Fetch the authoritative mute/block sets and republish if they changed. Null (failed fetch)
-     *  leaves the last-known sets untouched so a transient error can't wrongly clear active icons. */
-    private suspend fun refreshModerations(context: Context) {
-        val pm = VrchatAuthManager.fetchPlayerModerations(context) ?: return
-        if (pm.blocked == blockedIds && pm.muted == mutedIds) return
-        blockedIds = pm.blocked
-        mutedIds = pm.muted
+    /** Friends set changed (a friend-add / friend-delete landed on the pipeline) — re-derive the
+     *  isFriend flag on the CURRENT roster and republish so the friend button flips (add ⇄ unfriend)
+     *  and the name colour updates PROMPTLY, instead of waiting for the next log-driven publish (up
+     *  to minutes on a quiet log) or a roster reopen. Reads the friend ids fresh (TTL reset). Cheap
+     *  no-op when the roster isn't LIVE / has no members (so it's safe to call on any build). */
+    fun onFriendsChanged(context: Context) {
         val cur = _flow.value
-        if (cur.status != Status.LIVE) return
-        _flow.value = cur.copy(members = cur.members.map { m ->
+        if (cur.status != Status.LIVE || cur.members.isEmpty()) return
+        friendIdsLoadedAt = 0L   // force a fresh read of the friends store on the next friendIds()
+        val self = try { VrchatAuthManager.getStoredUserId(context) } catch (e: Exception) { null }
+        val friends = friendIds(context)
+        val updated = cur.members.map { m ->
             val uid = m.userId
-            val b = uid != null && blockedIds.contains(uid)
-            val mu = uid != null && mutedIds.contains(uid)
-            if (m.isBlocked != b || m.isMuted != mu) m.copy(isBlocked = b, isMuted = mu) else m
-        })
-    }
-
-    /** Toggle mute ([type]="mute") or block ([type]="block") for a member. Optimistically flips the
-     *  local set + icon instantly, fires the VRChat call, then re-reads the authoritative list 5s
-     *  later (VRChat lags) to confirm / self-correct. Started only from the headset roster UI. */
-    fun toggleMute(context: Context, userId: String) = toggleModeration(context, userId, "mute")
-    fun toggleBlock(context: Context, userId: String) = toggleModeration(context, userId, "block")
-
-    private fun toggleModeration(context: Context, userId: String, type: String) {
-        if (userId.isBlank()) return
-        val enable = if (type == "mute") !mutedIds.contains(userId) else !blockedIds.contains(userId)
-        // Optimistic local flip so the icon changes the instant it's tapped.
-        applyModerationLocal(userId, type, enable)
-        scope.launch {
-            val res = VrchatAuthManager.setPlayerModeration(context, userId, type, enable)
-            if (!res.ok) {
-                // Revert the optimistic flip on a definitive failure.
-                applyModerationLocal(userId, type, !enable)
-            }
-            // Re-read the real list after VRChat has had a moment to reflect it (confirms + heals).
-            delay(MODERATION_CONFIRM_DELAY_MS)
-            refreshModerations(context)
+            val f = uid != null && uid != self && friends.contains(uid)
+            if (m.isFriend != f) m.copy(isFriend = f) else m
         }
-    }
-
-    private fun applyModerationLocal(userId: String, type: String, on: Boolean) {
-        if (type == "mute") mutedIds = if (on) mutedIds + userId else mutedIds - userId
-        else blockedIds = if (on) blockedIds + userId else blockedIds - userId
-        val cur = _flow.value
-        _flow.value = cur.copy(members = cur.members.map { m ->
-            if (m.userId == userId) m.copy(
-                isMuted = mutedIds.contains(userId), isBlocked = blockedIds.contains(userId)
-            ) else m
-        })
+        if (updated != cur.members) _flow.value = cur.copy(members = updated)
     }
 
     /** Periodic pfp sweep for VRChat+/gallery pic changes (no avatar switch fires

@@ -826,6 +826,9 @@ class VrchatPipelineService : Service() {
                     val displayName = user?.optString("displayName") ?: userId
                     friendsCache[userId] = entryFromUserJson(user, displayName)
                     persistFriendsCache()
+                    // Promptly flip the instance-roster friend button (add → unfriend) + name colour
+                    // for this new friend, instead of waiting for the next log-driven publish.
+                    InstanceRosterManager.onFriendsChanged(this@VrchatPipelineService)
                     // SHORT-WINDOW dedup (not permanent): VRChat re-emits / replays the
                     // friend-add pipeline event (notably on a WS reconnect), and this
                     // notification carries no dedupId, so a duplicate fired "New friend"
@@ -868,6 +871,7 @@ class VrchatPipelineService : Service() {
                     if (SelfInviteStore.isFriendNotifSuppressed(this@VrchatPipelineService, userId)) {
                         friendsCache.remove(userId)
                         persistFriendsCache()
+                        InstanceRosterManager.onFriendsChanged(this@VrchatPipelineService)
                         clearSeenNotifId("fr_$userId")
                         recentFriendAddMs.remove(userId)
                         return
@@ -875,6 +879,7 @@ class VrchatPipelineService : Service() {
                     if (!notifiedUnfriendIds.add(userId)) {
                         friendsCache.remove(userId)
                         persistFriendsCache()
+                        InstanceRosterManager.onFriendsChanged(this@VrchatPipelineService)
                         return
                     }
 
@@ -893,6 +898,7 @@ class VrchatPipelineService : Service() {
 
                     friendsCache.remove(userId)
                     persistFriendsCache()
+                    InstanceRosterManager.onFriendsChanged(this@VrchatPipelineService)
                     // Unfriended → the friendship is over, so RESET the per-person
                     // dedup state: clear the permanent friend-request key so a future
                     // request from this person notifies again, and drop the friend-add
