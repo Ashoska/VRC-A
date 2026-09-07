@@ -119,6 +119,8 @@ object InstanceRosterManager {
         val status: String = "",
         /** The user's free-text status line (e.g. "doing nothin"). Shown next to the dot. */
         val statusDescription: String = "",
+        /** Raw `system_trust_<rank>` tag (or "" = Visitor). Drives the trust-rank dot on the pfp. */
+        val trustRank: String = "",
         /** DIAGNOSTIC: the step-by-step clone-resolution trace for this member's CURRENT avatar —
          *  what was tried, what each DB/confirm returned, and the terminal outcome. Surfaced under
          *  the row so the whole resolve process is visible for every user in the instance. */
@@ -235,6 +237,7 @@ object InstanceRosterManager {
     // friends, live via the pipeline WS (onFriendStatusUpdate). Cleared on leave.
     private val statusCache = ConcurrentHashMap<String, String>()
     private val statusDescCache = ConcurrentHashMap<String, String>()
+    private val trustCache = ConcurrentHashMap<String, String>()
     private val enrichInFlight = ConcurrentHashMap.newKeySet<String>()
     // avatarName last seen per user → detect a SWITCH to refetch that pic 5s later.
     private val lastAvatarByUser = ConcurrentHashMap<String, String>()
@@ -319,18 +322,24 @@ object InstanceRosterManager {
     // Single-flight guard so platforms resolve as ONE ordered top-to-bottom pass
     // (not several concurrent passes that would race the rate limit).
     private val enriching = java.util.concurrent.atomic.AtomicBoolean(false)
-    // Friend-id set (local FriendsCacheStore), refreshed with a short TTL.
-    @Volatile private var friendIdsSnapshot: Set<String> = emptySet()
+    // Local friends cache snapshot (FriendsCacheStore, kept LIVE by the pipeline WS on every
+    // friend event). Short 2s TTL so a friend's STATUS reflects within ~2s of a friend-update —
+    // publish() reads a friend member's status/desc straight from here (WS cadence, zero REST),
+    // which is what fixed "a friend's status took minutes to update" (the enrich statusCache only
+    // refreshed on the 3-min pfp sweep). `friendIds()` returns the keys; `friendEntry()` the status.
+    @Volatile private var friendMapSnapshot: Map<String, FriendCacheEntry> = emptyMap()
     @Volatile private var friendIdsLoadedAt: Long = 0L
 
-    private fun friendIds(context: Context): Set<String> {
+    private fun friendMap(context: Context): Map<String, FriendCacheEntry> {
         val now = System.currentTimeMillis()
-        if (now - friendIdsLoadedAt > 15_000L) {
-            friendIdsSnapshot = try { FriendsCacheStore.load(context).keys } catch (e: Exception) { friendIdsSnapshot }
+        if (now - friendIdsLoadedAt > 2_000L) {
+            friendMapSnapshot = try { FriendsCacheStore.load(context) } catch (e: Exception) { friendMapSnapshot }
             friendIdsLoadedAt = now
         }
-        return friendIdsSnapshot
+        return friendMapSnapshot
     }
+
+    private fun friendIds(context: Context): Set<String> = friendMap(context).keys
 
     /** Idempotent — safe to call from every Home composition. */
     fun start(context: Context) {
@@ -811,7 +820,8 @@ object InstanceRosterManager {
             lastLocation = state.location
         }
 
-        val friends = friendIds(context)
+        val friendsMap = friendMap(context)
+        val friends = friendsMap.keys
         // Display order: YOU first, then friends, then everyone else; each by
         // join time (top-to-bottom). Enrichment walks this SAME order so
         // platforms fill in top-to-bottom (and friends before non-friends, which
@@ -833,10 +843,25 @@ object InstanceRosterManager {
             }
             val pfp = if (isSelfMember) (selfPresence?.profilePicUrl ?: "")
                       else e.userId?.let { pfpCache[it] } ?: ""
-            val stat = if (isSelfMember) (selfPresence?.status ?: "")
-                       else e.userId?.let { statusCache[it] } ?: ""
-            val statDesc = if (isSelfMember) (selfPresence?.statusDescription ?: "")
-                           else e.userId?.let { statusDescCache[it] } ?: ""
+            // Status: self from presence; a FRIEND from the live friends cache (WS-driven, ~2s
+            // fresh — fixes "a friend's status took minutes"); everyone else from the enrich cache
+            // (+ the pfp poll-diff). The friend-cache value falls back to the enrich cache when blank.
+            val friendEntry = e.userId?.let { friendsMap[it] }
+            val stat = when {
+                isSelfMember -> selfPresence?.status ?: ""
+                friendEntry != null -> friendEntry.status.ifBlank { e.userId?.let { statusCache[it] } ?: "" }
+                else -> e.userId?.let { statusCache[it] } ?: ""
+            }
+            val statDesc = when {
+                isSelfMember -> selfPresence?.statusDescription ?: ""
+                friendEntry != null -> friendEntry.statusDescription.ifBlank { e.userId?.let { statusDescCache[it] } ?: "" }
+                else -> e.userId?.let { statusDescCache[it] } ?: ""
+            }
+            val trust = when {
+                isSelfMember -> selfPresence?.trustRank ?: ""
+                friendEntry != null && friendEntry.trustRank.isNotBlank() -> friendEntry.trustRank
+                else -> e.userId?.let { trustCache[it] } ?: ""
+            }
             // Pre-resolved clone target — the SAME source of truth resolveAvatars publishes with, so the
             // button can't flicker between spinner and grey/blue as the two loops interleave: null =
             // still resolving (spinner, only for the first ~40s), "" = decided grey, non-blank = ready.
@@ -855,6 +880,7 @@ object InstanceRosterManager {
                 profilePicUrl = pfp,
                 status = stat,
                 statusDescription = statDesc,
+                trustRank = trust,
                 // Carry the resolver's step trace (kept per-uid in VrchatAuthManager until the roster
                 // caches clear) so it survives the ~1s publish rebuild instead of blanking each cycle.
                 resolveTrace = if (!isSelfMember) e.userId?.let { VrchatAuthManager.lastResolveTrace(it) } ?: emptyList() else emptyList()
@@ -937,6 +963,7 @@ object InstanceRosterManager {
                 pfpCache[id] = info.profilePicUrl
                 statusCache[id] = info.status
                 statusDescCache[id] = info.statusDescription
+                trustCache[id] = info.trustRank
                 enrichAttempts.remove(id)
                 // INSTANT clone id for catalog-backed avatars: the worn file id is in
                 // the SAME /users/{id} response as the pic, so a catalog hit resolves
@@ -1018,6 +1045,7 @@ object InstanceRosterManager {
                                 if (m.userId == id) m.copy(
                                     platform = plat, profilePicUrl = info.profilePicUrl,
                                     status = info.status, statusDescription = info.statusDescription,
+                                    trustRank = info.trustRank,
                                     avatarId = catalogAvatarId ?: m.avatarId,
                                     cloneFileId = avatarCloneFileIdCache[id] ?: m.cloneFileId,
                                     resolveTrace = VrchatAuthManager.lastResolveTrace(id).ifEmpty { m.resolveTrace }
@@ -1058,7 +1086,7 @@ object InstanceRosterManager {
      *  eviction also drops any shard fetched for the previous instance's avatars. */
     private fun clearRosterCaches() {
         platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
-        statusCache.clear(); statusDescCache.clear()
+        statusCache.clear(); statusDescCache.clear(); trustCache.clear()
         lastAvatarByUser.clear(); lastEntries = emptyList()
         avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear()
         avatarPlatformsCache.clear(); avatarResolveInFlight.clear()
@@ -1198,17 +1226,20 @@ object InstanceRosterManager {
         val newPfp = info.profilePicUrl
         val pfpChanged = newPfp.isNotBlank() && newPfp != pfpCache[userId]
         val statusChanged = info.status != statusCache[userId] || info.statusDescription != statusDescCache[userId]
-        if (!pfpChanged && !statusChanged) return
+        val trustChanged = info.trustRank != trustCache[userId]
+        if (!pfpChanged && !statusChanged && !trustChanged) return
         if (pfpChanged) pfpCache[userId] = newPfp
         statusCache[userId] = info.status
         statusDescCache[userId] = info.statusDescription
+        trustCache[userId] = info.trustRank
         _flow.value.let { cur ->
             if (cur.members.any { it.userId == userId }) {
                 _flow.value = cur.copy(
                     members = cur.members.map { m ->
                         if (m.userId == userId) m.copy(
                             profilePicUrl = if (pfpChanged) newPfp else m.profilePicUrl,
-                            status = info.status, statusDescription = info.statusDescription
+                            status = info.status, statusDescription = info.statusDescription,
+                            trustRank = info.trustRank
                         ) else m
                     }
                 )

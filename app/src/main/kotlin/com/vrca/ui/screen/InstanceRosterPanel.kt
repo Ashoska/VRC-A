@@ -22,7 +22,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -196,12 +196,14 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
     val scope = rememberCoroutineScope()
     // Tap the row to reveal the step-by-step clone-resolution trace for this member (diagnostics).
     var traceOpen by remember(m.userId) { mutableStateOf(false) }
-    // Each member is its OWN rounded card (subtle fill) so rows are visually separated
-    // instead of blending into one block.
+    // Each member is its OWN rounded card. The roster card itself is surfaceVariant, so the
+    // rows use `surface` (a DIFFERENT shade) to actually stand out — the earlier
+    // surfaceVariant-with-alpha was the same colour as the card and blended in.
+    val rowBg = MaterialTheme.colorScheme.surface
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+        color = rowBg
     ) {
       Column(
           Modifier.fillMaxWidth()
@@ -213,43 +215,9 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(9.dp)
         ) {
-            // Avatar: the VRChat pic when we have one, loaded through the session-authed
-            // loader with DISK cache DISABLED — memory-only (evicts on leave), so nothing
-            // builds up on disk. Initial-circle fallback while blank/loading.
-            if (m.profilePicUrl.isNotBlank()) {
-                coil.compose.AsyncImage(
-                    model = coil.request.ImageRequest.Builder(ctx)
-                        .data(m.profilePicUrl)
-                        .diskCachePolicy(coil.request.CachePolicy.DISABLED)
-                        .crossfade(true)
-                        .build(),
-                    imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(34.dp).clip(CircleShape)
-                )
-            } else {
-                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(34.dp)) {
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Text(
-                            m.displayName.firstOrNull()?.uppercase() ?: "?",
-                            style = MaterialTheme.typography.labelMedium
-                        )
-                    }
-                }
-            }
-            // Platform symbol — moved to the LEFT, right beside the profile picture.
-            if (m.platform.isNotBlank()) {
-                PlatformSymbol(m.platform)
-            } else if (m.userId == null) {
-                // Older name-only log format: no id to resolve a platform from.
-                Icon(
-                    Icons.Filled.Lock,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                    modifier = Modifier.size(12.dp)
-                )
-            }
+            // Avatar with Discord-style corner badges: trust-rank shield bottom-right (where
+            // Discord shows the presence dot), platform brand glyph bottom-left.
+            AvatarWithBadges(m, ctx, rowBg)
             // Name + status line (dot coloured by status; text = status description, else label).
             Column(Modifier.weight(1f)) {
                 Text(
@@ -519,6 +487,99 @@ private fun rosterStatusLabel(status: String): String = when (status.lowercase()
     "busy" -> "Busy"
     "offline" -> "Offline"
     else -> ""
+}
+
+/** The pfp with two Discord-style corner badges overlaid: the platform brand glyph at the
+ *  bottom-LEFT and the trust-rank shield at the bottom-RIGHT (where Discord puts its presence
+ *  dot). Each badge sits in a small ring the colour of the row so it reads as cut out of the pfp. */
+@Composable
+private fun AvatarWithBadges(
+    m: InstanceRosterManager.Member,
+    ctx: android.content.Context,
+    ring: androidx.compose.ui.graphics.Color
+) {
+    Box(Modifier.size(38.dp)) {
+        val pfpMod = Modifier.size(34.dp).align(Alignment.Center).clip(CircleShape)
+        if (m.profilePicUrl.isNotBlank()) {
+            coil.compose.AsyncImage(
+                model = coil.request.ImageRequest.Builder(ctx)
+                    .data(m.profilePicUrl)
+                    .diskCachePolicy(coil.request.CachePolicy.DISABLED)
+                    .crossfade(true)
+                    .build(),
+                imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = pfpMod
+            )
+        } else {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant, modifier = pfpMod) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text(m.displayName.firstOrNull()?.uppercase() ?: "?", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+        // Platform brand glyph, bottom-left (only when known).
+        if (m.platform.isNotBlank()) {
+            Box(Modifier.align(Alignment.BottomStart)) { PlatformCornerBadge(m.platform, ring) }
+        }
+        // Trust-rank shield, bottom-right (always — Visitor grey when unknown).
+        Box(Modifier.align(Alignment.BottomEnd)) { TrustCornerBadge(m.trustRank, ring) }
+    }
+}
+
+@Composable
+private fun TrustCornerBadge(trustRank: String, ring: androidx.compose.ui.graphics.Color) {
+    Surface(shape = CircleShape, color = ring, modifier = Modifier.size(16.dp)) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Icon(
+                Icons.Filled.Shield,
+                contentDescription = "Trust rank",
+                tint = rosterTrustColor(trustRank),
+                modifier = Modifier.size(12.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlatformCornerBadge(platform: String, ring: androidx.compose.ui.graphics.Color) {
+    val tint = when (platform) {
+        "PC" -> androidx.compose.ui.graphics.Color(0xFF2196F3)
+        "Quest" -> androidx.compose.ui.graphics.Color(0xFF3DDC84)
+        "iOS" -> androidx.compose.ui.graphics.Color(0xFFE0E0E0)
+        else -> return
+    }
+    Surface(shape = CircleShape, color = ring, modifier = Modifier.size(16.dp)) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            when (platform) {
+                "PC" -> Icon(
+                    painterResource(com.vrca.R.drawable.ic_platform_windows),
+                    contentDescription = "PC", tint = tint, modifier = Modifier.size(10.dp)
+                )
+                "Quest" -> Icon(
+                    Icons.Filled.Android,
+                    contentDescription = "Quest", tint = tint, modifier = Modifier.size(11.dp)
+                )
+                else -> Icon(
+                    painterResource(com.vrca.R.drawable.ic_platform_apple),
+                    contentDescription = "iOS", tint = tint, modifier = Modifier.size(10.dp)
+                )
+            }
+        }
+    }
+}
+
+/** VRChat trust tag → shield colour, per VRChat's displayed ranks (tag names are offset one step
+ *  from the label): veteran="Trusted User" purple, trusted="Known User" orange, known="User" green,
+ *  basic="New User" blue, none="Visitor" grey; legend="Veteran" gold. */
+private fun rosterTrustColor(rank: String): androidx.compose.ui.graphics.Color = when {
+    rank.contains("legend") -> androidx.compose.ui.graphics.Color(0xFFFFD000)
+    rank.contains("veteran") -> androidx.compose.ui.graphics.Color(0xFF8B5CF6)
+    rank.contains("trusted") -> androidx.compose.ui.graphics.Color(0xFFF0803C)
+    rank.contains("known") -> androidx.compose.ui.graphics.Color(0xFF2BCF5C)
+    rank.contains("basic") -> androidx.compose.ui.graphics.Color(0xFF1F6FEB)
+    else -> androidx.compose.ui.graphics.Color(0xFFB0B8C4)
 }
 
 /**
