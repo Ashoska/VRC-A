@@ -25,7 +25,9 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -294,25 +296,39 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    FriendRequestButton(m, ctx, scope)
+                    FriendButton(m, ctx, scope)
                     CloneButton(m, ctx, scope)
-                    RosterActionButton(enabled = true, onClick = {
-                        android.widget.Toast.makeText(ctx, "Block coming soon", android.widget.Toast.LENGTH_SHORT).show()
+                    // Block — LIVE toggle. Icon reflects state (custom blocked glyph when blocked);
+                    // the manager flips it optimistically on tap, then re-reads the authoritative
+                    // playermoderations list 5s later to confirm.
+                    RosterActionButton(enabled = m.userId != null, onClick = {
+                        m.userId?.let { InstanceRosterManager.toggleBlock(ctx, it) }
                     }) {
-                        Icon(
-                            Icons.Filled.Block,
-                            contentDescription = "Block",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        if (m.isBlocked) {
+                            Icon(
+                                painterResource(com.vrca.R.drawable.ic_blocked_user),
+                                contentDescription = "Unblock",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.Block,
+                                contentDescription = "Block",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
-                    RosterActionButton(enabled = true, onClick = {
-                        android.widget.Toast.makeText(ctx, "Mute coming soon", android.widget.Toast.LENGTH_SHORT).show()
+                    // Mute — LIVE toggle. Mic ⇄ MicOff, same optimistic-flip + 5s confirm model.
+                    RosterActionButton(enabled = m.userId != null, onClick = {
+                        m.userId?.let { InstanceRosterManager.toggleMute(ctx, it) }
                     }) {
                         Icon(
-                            Icons.Filled.Mic,
-                            contentDescription = "Mute",
-                            tint = MaterialTheme.colorScheme.primary,
+                            if (m.isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
+                            contentDescription = if (m.isMuted) "Unmute" else "Mute",
+                            tint = if (m.isMuted) MaterialTheme.colorScheme.error
+                                   else MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -371,40 +387,49 @@ private fun RosterActionButton(
     }
 }
 
-/** Friend-request button — LIVE. Greyed when already a friend or no user id; otherwise
- *  taps send a VRChat friend request (one-shot, then shows sent). */
+/** Friend button — LIVE toggle. No user id → greyed. Already a friend → PersonRemove
+ *  (tap unfriends). Not a friend → PersonAdd (tap sends a request, then shows sent/dimmed
+ *  since a request isn't friendship yet). Unfriend flips optimistically (the friends cache
+ *  catches up via the pipeline WS). */
 @Composable
-private fun FriendRequestButton(
+private fun FriendButton(
     m: InstanceRosterManager.Member,
     ctx: android.content.Context,
     scope: kotlinx.coroutines.CoroutineScope
 ) {
-    if (m.userId == null || m.isFriend) {
+    if (m.userId == null) {
         RosterActionButton(enabled = false, onClick = {}) {
             Icon(
                 Icons.Filled.PersonAdd,
-                contentDescription = if (m.isFriend) "Already a friend" else "Cannot add",
-                tint = if (m.isFriend) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
-                       else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+                contentDescription = "Cannot add",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
                 modifier = Modifier.size(18.dp)
             )
         }
         return
     }
     var busy by remember(m.userId) { mutableStateOf(false) }
+    var unfriended by remember(m.userId) { mutableStateOf(false) }
     var sent by remember(m.userId) { mutableStateOf(false) }
-    RosterActionButton(enabled = !busy && !sent, onClick = {
-        if (!busy && !sent) {
+    val isFriend = m.isFriend && !unfriended
+    val justSent = sent && !isFriend
+    RosterActionButton(enabled = !busy && !justSent, onClick = {
+        if (!busy) {
             busy = true
             scope.launch {
-                val res = com.vrca.vrchat.VrchatAuthManager.sendFriendRequest(ctx, m.userId)
+                val res = if (isFriend)
+                    com.vrca.vrchat.VrchatAuthManager.unfriendUser(ctx, m.userId)
+                else
+                    com.vrca.vrchat.VrchatAuthManager.sendFriendRequest(ctx, m.userId)
                 android.widget.Toast.makeText(
                     ctx,
-                    if (res.ok) "Friend request sent to ${m.displayName}"
-                    else (res.error ?: "Couldn't send friend request"),
+                    if (res.ok) {
+                        if (isFriend) "Unfriended ${m.displayName}"
+                        else "Friend request sent to ${m.displayName}"
+                    } else (res.error ?: "Couldn't complete that"),
                     android.widget.Toast.LENGTH_LONG
                 ).show()
-                if (res.ok) sent = true
+                if (res.ok) { if (isFriend) unfriended = true else sent = true }
                 busy = false
             }
         }
@@ -417,9 +442,9 @@ private fun FriendRequestButton(
             )
         } else {
             Icon(
-                Icons.Filled.PersonAdd,
-                contentDescription = "Send friend request",
-                tint = if (sent) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+                if (isFriend) Icons.Filled.PersonRemove else Icons.Filled.PersonAdd,
+                contentDescription = if (isFriend) "Unfriend" else "Send friend request",
+                tint = if (justSent) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
                        else MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(18.dp)
             )

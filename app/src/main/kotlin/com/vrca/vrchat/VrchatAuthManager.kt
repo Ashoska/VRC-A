@@ -2744,6 +2744,67 @@ object VrchatAuthManager {
             }
         }
 
+    /** The current user's active player moderations — everyone THIS account has muted /
+     *  blocked (the "Blocks & Mutes" tab). ONE call returns the whole list regardless of
+     *  size, so it's the cheap authoritative source for both "already muted/blocked" and
+     *  changes made anywhere else (website / in-game / another device). */
+    data class PlayerModerations(val blocked: Set<String>, val muted: Set<String>)
+
+    suspend fun fetchPlayerModerations(context: Context): PlayerModerations? =
+        withContext(Dispatchers.IO) {
+            val cookieHeader = getCookieHeader(context) ?: return@withContext null
+            try {
+                val (code, body, rawCookies) = get("$BASE/auth/user/playermoderations", null, cookieHeader)
+                if (code != 200 || !body.startsWith("[")) return@withContext null
+                captureRolledCookies(context, rawCookies)
+                val arr = org.json.JSONArray(body)
+                val blocked = HashSet<String>()
+                val muted = HashSet<String>()
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val target = o.optString("targetUserId", "").ifBlank { o.optString("moderated", "") }
+                    if (!target.startsWith("usr_")) continue
+                    when (o.optString("type", "").lowercase()) {
+                        "block" -> blocked.add(target)
+                        "mute" -> muted.add(target)
+                    }
+                }
+                PlayerModerations(blocked, muted)
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchPlayerModerations failed", e)
+                null
+            }
+        }
+
+    /** Apply or remove a player moderation ([type] = "block" or "mute"). enable=true →
+     *  POST /auth/user/playermoderations; enable=false → PUT /auth/user/unplayermoderate.
+     *  The authoritative state is re-read from [fetchPlayerModerations] after (VRChat is a
+     *  little slow to reflect it), so this just needs to succeed. */
+    suspend fun setPlayerModeration(
+        context: Context, userId: String, type: String, enable: Boolean
+    ): InviteResult = withContext(Dispatchers.IO) {
+        val uid = userId.trim()
+        if (uid.isBlank() || !uid.startsWith("usr_")) return@withContext InviteResult(false, "Missing user id")
+        val cookieHeader = getCookieHeader(context)
+            ?: return@withContext InviteResult(false, "Not signed in to VRChat")
+        try {
+            val (code, respBody, rawCookies) = if (enable)
+                post("$BASE/auth/user/playermoderations", """{"moderated":"$uid","type":"$type"}""", cookieHeader)
+            else
+                put("$BASE/auth/user/unplayermoderate", """{"moderated":"$uid","type":"$type"}""", cookieHeader)
+            if (code == 200) {
+                captureRolledCookies(context, rawCookies)
+                InviteResult(true)
+            } else {
+                Log.w(TAG, "setPlayerModeration $type=$enable $uid returned $code body=${respBody.take(200)}")
+                InviteResult(false, parseVrcError(respBody, code), code)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "setPlayerModeration $type $uid failed", e)
+            InviteResult(false, "Network error")
+        }
+    }
+
     private fun delete(
         url: String,
         cookieHeader: String?
