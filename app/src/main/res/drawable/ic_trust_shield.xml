@@ -1,6 +1,6 @@
-<!-- Trust-rank shield — a sleek heraldic shield with a checkmark carved out (evenOdd),
-     matching VRChat's own trust badge. Single fill colour so Icon(tint=…) themes it per rank.
-     Reads cleaner/"more official" than Material's chunky Icons.Filled.Shield. -->
+<!-- Trust-rank shield — a clean SOLID heraldic shield (rounded top, tapering point), single fill
+     so Icon(tint=…) themes it per rank. No carved checkmark: at ~11dp the carve read as muddy /
+     "cartoonie"; a solid silhouette is crisp at badge size and matches VRChat's filled shield. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -8,7 +8,5 @@
     android:viewportHeight="24">
     <path
         android:fillColor="#FFFFFFFF"
-        android:fillType="evenOdd"
-        android:pathData="M12,2.2 L19.2,5 L19.2,11 C19.2,15.9 16.1,20.1 12,21.5 C7.9,20.1 4.8,15.9 4.8,11 L4.8,5 Z
-                          M7.9,12.2 L10.9,15.2 L16.2,9.9 L15.0,8.7 L10.9,12.8 L9.1,11.0 Z" />
+        android:pathData="M12,2.4 L19.6,5.2 L19.6,11.1 C19.6,16.3 16.3,20.7 12,22 C7.7,20.7 4.4,16.3 4.4,11.1 L4.4,5.2 Z" />
 </vector>

@@ -1302,8 +1302,36 @@ object VrchatAuthManager {
          *  VRC+/avatar-hidden case where VRChat robots the THUMBNAIL field but still
          *  carries the user's real worn avatar here — its file id then resolves the
          *  avatar via the mirror/author-listing paths (which match on imageUrl too). */
-        val wornAvatarImageUrl: String = ""
+        val wornAvatarImageUrl: String = "",
+        /** DIAGNOSTIC: compact list of every avatar/image/icon/pic field VRChat returned for this
+         *  user with its `file_…` id (short) — so the roster trace can reveal WHERE the real worn
+         *  avatar thumbnail lives when the standard fields are the Robot fallback (VRC+ case). */
+        val imageFieldsDiag: String = ""
     )
+
+    /** Scan a `/users/{id}` JSON for EVERY key that looks image-bearing and pull its `file_…` id
+     *  (shortened). Surfaces a field we might not be reading — the honest way to answer "is the real
+     *  avatar thumbnail hiding somewhere in the response?" for a VRC+/loading user. */
+    private fun buildImageFieldsDiag(j: org.json.JSONObject): String {
+        val out = StringBuilder()
+        val keys = j.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val lk = k.lowercase()
+            if (!(lk.contains("avatar") || lk.contains("image") || lk.contains("icon") || lk.contains("pic"))) continue
+            val v = j.optString(k, "")
+            if (v.isBlank()) continue
+            val fid = fileIdOf(v)
+            val shown = when {
+                fid != null -> fid.removePrefix("file_").take(8)
+                v.startsWith("http") -> "url(no-fileid)"
+                else -> v.take(12)
+            }
+            if (out.isNotEmpty()) out.append("  ")
+            out.append(k).append('=').append(shown)
+        }
+        return if (out.isEmpty()) "(no image fields)" else out.toString()
+    }
 
     suspend fun fetchUserInfo(context: Context, userId: String): VrcUserInfo? = withContext(Dispatchers.IO) {
         if (userId.isBlank() || !userId.startsWith("usr_")) return@withContext null
@@ -1333,8 +1361,9 @@ object VrchatAuthManager {
                     .ifBlank { j.optString("userIcon", "") }
                     .ifBlank { j.optString("currentAvatarThumbnailImageUrl", "") },
                 wornAvatarThumbUrl = j.optString("currentAvatarThumbnailImageUrl", ""),
-                wornAvatarImageUrl = j.optString("currentAvatarImageUrl", "")
-            ).also { cacheWornThumb(userId, it.wornAvatarThumbUrl, it.wornAvatarImageUrl) }
+                wornAvatarImageUrl = j.optString("currentAvatarImageUrl", ""),
+                imageFieldsDiag = buildImageFieldsDiag(j)
+            ).also { cacheWornThumb(userId, it.wornAvatarThumbUrl, it.wornAvatarImageUrl, it.imageFieldsDiag) }
         } catch (e: Exception) {
             Log.w(TAG, "fetchUserInfo($userId) failed", e)
             null
@@ -1618,14 +1647,14 @@ object VrchatAuthManager {
     private const val WORN_THUMB_TTL_MS = 12_000L
     // (thumbnailUrl, fullImageUrl, stampMs) — both worn urls so the robot-thumb→full-image
     // substitution below survives a cache reuse without a second /users/{id} fetch.
-    private data class WornCacheEntry(val thumbUrl: String, val imageUrl: String, val ts: Long)
+    private data class WornCacheEntry(val thumbUrl: String, val imageUrl: String, val diag: String, val ts: Long)
     private val wornThumbCache = java.util.concurrent.ConcurrentHashMap<String, WornCacheEntry>()
-    private fun cacheWornThumb(userId: String, thumbUrl: String, imageUrl: String = "") {
-        if (userId.startsWith("usr_")) wornThumbCache[userId] = WornCacheEntry(thumbUrl, imageUrl, System.currentTimeMillis())
+    private fun cacheWornThumb(userId: String, thumbUrl: String, imageUrl: String = "", diag: String = "") {
+        if (userId.startsWith("usr_")) wornThumbCache[userId] = WornCacheEntry(thumbUrl, imageUrl, diag, System.currentTimeMillis())
     }
-    /** Fresh worn (thumbnail, fullImage) URLs for this user, or null if not cached within the TTL. */
-    private fun cachedWornThumb(userId: String): Pair<String, String>? =
-        wornThumbCache[userId]?.let { e -> if (System.currentTimeMillis() - e.ts < WORN_THUMB_TTL_MS) (e.thumbUrl to e.imageUrl) else null }
+    /** Fresh worn (thumbnail, fullImage, imageFieldsDiag) for this user, or null if not cached within the TTL. */
+    private fun cachedWornThumb(userId: String): Triple<String, String, String>? =
+        wornThumbCache[userId]?.let { e -> if (System.currentTimeMillis() - e.ts < WORN_THUMB_TTL_MS) Triple(e.thumbUrl, e.imageUrl, e.diag) else null }
 
     /**
      * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
@@ -1662,6 +1691,7 @@ object VrchatAuthManager {
         val fetchFailed = reused == null && freshInfo == null
         val wornThumbUrl = reused?.first ?: freshInfo?.wornAvatarThumbUrl.orEmpty()
         val wornImageUrl = reused?.second ?: freshInfo?.wornAvatarImageUrl.orEmpty()
+        val imageFieldsDiag = reused?.third ?: freshInfo?.imageFieldsDiag.orEmpty()
         val thumbFileId = fileIdOf(wornThumbUrl)
         val imageFileId = fileIdOf(wornImageUrl)
         // The worn THUMBNAIL is VRChat's Robot fallback for some players — notably users with a
@@ -1707,6 +1737,10 @@ object VrchatAuthManager {
         if (com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(wornFileId)) {
             step("worn image is a VRChat FALLBACK (avatar still loading)" +
                 if (nameStable) " → try unique name+author" else " → name not yet stable, waiting")
+            // DIAGNOSTIC (the "where does VRChat keep the real avatar for a VRC+ user?" hunt): show
+            // EVERY image/avatar/icon/pic field VRChat returned for this member + its file id, so we
+            // can see whether the real worn thumbnail is hiding in a field we don't read.
+            if (imageFieldsDiag.isNotBlank()) step("  /users image fields: $imageFieldsDiag")
             // The worn image is the fallback, so we can't image-confirm — BUT the log has their REAL
             // avatar name + author. Resolve by a UNIQUE name+author match (the author locks it to the
             // same avatar; a unique match is a lookup, not a guess). This clones a loading/hidden
@@ -1714,11 +1748,12 @@ object VrchatAuthManager {
             // GUARD: only when the log name has been STABLE — a name captured mid-switch could be the
             // PREVIOUS avatar's, which would uniquely match (and clone) the wrong avatar. When it's not
             // yet stable we keep watching (loading) until it settles or the real thumbnail lands.
-            if (nameStable) resolveByNameAndAuthor(context, avatarName, author)?.let {
-                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name+author (worn image is fallback)"
-                return@withContext it
+            if (nameStable) {
+                val byName = resolveByNameAndAuthor(context, avatarName, author)
+                step("  name lookup: ${com.vrca.vrchat.AvatarSearch.Diag.lastReason}")   // WHY it did/didn't resolve
+                if (byName != null) return@withContext byName   // keep resolveByNameAndAuthor's detailed reason
             }
-            // No unique name+author match → keep retrying (their real image may still land, or the
+            // No unique name(+author) match → keep retrying (their real image may still land, or the
             // log's name+author may still land — the roster watches BOTH signals within a bounded window).
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "avatar still loading (VRChat fallback) — retrying"
             return@withContext WornAvatarResult(null, loading = true, observedFileId = wornFileId)
@@ -1926,27 +1961,39 @@ object VrchatAuthManager {
     }
 
     /**
-     * Resolve a worn avatar by the LOG's name + author when the worn IMAGE can't confirm it (the
-     * player is on the VRChat fallback / loading). The author LOCKS it to the same avatar, and we
-     * only accept a UNIQUE match — so it's a lookup, not a name guess. Searches our catalog + avtrdb
-     * by name variants, keeps candidates whose author matches, and returns the id ONLY when exactly
-     * one distinct avatar remains. Never returns a VRChat fallback/system avatar. Null on 0/ambiguous.
+     * Resolve a worn avatar by the LOG's name (+ author when available) when the worn IMAGE can't
+     * confirm it (the player is on the VRChat fallback / loading). We only ever accept a UNIQUE match,
+     * so it's a lookup, not a name guess. OUR catalog is image-VERIFIED, so a unique name match there
+     * is trusted even without an author (the log often has the name but no "by <author>" line);
+     * an author, when present, disambiguates. The EXTERNAL avtrdb fallback still REQUIRES an author
+     * (untrusted for a name-only guess). Never returns a VRChat fallback/system avatar. Null on
+     * 0/ambiguous; sets AvatarSearch.Diag.lastReason to the exact reason (surfaced in the roster trace).
      */
     private suspend fun resolveByNameAndAuthor(context: Context, avatarName: String, author: String): WornAvatarResult? =
         withContext(Dispatchers.IO) {
             val authorNorm = author.trim().lowercase()
-            // No author to lock it → refuse (a name alone is not reliable, per the "guarantee by
-            // author" rule). Also skip the fallback name itself.
-            if (avatarName.isBlank() || authorNorm.isBlank() || avatarName.trim().equals("Robot", true)) return@withContext null
+            if (avatarName.isBlank() || avatarName.trim().equals("Robot", true)) {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "name+author: no usable log name"
+                return@withContext null
+            }
 
             // 1. OUR CATALOG FIRST — served from R2/CDN, so no avtrdb rate-limit, image-verified, and
-            //    it already carries platforms (no extra /avatars call). Unique name+author = a lookup.
+            //    it already carries platforms (no extra /avatars call). Because our catalog is image-
+            //    VERIFIED at contribution time (and we confirm-live before serving), a UNIQUE name match
+            //    in OUR OWN db is a trustworthy lookup even when the log DID NOT capture an author — the
+            //    "Unpacking Avatar (… by …)" line is separate from "Switching … to avatar …", so a
+            //    loading player often has the name but no author. When an author IS present we still use
+            //    it to disambiguate (it can turn an ambiguous name into a single hit). Only refuse when
+            //    genuinely ambiguous (>1 distinct avatar after author filtering).
+            var totalCatalogHits = 0
             for (v in avatarNameVariants(avatarName)) {
                 val hits = try { com.vrca.vrchat.AvatarGlobalDb.searchSharded(context, v, 40) } catch (e: Exception) { emptyList() }
-                val m = hits.filter {
-                    it.author.trim().lowercase() == authorNorm &&
-                        !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.avatarId, it.fileId)
-                }.distinctBy { it.avatarId }
+                totalCatalogHits += hits.size
+                val nonSystem = hits.filter { !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.avatarId, it.fileId) }
+                // Prefer an author-locked match; if the log had no author (or none of the hits match it),
+                // fall back to a name-unique match in our verified catalog.
+                val byAuthor = if (authorNorm.isNotBlank()) nonSystem.filter { it.author.trim().lowercase() == authorNorm }.distinctBy { it.avatarId } else emptyList()
+                val m = if (byAuthor.isNotEmpty()) byAuthor else nonSystem.distinctBy { it.avatarId }
                 if (m.size == 1) {
                     val e = m[0]
                     // CONFIRM live+public before offering (no worn image to match here — loading player —
@@ -1954,15 +2001,33 @@ object VrchatAuthManager {
                     // clickable button that would robot the user.
                     val (verdict, plats) = verifyCatalogHit(context, e.avatarId, null)
                     return@withContext when (verdict) {
-                        HitVerdict.SERVE -> WornAvatarResult(e.avatarId, plats.ifEmpty { e.platforms })
+                        HitVerdict.SERVE -> {
+                            com.vrca.vrchat.AvatarSearch.Diag.lastReason =
+                                if (byAuthor.isNotEmpty()) "name+author: unique catalog match" else "name-only: unique catalog match (no log author)"
+                            WornAvatarResult(e.avatarId, plats.ifEmpty { e.platforms })
+                        }
                         HitVerdict.DEAD -> {
                             com.vrca.vrchat.AvatarGlobalDb.report(context, e.fileId, e.avatarId, "dead")
+                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "name+author: catalog match dead/private — greyed"
                             WornAvatarResult(null, dead = true)
                         }
                         else -> null   // transient → retry via the loading loop
                     }
                 }
-                if (m.size > 1) return@withContext null   // ambiguous in our own DB → don't guess
+                if (m.size > 1) {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason =
+                        "name${if (authorNorm.isNotBlank()) "+author" else ""}: ambiguous (${m.size} distinct in catalog) — won't guess"
+                    return@withContext null   // ambiguous in our own DB → don't guess
+                }
+            }
+
+            // No author to lock an EXTERNAL (avtrdb) match, and our verified catalog had no unique hit →
+            // stop. avtrdb is untrusted for a name-only guess (a same-named different avatar → wrong
+            // clone), so we only consult it when the log gave an author.
+            if (authorNorm.isBlank()) {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason =
+                    if (totalCatalogHits == 0) "name-only: not in our catalog (no log author for avtrdb)" else "name-only: not unique in our catalog (no log author)"
+                return@withContext null
             }
 
             // 2. FALLBACK to avtrdb/mirrors only if our catalog had nothing (they can rate-limit; a 429
@@ -1981,7 +2046,11 @@ object VrchatAuthManager {
                 it.author.trim().lowercase() == authorNorm &&
                     !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.id, null)
             }.distinctBy { it.id }
-            if (matches.size != 1) return@withContext null   // 0 or ambiguous (e.g. v1/v2) → don't guess
+            if (matches.size != 1) {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason =
+                    if (matches.isEmpty()) "name+author: 0 avtrdb matches by author" else "name+author: ambiguous in avtrdb (${matches.size}) — won't guess"
+                return@withContext null   // 0 or ambiguous (e.g. v1/v2) → don't guess
+            }
             val c = matches[0]
             // CONFIRM live+public (same GET fetchAvatarPlatforms did, now session-cached + tri-state) so
             // a dead/private avtrdb match never presents a clickable button that robots the user.

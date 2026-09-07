@@ -126,7 +126,7 @@ fun InstanceRosterPanel(modifier: Modifier = Modifier) {
                     if (ui.members.isEmpty()) {
                         HintState("You're the only one here so far.")
                     } else {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             ui.members.forEach { m -> MemberRow(m) }
                         }
                     }
@@ -201,7 +201,7 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
     // now sit a touch LIGHTER than the card (raised, "less dark") with a subtle shadow, so they read
     // as above the card without a heavy fill.
     val rowBg = if (isSystemInDarkTheme())
-        androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.surfaceVariant, androidx.compose.ui.graphics.Color.White, 0.07f)
+        androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.surfaceVariant, androidx.compose.ui.graphics.Color.White, 0.03f)
     else
         MaterialTheme.colorScheme.surface
     Surface(
@@ -213,7 +213,7 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
       Column(
           Modifier.fillMaxWidth()
               .clickable { traceOpen = !traceOpen }
-              .padding(horizontal = 10.dp, vertical = 5.dp)
+              .padding(horizontal = 10.dp, vertical = 3.dp)
       ) {
         Row(
             Modifier.fillMaxWidth(),
@@ -503,8 +503,8 @@ private fun AvatarWithBadges(
     ctx: android.content.Context,
     ring: androidx.compose.ui.graphics.Color
 ) {
-    Box(Modifier.size(36.dp)) {
-        val pfpMod = Modifier.size(32.dp).align(Alignment.Center).clip(CircleShape)
+    Box(Modifier.size(34.dp)) {
+        val pfpMod = Modifier.size(30.dp).align(Alignment.Center).clip(CircleShape)
         if (m.profilePicUrl.isNotBlank()) {
             coil.compose.AsyncImage(
                 model = coil.request.ImageRequest.Builder(ctx)
