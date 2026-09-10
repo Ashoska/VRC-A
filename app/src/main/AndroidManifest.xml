@@ -88,6 +88,13 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Discord AI bot gateway (admin build only; refuses to start otherwise) -->
+        <service
+            android:name=".discordbot.DiscordBotService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
+
         <!-- Boot receiver: restarts pipeline after device reboot -->
         <receiver
             android:name=".vrchat.BootReceiver"

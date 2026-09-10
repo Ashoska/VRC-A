@@ -257,6 +257,8 @@ object AppShutdown {
         try { app.stopService(Intent(app, com.vrca.vrchat.VrchatPipelineService::class.java)) } catch (_: Throwable) {}
         try { app.stopService(Intent(app, KeepAliveService::class.java)) } catch (_: Throwable) {}
         try { app.stopService(Intent(app, OverlayService::class.java)) } catch (_: Throwable) {}
+        // Discord AI bot (admin build); a swipe should take it down like the rest.
+        try { app.stopService(Intent(app, com.vrca.discordbot.DiscordBotService::class.java)) } catch (_: Throwable) {}
     }
 
     private fun buildOfflineWriteTask(app: Context): com.google.android.gms.tasks.Task<Void>? {
