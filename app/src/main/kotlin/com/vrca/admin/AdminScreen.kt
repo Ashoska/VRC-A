@@ -315,7 +315,7 @@ fun AdminScreen() {
     // ==========================================
     // MAIN UI
     // ==========================================
-    val tabs = remember { listOf("Dashboard", "Users", "Mod", "Announce", "Releases", "Config", "Log", "Bots") }
+    val tabs = remember { listOf("Dashboard", "Users", "Mod", "Announce", "Releases", "Config", "Log", "Bots", "Bot") }
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
 
     // ModerationTarget is NOT saveable
@@ -612,6 +612,13 @@ fun AdminScreen() {
     // Start the catalog bots at APP LAUNCH (not only when the Bots tab is opened) so they
     // re-validate + resume sweeping in the background on every reopen.
     LaunchedEffect(Unit) { BotController.start(ctx) }
+    // Resume the Discord AI bot when the admin app opens if it was left enabled
+    // (START_STICKY + this cover OS kills / reopens; a deliberate swipe disarms it).
+    LaunchedEffect(Unit) {
+        if (com.vrca.discordbot.DiscordBotStore.isEnabled(ctx)) {
+            com.vrca.discordbot.DiscordBotService.start(ctx)
+        }
+    }
     LaunchedEffect(needsUsers) { AdminRuntime.setBrowsing(needsUsers) }
     // Clear the watch/browse intent when the admin LEAVES the panel (page
     // navigation disposes AdminScreen). Without this, AdminRuntime — which is
@@ -842,6 +849,8 @@ fun AdminScreen() {
                     6 -> ModLogTab(db = db, setError = ::setErr)
 
                     7 -> BotsTab()
+
+                    8 -> DiscordBotTab()
 
                     else -> ModLogTab(db = db, setError = ::setErr)
                 }
