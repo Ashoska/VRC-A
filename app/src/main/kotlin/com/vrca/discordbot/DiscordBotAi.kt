@@ -118,8 +118,7 @@ object DiscordBotAi {
                 "array of 8-14 short trait strings — likes, dislikes, running jokes, opinions, " +
                 "and general vibe — that fit THIS room right now. Keep traits that still fit, " +
                 "drop stale ones, add ones the room clearly vibes with. Each trait is 3-10 " +
-                "words. Do not add traits about hating a protected group, or about jokes aimed " +
-                "at a real named person's death or crimes. Output ONLY the JSON array."))
+                "words. Output ONLY the JSON array."))
             .put(JSONObject().put("role", "user")
                 .put("content", "CURRENT TRAITS: $cur\n\nRECENT CHAT:\n$transcript"))
         return when (val r = call(cfg, TRIAGE_MODEL, messages, 300)) {
