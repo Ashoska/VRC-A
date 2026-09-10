@@ -64,6 +64,10 @@ class DiscordBotService : Service() {
         // a burst of quick messages is read together and answered ONCE (more human + cheaper).
         private const val DEBOUNCE_MS = 1500L
 
+        // How often the personality reflection/mutation runs (reads recent chat, evolves the
+        // trait store via the cheap 8B model). Periodic, NOT per-message, so cost stays tiny.
+        private const val REFLECT_INTERVAL_MS = 20 * 60 * 1000L
+
         fun start(context: Context) {
             if (!BuildConfig.IS_ADMIN_BUILD) return
             context.startService(Intent(context, DiscordBotService::class.java).apply {
@@ -90,6 +94,10 @@ class DiscordBotService : Service() {
     @Volatile private var webSocket: WebSocket? = null
     private var heartbeatJob: Job? = null
     private var reconnectJob: Job? = null
+    private var reflectionJob: Job? = null
+
+    // Newest channel we've seen a real (human) message in — the reflection loop reads it.
+    @Volatile private var lastActiveChannel: String = ""
 
     // Gateway session state
     @Volatile private var lastSeq: Int? = null
@@ -158,6 +166,7 @@ class DiscordBotService : Service() {
                     DiscordBotState.log("Starting bot")
                     reconnectAttempt = 0
                     openSocket(resume = false)
+                    startReflectionLoop()
                 }
                 return START_STICKY
             }
@@ -305,6 +314,7 @@ class DiscordBotService : Service() {
         val channelId = d.optString("channel_id")
         val messageId = d.optString("id")
         if (channelId.isBlank()) return
+        lastActiveChannel = channelId
         val rawContent = d.optString("content")
 
         val mentioned = messageMentionsBot(d, rawContent)
@@ -380,7 +390,7 @@ class DiscordBotService : Service() {
         }
 
         DiscordRest.triggerTyping(cfg.botToken, channelId)
-        when (val res = DiscordBotAi.reply(cfg, history)) {
+        when (val res = DiscordBotAi.reply(cfg, history, PersonalityStore.snapshot(this))) {
             is DiscordBotAi.Result.Ok -> {
                 // Human pacing: a short beat scaled to reply length before sending.
                 delay((res.text.length * 20L).coerceIn(400L, 2500L))
@@ -417,6 +427,35 @@ class DiscordBotService : Service() {
             t.contains("lol") || t.contains("lmao") || t.contains("😂") || t.contains("🤣") -> "😂"
             t.contains("💀") -> "💀"
             else -> reactEmojis.random()
+        }
+    }
+
+    // ── Personality reflection (mutation loop) ────────────────────────────
+
+    private fun startReflectionLoop() {
+        if (reflectionJob?.isActive == true) return
+        reflectionJob = scope.launch {
+            while (true) {
+                delay(REFLECT_INTERVAL_MS)
+                try { runReflection() } catch (_: Exception) { }
+            }
+        }
+    }
+
+    /** One mutation pass: read recent chat in the most-active channel, ask the cheap model to
+     *  evolve the personality, and merge it (reinforce/decay) into [PersonalityStore]. */
+    private suspend fun runReflection() {
+        val ch = lastActiveChannel
+        if (ch.isBlank() || !::cfg.isInitialized || !cfg.isComplete) return
+        val recent = DiscordRest.fetchRecentMessages(cfg.botToken, ch, 20)
+        if (recent.size < 4) return   // not enough chat to learn anything yet
+        val transcript = recent.joinToString("\n") {
+            "${it.authorName}: ${stripBotMentions(it.content)}"
+        }.take(3000)
+        val proposed = DiscordBotAi.reflect(cfg, PersonalityStore.load(this).map { it.text }, transcript)
+        if (proposed.isNotEmpty()) {
+            PersonalityStore.applyReflection(this, proposed)
+            DiscordBotState.log("personality evolved (${proposed.size} traits)")
         }
     }
 
@@ -468,6 +507,7 @@ class DiscordBotService : Service() {
     private fun teardown(reason: String) {
         heartbeatJob?.cancel(); heartbeatJob = null
         reconnectJob?.cancel(); reconnectJob = null
+        reflectionJob?.cancel(); reflectionJob = null
         try { webSocket?.close(1000, reason) } catch (_: Exception) {}
         webSocket = null
         DiscordBotState.setRunning(false)

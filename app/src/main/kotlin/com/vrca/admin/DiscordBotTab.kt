@@ -9,13 +9,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -36,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import com.vrca.discordbot.DiscordBotService
 import com.vrca.discordbot.DiscordBotState
 import com.vrca.discordbot.DiscordBotStore
+import com.vrca.discordbot.PersonalityStore
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -66,6 +71,7 @@ internal fun DiscordBotTab() {
     var cooldown by remember { mutableStateOf(initial.ambientCooldownSec.toString()) }
     var history by remember { mutableStateOf(initial.historyLimit.toString()) }
     var saved by remember { mutableStateOf(false) }
+    var personality by remember { mutableStateOf(PersonalityStore.snapshot(ctx)) }
 
     val running = status != DiscordBotState.Status.IDLE && status != DiscordBotState.Status.FAILED
 
@@ -217,6 +223,31 @@ internal fun DiscordBotTab() {
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(if (saved) "Saved" else "Save configuration") }
+            }
+        }
+
+        // ── Evolving personality ──
+        item {
+            AdminSectionCard(
+                title = "Personality (evolving)",
+                icon = Icons.Filled.Face,
+                tone = AdminTone.Primary,
+                trailing = {
+                    IconButton(onClick = { personality = PersonalityStore.snapshot(ctx) }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                    }
+                }
+            ) {
+                Text(
+                    personality.ifBlank {
+                        "No personality yet — Cardinal develops one from the chat (evolves every ~20 min)."
+                    },
+                    style = MaterialTheme.typography.bodySmall
+                )
+                OutlinedButton(
+                    onClick = { PersonalityStore.reset(ctx); personality = "" },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Reset personality") }
             }
         }
 

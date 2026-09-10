@@ -59,11 +59,20 @@ object DiscordBotAi {
             "https://api.cloudflare.com/client/v4/accounts/${cfg.cfAccountId}/ai/run/$model"
 
     /** Generate a reply from the conversation [history] (chronological; last = the message
-     *  being answered). System = behaviour rules + the admin's persona. */
-    suspend fun reply(cfg: DiscordBotStore.Config, history: List<Turn>): Result {
+     *  being answered). System = behaviour rules + the admin's persona + the bot's current
+     *  evolved [personaState] (from [PersonalityStore]). */
+    suspend fun reply(
+        cfg: DiscordBotStore.Config, history: List<Turn>, personaState: String = ""
+    ): Result {
+        val sys = buildString {
+            append(BEHAVIOR).append("\n\n").append(cfg.systemPrompt)
+            if (personaState.isNotBlank()) {
+                append("\n\nWho you are right now (let it colour your voice; do NOT recite it):\n")
+                append(personaState)
+            }
+        }
         val messages = JSONArray()
-            .put(JSONObject().put("role", "system")
-                .put("content", "$BEHAVIOR\n\n${cfg.systemPrompt}"))
+            .put(JSONObject().put("role", "system").put("content", sys))
         for (t in history) {
             if (t.text.isBlank()) continue
             messages.put(JSONObject()
@@ -91,6 +100,41 @@ object DiscordBotAi {
             is Result.Error -> false
         }
     }
+
+    /**
+     * The MUTATION step: given the bot's [currentTraits] and a recent-chat [transcript], the
+     * cheap 8B model proposes his UPDATED personality — traits that still fit kept, stale ones
+     * dropped, new ones the room vibes with added. Returns the proposed trait strings (empty
+     * on error). The single content boundary lives in this prompt.
+     */
+    suspend fun reflect(
+        cfg: DiscordBotStore.Config, currentTraits: List<String>, transcript: String
+    ): List<String> {
+        val cur = if (currentTraits.isEmpty()) "(none yet)" else currentTraits.joinToString("; ")
+        val messages = JSONArray()
+            .put(JSONObject().put("role", "system").put("content",
+                "You maintain the evolving personality of a Discord chat regular. Given his " +
+                "CURRENT traits and the RECENT chat, output his UPDATED personality as a JSON " +
+                "array of 8-14 short trait strings — likes, dislikes, running jokes, opinions, " +
+                "and general vibe — that fit THIS room right now. Keep traits that still fit, " +
+                "drop stale ones, add ones the room clearly vibes with. Each trait is 3-10 " +
+                "words. Do not add traits about hating a protected group, or about jokes aimed " +
+                "at a real named person's death or crimes. Output ONLY the JSON array."))
+            .put(JSONObject().put("role", "user")
+                .put("content", "CURRENT TRAITS: $cur\n\nRECENT CHAT:\n$transcript"))
+        return when (val r = call(cfg, TRIAGE_MODEL, messages, 300)) {
+            is Result.Ok -> parseTraitArray(r.text)
+            is Result.Error -> emptyList()
+        }
+    }
+
+    private fun parseTraitArray(text: String): List<String> = try {
+        val start = text.indexOf('['); val end = text.lastIndexOf(']')
+        if (start < 0 || end <= start) emptyList()
+        else JSONArray(text.substring(start, end + 1)).let { arr ->
+            (0 until arr.length()).mapNotNull { arr.optString(it).trim().ifBlank { null } }.take(14)
+        }
+    } catch (_: Exception) { emptyList() }
 
     private suspend fun call(
         cfg: DiscordBotStore.Config, model: String, messages: JSONArray, maxTokens: Int
