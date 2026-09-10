@@ -10,8 +10,8 @@ import android.content.Intent
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.vrca.BuildConfig
-import com.vrca.MainActivity
 import com.vrca.R
+import com.vrca.app.MainActivity
 import com.vrca.app.startForegroundSafely
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
