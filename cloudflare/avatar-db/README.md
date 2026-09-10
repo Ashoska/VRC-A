@@ -74,6 +74,53 @@ Save / Deploy after adding them.
 
 ---
 
+## 7. Cache Rule on the catalog domain (REQUIRED — load-bearing for cost)
+
+**This is the single most important cost setting and NOTHING in the code can
+enforce it — it lives only in the Cloudflare dashboard.** If the zone is ever
+rebuilt or this rule is deleted, the catalog silently falls back to **0% edge
+caching** and every clone/search read becomes a direct R2 Class B op again.
+
+The apps + bots read the catalog off the R2 custom domain
+`cdn.gremlininc.app` (see `CATALOG_BASE` in `wrangler.toml`), NOT through the
+Worker. The Worker already stamps the right `cache-control` on every object
+(shards/fragments/index/avtr `max-age=21600` = 6h; `_manifest.json` /
+`_worklist.json` `max-age=30`) AND purges on write (`CF_PURGE_TOKEN` +
+`CF_ZONE_ID`). But **Cloudflare does NOT cache `application/json` by default** —
+without an explicit Cache Rule every response comes back `cf-cache-status:
+DYNAMIC` (uncacheable), so reads scale linearly with user count.
+
+The rule flips that to `MISS`/`HIT` so reads are absorbed at the edge and R2
+reads decouple from user count (floor ≈ 4096 shards refreshing per TTL ≈
+~0.5M reads/month, whether 20 or 20,000 users are reading).
+
+**Create it:** dashboard → the `gremlininc.app` zone → **Caching → Cache Rules
+→ Create rule**:
+
+- **Rule name:** `catalog cache`
+- **When incoming requests match** (Custom filter expression):
+  `http.host eq "cdn.gremlininc.app"`
+- **Then → Cache eligibility:** *Eligible for cache*
+- **Then → Edge TTL:** *Use cache-control header if present, bypass cache if
+  not* (= respect origin — honors the Worker's per-object `max-age`)
+- Leave Browser TTL / Cache key / Vary / Serve-stale untouched. **Deploy.**
+
+**Verify:** hit any shard twice and check the header — it must be `MISS` then
+`HIT`, never `DYNAMIC`:
+```
+curl -sI https://cdn.gremlininc.app/shard/000.json | grep -i cf-cache-status
+```
+`DYNAMIC` = the rule is missing/broken (reads are NOT cached). `MISS`/`HIT` =
+working. (Repeat hits can show `MISS` from a different edge PoP; that's fine —
+it just means that PoP is cold, not that caching is off. `DYNAMIC` is the only
+bad state.)
+
+Freshness is safe with this on: the Worker purges a changed object within ~1s,
+and the app re-checks each avatar is live against VRChat before cloning, so a
+cached shard can never cause a wrong/dead clone.
+
+---
+
 ## How it behaves
 
 - Apps `POST /contribute` new avatar mappings → stashed in KV.
