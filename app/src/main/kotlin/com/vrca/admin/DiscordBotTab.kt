@@ -64,6 +64,7 @@ internal fun DiscordBotTab() {
     var systemPrompt by remember { mutableStateOf(initial.systemPrompt) }
     var ambientPct by remember { mutableStateOf(initial.ambientPercent.toString()) }
     var cooldown by remember { mutableStateOf(initial.ambientCooldownSec.toString()) }
+    var history by remember { mutableStateOf(initial.historyLimit.toString()) }
     var saved by remember { mutableStateOf(false) }
 
     val running = status != DiscordBotState.Status.IDLE && status != DiscordBotState.Status.FAILED
@@ -183,9 +184,17 @@ internal fun DiscordBotTab() {
                         singleLine = true, modifier = Modifier.weight(1f)
                     )
                 }
+                OutlinedTextField(
+                    value = history, onValueChange = { history = it.filter(Char::isDigit).take(2); saved = false },
+                    label = { Text("Memory (recent messages)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
                 Text(
                     "Ambient % = chance to jump into an unaddressed message; cooldown limits how " +
-                        "often it does so per channel. Mentions and replies always answer.",
+                        "often it does so per channel. Mentions and replies always answer. " +
+                        "Memory = how many recent channel messages the bot reads for context each " +
+                        "reply (0 = off; higher = more context but slightly slower/pricier).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -193,8 +202,9 @@ internal fun DiscordBotTab() {
                     onClick = {
                         val pct = ambientPct.toIntOrNull() ?: DiscordBotStore.DEFAULT_AMBIENT_PCT
                         val cd = cooldown.toIntOrNull() ?: DiscordBotStore.DEFAULT_AMBIENT_COOLDOWN_SEC
+                        val hist = history.toIntOrNull() ?: DiscordBotStore.DEFAULT_HISTORY
                         DiscordBotStore.save(
-                            ctx, botToken, cfAccount, cfToken, cfGateway, model, systemPrompt, pct, cd
+                            ctx, botToken, cfAccount, cfToken, cfGateway, model, systemPrompt, pct, cd, hist
                         )
                         saved = true
                         // Apply live config to a running bot by cycling it.

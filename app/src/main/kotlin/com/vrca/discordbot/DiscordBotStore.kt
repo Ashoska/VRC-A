@@ -27,6 +27,7 @@ object DiscordBotStore {
     private const val KEY_SYSTEM_PROMPT = "system_prompt"
     private const val KEY_AMBIENT_PCT = "ambient_percent"
     private const val KEY_AMBIENT_COOLDOWN = "ambient_cooldown_sec"
+    private const val KEY_HISTORY = "history_limit"
     private const val KEY_ENABLED = "enabled"
 
     /** Cloudflare's strongest broadly-available Workers-AI model; fp8-fast trims latency
@@ -37,6 +38,7 @@ object DiscordBotStore {
         "conversational (usually 1-3 sentences). Never use @everyone or role pings."
     const val DEFAULT_AMBIENT_PCT = 4          // % chance to chime into an unaddressed message
     const val DEFAULT_AMBIENT_COOLDOWN_SEC = 90 // min seconds between ambient replies per channel
+    const val DEFAULT_HISTORY = 8               // recent channel messages fed as memory (0 = off)
 
     /** Immutable snapshot the service reads at start and per message (cheap read). */
     data class Config(
@@ -48,6 +50,7 @@ object DiscordBotStore {
         val systemPrompt: String,
         val ambientPercent: Int,
         val ambientCooldownSec: Int,
+        val historyLimit: Int,
     ) {
         /** True when the bot has enough to actually run (gateway token + an AI backend). */
         val isComplete: Boolean
@@ -91,6 +94,8 @@ object DiscordBotStore {
                 .coerceIn(0, 100),
             ambientCooldownSec = (p?.getInt(KEY_AMBIENT_COOLDOWN, DEFAULT_AMBIENT_COOLDOWN_SEC)
                 ?: DEFAULT_AMBIENT_COOLDOWN_SEC).coerceAtLeast(0),
+            historyLimit = (p?.getInt(KEY_HISTORY, DEFAULT_HISTORY) ?: DEFAULT_HISTORY)
+                .coerceIn(0, 25),
         )
     }
 
@@ -104,6 +109,7 @@ object DiscordBotStore {
         systemPrompt: String,
         ambientPercent: Int,
         ambientCooldownSec: Int,
+        historyLimit: Int,
     ) {
         prefs(context)?.edit()
             ?.putString(KEY_BOT_TOKEN, botToken.trim())
@@ -114,6 +120,7 @@ object DiscordBotStore {
             ?.putString(KEY_SYSTEM_PROMPT, systemPrompt.trim().ifBlank { DEFAULT_SYSTEM_PROMPT })
             ?.putInt(KEY_AMBIENT_PCT, ambientPercent.coerceIn(0, 100))
             ?.putInt(KEY_AMBIENT_COOLDOWN, ambientCooldownSec.coerceAtLeast(0))
+            ?.putInt(KEY_HISTORY, historyLimit.coerceIn(0, 25))
             ?.apply()
     }
 

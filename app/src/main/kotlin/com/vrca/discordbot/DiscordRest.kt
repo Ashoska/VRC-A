@@ -30,6 +30,47 @@ object DiscordRest {
     }
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
+    /** One recent channel message, oldest-relevant fields only. */
+    data class HistMsg(val id: String, val authorId: String, val authorName: String, val isBot: Boolean, val content: String)
+
+    /**
+     * Reads the last [limit] messages in a channel (Discord returns them newest-first;
+     * we reverse to chronological). This is the bot's short-term MEMORY — free, stateless,
+     * per-channel, and survives process kills, since Discord itself is the store.
+     * Returns empty on any failure (the caller falls back to single-turn).
+     */
+    suspend fun fetchRecentMessages(token: String, channelId: String, limit: Int): List<HistMsg> =
+        withContext(Dispatchers.IO) {
+            try {
+                val n = limit.coerceIn(1, 50)
+                val req = Request.Builder()
+                    .url("$API/channels/$channelId/messages?limit=$n")
+                    .addHeader("Authorization", "Bot $token")
+                    .addHeader("User-Agent", UA)
+                    .get()
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@withContext emptyList()
+                    val arr = JSONArray(resp.body?.string().orEmpty())
+                    val out = ArrayList<HistMsg>(arr.length())
+                    for (i in 0 until arr.length()) {
+                        val m = arr.optJSONObject(i) ?: continue
+                        val author = m.optJSONObject("author") ?: continue
+                        val name = author.optString("global_name").ifBlank { author.optString("username") }
+                            .ifBlank { "user" }
+                        out.add(HistMsg(
+                            id = m.optString("id"),
+                            authorId = author.optString("id"),
+                            authorName = name,
+                            isBot = author.optBoolean("bot", false),
+                            content = m.optString("content")
+                        ))
+                    }
+                    out.reversed()   // chronological (oldest first)
+                }
+            } catch (_: Exception) { emptyList() }
+        }
+
     /** Shows "Bot is typing…" for ~10s (or until the next message) so the AI latency
      *  reads as responsiveness. Best-effort; failures are swallowed. */
     suspend fun triggerTyping(token: String, channelId: String) = withContext(Dispatchers.IO) {

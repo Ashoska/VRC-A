@@ -39,6 +39,10 @@ object DiscordBotAi {
         data class Error(val message: String) : Result()
     }
 
+    /** One conversation turn fed to the model. [isBot] marks the bot's OWN past
+     *  replies (role=assistant); everyone else is a user turn prefixed with their name. */
+    data class Turn(val isBot: Boolean, val name: String, val text: String)
+
     private fun endpoint(cfg: DiscordBotStore.Config): String =
         if (cfg.cfGatewayId.isNotBlank())
             "https://gateway.ai.cloudflare.com/v1/${cfg.cfAccountId}/${cfg.cfGatewayId}/workers-ai/${cfg.model}"
@@ -46,16 +50,21 @@ object DiscordBotAi {
             "https://api.cloudflare.com/client/v4/accounts/${cfg.cfAccountId}/ai/run/${cfg.model}"
 
     /**
-     * @param userText the (mention-stripped) message content
-     * @param authorName the sender's display name, given to the model as light context
+     * @param history recent conversation turns in chronological order; the last one is
+     *   the message being answered. User turns are name-prefixed so the model can tell
+     *   speakers apart; the bot's own turns are role=assistant (its memory).
      */
-    suspend fun reply(cfg: DiscordBotStore.Config, userText: String, authorName: String): Result =
+    suspend fun reply(cfg: DiscordBotStore.Config, history: List<Turn>): Result =
         withContext(Dispatchers.IO) {
             try {
                 val messages = JSONArray()
                     .put(JSONObject().put("role", "system").put("content", cfg.systemPrompt))
-                    .put(JSONObject().put("role", "user")
-                        .put("content", "$authorName says: $userText"))
+                for (t in history) {
+                    if (t.text.isBlank()) continue
+                    messages.put(JSONObject()
+                        .put("role", if (t.isBot) "assistant" else "user")
+                        .put("content", if (t.isBot) t.text else "${t.name}: ${t.text}"))
+                }
                 val body = JSONObject()
                     .put("messages", messages)
                     .put("max_tokens", 512)

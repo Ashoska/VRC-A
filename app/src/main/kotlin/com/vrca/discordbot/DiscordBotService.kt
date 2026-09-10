@@ -326,7 +326,8 @@ class DiscordBotService : Service() {
 
         scope.launch {
             DiscordRest.triggerTyping(cfg.botToken, channelId)
-            when (val res = DiscordBotAi.reply(cfg, userText, authorName)) {
+            val history = buildHistory(channelId, messageId, authorName, userText)
+            when (val res = DiscordBotAi.reply(cfg, history)) {
                 is DiscordBotAi.Result.Ok -> {
                     // Reply-thread to the triggering message when addressed; ambient posts plainly.
                     val err = DiscordRest.sendMessage(
@@ -342,6 +343,25 @@ class DiscordBotService : Service() {
                 is DiscordBotAi.Result.Error -> DiscordBotState.log("AI error: ${res.message}")
             }
         }
+    }
+
+    /** The bot's short-term memory: the last N channel messages (chronological) with the
+     *  triggering message guaranteed present and last. `historyLimit<=0` or a failed fetch
+     *  degrades to a single turn (the current message only) — same as v1 behaviour. */
+    private suspend fun buildHistory(
+        channelId: String, currentMsgId: String, authorName: String, currentText: String
+    ): List<DiscordBotAi.Turn> {
+        if (cfg.historyLimit <= 0) return listOf(DiscordBotAi.Turn(false, authorName, currentText))
+        val recent = DiscordRest.fetchRecentMessages(cfg.botToken, channelId, cfg.historyLimit)
+        val turns = ArrayList<DiscordBotAi.Turn>(recent.size + 1)
+        for (m in recent) {
+            if (m.id == currentMsgId) continue          // appended last, deterministically
+            val text = stripBotMentions(m.content)
+            if (text.isBlank()) continue
+            turns.add(DiscordBotAi.Turn(isBot = m.isBot, name = m.authorName, text = text))
+        }
+        turns.add(DiscordBotAi.Turn(false, authorName, currentText))
+        return turns
     }
 
     private fun messageMentionsBot(d: JSONObject, content: String): Boolean {
