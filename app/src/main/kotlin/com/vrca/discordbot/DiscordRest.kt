@@ -8,6 +8,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 /**
@@ -63,12 +64,41 @@ object DiscordRest {
                             authorId = author.optString("id"),
                             authorName = name,
                             isBot = author.optBoolean("bot", false),
-                            content = m.optString("content")
+                            content = resolveMentions(m.optString("content"), m.optJSONArray("mentions"))
                         ))
                     }
                     out.reversed()   // chronological (oldest first)
                 }
             } catch (_: Exception) { emptyList() }
+        }
+
+    /** Replaces inline user mentions (`<@id>` / `<@!id>`) in message text with `@DisplayName`
+     *  using the message's own `mentions` array — so the model sees names, not raw ids. Free. */
+    fun resolveMentions(content: String, mentions: JSONArray?): String {
+        if (content.isBlank() || mentions == null || mentions.length() == 0) return content
+        var out = content
+        for (i in 0 until mentions.length()) {
+            val u = mentions.optJSONObject(i) ?: continue
+            val id = u.optString("id"); if (id.isBlank()) continue
+            val name = u.optString("global_name").ifBlank { u.optString("username") }.ifBlank { "user" }
+            out = out.replace("<@$id>", "@$name").replace("<@!$id>", "@$name")
+        }
+        return out
+    }
+
+    /** Adds an emoji reaction to a message (unicode emoji). Best-effort. */
+    suspend fun addReaction(token: String, channelId: String, messageId: String, emoji: String) =
+        withContext(Dispatchers.IO) {
+            try {
+                val e = URLEncoder.encode(emoji, "UTF-8")
+                val req = Request.Builder()
+                    .url("$API/channels/$channelId/messages/$messageId/reactions/$e/@me")
+                    .addHeader("Authorization", "Bot $token")
+                    .addHeader("User-Agent", UA)
+                    .put(ByteArray(0).toRequestBody(null))
+                    .build()
+                client.newCall(req).execute().use { }
+            } catch (_: Exception) { }
         }
 
     /** Shows "Bot is typing…" for ~10s (or until the next message) so the AI latency

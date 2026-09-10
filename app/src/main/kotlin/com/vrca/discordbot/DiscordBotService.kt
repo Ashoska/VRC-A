@@ -60,6 +60,10 @@ class DiscordBotService : Service() {
 
         private const val MAX_BACKOFF_MS = 30_000L
 
+        // Wait this long after the last triggering message in a channel before replying, so
+        // a burst of quick messages is read together and answered ONCE (more human + cheaper).
+        private const val DEBOUNCE_MS = 1500L
+
         fun start(context: Context) {
             if (!BuildConfig.IS_ADMIN_BUILD) return
             context.startService(Intent(context, DiscordBotService::class.java).apply {
@@ -100,6 +104,8 @@ class DiscordBotService : Service() {
 
     // Per-channel cooldown for ambient (unaddressed) replies.
     private val ambientCooldown = ConcurrentHashMap<String, Long>()
+    // Per-channel pending (debounced) reply job — a new trigger cancels + reschedules it.
+    private val pendingReplyByChannel = ConcurrentHashMap<String, Job>()
 
     override fun onCreate() {
         super.onCreate()
@@ -299,67 +305,143 @@ class DiscordBotService : Service() {
         val channelId = d.optString("channel_id")
         val messageId = d.optString("id")
         if (channelId.isBlank()) return
-        val content = d.optString("content")
+        val rawContent = d.optString("content")
 
-        val mentioned = messageMentionsBot(d, content)
-        val repliedToBot = d.optJSONObject("referenced_message")
-            ?.optJSONObject("author")?.optString("id") == botId && botId.isNotBlank()
-
+        val mentioned = messageMentionsBot(d, rawContent)
+        val ref = d.optJSONObject("referenced_message")
+        val repliedToBot = botId.isNotBlank() &&
+            ref?.optJSONObject("author")?.optString("id") == botId
         val addressed = mentioned || repliedToBot
-        val respond: Boolean
-        if (addressed) {
-            respond = true
-        } else {
-            // Ambient "jump into the convo": needs readable text, a live dice roll, and
-            // the channel off cooldown — the operator-tunable knob.
-            respond = content.isNotBlank() &&
+
+        if (!addressed) {
+            // Ambient eligibility: readable text + a live dice roll + channel off cooldown.
+            val eligible = rawContent.isNotBlank() &&
                 cfg.ambientPercent > 0 &&
                 Random.nextInt(100) < cfg.ambientPercent &&
                 ambientCooldownOk(channelId)
-            if (respond) ambientCooldown[channelId] = System.currentTimeMillis()
+            if (!eligible) return
+            ambientCooldown[channelId] = System.currentTimeMillis()
         }
-        if (!respond) return
 
-        val userText = stripBotMentions(content).ifBlank { "(they pinged you with no message)" }
+        // Text fed to the model: drop the bot's own mention, resolve other @mentions to names.
+        val userText = DiscordRest.resolveMentions(
+            stripBotMentions(rawContent), d.optJSONArray("mentions")
+        ).ifBlank { "(they pinged you with no message)" }
         val authorName = author.optString("global_name").ifBlank { author.optString("username") }
             .ifBlank { "someone" }
 
-        scope.launch {
-            DiscordRest.triggerTyping(cfg.botToken, channelId)
-            val history = buildHistory(channelId, messageId, authorName, userText)
-            when (val res = DiscordBotAi.reply(cfg, history)) {
-                is DiscordBotAi.Result.Ok -> {
-                    // Reply-thread to the triggering message when addressed; ambient posts plainly.
-                    val err = DiscordRest.sendMessage(
-                        cfg.botToken, channelId, res.text,
-                        replyToMessageId = if (addressed) messageId else null
-                    )
-                    if (err == null) {
-                        DiscordBotState.log("↩ $authorName: ${res.text.take(60)}")
-                    } else {
-                        DiscordBotState.log("Send failed: $err")
-                    }
-                }
-                is DiscordBotAi.Result.Error -> DiscordBotState.log("AI error: ${res.message}")
+        // Reply-chain: capture the exact message being replied to (even if it's old).
+        var refTurn: DiscordBotAi.Turn? = null
+        var refId: String? = null
+        if (ref != null) {
+            val rAuthor = ref.optJSONObject("author")
+            val rText = DiscordRest.resolveMentions(
+                stripBotMentions(ref.optString("content")), ref.optJSONArray("mentions")
+            )
+            if (rText.isNotBlank() && rAuthor != null) {
+                refId = ref.optString("id")
+                refTurn = DiscordBotAi.Turn(
+                    isBot = rAuthor.optString("id") == botId,
+                    name = rAuthor.optString("global_name").ifBlank { rAuthor.optString("username") }
+                        .ifBlank { "someone" },
+                    text = rText
+                )
             }
+        }
+
+        // Debounce: coalesce a burst into ONE reply to the latest triggering message. A new
+        // trigger cancels the pending job and reschedules; the stale (completed/cancelled)
+        // map entry is simply overwritten — cancel() on a finished job is a no-op.
+        pendingReplyByChannel[channelId]?.cancel()
+        pendingReplyByChannel[channelId] = scope.launch {
+            delay(DEBOUNCE_MS)
+            respondNow(channelId, messageId, addressed, userText, authorName, refTurn, refId)
         }
     }
 
-    /** The bot's short-term memory: the last N channel messages (chronological) with the
-     *  triggering message guaranteed present and last. `historyLimit<=0` or a failed fetch
-     *  degrades to a single turn (the current message only) — same as v1 behaviour. */
-    private suspend fun buildHistory(
-        channelId: String, currentMsgId: String, authorName: String, currentText: String
-    ): List<DiscordBotAi.Turn> {
-        if (cfg.historyLimit <= 0) return listOf(DiscordBotAi.Turn(false, authorName, currentText))
-        val recent = DiscordRest.fetchRecentMessages(cfg.botToken, channelId, cfg.historyLimit)
-        val turns = ArrayList<DiscordBotAi.Turn>(recent.size + 1)
-        for (m in recent) {
-            if (m.id == currentMsgId) continue          // appended last, deterministically
-            val text = stripBotMentions(m.content)
-            if (text.isBlank()) continue
-            turns.add(DiscordBotAi.Turn(isBot = m.isBot, name = m.authorName, text = text))
+    private suspend fun respondNow(
+        channelId: String, messageId: String, addressed: Boolean,
+        userText: String, authorName: String,
+        refTurn: DiscordBotAi.Turn?, refId: String?
+    ) {
+        // A trivial addressed message ("lol", an emoji) → react like a person, no AI call.
+        if (addressed && isTrivial(userText)) {
+            DiscordRest.addReaction(cfg.botToken, channelId, messageId, pickEmoji(userText))
+            DiscordBotState.log("reacted to $authorName")
+            return
         }
+
+        val history = buildHistory(channelId, messageId, authorName, userText, refTurn, refId)
+
+        // Ambient: a cheap 8B gate decides whether chiming in is worth it (else stay quiet).
+        if (!addressed && !DiscordBotAi.shouldChimeIn(cfg, history)) {
+            DiscordBotState.log("stayed quiet")
+            return
+        }
+
+        DiscordRest.triggerTyping(cfg.botToken, channelId)
+        when (val res = DiscordBotAi.reply(cfg, history)) {
+            is DiscordBotAi.Result.Ok -> {
+                // Human pacing: a short beat scaled to reply length before sending.
+                delay((res.text.length * 20L).coerceIn(400L, 2500L))
+                val err = DiscordRest.sendMessage(
+                    cfg.botToken, channelId, res.text,
+                    replyToMessageId = if (addressed) messageId else null
+                )
+                DiscordBotState.log(
+                    if (err == null) "↩ $authorName: ${res.text.take(60)}" else "Send failed: $err"
+                )
+            }
+            is DiscordBotAi.Result.Error -> DiscordBotState.log("AI error: ${res.message}")
+        }
+    }
+
+    // ── Human-touch helpers ───────────────────────────────────────────────
+
+    private val triviaWords = setOf(
+        "lol", "lmao", "lmfao", "lel", "kek", "ok", "kk", "k", "nice", "fr", "real",
+        "bruh", "true", "yep", "yup", "nah", "w", "l", "based", "same", "mood"
+    )
+    /** A message not worth a full generated reply (react instead): blank, ≤2 chars, a known
+     *  filler word, or pure punctuation/emoji. */
+    private fun isTrivial(text: String): Boolean {
+        val n = text.trim().lowercase().trimEnd('!', '.', '?', ' ')
+        if (n.isEmpty()) return true
+        if (n in triviaWords) return true
+        return n.length <= 2 || n.none { it.isLetterOrDigit() }
+    }
+    private val reactEmojis = listOf("👍", "😂", "💀", "👀", "🔥", "😭", "🙏")
+    private fun pickEmoji(text: String): String {
+        val t = text.lowercase()
+        return when {
+            t.contains("lol") || t.contains("lmao") || t.contains("😂") || t.contains("🤣") -> "😂"
+            t.contains("💀") -> "💀"
+            else -> reactEmojis.random()
+        }
+    }
+
+    /** The bot's short-term memory: the last N channel messages (chronological), plus the
+     *  replied-to message when it's outside that window (reply-chain), with the triggering
+     *  message appended last. Only OUR bot's messages become assistant turns; other bots
+     *  are name-prefixed user turns. `historyLimit<=0`/failed fetch → single-turn. */
+    private suspend fun buildHistory(
+        channelId: String, currentMsgId: String, authorName: String, currentText: String,
+        refTurn: DiscordBotAi.Turn?, refId: String?
+    ): List<DiscordBotAi.Turn> {
+        val turns = ArrayList<DiscordBotAi.Turn>()
+        val seen = HashSet<String>()
+        if (cfg.historyLimit > 0) {
+            val recent = DiscordRest.fetchRecentMessages(cfg.botToken, channelId, cfg.historyLimit)
+            for (m in recent) {
+                if (m.id == currentMsgId) continue          // appended last, deterministically
+                seen.add(m.id)
+                val text = stripBotMentions(m.content)      // content already mention-resolved
+                if (text.isBlank()) continue
+                turns.add(DiscordBotAi.Turn(isBot = m.authorId == botId, name = m.authorName, text = text))
+            }
+        }
+        // Ensure the replied-to message is present even if older than the fetched window.
+        if (refTurn != null && (refId == null || refId !in seen)) turns.add(refTurn)
         turns.add(DiscordBotAi.Turn(false, authorName, currentText))
         return turns
     }
