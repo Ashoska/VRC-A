@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Storage
@@ -77,12 +76,10 @@ fun BotsTab() {
     LaunchedEffect(Unit) { BotController.start(ctx) }
     val bots by BotController.bots.collectAsState()
     val views by BotController.views.collectAsState()
-    val totalQueued by BotController.totalQueued.collectAsState()
     val added24h by BotController.added24h.collectAsState()
     val lastPush by BotController.lastPush.collectAsState()
-    val blitz by BotController.blitz.collectAsState()
-    val blitzViews by BotController.blitzViews.collectAsState()
-    val blitzShards by BotController.blitzShards.collectAsState()
+    val shardsCovered by BotController.shardsCovered.collectAsState()
+    val lapAgeMs by BotController.lapAgeMs.collectAsState()
     val sweepAlive by BotController.sweepAlive.collectAsState()
     val sweepAgoMs by BotController.sweepLastCycleAgoMs.collectAsState()
     // The sweep lifecycle is owned by BotController (reads the saved key/assignment/pause
@@ -100,8 +97,8 @@ fun BotsTab() {
             MaintenanceCard(
                 adminKey = adminKey,
                 onKeyChange = { adminKey = it; prefs.edit().putString("avatar_admin_key", it).apply() },
-                totalQueued = totalQueued,
-                blitz = blitz, blitzShards = blitzShards,
+                shardsCovered = shardsCovered,
+                lapAgeMs = lapAgeMs,
                 sweepAlive = sweepAlive,
                 sweepAgoMs = sweepAgoMs,
                 paused = paused,
@@ -117,7 +114,7 @@ fun BotsTab() {
                 }
             )
         }
-        item { BotsCard(bots, views, blitzViews) }
+        item { BotsCard(bots, views) }
         item { Spacer(Modifier.height(12.dp)) }
     }
 }
@@ -132,6 +129,16 @@ private fun agoLabel(fromMs: Long, now: Long): String {
         s < 60 -> "${s}s ago"
         s < 3600 -> "${s / 60}m ago"
         else -> "${s / 3600}h ago"
+    }
+}
+
+private fun durLabel(ms: Long): String {
+    val s = (ms / 1000L).coerceAtLeast(0)
+    return when {
+        s < 90 -> "${s}s"
+        s < 3600 -> "${s / 60}m"
+        s < 86400 -> "${s / 3600}h ${(s % 3600) / 60}m"
+        else -> "${s / 86400}d ${(s % 86400) / 3600}h"
     }
 }
 
@@ -248,7 +255,7 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
 @Composable
 private fun MaintenanceCard(
     adminKey: String, onKeyChange: (String) -> Unit,
-    totalQueued: Int, blitz: Boolean, blitzShards: Pair<Int, Int>? = null,
+    shardsCovered: Pair<Int, Int>? = null, lapAgeMs: Long = -1L,
     sweepAlive: Boolean, sweepAgoMs: Long,
     paused: Boolean, onTogglePause: () -> Unit,
     avtrdbCrawl: Boolean, onToggleCrawl: () -> Unit,
@@ -302,25 +309,43 @@ private fun MaintenanceCard(
 
             Divider()
 
-            // The bots run a CONTINUOUS oldest-first shard walk — every avatar is re-verified on a
-            // rolling basis forever (dead/rename/desc/perf), one grouped write per shard. There's no
-            // "catch-up backlog", so the old manual blitz button was removed.
+            // CONTINUOUS oldest-first shard walk: every avatar is re-verified on a rolling basis
+            // forever (dead/rename/desc/perf), one grouped write per shard, no catch-up backlog.
             Text(
-                "Continuous liveness: the bots walk the oldest shards forever, checking every avatar and pushing one write per shard.",
+                "Continuous liveness — the bots walk the oldest shards forever, checking every avatar and pushing one write per shard.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth()
             )
-            Row(
+            // Catalog coverage: distinct shards visited at least once, toward the full 4096. A
+            // progress bar while the first lap is still filling; "Full" once every shard is covered.
+            shardsCovered?.let { (done, total) ->
+                val full = done >= total
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Catalog coverage", style = MaterialTheme.typography.bodyMedium)
+                    StatusPill(if (full) "Full · $total shards" else "%,d / %,d".format(done, total),
+                        if (full) AdminTone.Success else AdminTone.Info)
+                }
+                if (!full) androidx.compose.material3.LinearProgressIndicator(
+                    progress = if (total > 0) done.toFloat() / total else 0f,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            // Re-verify lap time — how long since the OLDEST shard was last checked (i.e. how fresh
+            // the whole catalog is). Only meaningful once coverage is Full.
+            if (lapAgeMs >= 0L) Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("To process", style = MaterialTheme.typography.bodyMedium)
-                StatusPill("$totalQueued", if (totalQueued == 0) AdminTone.Success else AdminTone.Warn)
+                Text("Re-verify lap", style = MaterialTheme.typography.bodyMedium)
+                StatusPill("every ${durLabel(lapAgeMs)}", AdminTone.Neutral)
             }
-            // Proof-of-life: shows the sweep loop is alive even when the backlog is flat,
-            // so "caught up / idle" is distinguishable from "stopped". Updates every ~2s.
+            // Proof-of-life: the walk never idles, so this reads Running/Paused/Stopped only.
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -331,8 +356,7 @@ private fun MaintenanceCard(
                     paused -> StatusPill("Paused", AdminTone.Neutral)
                     sweepAlive -> {
                         val ago = if (sweepAgoMs in 0..600_000) "${sweepAgoMs / 1000}s ago" else "active"
-                        val label = if (totalQueued == 0) "Running · idle · $ago" else "Running · $ago"
-                        StatusPill(label, AdminTone.Success)
+                        StatusPill("Running · $ago", AdminTone.Success)
                     }
                     else -> StatusPill("Stopped", AdminTone.Error)
                 }
@@ -403,14 +427,13 @@ private fun RoleAssignRow(
 @Composable
 private fun BotsCard(
     bots: List<BotController.BotUi>,
-    views: List<AvatarCatalogSweep.RoleView>,
-    blitzViews: Map<Int, AvatarCatalogSweep.BlitzView>
+    views: List<AvatarCatalogSweep.RoleView>
 ) {
     AdminSectionCard(title = "Bots", icon = Icons.Filled.SportsEsports, tone = AdminTone.Primary) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             bots.forEachIndexed { idx, bot ->
                 if (idx > 0) Divider()
-                BotSection(bot, views.filter { it.bot == "bot ${bot.slot + 1}" }, blitzViews[bot.slot])
+                BotSection(bot, views.filter { it.bot == "bot ${bot.slot + 1}" })
             }
         }
     }
@@ -419,8 +442,7 @@ private fun BotsCard(
 @Composable
 private fun BotSection(
     bot: BotController.BotUi,
-    roleViews: List<AvatarCatalogSweep.RoleView>,
-    blitzView: AvatarCatalogSweep.BlitzView?
+    roleViews: List<AvatarCatalogSweep.RoleView>
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -458,9 +480,7 @@ private fun BotSection(
                     Text("Session expired and couldn't auto-recover — log out and back in.",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
-                // During a blitz every bot shares the fill+dead-check work, so show its
-                // blitz progress instead of the idle assigned-role rows.
-                if (blitzView != null) BlitzRow(blitzView) else roleViews.forEach { RoleRow(it) }
+                roleViews.forEach { RoleRow(it) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(onClick = {
                         BotVrchatSession.logout(ctx, slot); BotController.refreshSlot(ctx, slot)
@@ -528,79 +548,59 @@ private fun BotSection(
 }
 
 @Composable
-private fun BlitzRow(v: AvatarCatalogSweep.BlitzView) {
-    Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("⚡ Blitz", style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            StatusPill("queued ${v.queued}", if (v.queued <= 0) AdminTone.Success else AdminTone.Warn)
-        }
-        Text(
-            "checked ${v.checked} · filled ${v.filled} · refreshed ${v.refreshed} · removed ${v.removed}",
-            style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-@Composable
 private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
-    val queuedTone = when {
-        v.queued <= 0 -> AdminTone.Success
-        v.queued > 500 -> AdminTone.Error
-        else -> AdminTone.Warn
-    }
-    Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.fillMaxWidth()) {
+    fun n(x: Int) = "%,d".format(x)
+    val onWalk = v.curShard.isNotEmpty() && v.curShardTotal > 0
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.fillMaxWidth()) {
+        // Header: what this bot is DOING + its live shard position.
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // In walk mode a bot is ONE folded row doing fill + refresh + liveness (+ reports if it's the
-            // reports bot) over the shared shard pool — so it's labelled by what it DOES, not one role
-            // that happened to be first. Pre-cutover keeps the per-role label + loan marker.
             val label = when {
-                // L6: distinguish a Reports bot actively verifying (reports queued) from one loaning
-                // itself to the shard walk (no reports pending → helping == "walk").
-                v.walkFolded && v.isReportsBot && v.helping == "walk" -> "Reports (loaning to walk)"
-                v.walkFolded && v.isReportsBot -> "Reports + shard walk"
-                v.walkFolded -> "Shard walk"
-                v.helping.isNotBlank() -> "${v.role.label}  →  helping ${v.helping}"
-                else -> v.role.label
+                v.isReportsBot && v.helping == "walk" -> "Reports + walk"
+                v.isReportsBot -> "Reports"
+                else -> "Shard walk"
             }
             Text(
                 label,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f)
             )
-            StatusPill("queued ${v.queued}", queuedTone)
+            when {
+                !v.running -> StatusPill("Idle", AdminTone.Neutral)
+                onWalk -> StatusPill("shard ${v.curShard.uppercase()}", AdminTone.Primary)
+                else -> StatusPill("Walking", AdminTone.Success)
+            }
         }
-        // Clean, readable detail: lead with the cheap unit (shards swept), then list ONLY the work that
-        // actually happened — comma-formatted, zero counters hidden — so an idle bot reads "7,235 shards
-        // swept · no changes yet" instead of a wall of "· 0 · 0 · 0 · 0". Reports bot adds its own line.
-        fun n(x: Int) = "%,d".format(x)
+        // LIVE progress through the CURRENT shard: avatar N / M + a bar.
+        if (onWalk) {
+            androidx.compose.material3.LinearProgressIndicator(
+                progress = (v.curShardDone.toFloat() / v.curShardTotal).coerceIn(0f, 1f),
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text(
+                "checking ${v.curShardDone} / ${v.curShardTotal} in shard ${v.curShard.uppercase()}",
+                style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        // Cumulative work THIS SESSION: lead with the cheap unit (shards swept), then only the work
+        // that actually happened, so an idle-but-clean bot reads "7,235 shards swept · no changes yet".
         val work = buildList {
             if (v.filled > 0) add("${n(v.filled)} filled")
             if (v.refreshed > 0) add("${n(v.refreshed)} refreshed")
-            if (!v.walkFolded && v.role != AvatarCatalogSweep.Role.REPORTS && v.refreshedOrFilled > 0 &&
-                v.filled == 0 && v.refreshed == 0) {
-                add("${n(v.refreshedOrFilled)} ${if (v.role == AvatarCatalogSweep.Role.FILL || v.helping == "Fill") "filled" else "refreshed"}")
-            }
-            if (v.checked > 0) add("${n(v.checked)} checked")
             if (v.removed > 0) add("${n(v.removed)} removed")
         }
-        val detail = "${n(v.shards)} shards swept" + if (work.isEmpty()) " · no changes yet" else " · " + work.joinToString(" · ")
         Text(
-            detail,
+            "${n(v.shards)} shards swept · ${n(v.checked)} checked" +
+                if (work.isEmpty()) " · no changes yet" else " · " + work.joinToString(" · "),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        // Reports bot: its verify/cull work on its own line so it's never lost in the walk stats.
-        if (v.isReportsBot || v.role == AvatarCatalogSweep.Role.REPORTS) {
+        // Reports bot: verify/cull work on its own line so it's never lost in the walk stats.
+        if (v.isReportsBot) {
             val rep = buildList {
                 if (v.reportsVerified > 0) add("${n(v.reportsVerified)} verified")
                 if (v.reportsRemoved > 0) add("${n(v.reportsRemoved)} culled")

@@ -61,6 +61,12 @@ object AvatarCatalogSweep {
         // work). reportsVerified = reports it dead-checked; reportsRemoved = confirmed-dead culls.
         @Volatile var reportsVerified = 0
         @Volatile var reportsRemoved = 0
+        // LIVE per-shard progress (continuous walk): which shard this bot is currently on and how far
+        // through it (avatar curShardDone of curShardTotal). Surfaced so the admin sees exactly where
+        // each bot is right now, not just cumulative totals.
+        @Volatile var curShard = ""
+        @Volatile var curShardDone = 0
+        @Volatile var curShardTotal = 0
         @Volatile var status = "idle"
         /** Non-blank ("Fill"/"Liveness") while this bot's own role has no work and it is
          *  LOANING itself to another backlog — so the UI can show it's helping, not idle. */
@@ -498,7 +504,11 @@ object AvatarCatalogSweep {
          *  per-role rows showed 0 for every role but the first — M2). */
         val walkFolded: Boolean = false,
         /** This bot IS handling reports (show the reports detail line). */
-        val isReportsBot: Boolean = false
+        val isReportsBot: Boolean = false,
+        /** LIVE per-shard progress: the shard this bot is on + how far through it. */
+        val curShard: String = "",
+        val curShardDone: Int = 0,
+        val curShardTotal: Int = 0
     )
 
     /** `pendingReports` = the Worker's live report count (from /health). Fill + liveness
@@ -554,11 +564,15 @@ object AvatarCatalogSweep {
             return bySlot.entries.sortedBy { it.key }.map { (slot, rolesOnSlot) ->
                 var c = 0; var rem = 0; var fl = 0; var rf = 0; var sh = 0; var rv = 0; var rr = 0
                 var status = ""; var run = false
+                var curS = ""; var curD = 0; var curT = 0
                 for (r in rolesOnSlot) {
                     val p = progress.getValue(r)
                     c += p.checked; rem += p.removed; fl += p.filled; rf += p.refreshed
                     sh += p.shards; rv += p.reportsVerified; rr += p.reportsRemoved
                     if (p.checked + p.shards > 0 || status.isEmpty()) status = p.status
+                    // Only the slot's OWN (walking) role drives per-shard progress; take whichever role
+                    // actually has a current shard set.
+                    if (p.curShard.isNotEmpty()) { curS = p.curShard; curD = p.curShardDone; curT = p.curShardTotal }
                     run = run || p.running
                 }
                 val isRepBot = rolesOnSlot.contains(Role.REPORTS)
@@ -579,7 +593,8 @@ object AvatarCatalogSweep {
                     reportsVerified = rv,
                     reportsRemoved = rr,
                     walkFolded = true,
-                    isReportsBot = isRepBot
+                    isReportsBot = isRepBot,
+                    curShard = curS, curShardDone = curD, curShardTotal = curT
                 )
             }
         }
@@ -870,6 +885,17 @@ object AvatarCatalogSweep {
      *  shards last swept BEFORE that instant are eligible, so a blitz / fill-scan ENDS once every shard
      *  has been covered (no endless re-reading of an already-covered catalog). Claims the pick so two
      *  bots rarely grab the same shard; the claim (not sweptAt) is what's set here. */
+    /** Distinct shards visited at least once (initial coverage progress toward 4096). */
+    fun shardsCovered(context: Context): Int { loadSwept(context); return sweptAt.size.coerceAtMost(4096) }
+    /** Age (ms) of the OLDEST-swept shard once the whole catalog has been covered = the effective
+     *  full re-verify LAP time. -1 while still on the first coverage lap (unvisited shards read as
+     *  epoch 0, so an average would be meaningless until every shard has a real timestamp). */
+    fun oldestSweptAgeMs(context: Context): Long {
+        loadSwept(context)
+        if (sweptAt.size < 4096) return -1L
+        val oldest = sweptAt.values.minOrNull() ?: return -1L
+        return (System.currentTimeMillis() - oldest).coerceAtLeast(0)
+    }
     private fun oldestSweptPrefix(context: Context, dueOnly: Boolean, coverBeforeMs: Long? = null): String? {
         loadSwept(context)
         synchronized(sweptSelectLock) {
@@ -992,7 +1018,8 @@ object AvatarCatalogSweep {
         if (work.isEmpty()) { p.status = "walking ($prefix clear)"; return false }
         val batch = claimBatch(work, work.size)
         if (batch.isEmpty()) return false
-        if (blitzActive()) blitzUntilMs = maxOf(blitzUntilMs, System.currentTimeMillis() + BLITZ_KEEPALIVE_MS)
+        // LIVE per-shard progress: this bot is now on `prefix`, checking `batch.size` avatars.
+        p.curShard = prefix; p.curShardTotal = batch.size; p.curShardDone = 0
         p.status = "walk $prefix: ${batch.size}"
         val upserts = mutableListOf<AvatarGlobalDb.Entry>()
         val removes = mutableListOf<String>()
@@ -1003,7 +1030,7 @@ object AvatarCatalogSweep {
             for (e in batch) {
                 if (!running || paused) break
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
-                p.checked++
+                p.checked++; p.curShardDone++
                 if (chk == null) {
                     if (needsFill(e)) {
                         noteFillNull(slot, e.fileId)
