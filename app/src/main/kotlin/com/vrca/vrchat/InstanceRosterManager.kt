@@ -972,6 +972,7 @@ object InstanceRosterManager {
                 val member0 = _flow.value.members.firstOrNull { it.userId == id }
                 val avaName = member0?.avatarName ?: ""
                 val avaAuthor = member0?.avatarCreator ?: ""
+                val nameStable = System.currentTimeMillis() - (avatarNameSince[id] ?: 0L) >= NAME_STABLE_MS
                 var catalogAvatarId: String? = null
                 // Name-optional: resolve from the worn file id whether or not the log gave an avatar name
                 // (impostor'd players have no name but still a file id). This is the INSTANT catalog-hit
@@ -1008,12 +1009,13 @@ object InstanceRosterManager {
                                 // this member UNPINNED so the guarded resolveAvatars pass (equally strict —
                                 // `verifyCatalogHit`/image-fileid match) decides, greying it if it can't
                                 // image-confirm. Matches every other serve path (all require the fileId match).
-                                // Serve ONLY when the worn image matches AND the LIVE avatar's author agrees
-                                // with the log author (or one is unknown). A live-author MISMATCH means the
-                                // image-keyed entry is a DIFFERENT creator's avatar sharing the thumbnail
-                                // (rip/reskin) — don't pin the wrong one; leave it for the guarded resolver,
-                                // which resolves by name+author (the "shows I ESME, clones Gucci Morty" fix).
-                                true -> if (wornFid in conf.fileIds && !VrchatAuthManager.authorMismatch(conf.author, avaAuthor)) {
+                                // Serve ONLY when the worn image matches AND the LIVE avatar's name+author
+                                // agree with the LOG. If they disagree (and the log name is stable), the worn
+                                // image was a PREVIOUS avatar's (a stale /users read) — so this image-keyed
+                                // entry is the WRONG avatar; don't pin it, leave it for the guarded resolver
+                                // to re-resolve by name+author (the "shows ǃ ESME, clones Gucci Morty" fix).
+                                true -> if (wornFid in conf.fileIds &&
+                                            !(nameStable && VrchatAuthManager.logConflictsWithLive(conf.name, conf.author, avaName, avaAuthor))) {
                                     val plats = conf.platforms.ifEmpty { hit.platforms }
                                     val gated = gateCloneId(hit.avatarId, plats)  // "" if PC-only on Quest
                                     avatarPlatformsCache[id] = plats

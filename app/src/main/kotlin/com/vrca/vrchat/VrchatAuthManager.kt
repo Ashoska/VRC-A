@@ -1601,10 +1601,20 @@ object VrchatAuthManager {
         }
     }
 
-    /** True when both authors are known and DIFFER (font-folded). Public so the roster's instant enrich
+    /** True when both strings are known and DIFFER (font-folded). Public so the roster's instant enrich
      *  shortcut can reuse the same comparison. */
     fun authorMismatch(a: String, b: String): Boolean =
         a.isNotBlank() && b.isNotBlank() && fancyFold(a) != fancyFold(b)
+
+    /** True when the LIVE avatar page (name/author from the confirm GET) disagrees with what the LOG
+     *  says the player is wearing — the reliable signal that the WORN IMAGE FILE ID was STALE (a previous
+     *  avatar's), so the image-keyed catalog HIT is the WRONG avatar even though its live thumbnail
+     *  matches that stale file. Either the name OR the author disagreeing counts (catches a different
+     *  creator AND a same-creator different avatar). Both live+log values are real-time, so a genuine
+     *  RENAME does NOT trip this (both reflect the new value); only a stale worn image does. Callers gate
+     *  this on the log name being STABLE, so a mid-switch stale LOG name can't false-trigger it. */
+    fun logConflictsWithLive(liveName: String, liveAuthor: String, logName: String, logAuthor: String): Boolean =
+        authorMismatch(liveAuthor, logAuthor) || authorMismatch(liveName, logName)
 
     /** Decide a catalog image-file-id HIT (local map OR R2 shard). Returns the result to RETURN, or
      *  null to FALL THROUGH to the fresh image-based resolve paths. Uses the LIVE avatar page (fetched
@@ -1619,7 +1629,7 @@ object VrchatAuthManager {
      *     self-heals (the rare-case refresh the user asked for). */
     private suspend fun serveCatalogHit(
         context: Context, entry: com.vrca.vrchat.AvatarGlobalDb.Entry, wornFileId: String?,
-        logName: String, logAuthor: String, source: String, step: (String) -> Unit
+        logName: String, logAuthor: String, nameStable: Boolean, source: String, step: (String) -> Unit
     ): WornAvatarResult? {
         val conf = confirmAvatarLive(context, entry.avatarId)
         step("  live-confirm (GET /avatars/${entry.avatarId}): " + when (conf.live) {
@@ -1634,12 +1644,18 @@ object VrchatAuthManager {
             else -> {
                 // The worn image must still be THIS avatar's (guards a re-keyed/changed thumbnail).
                 if (wornFileId != null && wornFileId !in conf.fileIds) { step("  worn image no longer matches this entry — resolving fresh"); return null }
-                // Genuine collision iff the LIVE author (authoritative) still disagrees with the log.
-                if (authorMismatch(conf.author, logAuthor)) {
-                    step("  author mismatch (live '${conf.author}' vs log '$logAuthor') — shared-thumbnail collision; resolving by name+author")
+                // STALE-WORN-IMAGE guard: the worn file id maps (correctly) to THIS live avatar, but if the
+                // LIVE avatar's name/author disagrees with the LOG (real-time, authoritative), the worn
+                // image was a PREVIOUS avatar's (VRChat's /users currentAvatar lags a switch, or a stale
+                // cache) — so this is the WRONG avatar. Re-resolve by the log name+author (the reliable
+                // signal). Gated on nameStable so a mid-switch stale LOG name can't false-trigger it. This
+                // covers BOTH a different creator (Gucci Morty/Nemorio vs I ESME/Taiga) AND a same-creator
+                // different avatar. A genuine RENAME never trips it (live+log both reflect the new value).
+                if (nameStable && logConflictsWithLive(conf.name, conf.author, logName, logAuthor)) {
+                    step("  live avatar ('${conf.name}' by '${conf.author}') ≠ log ('$logName' by '$logAuthor') — STALE worn image; resolving by name+author")
                     val byNA = resolveByNameAndAuthor(context, logName, logAuthor)
                     step("  name+author resolve: ${com.vrca.vrchat.AvatarSearch.Diag.lastReason}")
-                    return byNA ?: WornAvatarResult(null)   // the REAL avatar, or unresolved (retry) — never the collided one
+                    return byNA ?: WornAvatarResult(null)   // the REAL avatar, or unresolved (retry) — never the wrong one
                 }
                 // Right avatar. If OUR stored NAME is stale vs the live page, flag a "renamed" report so
                 // the catalog self-heals (the Worker applies the name immediately). AUTHOR-only staleness
@@ -1827,7 +1843,7 @@ object VrchatAuthManager {
                 return@withContext WornAvatarResult(null)
             }
             // Confirm live + author (collision vs stale) via the live avatar page; null = fall through.
-            serveCatalogHit(context, hit, wornFileId, avatarName, author, "catalog") { s -> step(s) }?.let { return@withContext it }
+            serveCatalogHit(context, hit, wornFileId, avatarName, author, nameStable, "catalog") { s -> step(s) }?.let { return@withContext it }
         }
         // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
         // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
@@ -1852,7 +1868,7 @@ object VrchatAuthManager {
                         return@withContext WornAvatarResult(null)
                     }
                     // Confirm live + author (collision vs stale) via the live avatar page; null = fall through.
-                    serveCatalogHit(context, e, wornFileId, avatarName, author, "shard") { s -> step(s) }?.let { return@withContext it }
+                    serveCatalogHit(context, e, wornFileId, avatarName, author, nameStable, "shard") { s -> step(s) }?.let { return@withContext it }
                 }
                 com.vrca.vrchat.AvatarGlobalDb.ShardStatus.UNAVAILABLE -> {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog read unavailable — will retry"
