@@ -1969,9 +1969,18 @@ object VrchatAuthManager {
      * (untrusted for a name-only guess). Never returns a VRChat fallback/system avatar. Null on
      * 0/ambiguous; sets AvatarSearch.Diag.lastReason to the exact reason (surfaced in the roster trace).
      */
+    /** Fold "fancy"/stylised Unicode (𝗪𝗛𝗜𝗧𝗘, ＦＵＬＬＷＩＤＴＨ, ℌ𝔞𝔯𝔡, etc.) back to plain ASCII, then
+     *  trim + lowercase, for robust matching. VRChat display names VERY commonly use the
+     *  Mathematical-Alphanumeric / fullwidth font glyphs; those are DIFFERENT codepoints from the
+     *  ASCII letters, so a raw `author.lowercase() == "white tiger"` compare (or a token match)
+     *  fails whenever the two sides use different fonts. NFKC maps those decorative glyphs to their
+     *  base letters ("𝗪𝗛𝗜𝗧𝗘 𝗧𝗜𝗚𝗘𝗥" → "white tiger"), so the compare works regardless of styling. */
+    private fun fancyFold(s: String): String =
+        java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC).trim().lowercase()
+
     private suspend fun resolveByNameAndAuthor(context: Context, avatarName: String, author: String): WornAvatarResult? =
         withContext(Dispatchers.IO) {
-            val authorNorm = author.trim().lowercase()
+            val authorNorm = fancyFold(author)
             if (avatarName.isBlank() || avatarName.trim().equals("Robot", true)) {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "name+author: no usable log name"
                 return@withContext null
@@ -1987,13 +1996,25 @@ object VrchatAuthManager {
             //    genuinely ambiguous (>1 distinct avatar after author filtering).
             var totalCatalogHits = 0
             for (v in avatarNameVariants(avatarName)) {
-                val hits = try { com.vrca.vrchat.AvatarGlobalDb.searchSharded(context, v, 40) } catch (e: Exception) { emptyList() }
+                // Search the catalog by NAME **plus** AUTHOR tokens together (both are indexed) so the
+                // author narrows the SEARCH itself, not just a post-filter. VRChat TRUNCATES the log
+                // avatar name (a long name arrives as e.g. "Meow M", whose only usable search token is
+                // "meow" → 40+ unrelated hits); the old code searched name-only, capped at 40, then
+                // post-filtered by author — so the real author-match, if it ranked past the cap, was
+                // never seen and it falsely reported "ambiguous (40 distinct)". AND-intersecting the
+                // author tokens collapses that to the one creator's avatar. When no author was logged,
+                // keep the plain name search + name-unique logic.
+                val query = if (authorNorm.isNotBlank()) "$v $author" else v
+                val hits = try { com.vrca.vrchat.AvatarGlobalDb.searchSharded(context, query, 40) } catch (e: Exception) { emptyList() }
                 totalCatalogHits += hits.size
                 val nonSystem = hits.filter { !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.avatarId, it.fileId) }
-                // Prefer an author-locked match; if the log had no author (or none of the hits match it),
+                // With an author present, REQUIRE an exact author match (the AND-narrowed search already
+                // scoped it — never guess by name alone when we know the author). No author logged →
                 // fall back to a name-unique match in our verified catalog.
-                val byAuthor = if (authorNorm.isNotBlank()) nonSystem.filter { it.author.trim().lowercase() == authorNorm }.distinctBy { it.avatarId } else emptyList()
-                val m = if (byAuthor.isNotEmpty()) byAuthor else nonSystem.distinctBy { it.avatarId }
+                val m = if (authorNorm.isNotBlank())
+                    nonSystem.filter { fancyFold(it.author) == authorNorm }.distinctBy { it.avatarId }
+                else
+                    nonSystem.distinctBy { it.avatarId }
                 if (m.size == 1) {
                     val e = m[0]
                     // CONFIRM live+public before offering (no worn image to match here — loading player —
@@ -2003,7 +2024,7 @@ object VrchatAuthManager {
                     return@withContext when (verdict) {
                         HitVerdict.SERVE -> {
                             com.vrca.vrchat.AvatarSearch.Diag.lastReason =
-                                if (byAuthor.isNotEmpty()) "name+author: unique catalog match" else "name-only: unique catalog match (no log author)"
+                                if (authorNorm.isNotBlank()) "name+author: unique catalog match" else "name-only: unique catalog match (no log author)"
                             WornAvatarResult(e.avatarId, plats.ifEmpty { e.platforms })
                         }
                         HitVerdict.DEAD -> {
@@ -2015,11 +2036,20 @@ object VrchatAuthManager {
                     }
                 }
                 if (m.size > 1) {
+                    // With the author AND-narrowed search this means the SAME creator genuinely has >1
+                    // avatar matching the (possibly truncated) name — real ambiguity, so don't guess.
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason =
-                        "name${if (authorNorm.isNotBlank()) "+author" else ""}: ambiguous (${m.size} distinct in catalog) — won't guess"
-                    return@withContext null   // ambiguous in our own DB → don't guess
+                        "name${if (authorNorm.isNotBlank()) "+author" else ""}: ambiguous (${m.size} by same author) — won't guess"
+                    return@withContext null
                 }
             }
+            // Author present but no catalog match by that author (the AND-narrowed search found nothing /
+            // no exact-author hit). Record an HONEST reason — the old code fell through to the broad
+            // name-only set and reported "ambiguous (40 distinct)" for a name token like "meow" that no
+            // WHITE TIGER avatar was even among. This distinguishes "not in our catalog by <author>" from
+            // real ambiguity so the roster trace is truthful. (avtrdb is still consulted below.)
+            if (authorNorm.isNotBlank())
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "name+author: not in our catalog by '$author'"
 
             // No author to lock an EXTERNAL (avtrdb) match, and our verified catalog had no unique hit →
             // stop. avtrdb is untrusted for a name-only guess (a same-named different avatar → wrong
@@ -2043,7 +2073,7 @@ object VrchatAuthManager {
             if (merged.isNotEmpty())
                 com.vrca.vrchat.AvatarGlobalDb.harvestCandidates(context, merged.values.toList())
             val matches = merged.values.filter {
-                it.author.trim().lowercase() == authorNorm &&
+                fancyFold(it.author) == authorNorm &&
                     !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.id, null)
             }.distinctBy { it.id }
             if (matches.size != 1) {
