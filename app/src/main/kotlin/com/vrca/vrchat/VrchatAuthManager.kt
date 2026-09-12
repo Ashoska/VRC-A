@@ -1606,15 +1606,20 @@ object VrchatAuthManager {
     fun authorMismatch(a: String, b: String): Boolean =
         a.isNotBlank() && b.isNotBlank() && fancyFold(a) != fancyFold(b)
 
-    /** True when the LIVE avatar page (name/author from the confirm GET) disagrees with what the LOG
-     *  says the player is wearing — the reliable signal that the WORN IMAGE FILE ID was STALE (a previous
-     *  avatar's), so the image-keyed catalog HIT is the WRONG avatar even though its live thumbnail
-     *  matches that stale file. Either the name OR the author disagreeing counts (catches a different
-     *  creator AND a same-creator different avatar). Both live+log values are real-time, so a genuine
-     *  RENAME does NOT trip this (both reflect the new value); only a stale worn image does. Callers gate
-     *  this on the log name being STABLE, so a mid-switch stale LOG name can't false-trigger it. */
+    /** True when the LIVE avatar page's AUTHOR disagrees with the LOG's author — the reliable signal that
+     *  the WORN IMAGE FILE ID was STALE (a previous avatar's), so the image-keyed catalog HIT is the WRONG
+     *  avatar even though its live thumbnail matches that stale file (the "shows ǃ ESME, clones Gucci
+     *  Morty" case: live Nemorio vs log Taiga). **AUTHOR ONLY — the NAME is deliberately NOT compared**:
+     *  VRChat's LOG name is frequently a truncated / descriptor-stripped form of the full stored name
+     *  ("Ball Python" in the log vs "Ball Python (handpuppet / head puppet)" stored), so a name compare
+     *  false-fired on correct avatars and made the fast enrich-shortcut fall through to the full resolver
+     *  for nearly every avatar. A genuine RENAME never trips this (live+log author both reflect the new
+     *  name); a blank log author (the common "no Unpacking-Avatar line captured" case) can't disambiguate,
+     *  so it returns false and the image-verified HIT is served. `liveName`/`logName` are unused (kept in
+     *  the signature so callers read naturally). */
+    @Suppress("UNUSED_PARAMETER")
     fun logConflictsWithLive(liveName: String, liveAuthor: String, logName: String, logAuthor: String): Boolean =
-        authorMismatch(liveAuthor, logAuthor) || authorMismatch(liveName, logName)
+        authorMismatch(liveAuthor, logAuthor)
 
     /** Decide a catalog image-file-id HIT (local map OR R2 shard). Returns the result to RETURN, or
      *  null to FALL THROUGH to the fresh image-based resolve paths. Uses the LIVE avatar page (fetched
