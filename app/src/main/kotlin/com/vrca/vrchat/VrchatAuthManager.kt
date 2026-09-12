@@ -2008,13 +2008,21 @@ object VrchatAuthManager {
                 val hits = try { com.vrca.vrchat.AvatarGlobalDb.searchSharded(context, query, 40) } catch (e: Exception) { emptyList() }
                 totalCatalogHits += hits.size
                 val nonSystem = hits.filter { !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.avatarId, it.fileId) }
-                // With an author present, REQUIRE an exact author match (the AND-narrowed search already
-                // scoped it — never guess by name alone when we know the author). No author logged →
-                // fall back to a name-unique match in our verified catalog.
-                val m = if (authorNorm.isNotBlank())
+                // Candidate set: author-narrowed when the log gave an author, else all name-token hits.
+                val cand = if (authorNorm.isNotBlank())
                     nonSystem.filter { fancyFold(it.author) == authorNorm }.distinctBy { it.avatarId }
                 else
                     nonSystem.distinctBy { it.avatarId }
+                // The token search is BROAD — searching "raiden shadow" also returns "Mei Raiden Shadow
+                // Dance" and "…shadow.exe", so 3 token hits looked "ambiguous" even though only ONE is
+                // actually NAMED "Raiden Shadow". Prefer a UNIQUE EXACT (fancy-folded) name equality
+                // before falling back to the broad set — this is what picks the real avatar out of its
+                // token-siblings (and resolves the "Meow M" name-only case too). Only if there's no exact
+                // name match at all do we consider the broad token set (and its size decides serve vs
+                // ambiguous). Our catalog is image-verified, so a unique exact-name hit is trustworthy.
+                val nameNorm = fancyFold(avatarName)
+                val exact = cand.filter { fancyFold(it.name) == nameNorm }
+                val m = if (exact.isNotEmpty()) exact else cand
                 if (m.size == 1) {
                     val e = m[0]
                     // CONFIRM live+public before offering (no worn image to match here — loading player —
@@ -2036,10 +2044,11 @@ object VrchatAuthManager {
                     }
                 }
                 if (m.size > 1) {
-                    // With the author AND-narrowed search this means the SAME creator genuinely has >1
-                    // avatar matching the (possibly truncated) name — real ambiguity, so don't guess.
+                    // >1 even after preferring exact-name: either 2+ avatars share the EXACT name (real
+                    // ambiguity) or, with no exact match, 2+ token-siblings and no way to pick — don't guess.
+                    val exactDup = exact.size > 1
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason =
-                        "name${if (authorNorm.isNotBlank()) "+author" else ""}: ambiguous (${m.size} by same author) — won't guess"
+                        "name${if (authorNorm.isNotBlank()) "+author" else ""}: ambiguous (${m.size}${if (exactDup) " same exact name" else " token matches, no exact name"}) — won't guess"
                     return@withContext null
                 }
             }
