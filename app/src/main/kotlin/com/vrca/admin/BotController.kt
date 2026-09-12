@@ -148,6 +148,22 @@ object BotController {
         AvatarCatalogSweep.ensureRunning(app, key, currentManual(prefs))
     }
 
+    /** Call on foreground-return (ON_RESUME). If the process was OS-suspended while
+     *  backgrounded the sweep's cycle heartbeat goes stale (`sweepAlive()` false) — kick it
+     *  IMMEDIATELY instead of waiting out the ~2-min freeze watchdog, so the shard counter
+     *  resumes the instant the admin reopens the app. Also re-asserts the foreground service
+     *  (an OEM may have stopped it) and re-applies the sweep config. Cheap + idempotent. */
+    fun onForeground(context: Context) {
+        val app = context.applicationContext
+        if (!started.get()) { start(app); return }
+        runCatching { com.vrca.keepalive.KeepAliveService.start(app) }
+        applySweepConfig(app)
+        if (AvatarCatalogSweep.running && !silenced(app) && !AvatarCatalogSweep.sweepAlive()) {
+            val key = prefs0(app).getString("avatar_admin_key", "") ?: ""
+            runCatching { AvatarCatalogSweep.kick(app, key, currentManual(prefs0(app))) }
+        }
+    }
+
     /** Idempotent — safe to call on every Bots-tab entry AND on admin app launch. */
     fun start(context: Context) {
         val app = context.applicationContext
@@ -226,10 +242,16 @@ object BotController {
                 // caught-up (pool==0) idle. Cooldown-bounded so it can never churn.
                 if (!silenced(app) && AvatarCatalogSweep.running) {
                     val checked = AvatarCatalogSweep.totalChecked()
-                    val pool = AvatarCatalogSweep.lastTotalBacklog
+                    // The continuous shard-walk ALWAYS has work (it re-verifies every shard
+                    // forever), so its steady-state manifest backlog is ~0 — the old `pool > 0`
+                    // gate then never fired, so a walk frozen while backgrounded (OS-suspended,
+                    // then thawed on foreground) could never self-recover. Treat shard-walk mode
+                    // as always having work so the freeze watchdog can kick it. (`checked` still
+                    // ticks every cycle while progressing, so this only fires on a TRUE freeze.)
+                    val hasWork = AvatarCatalogSweep.lastTotalBacklog > 0 || AvatarGlobalDb.shardWalkLive()
                     val now = System.currentTimeMillis()
                     if (checked != lastCheckedSum) { lastCheckedSum = checked; lastProgressMs = now }
-                    else if (pool > 0 && lastProgressMs > 0L &&
+                    else if (hasWork && lastProgressMs > 0L &&
                              now - lastProgressMs > STUCK_MS && now - lastKickMs > KICK_COOLDOWN_MS) {
                         lastKickMs = now; lastProgressMs = now
                         val key = prefs0(app).getString("avatar_admin_key", "") ?: ""
