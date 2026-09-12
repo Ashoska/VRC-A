@@ -2022,7 +2022,13 @@ object VrchatAuthManager {
                 // ambiguous). Our catalog is image-verified, so a unique exact-name hit is trustworthy.
                 val nameNorm = fancyFold(avatarName)
                 val exact = cand.filter { fancyFold(it.name) == nameNorm }
-                val m = if (exact.isNotEmpty()) exact else cand
+                // Author present → author-locked, so a unique EXACT name wins else the (author-filtered)
+                // candidate set decides. NO author logged → take the risk ONLY on a unique EXACT name:
+                // serve iff exactly ONE avatar is named exactly this; 2+ exact-same-named → ambiguous
+                // (don't guess); NO exact match → don't guess (a looser unique-token guess with no author
+                // is too risky — the user's explicit call). So a fancy-font name resolves iff its plain
+                // exact name is unique in the catalog.
+                val m = if (authorNorm.isNotBlank()) (if (exact.isNotEmpty()) exact else cand) else exact
                 if (m.size == 1) {
                     val e = m[0]
                     // CONFIRM live+public before offering (no worn image to match here — loading player —
