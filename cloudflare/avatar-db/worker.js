@@ -140,13 +140,34 @@ function platMask(platforms) {
   let m = 0; const p = platforms || [];
   if (p.includes("PC")) m |= 1; if (p.includes("Quest")) m |= 2; if (p.includes("iOS")) m |= 4; return m;
 }
+// NFKC-fold before tokenizing so "fancy" Unicode display names — modifier-letter/superscript caps
+// (ᵂᴴᴵᵀᴱ ᵀᴵᴳᴱᴿ), Mathematical-Alphanumeric bold/script (𝗪𝗛𝗜𝗧𝗘), fullwidth (ＷＨＩＴＥ), all VERY common
+// on VRChat — index under their PLAIN-ASCII tokens ("white","tiger") instead of the decorative
+// codepoints. This makes a plain-text search find a fancy-named/authored avatar. The STORED display
+// fields (fragSummary.n/au) stay RAW so the UI still shows the styled name; only the search tokens fold.
+// Unicode "small capital" letters (a common VRChat font NFKC does NOT fold) -> plain ASCII, applied
+// AFTER NFKC so smallcaps names index/search as plain. MUST stay byte-identical to the app maps
+// (AvatarGlobalDb.SMALLCAPS / VrchatAuthManager.SMALLCAPS).
+const SMALLCAPS = { "ᴀ":"a","ʙ":"b","ᴄ":"c","ᴅ":"d","ᴇ":"e","ꜰ":"f","ɢ":"g","ʜ":"h","ɪ":"i","ᴊ":"j","ᴋ":"k","ʟ":"l","ᴍ":"m","ɴ":"n","ᴏ":"o","ᴘ":"p","ꞯ":"q","ʀ":"r","ꜱ":"s","ᴛ":"t","ᴜ":"u","ᴠ":"v","ᴡ":"w","ʏ":"y","ᴢ":"z" };
+function foldFancy(s) {
+  let out = "";
+  for (const ch of String(s).normalize("NFKC")) out += (SMALLCAPS[ch] || ch);
+  return out;
+}
 function tokenizeFields(...fields) {
   const set = new Set();
   for (const f of fields) {
     if (!f) continue;
-    for (const w of String(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) set.add(w);
+    for (const w of foldFancy(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) set.add(w);
   }
   return set;
+}
+// True when an entry's name/author contain "fancy" Unicode that NFKC folds to different ASCII — i.e.
+// it was indexed (before this fold shipped) under decorative tokens and needs a one-time re-index so
+// its plain-ASCII tokens enter the search index. Cheap string compare, no allocation on the ASCII path.
+function needsFold(e) {
+  const s = (e.name || "") + " " + (e.author || "");
+  return foldFancy(s) !== s;
 }
 const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
 // Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The index-op backlog beyond this cap
@@ -595,7 +616,8 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 16,   // MAX_SHARDS_PER_FLUSH 120 -> 180: drain pending into processable unfilled faster so fill bots aren't starved (no cost increase — same writes, fewer crons)
+          foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
+          version: 18,   // small-caps added to the Unicode fold (index + query), FOLD_VER 2 re-index
         });
       }
 
@@ -668,6 +690,11 @@ const RECONCILE_REARM_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days (matches the r
 // the removed GitHub Action (the Worker never recomputed it → a permanent phantom liveness "queued N",
 // staleCount/4 ≈ 73 per bot, that could never drain).
 const STALE_CUTOFF_MS = 30 * 24 * 60 * 60 * 1000;
+// Bump to force a one-time re-index of the WHOLE catalog's fancy-Unicode entries: when meta.foldVer is
+// behind this, the reconcile lap emits an ADD index op for every needsFold() entry so its NFKC-FOLDED
+// (plain-ASCII) tokens enter the search index (the old fancy-glyph tokens stay as harmless orphans).
+// After that lap, plain-text search finds fancy-named/authored avatars. Set on clean lap completion.
+const FOLD_VER = 2;   // bumped: added small-caps to the fold map -> re-index folds smallcaps entries too
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   // ONE-TIME migration: zero the frozen legacy staleCount NOW (kills the phantom "queued" immediately)
@@ -685,6 +712,15 @@ async function reconcileIndex(env) {
     } catch (_) {}
     // fall through → run the recount this run (rcDone is now false)
   }
+  // ONE-TIME fold re-index: if foldVer is behind, force a fresh lap (even if a heal is current + within
+  // the re-arm window) so the entry loop can emit folded-token ADD ops for existing fancy entries.
+  if (meta.foldVer !== FOLD_VER && meta.rcDone) {
+    meta.rcDone = false;
+    meta.rc = 0; meta.reconcileScanned = 0;
+    meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
+    // fall through → run the lap; foldVer is stamped on clean completion
+  }
+  const foldPass = meta.foldVer !== FOLD_VER;   // emit folded-token ADDs for fancy entries this lap
   // Re-arm a completed heal once it's older than the interval, so the count is periodically re-truthed.
   if (meta.rcDone) {
     const doneMs = meta.rcDoneAt ? (Date.parse(meta.rcDoneAt) || 0) : 0;
@@ -746,6 +782,13 @@ async function reconcileIndex(env) {
       if (!avtrCache[b].has(id)) {
         const op = buildIndexOp(null, e, fid);   // ADD: writes fragment + avtr + tokens
         if (op) { missing.push(op); avtrCache[b].add(id); }   // add to cache so siblings this run aren't re-flagged
+      } else if (foldPass && needsFold(e)) {
+        // Present in the index but tokenized under FANCY glyphs → emit an ADD so its FOLDED (NFKC,
+        // plain-ASCII) tokens enter the index. buildIndexOp uses the now-folding tokenizeFields; the
+        // applyIndexOps no-op guards mean only the genuinely-new folded tokens get written (avtr/frag
+        // are already present → skipped). Runs once per entry until foldVer is stamped.
+        const op = buildIndexOp(null, e, fid);
+        if (op) missing.push(op);
       }
     }
     if (shardHasUnfilled) fillSeen.add(prefix);   // this shard belongs in the fill worklist
@@ -776,6 +819,7 @@ async function reconcileIndex(env) {
     const attempts = (meta.rcAttempts || 0);
     if (clean) {
       meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
+      meta.foldVer = FOLD_VER;   // fancy-entry fold re-index complete (folded tokens now in the index)
       meta.entries = meta.rcEntries || 0;
       meta.unfilled = meta.rcUnfilled || 0;
       meta.stale = meta.rcStale || 0;   // adopt the TRUE liveness backlog (drains live via the flush)

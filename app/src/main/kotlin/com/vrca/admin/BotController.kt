@@ -35,8 +35,13 @@ object BotController {
     private val _views = MutableStateFlow<List<AvatarCatalogSweep.RoleView>>(emptyList())
     val views: StateFlow<List<AvatarCatalogSweep.RoleView>> = _views
 
-    private val _totalQueued = MutableStateFlow(0)
-    val totalQueued: StateFlow<Int> = _totalQueued
+    // Catalog re-verify coverage: distinct shards visited at least once (Pair = covered/4096), and the
+    // full re-verify LAP time in ms (-1 while still on the first coverage lap). The continuous walk has
+    // no "queued backlog" — coverage + lap time are the meaningful progress signals instead.
+    private val _shardsCovered = MutableStateFlow<Pair<Int, Int>?>(null)
+    val shardsCovered: StateFlow<Pair<Int, Int>?> = _shardsCovered
+    private val _lapAgeMs = MutableStateFlow(-1L)
+    val lapAgeMs: StateFlow<Long> = _lapAgeMs
 
     // Net catalog growth over ~24h (added − removed), from local entryCount snapshots. Pair =
     // (delta, windowHours); null until we have a snapshot. windowHours < 24 while history is short.
@@ -47,16 +52,6 @@ object BotController {
     // Free — read straight from the flush buffer, no network.
     private val _lastPush = MutableStateFlow<Pair<String, Long>?>(null)
     val lastPush: StateFlow<Pair<String, Long>?> = _lastPush
-
-    private val _blitz = MutableStateFlow(false)
-    val blitz: StateFlow<Boolean> = _blitz
-
-    private val _blitzViews = MutableStateFlow<Map<Int, AvatarCatalogSweep.BlitzView>>(emptyMap())
-    val blitzViews: StateFlow<Map<Int, AvatarCatalogSweep.BlitzView>> = _blitzViews
-
-    // Blitz shard coverage (done, total) while a blitz is active — the "shards finished / left" readout.
-    private val _blitzShards = MutableStateFlow<Pair<Int, Int>?>(null)
-    val blitzShards: StateFlow<Pair<Int, Int>?> = _blitzShards
 
     /** Proof-of-life for the sweep loop: true while it has cycled within the last minute
      *  (alive even when idle/caught-up), and how many ms since the last cycle (-1 = never).
@@ -243,14 +238,9 @@ object BotController {
                 } else { lastProgressMs = 0L; lastCheckedSum = -1 }
                 // pendingReports now comes from the shared 30s /health poll (L3) — no separate GET here.
                 val vs = withContext(Dispatchers.Default) { AvatarCatalogSweep.roleViews(pendingReports) }
-                val bv = withContext(Dispatchers.Default) { AvatarCatalogSweep.blitzViews() }
                 _views.value = vs
-                // The per-bot queued numbers are SPLIT shares; use the true total backlog for
-                // the "To process" pill so splitting the display doesn't distort the grand total.
-                _totalQueued.value = AvatarCatalogSweep.lastTotalBacklog
-                _blitz.value = AvatarCatalogSweep.blitzActive()
-                _blitzViews.value = bv
-                _blitzShards.value = AvatarCatalogSweep.blitzShardProgress()
+                _shardsCovered.value = withContext(Dispatchers.Default) { AvatarCatalogSweep.shardsCovered(app) to 4096 }
+                _lapAgeMs.value = withContext(Dispatchers.Default) { AvatarCatalogSweep.oldestSweptAgeMs(app) }
                 _sweepAlive.value = AvatarCatalogSweep.sweepAlive()
                 _lastPush.value = AvatarCatalogSweep.lastFlushInfo.takeIf { it.isNotBlank() }
                     ?.let { it to AvatarCatalogSweep.lastFlushAtMs }
