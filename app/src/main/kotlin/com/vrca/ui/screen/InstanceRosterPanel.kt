@@ -46,7 +46,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.vrca.BuildConfig
 import com.vrca.vrchat.InstanceRosterManager
 
@@ -227,7 +230,17 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
             Column(Modifier.weight(1f)) {
                 Text(
                     m.displayName,
-                    style = MaterialTheme.typography.bodyMedium,
+                    // Pin the line box to a fixed height + trim, so a name with TALL glyphs
+                    // (daggers, Bengali/Thai combining marks, fancy Unicode) can't stretch the row
+                    // taller than its neighbours — the glyphs overflow the fixed box instead.
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        lineHeight = 18.sp,
+                        lineHeightStyle = LineHeightStyle(
+                            alignment = LineHeightStyle.Alignment.Center,
+                            trim = LineHeightStyle.Trim.Both
+                        ),
+                        platformStyle = PlatformTextStyle(includeFontPadding = false)
+                    ),
                     // You = purple (pinned top), friends = yellow, everyone else default.
                     color = when {
                         m.isSelf -> androidx.compose.ui.graphics.Color(0xFFB388FF)
@@ -235,6 +248,7 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                         else -> MaterialTheme.colorScheme.onSurface
                     },
                     maxLines = 1,
+                    softWrap = false,
                     overflow = TextOverflow.Ellipsis
                 )
                 val statusText = m.statusDescription.ifBlank { rosterStatusLabel(m.status) }
@@ -249,9 +263,17 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                         )
                         Text(
                             statusText,
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                lineHeight = 15.sp,
+                                lineHeightStyle = LineHeightStyle(
+                                    alignment = LineHeightStyle.Alignment.Center,
+                                    trim = LineHeightStyle.Trim.Both
+                                ),
+                                platformStyle = PlatformTextStyle(includeFontPadding = false)
+                            ),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
+                            softWrap = false,
                             overflow = TextOverflow.Ellipsis
                         )
                     }

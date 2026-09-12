@@ -1,6 +1,6 @@
-<!-- Friend-request glyph: a person with a small "+" badge at the bottom-right, matching
-     VRChat's add-friend mark. Person (nonZero) + badge circle with the plus carved (evenOdd).
-     Single fill colour so Icon(tint=…) themes it. -->
+<!-- Friend-request glyph: a solid person (head + shoulders) with a filled circle badge at the
+     bottom-right carrying a "+" carved out (evenOdd), a clean background gap between the body and
+     the badge. Single fill colour so Icon(tint=…) themes it. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -8,11 +8,11 @@
     android:viewportHeight="24">
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M5.7,7.2 a3.6,3.6 0 1,0 7.2,0 a3.6,3.6 0 1,0 -7.2,0 z
-                          M2.6,18.6 c0,-4 3,-7.1 6.7,-7.1 s6.7,3.1 6.7,7.1 z" />
+        android:pathData="M3.5,7 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 z
+                          M2.5,19.5 c0,-3.6 2.24,-6.5 5,-6.5 s5,2.9 5,6.5 z" />
     <path
         android:fillColor="#FFFFFFFF"
         android:fillType="evenOdd"
-        android:pathData="M12.4,18 a5.6,5.6 0 1,0 11.2,0 a5.6,5.6 0 1,0 -11.2,0 z
-                          M16.8,14.6 L19.2,14.6 L19.2,16.8 L21.4,16.8 L21.4,19.2 L19.2,19.2 L19.2,21.4 L16.8,21.4 L16.8,19.2 L14.6,19.2 L14.6,16.8 L16.8,16.8 Z" />
+        android:pathData="M13.5,16.5 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0 z
+                          M17.2,14.1 L18.8,14.1 L18.8,15.7 L20.4,15.7 L20.4,17.3 L18.8,17.3 L18.8,18.9 L17.2,18.9 L17.2,17.3 L15.6,17.3 L15.6,15.7 L17.2,15.7 Z" />
 </vector>
