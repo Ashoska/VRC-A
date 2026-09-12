@@ -1975,8 +1975,15 @@ object VrchatAuthManager {
      *  ASCII letters, so a raw `author.lowercase() == "white tiger"` compare (or a token match)
      *  fails whenever the two sides use different fonts. NFKC maps those decorative glyphs to their
      *  base letters ("𝗪𝗛𝗜𝗧𝗘 𝗧𝗜𝗚𝗘𝗥" → "white tiger"), so the compare works regardless of styling. */
-    private fun fancyFold(s: String): String =
-        java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC).trim().lowercase()
+    private val SMALLCAPS = mapOf(
+        'ᴀ' to 'a','ʙ' to 'b','ᴄ' to 'c','ᴅ' to 'd','ᴇ' to 'e','ꜰ' to 'f','ɢ' to 'g','ʜ' to 'h','ɪ' to 'i',
+        'ᴊ' to 'j','ᴋ' to 'k','ʟ' to 'l','ᴍ' to 'm','ɴ' to 'n','ᴏ' to 'o','ᴘ' to 'p','ꞯ' to 'q','ʀ' to 'r',
+        'ꜱ' to 's','ᴛ' to 't','ᴜ' to 'u','ᴠ' to 'v','ᴡ' to 'w','ʏ' to 'y','ᴢ' to 'z')
+    private fun fancyFold(s: String): String {
+        val n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC)
+        val folded = if (n.none { it in SMALLCAPS }) n else buildString(n.length) { for (c in n) append(SMALLCAPS[c] ?: c) }
+        return folded.trim().lowercase()
+    }
 
     private suspend fun resolveByNameAndAuthor(context: Context, avatarName: String, author: String): WornAvatarResult? =
         withContext(Dispatchers.IO) {

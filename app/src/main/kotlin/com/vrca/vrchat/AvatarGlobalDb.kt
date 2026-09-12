@@ -759,9 +759,21 @@ object AvatarGlobalDb {
      * desc-absent), return as [Entry]s. Empty when R2 search isn't live or nothing matches —
      * the caller then keeps its existing behaviour (whole-map / mirrors).
      */
-    // NFKC-fold "fancy" Unicode display text (ᵂᴴᴵᵀᴱ/𝗪𝗛𝗜𝗧𝗘/ＷＨＩＴＥ → white) so a query matches the
-    // plain-ASCII tokens the Worker now indexes. See the Worker's tokenizeFields.
-    private fun nfkcFold(s: String): String = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC)
+    // Small-caps Unicode letters NFKC does NOT fold; mapped to plain ASCII AFTER NFKC. MUST match the
+    // Worker's SMALLCAPS byte-for-byte (else index tokens and query tokens disagree).
+    private val SMALLCAPS = mapOf(
+        'ᴀ' to 'a','ʙ' to 'b','ᴄ' to 'c','ᴅ' to 'd','ᴇ' to 'e','ꜰ' to 'f','ɢ' to 'g','ʜ' to 'h','ɪ' to 'i',
+        'ᴊ' to 'j','ᴋ' to 'k','ʟ' to 'l','ᴍ' to 'm','ɴ' to 'n','ᴏ' to 'o','ᴘ' to 'p','ꞯ' to 'q','ʀ' to 'r',
+        'ꜱ' to 's','ᴛ' to 't','ᴜ' to 'u','ᴠ' to 'v','ᴡ' to 'w','ʏ' to 'y','ᴢ' to 'z')
+    // Fold "fancy" Unicode display text (ᵂᴴᴵᵀᴱ/𝗪𝗛𝗜𝗧𝗘/ＷＨＩＴＥ/ᴡʜɪᴛᴇ → white) so a query matches the
+    // plain-ASCII tokens the Worker now indexes (NFKC + small-caps). See the Worker's foldFancy.
+    private fun nfkcFold(s: String): String {
+        val n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC)
+        if (n.none { it in SMALLCAPS }) return n
+        val sb = StringBuilder(n.length)
+        for (c in n) sb.append(SMALLCAPS[c] ?: c)
+        return sb.toString()
+    }
     private fun queryTokens(q: String): List<String> =
         q.trim().lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }.distinct()
     /** AND-intersect a token list's posting lists (order preserved from the first token). */

@@ -145,11 +145,20 @@ function platMask(platforms) {
 // on VRChat — index under their PLAIN-ASCII tokens ("white","tiger") instead of the decorative
 // codepoints. This makes a plain-text search find a fancy-named/authored avatar. The STORED display
 // fields (fragSummary.n/au) stay RAW so the UI still shows the styled name; only the search tokens fold.
+// Unicode "small capital" letters (a common VRChat font NFKC does NOT fold) -> plain ASCII, applied
+// AFTER NFKC so smallcaps names index/search as plain. MUST stay byte-identical to the app maps
+// (AvatarGlobalDb.SMALLCAPS / VrchatAuthManager.SMALLCAPS).
+const SMALLCAPS = { "ᴀ":"a","ʙ":"b","ᴄ":"c","ᴅ":"d","ᴇ":"e","ꜰ":"f","ɢ":"g","ʜ":"h","ɪ":"i","ᴊ":"j","ᴋ":"k","ʟ":"l","ᴍ":"m","ɴ":"n","ᴏ":"o","ᴘ":"p","ꞯ":"q","ʀ":"r","ꜱ":"s","ᴛ":"t","ᴜ":"u","ᴠ":"v","ᴡ":"w","ʏ":"y","ᴢ":"z" };
+function foldFancy(s) {
+  let out = "";
+  for (const ch of String(s).normalize("NFKC")) out += (SMALLCAPS[ch] || ch);
+  return out;
+}
 function tokenizeFields(...fields) {
   const set = new Set();
   for (const f of fields) {
     if (!f) continue;
-    for (const w of String(f).normalize("NFKC").toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) set.add(w);
+    for (const w of foldFancy(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) set.add(w);
   }
   return set;
 }
@@ -158,7 +167,7 @@ function tokenizeFields(...fields) {
 // its plain-ASCII tokens enter the search index. Cheap string compare, no allocation on the ASCII path.
 function needsFold(e) {
   const s = (e.name || "") + " " + (e.author || "");
-  return s.normalize("NFKC") !== s;
+  return foldFancy(s) !== s;
 }
 const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
 // Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The index-op backlog beyond this cap
@@ -608,7 +617,7 @@ export default {
           shardScheme: "filehex3-full",
           shardCount: 4096,
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
-          version: 17,   // NFKC-fold search tokens (fancy fonts ᵂᴴᴵᵀᴱ/𝗪𝗛𝗜𝗧𝗘 index as plain "white") + one-time fold re-index
+          version: 18,   // small-caps added to the Unicode fold (index + query), FOLD_VER 2 re-index
         });
       }
 
@@ -685,7 +694,7 @@ const STALE_CUTOFF_MS = 30 * 24 * 60 * 60 * 1000;
 // behind this, the reconcile lap emits an ADD index op for every needsFold() entry so its NFKC-FOLDED
 // (plain-ASCII) tokens enter the search index (the old fancy-glyph tokens stay as harmless orphans).
 // After that lap, plain-text search finds fancy-named/authored avatars. Set on clean lap completion.
-const FOLD_VER = 1;
+const FOLD_VER = 2;   // bumped: added small-caps to the fold map -> re-index folds smallcaps entries too
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   // ONE-TIME migration: zero the frozen legacy staleCount NOW (kills the phantom "queued" immediately)
