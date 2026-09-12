@@ -466,17 +466,10 @@ object AvatarCatalogSweep {
         start(context, adminKey, manual)
     }
 
-    /** Kick a bounded full-catalog blitz: for the next window, FILL targets every
-     *  incomplete entry and LIVENESS re-checks anything older than 1h — so all bots
-     *  catch up the whole catalog (bios + dead checks) from before. Re-press to extend. */
-    fun requestFullBlitz() {
-        val now = System.currentTimeMillis()
-        // Fresh blitz → anchor the cutoff to NOW so every currently-stale avatar is swept
-        // exactly once. A re-press while one is already running only EXTENDS the window and
-        // KEEPS the anchor, so it keeps draining the remainder instead of restarting the sweep.
-        if (!blitzActive()) { blitzStartMs = now; blitzWalked.clear() }   // reset shard coverage on a fresh blitz
-        blitzUntilMs = now + BLITZ_WINDOW_MS
-    }
+    /** DEPRECATED / NO-OP: the continuous oldest-first walk (see nextWorkPrefix) re-verifies the WHOLE
+     *  catalog on a rolling basis forever, so there is no "catch-up backlog" to blitz. Kept as a no-op
+     *  so any lingering caller compiles; blitzActive() stays false, disabling every blitz branch. */
+    fun requestFullBlitz() { /* no-op — replaced by the continuous walk */ }
 
     fun progressLine(role: Role): String {
         val p = progress.getValue(role)
@@ -916,35 +909,17 @@ object AvatarCatalogSweep {
      *  BLITZ, walk ALL 4096 shards (blind cursor) so "check entire catalog" actually covers it —
      *  the work-list only lists steady-state work shards. Otherwise refill the shared queue from
      *  `_worklist.json` when empty (single-flight, TTL-throttled). */
-    private suspend fun nextWorkPrefix(context: Context): String? {
-        // BLITZ: cover the WHOLE catalog ONCE, oldest-swept first, bounded to shards not yet swept
-        // since the blitz began (blitzStartMs). Returns null once every shard is covered → the bots
-        // idle → the blitz keepalive lapses → the blitz ENDS, instead of spin-reading the whole
-        // catalog every ~1.5s for the rest of the 30-min window after coverage was already complete.
-        if (blitzActive()) return oldestSweptPrefix(context, dueOnly = false, coverBeforeMs = blitzStartMs)
-        workQueue.poll()?.let { return it }
-        // FILL work comes ENTIRELY from `_worklist.json` now — the Worker's reconcile keeps it
-        // authoritative for EVERY unfilled shard (freshly-contributed AND pre-existing), so an empty
-        // work-list genuinely means no fill work. We no longer blind-walk the whole catalog to "find"
-        // unfilled avatars the incremental list missed (that re-armed on every manifestUnfilled growth
-        // and looped the 4096-shard walk forever). When the list is empty we fall back only to the
-        // LIVENESS due-trickle; the fill walk terminates when the work-list drains.
-        return worklistMutex.withLock {
-            workQueue.poll()?.let { return@withLock it }   // another bot refilled while we waited
-            // If we recently learned the worklist is empty, don't re-hit the CDN this cycle — just
-            // run the liveness due-trickle (no whole-catalog fill sweep).
-            if (worklistEmpty && System.currentTimeMillis() - worklistFetchedMs < WORKLIST_TTL_MS)
-                return@withLock livenessPrefix(context)
-            val wl = AvatarGlobalDb.fetchWorklist(context)
-            worklistFetchedMs = System.currentTimeMillis()
-            if (wl == null) { worklistEmpty = false; return@withLock livenessPrefix(context) }  // read failed → liveness trickle
-            val (fill, stale) = wl
-            worklistEmpty = fill.isEmpty() && stale.isEmpty()
-            workQueue.addAll(fill); workQueue.addAll(stale)   // fill first, then stale (liveness)
-            // Worklist empty → liveness due-trickle only (fill is fully work-list-driven now).
-            workQueue.poll() ?: livenessPrefix(context)
-        }
-    }
+    private suspend fun nextWorkPrefix(context: Context): String? =
+        // CONTINUOUS OLDEST-FIRST WALK (per the user's design): all bots forever grab the
+        // OLDEST-swept shard (unswept = oldest), one at a time, together. Each shard is checked
+        // WHOLE (fill + refresh + dead in ONE pass) and pushed as ONE grouped write, then re-stamped
+        // swept so it goes to the back of the line — so the walk rotates through all 4096 shards
+        // endlessly and every avatar is re-verified once per full lap. `dueOnly=false` means it never
+        // idles (there is always an oldest shard); the only per-shard cost is R2 reads (CDN-cached)
+        // + ONE write when something actually changed. This REPLACED the fill-worklist + due-only
+        // liveness trickle + blitz (all three are subsumed by this one continuous walk — the worklist
+        // machinery is now vestigial, and requestFullBlitz() is a no-op).
+        oldestSweptPrefix(context, dueOnly = false)
     // Skip re-checking an avatar within the flush-lag window: the bot's fill/check reaches the
     // shard ~1 flush cycle later, so without this a fast re-walk of the same shard would re-do
     // the same VRChat call. Bounded + TTL'd.
@@ -1009,9 +984,13 @@ object AvatarCatalogSweep {
         if (blitzActive()) blitzWalked.add(prefix)   // count coverage only for shards actually READ
         p.shards++                    // shard-walk throughput (one shard = one cheap grouped R2 write)
         val cutoff = livenessCutoff()
-        val work = entries.filter { (needsFill(it) || it.checked < cutoff) && !wasRecentlyProcessed(it.fileId) }
+        // Check EVERY avatar in the shard (per the user's design) — dead/rename/desc/perf are all
+        // caught in the ONE continuous pass, not gated on a 30-day "due" cutoff. The only skip is the
+        // short-TTL recent-process guard (another bot / a just-done re-walk). WHOLE shard in one pass →
+        // one grouped push at the end.
+        val work = entries.filterNot { wasRecentlyProcessed(it.fileId) }
         if (work.isEmpty()) { p.status = "walking ($prefix clear)"; return false }
-        val batch = claimBatch(work, WALK_BATCH)
+        val batch = claimBatch(work, work.size)
         if (batch.isEmpty()) return false
         if (blitzActive()) blitzUntilMs = maxOf(blitzUntilMs, System.currentTimeMillis() + BLITZ_KEEPALIVE_MS)
         p.status = "walk $prefix: ${batch.size}"

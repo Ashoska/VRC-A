@@ -302,26 +302,15 @@ private fun MaintenanceCard(
 
             Divider()
 
-            Button(onClick = { AvatarCatalogSweep.requestFullBlitz() }, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Filled.Bolt, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.size(6.dp))
-                Text(if (blitz) "Blitz running — extend" else "Check entire catalog (blitz)")
-            }
-            // Blitz shard coverage — "N / 4096 shards checked (M left)".
-            blitzShards?.let { (done, total) ->
-                val left = (total - done).coerceAtLeast(0)
-                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    androidx.compose.material3.LinearProgressIndicator(
-                        progress = if (total > 0) done.toFloat() / total else 0f,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Text(
-                        "Blitz: $done / $total shards checked · $left left",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
+            // The bots run a CONTINUOUS oldest-first shard walk — every avatar is re-verified on a
+            // rolling basis forever (dead/rename/desc/perf), one grouped write per shard. There's no
+            // "catch-up backlog", so the old manual blitz button was removed.
+            Text(
+                "Continuous liveness: the bots walk the oldest shards forever, checking every avatar and pushing one write per shard.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth()
+            )
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
