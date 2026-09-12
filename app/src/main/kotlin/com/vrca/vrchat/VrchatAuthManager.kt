@@ -1540,11 +1540,18 @@ object VrchatAuthManager {
     /** Drop the session liveness cache — called on instance leave so it doesn't accumulate across a
      *  long session (kept ACROSS hops so a re-seen avatar isn't re-confirmed). Bounds the memory the
      *  "no robot tap" pre-check holds. */
-    fun clearAvatarLiveCache() { avatarLiveCache.clear(); avatarLivePlatforms.clear(); avatarLiveFileIds.clear() }
+    fun clearAvatarLiveCache() { avatarLiveCache.clear(); avatarLivePlatforms.clear(); avatarLiveFileIds.clear(); avatarLiveName.clear(); avatarLiveAuthor.clear(); staleReported.clear() }
 
     /** Result of a live-confirm: [live]=true (200, wearable), false (403/404, not wearable → grey +
      *  report), null (transient → unknown, retry, do NOT grey/report). */
-    data class AvatarConfirm(val live: Boolean?, val fileIds: Set<String>, val platforms: List<String>)
+    data class AvatarConfirm(val live: Boolean?, val fileIds: Set<String>, val platforms: List<String>, val name: String = "", val author: String = "")
+    // Live name/author parsed from the avatar page — the AUTHORITATIVE values for deciding a
+    // shared-thumbnail collision (vs our possibly-stale stored author) and for flagging a stale entry.
+    private val avatarLiveName = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val avatarLiveAuthor = java.util.concurrent.ConcurrentHashMap<String, String>()
+    // Fire the "stale entry" refresh report AT MOST ONCE per file id per session, so a member repeatedly
+    // switching back to a stale-catalog avatar can't re-send it (cleared on instance leave with the rest).
+    private val staleReported = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
 
     /** Confirm an avatar is still LIVE + PUBLIC before its catalog entry is offered as clonable, so
      *  the clone button NEVER robots on a dead/private avatar (the user's hard requirement). One
@@ -1554,7 +1561,8 @@ object VrchatAuthManager {
     suspend fun confirmAvatarLive(context: Context, avatarId: String): AvatarConfirm =
         withContext(Dispatchers.IO) {
             avatarLiveCache[avatarId]?.let {
-                return@withContext AvatarConfirm(it, avatarLiveFileIds[avatarId] ?: emptySet(), avatarLivePlatforms[avatarId] ?: emptyList())
+                return@withContext AvatarConfirm(it, avatarLiveFileIds[avatarId] ?: emptySet(), avatarLivePlatforms[avatarId] ?: emptyList(),
+                    avatarLiveName[avatarId] ?: "", avatarLiveAuthor[avatarId] ?: "")
             }
             val cookie = getCookieHeader(context) ?: return@withContext AvatarConfirm(null, emptySet(), emptyList())
             try {
@@ -1565,8 +1573,10 @@ object VrchatAuthManager {
                         val j = org.json.JSONObject(body)
                         val ids = setOfNotNull(fileIdOf(j.optString("thumbnailImageUrl", "")), fileIdOf(j.optString("imageUrl", "")))
                         val plats = platformsFromAvatarJson(j)
+                        val liveName = j.optString("name", ""); val liveAuthor = j.optString("authorName", "")
                         avatarLiveCache[avatarId] = true; avatarLiveFileIds[avatarId] = ids; avatarLivePlatforms[avatarId] = plats
-                        AvatarConfirm(true, ids, plats)
+                        avatarLiveName[avatarId] = liveName; avatarLiveAuthor[avatarId] = liveAuthor
+                        AvatarConfirm(true, ids, plats, liveName, liveAuthor)
                     }
                     code == 403 || code == 404 -> { avatarLiveCache[avatarId] = false; AvatarConfirm(false, emptySet(), emptyList()) }
                     else -> AvatarConfirm(null, emptySet(), emptyList())   // transient — do not cache, retry
@@ -1575,13 +1585,6 @@ object VrchatAuthManager {
         }
 
     private enum class HitVerdict { SERVE, DEAD, RETRY, FALLTHROUGH }
-    /** Human-readable verdict for the per-user resolve trace. */
-    private fun verdictLabel(v: HitVerdict): String = when (v) {
-        HitVerdict.SERVE -> "LIVE (200) → serve"
-        HitVerdict.DEAD -> "DEAD/private (403/404) → grey + report"
-        HitVerdict.RETRY -> "transient (429/5xx) → retry, not cached"
-        HitVerdict.FALLTHROUGH -> "live but worn image no longer matches (stale entry) → resolve fresh"
-    }
 
     /** Verify a catalog-HIT avatar is safe to offer as clonable. SERVE = live+public (and, when the
      *  worn file id is known, its image still matches — not a stale re-keyed entry). DEAD = 403/404
@@ -1595,6 +1598,63 @@ object VrchatAuthManager {
             null -> HitVerdict.RETRY to emptyList()
             else -> if (wornFileId == null || wornFileId in c.fileIds) HitVerdict.SERVE to c.platforms
                     else HitVerdict.FALLTHROUGH to emptyList()
+        }
+    }
+
+    /** True when both authors are known and DIFFER (font-folded). Public so the roster's instant enrich
+     *  shortcut can reuse the same comparison. */
+    fun authorMismatch(a: String, b: String): Boolean =
+        a.isNotBlank() && b.isNotBlank() && fancyFold(a) != fancyFold(b)
+
+    /** Decide a catalog image-file-id HIT (local map OR R2 shard). Returns the result to RETURN, or
+     *  null to FALL THROUGH to the fresh image-based resolve paths. Uses the LIVE avatar page (fetched
+     *  by confirmAvatarLive, session-cached) as the source of truth — NOT our possibly-stale stored
+     *  author — so a creator who RENAMED (their avatar or display name) isn't mistaken for a collision:
+     *   - dead/private → report dead + grey.  transient → retry.
+     *   - live but the worn image no longer matches this avatar → fall through (stale mapping).
+     *   - live + image matches, but the LIVE author still disagrees with the log author → genuine
+     *     shared-thumbnail collision (a rip/reskin reusing the thumbnail) → resolve by name+author.
+     *   - live + image matches + author agrees (or unknown) → the RIGHT avatar → serve; and if our
+     *     STORED entry's name/author is stale vs the live page, fire a "renamed" report so the catalog
+     *     self-heals (the rare-case refresh the user asked for). */
+    private suspend fun serveCatalogHit(
+        context: Context, entry: com.vrca.vrchat.AvatarGlobalDb.Entry, wornFileId: String?,
+        logName: String, logAuthor: String, source: String, step: (String) -> Unit
+    ): WornAvatarResult? {
+        val conf = confirmAvatarLive(context, entry.avatarId)
+        step("  live-confirm (GET /avatars/${entry.avatarId}): " + when (conf.live) {
+            true -> "LIVE (200)"; false -> "DEAD/private (403/404)"; else -> "transient (retry)" })
+        when (conf.live) {
+            false -> {
+                wornFileId?.let { com.vrca.vrchat.AvatarGlobalDb.report(context, it, entry.avatarId, "dead") }
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog entry dead/private ($source, confirmed) — greyed + reported"
+                return WornAvatarResult(null, dead = true, fileId = wornFileId)
+            }
+            null -> { com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog hit, liveness unknown ($source) — retry"; return WornAvatarResult(null) }
+            else -> {
+                // The worn image must still be THIS avatar's (guards a re-keyed/changed thumbnail).
+                if (wornFileId != null && wornFileId !in conf.fileIds) { step("  worn image no longer matches this entry — resolving fresh"); return null }
+                // Genuine collision iff the LIVE author (authoritative) still disagrees with the log.
+                if (authorMismatch(conf.author, logAuthor)) {
+                    step("  author mismatch (live '${conf.author}' vs log '$logAuthor') — shared-thumbnail collision; resolving by name+author")
+                    val byNA = resolveByNameAndAuthor(context, logName, logAuthor)
+                    step("  name+author resolve: ${com.vrca.vrchat.AvatarSearch.Diag.lastReason}")
+                    return byNA ?: WornAvatarResult(null)   // the REAL avatar, or unresolved (retry) — never the collided one
+                }
+                // Right avatar. If OUR stored NAME is stale vs the live page, flag a "renamed" report so
+                // the catalog self-heals (the Worker applies the name immediately). AUTHOR-only staleness
+                // is left to the bots' authorId rename propagation on their walk — the resolve already
+                // used the LIVE author, so a stale stored author never mis-resolves. Fired AT MOST ONCE
+                // per file id per session (staleReported), so switching back to this avatar never re-sends
+                // it — near-zero cost, and rare (only a genuine rename trips it).
+                val nameStale = conf.name.isNotBlank() && entry.name.isNotBlank() && fancyFold(conf.name) != fancyFold(entry.name)
+                if (nameStale && wornFileId != null && staleReported.add(wornFileId)) {
+                    step("  stored name stale vs live ('${entry.name}'→'${conf.name}') — flagged refresh")
+                    com.vrca.vrchat.AvatarGlobalDb.report(context, wornFileId, entry.avatarId, "renamed", conf.name)
+                }
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog ($source, confirmed live)"
+                return WornAvatarResult(entry.avatarId, conf.platforms.ifEmpty { entry.platforms }, fileId = wornFileId)
+            }
         }
     }
 
@@ -1766,25 +1826,8 @@ object VrchatAuthManager {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "resolved to a VRChat fallback — not cloneable"
                 return@withContext WornAvatarResult(null)
             }
-            // CONFIRM it's still wearable before offering it (no robot-tap on a since-dead/private entry).
-            val (verdict, plats) = verifyCatalogHit(context, hit.avatarId, wornFileId)
-            step("  live-confirm (GET /avatars/${hit.avatarId}): ${verdictLabel(verdict)}")
-            when (verdict) {
-                HitVerdict.SERVE -> {
-                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (confirmed live)"
-                    return@withContext WornAvatarResult(hit.avatarId, plats.ifEmpty { hit.platforms }, fileId = wornFileId)
-                }
-                HitVerdict.DEAD -> {
-                    com.vrca.vrchat.AvatarGlobalDb.report(context, wornFileId!!, hit.avatarId, "dead")
-                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog entry dead/private (confirmed) — greyed + reported"
-                    return@withContext WornAvatarResult(null, dead = true, fileId = wornFileId)
-                }
-                HitVerdict.RETRY -> {
-                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog hit, liveness unknown — retry"
-                    return@withContext WornAvatarResult(null)
-                }
-                HitVerdict.FALLTHROUGH -> { /* stale mapping (image changed) → resolve fresh below */ }
-            }
+            // Confirm live + author (collision vs stale) via the live avatar page; null = fall through.
+            serveCatalogHit(context, hit, wornFileId, avatarName, author, "catalog") { s -> step(s) }?.let { return@withContext it }
         }
         // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
         // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
@@ -1808,27 +1851,8 @@ object VrchatAuthManager {
                         com.vrca.vrchat.AvatarSearch.Diag.lastReason = "resolved to a VRChat fallback (shard) — not cloneable"
                         return@withContext WornAvatarResult(null)
                     }
-                    // CONFIRM live+public before offering (the catalog is image-verified at CONTRIBUTION
-                    // time, but avatars go private/deleted later; without this, a since-dead/private entry
-                    // shows clickable → robot). One GET, session-cached — the honest cost of "no robot tap".
-                    val (verdict, plats) = verifyCatalogHit(context, e.avatarId, wornFileId)
-                    step("  live-confirm (GET /avatars/${e.avatarId}): ${verdictLabel(verdict)}")
-                    when (verdict) {
-                        HitVerdict.SERVE -> {
-                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard, confirmed live)"
-                            return@withContext WornAvatarResult(e.avatarId, plats.ifEmpty { e.platforms }, fileId = wornFileId)
-                        }
-                        HitVerdict.DEAD -> {
-                            com.vrca.vrchat.AvatarGlobalDb.report(context, wornFileId!!, e.avatarId, "dead")
-                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog entry dead/private (shard, confirmed) — greyed + reported"
-                            return@withContext WornAvatarResult(null, dead = true, fileId = wornFileId)
-                        }
-                        HitVerdict.RETRY -> {
-                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog shard hit, liveness unknown — retry"
-                            return@withContext WornAvatarResult(null)
-                        }
-                        HitVerdict.FALLTHROUGH -> { /* stale mapping → resolve fresh below */ }
-                    }
+                    // Confirm live + author (collision vs stale) via the live avatar page; null = fall through.
+                    serveCatalogHit(context, e, wornFileId, avatarName, author, "shard") { s -> step(s) }?.let { return@withContext it }
                 }
                 com.vrca.vrchat.AvatarGlobalDb.ShardStatus.UNAVAILABLE -> {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog read unavailable — will retry"

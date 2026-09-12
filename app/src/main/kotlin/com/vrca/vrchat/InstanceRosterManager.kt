@@ -969,7 +969,9 @@ object InstanceRosterManager {
                 // the SAME /users/{id} response as the pic, so a catalog hit resolves
                 // the clone id offline right when the pfp loads (no separate DB search).
                 val wornFid = Regex("file_[0-9a-fA-F-]{36}").find(info.wornAvatarThumbUrl)?.value
-                val avaName = _flow.value.members.firstOrNull { it.userId == id }?.avatarName ?: ""
+                val member0 = _flow.value.members.firstOrNull { it.userId == id }
+                val avaName = member0?.avatarName ?: ""
+                val avaAuthor = member0?.avatarCreator ?: ""
                 var catalogAvatarId: String? = null
                 // Name-optional: resolve from the worn file id whether or not the log gave an avatar name
                 // (impostor'd players have no name but still a file id). This is the INSTANT catalog-hit
@@ -1006,7 +1008,12 @@ object InstanceRosterManager {
                                 // this member UNPINNED so the guarded resolveAvatars pass (equally strict —
                                 // `verifyCatalogHit`/image-fileid match) decides, greying it if it can't
                                 // image-confirm. Matches every other serve path (all require the fileId match).
-                                true -> if (wornFid in conf.fileIds) {
+                                // Serve ONLY when the worn image matches AND the LIVE avatar's author agrees
+                                // with the log author (or one is unknown). A live-author MISMATCH means the
+                                // image-keyed entry is a DIFFERENT creator's avatar sharing the thumbnail
+                                // (rip/reskin) — don't pin the wrong one; leave it for the guarded resolver,
+                                // which resolves by name+author (the "shows I ESME, clones Gucci Morty" fix).
+                                true -> if (wornFid in conf.fileIds && !VrchatAuthManager.authorMismatch(conf.author, avaAuthor)) {
                                     val plats = conf.platforms.ifEmpty { hit.platforms }
                                     val gated = gateCloneId(hit.avatarId, plats)  // "" if PC-only on Quest
                                     avatarPlatformsCache[id] = plats
@@ -1019,7 +1026,7 @@ object InstanceRosterManager {
                                         "instant enrich shortcut: local catalog HIT ${hit.avatarId}",
                                         "confirmed live" + (if (gated.isBlank()) " but PC-only → greyed on Quest" else ""),
                                         "result: via catalog (enrich shortcut)"))
-                                }   // else: worn image no longer matches (stale re-key) → let the guarded resolver find the right one
+                                }   // else: worn image no longer matches (stale re-key) OR live-author collision → let the guarded resolver find the right one
                                 false -> {
                                     // Confirmed dead/private → report + grey DECISIVELY (never a clickable robot).
                                     com.vrca.vrchat.AvatarGlobalDb.report(context, wornFid, hit.avatarId, "dead")
