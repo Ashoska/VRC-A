@@ -237,7 +237,9 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
                     if (isOpen) {
                         Text(
                             if (b.names.isEmpty()) "(names unavailable)"
-                            else b.names.joinToString(", ") +
+                            else b.names.joinToString(", ") { n ->
+                                n.replace(Regex("\\s+"), " ").trim().let { if (it.length > 24) it.take(24) + "…" else it }
+                            } +
                                 (if (b.n > b.names.size) "  (+${b.n - b.names.size} more not stored)" else ""),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,

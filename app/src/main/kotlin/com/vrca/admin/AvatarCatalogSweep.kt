@@ -1153,7 +1153,11 @@ object AvatarCatalogSweep {
             // FREE batch-contents readout: capture the counts + a few names BEFORE the deques are
             // drained, so the admin can see what just went up (no network — it's already in hand).
             val flAdd = upserts.size; val flRem = removes.size; val flChk = checked.size
-            val flNames = upserts.mapNotNull { it.name.takeIf { n -> n.isNotBlank() } }.take(4)
+            // Cap each name — some avatars are literally named with a wall of shader code
+            // (a real avatar, not corruption); without a per-name cap ONE such name floods the readout.
+            val flNames = upserts.mapNotNull { it.name.takeIf { n -> n.isNotBlank() } }
+                .map { n -> n.replace(Regex("\\s+"), " ").trim().let { if (it.length > 24) it.take(24) + "…" else it } }
+                .take(4)
             var failed = false
             while (upserts.isNotEmpty() || removes.isNotEmpty() || clears.isNotEmpty() || checked.isNotEmpty()) {
                 val u = ArrayList<AvatarGlobalDb.Entry>(); repeat(FLUSH_CHUNK) { upserts.removeFirstOrNull()?.let(u::add) }
