@@ -227,41 +227,41 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
             // Discord shows the presence dot), platform brand glyph bottom-left.
             AvatarWithBadges(m, ctx, rowBg)
             // Name + status line (dot coloured by status; text = status description, else label).
-            Column(Modifier.weight(1f)) {
-                // The name/status Texts are each wrapped in a FIXED-HEIGHT Box (a Box reports its
-                // own height to the parent regardless of how tall the child measures, and doesn't
-                // clip by default), so a name with TALL glyphs (daggers †, Bengali/Thai combining
-                // marks, fancy Unicode, stacked diacritics) OVERFLOWS the box visually but can NEVER
-                // stretch the row taller than its neighbours. The lineHeight pin alone wasn't enough
-                // — a fallback font's own line metrics for such glyphs still grew the Text — so the
-                // fixed-height box is the bulletproof clamp. maxLines=1 + softWrap=false keep it one line.
-                Box(Modifier.height(18.dp), contentAlignment = Alignment.CenterStart) {
-                    Text(
-                        m.displayName,
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            lineHeight = 18.sp,
-                            lineHeightStyle = LineHeightStyle(
-                                alignment = LineHeightStyle.Alignment.Center,
-                                trim = LineHeightStyle.Trim.Both
-                            ),
-                            platformStyle = PlatformTextStyle(includeFontPadding = false)
+            // The WHOLE pair is wrapped in ONE fixed-height column matched to the avatar's height
+            // (34dp) and centered (verticalArrangement = Center) — so the name+status block always
+            // sits vertically centered against the avatar as a unit, AND the fixed column height is
+            // the bulletproof clamp: a name with TALL glyphs (daggers †, Bengali/Thai combining
+            // marks, fancy Unicode) OVERFLOWS the column visually but can NEVER stretch the row (a
+            // fixed-height Column reports its own height and doesn't clip). Two separate per-line
+            // fixed boxes were tried but they shifted independently when tuned; one centered column
+            // is predictable. The lineHeight pins stay on each Text as belt-and-suspenders.
+            Column(
+                modifier = Modifier.weight(1f).height(34.dp),
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    m.displayName,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        lineHeight = 18.sp,
+                        lineHeightStyle = LineHeightStyle(
+                            alignment = LineHeightStyle.Alignment.Center,
+                            trim = LineHeightStyle.Trim.Both
                         ),
-                        // You = purple (pinned top), friends = yellow, everyone else default.
-                        color = when {
-                            m.isSelf -> androidx.compose.ui.graphics.Color(0xFFB388FF)
-                            m.isFriend -> androidx.compose.ui.graphics.Color(0xFFFFD54F)
-                            else -> MaterialTheme.colorScheme.onSurface
-                        },
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                        platformStyle = PlatformTextStyle(includeFontPadding = false)
+                    ),
+                    // You = purple (pinned top), friends = yellow, everyone else default.
+                    color = when {
+                        m.isSelf -> androidx.compose.ui.graphics.Color(0xFFB388FF)
+                        m.isFriend -> androidx.compose.ui.graphics.Color(0xFFFFD54F)
+                        else -> MaterialTheme.colorScheme.onSurface
+                    },
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
                 val statusText = m.statusDescription.ifBlank { rosterStatusLabel(m.status) }
                 if (statusText.isNotBlank()) {
-                    // Fixed-height row so a tall glyph in the status text can't grow the row either.
                     Row(
-                        modifier = Modifier.height(15.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
