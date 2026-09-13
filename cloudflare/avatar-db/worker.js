@@ -48,7 +48,14 @@ const REMOVE_QUORUM = 2; // independent "dead" reports needed before a hard remo
 // served free to EVERYONE who encounters that avatar until it changes. 6h balances max cache warmth
 // against the worst case if a purge ever fails (a stale shard = slightly-old name/author; the
 // file->avatar id mapping is stable, so cloning is unaffected).
-const SHARD_TTL = 21600; // 6h (was 5 min); purge-on-write keeps it fresh
+const SHARD_TTL = 21600; // 6h (was 5 min); purge-on-write keeps it fresh — for the rarely-changing CLONE shards only
+// The SEARCH-INDEX buckets (fragments/ avtr/ index/) change constantly (every contribution, fold ADD,
+// rename) and are read for search freshness, so they get a SHORT TTL — NOT the 6h SHARD_TTL. With 6h,
+// a CDN purge that missed an edge (or a stale re-cache between write and purge) served a stale bucket
+// for up to SIX HOURS, so a freshly-indexed avatar appeared then "disappeared" from plain-text search
+// for hours (the overnight→morning flicker). At 5 min a purge-miss self-heals fast and search stays
+// consistent. Costs a few more R2 Class B (cheap) reads on the search path; clone LOOKUPS are untouched.
+const INDEX_TTL = 300; // 5 min — search-index buckets (fragments/avtr/index)
 
 // The AUTHORITATIVE catalog size lives in _manifest.json (the Action rewrites entryCount every
 // ~20 min). meta.entries in KV only moves on a flush, so between rebuilds — and whenever
@@ -187,7 +194,12 @@ const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
 // at a time across many flushes) stops a hot token/frag/avtr bucket from being read+rewritten once per
 // flush — the hot-bucket write amplification. Grouped, 150 ops touch far fewer than 150 buckets, so the
 // subrequest cost stays well under budget alongside MAX_SHARDS_PER_FLUSH (120) and purges.
-const MAX_INDEX_OPS_PER_FLUSH = 150;
+const MAX_INDEX_OPS_PER_FLUSH = 300;   // raised 150->300: the FOLD_VER re-lap + missing-from-avtr ADDs
+// emit faster than 150/flush drained, so the iq: queue ballooned past 1000 keys and never converged.
+// The bulk of these ops are NO-OP re-adds (tokens already present → cheap R2 Class B reads, no write /
+// no purge via the applyIndexOps guards), and MAX_SHARDS_PER_FLUSH is now 60 (was 180), so the flush
+// has ample wall-time headroom for a bigger index drain. 300/flush out-drains the emission so the
+// backlog shrinks + the search index converges instead of growing unbounded.
 // Bound the CLONE-SHARD writes per flush too. Each distinct shard is 1 R2 read + 1 write, so a burst
 // of big USER contribution batches (a 136-avatar batch spans ~136 shards) could push a single flush
 // past Cloudflare's per-invocation subrequest limit → the invocation dies BEFORE clearing the `pend:`
@@ -294,7 +306,7 @@ async function applyIndexOps(env, ops) {
   }
   const changed = [];
   const base = env.CATALOG_BASE ? env.CATALOG_BASE.replace(/\/$/, "") : null;
-  const ttl = { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL } };
+  const ttl = { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + INDEX_TTL } };
   // Fragments + avtr share the avatarId prefix.
   for (const p of new Set([...Object.keys(fragWork), ...Object.keys(avtrWork)])) {
     const fw = fragWork[p], aw = avtrWork[p];
@@ -635,7 +647,7 @@ export default {
           shardScheme: "filehex3-full",
           shardCount: 4096,
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
-          version: 22,   // drain applies NEW contribution ops before the backlog (prompt new-avatar search)
+          version: 23,   // short TTL on search-index buckets (fix stale-cache flicker) + drain 150->300
         });
       }
 
