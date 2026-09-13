@@ -228,32 +228,40 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
             AvatarWithBadges(m, ctx, rowBg)
             // Name + status line (dot coloured by status; text = status description, else label).
             Column(Modifier.weight(1f)) {
-                Text(
-                    m.displayName,
-                    // Pin the line box to a fixed height + trim, so a name with TALL glyphs
-                    // (daggers, Bengali/Thai combining marks, fancy Unicode) can't stretch the row
-                    // taller than its neighbours — the glyphs overflow the fixed box instead.
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        lineHeight = 18.sp,
-                        lineHeightStyle = LineHeightStyle(
-                            alignment = LineHeightStyle.Alignment.Center,
-                            trim = LineHeightStyle.Trim.Both
+                // The name/status Texts are each wrapped in a FIXED-HEIGHT Box (a Box reports its
+                // own height to the parent regardless of how tall the child measures, and doesn't
+                // clip by default), so a name with TALL glyphs (daggers †, Bengali/Thai combining
+                // marks, fancy Unicode, stacked diacritics) OVERFLOWS the box visually but can NEVER
+                // stretch the row taller than its neighbours. The lineHeight pin alone wasn't enough
+                // — a fallback font's own line metrics for such glyphs still grew the Text — so the
+                // fixed-height box is the bulletproof clamp. maxLines=1 + softWrap=false keep it one line.
+                Box(Modifier.height(20.dp), contentAlignment = Alignment.CenterStart) {
+                    Text(
+                        m.displayName,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            lineHeight = 18.sp,
+                            lineHeightStyle = LineHeightStyle(
+                                alignment = LineHeightStyle.Alignment.Center,
+                                trim = LineHeightStyle.Trim.Both
+                            ),
+                            platformStyle = PlatformTextStyle(includeFontPadding = false)
                         ),
-                        platformStyle = PlatformTextStyle(includeFontPadding = false)
-                    ),
-                    // You = purple (pinned top), friends = yellow, everyone else default.
-                    color = when {
-                        m.isSelf -> androidx.compose.ui.graphics.Color(0xFFB388FF)
-                        m.isFriend -> androidx.compose.ui.graphics.Color(0xFFFFD54F)
-                        else -> MaterialTheme.colorScheme.onSurface
-                    },
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis
-                )
+                        // You = purple (pinned top), friends = yellow, everyone else default.
+                        color = when {
+                            m.isSelf -> androidx.compose.ui.graphics.Color(0xFFB388FF)
+                            m.isFriend -> androidx.compose.ui.graphics.Color(0xFFFFD54F)
+                            else -> MaterialTheme.colorScheme.onSurface
+                        },
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
                 val statusText = m.statusDescription.ifBlank { rosterStatusLabel(m.status) }
                 if (statusText.isNotBlank()) {
+                    // Fixed-height row so a tall glyph in the status text can't grow the row either.
                     Row(
+                        modifier = Modifier.height(16.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
@@ -359,7 +367,7 @@ private fun FriendButton(
                 painterResource(com.vrca.R.drawable.ic_friend_add),
                 contentDescription = "Cannot add",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                modifier = Modifier.size(15.dp)
+                modifier = Modifier.size(16.dp)
             )
         }
         return
@@ -405,7 +413,7 @@ private fun FriendButton(
                 contentDescription = if (isFriend) "Unfriend" else "Send friend request",
                 tint = if (justSent) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
                        else MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(15.dp)
+                modifier = Modifier.size(16.dp)
             )
         }
     }

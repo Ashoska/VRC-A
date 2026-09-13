@@ -1,6 +1,6 @@
-<!-- Unfriend glyph: a solid person (head + shoulders) with a filled circle badge at the bottom-right
-     carrying a "−" carved out (evenOdd), a clean background gap between the body and the badge.
-     Single fill colour so Icon(tint=…) themes it. -->
+<!-- Unfriend glyph: a solid person + a bold filled circle badge at the bottom-right with a BOLD "−"
+     carved out (evenOdd). The bar is 2.4 units thick on the 24-unit viewport so it stays crisp/sharp
+     when the icon renders small in the roster (a thin bar anti-aliased to a blur). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -8,11 +8,11 @@
     android:viewportHeight="24">
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M3.5,7 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 z
-                          M2.5,19.5 c0,-3.6 2.24,-6.5 5,-6.5 s5,2.9 5,6.5 z" />
+        android:pathData="M5,7 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 z
+                          M2.5,20 c0,-4.1 2.9,-7.2 6.5,-7.2 s6.5,3.1 6.5,7.2 z" />
     <path
         android:fillColor="#FFFFFFFF"
         android:fillType="evenOdd"
-        android:pathData="M13.5,16.5 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0 z
-                          M15.6,15.7 L20.4,15.7 L20.4,17.3 L15.6,17.3 Z" />
+        android:pathData="M12.5,18 a5.5,5.5 0 1,0 11,0 a5.5,5.5 0 1,0 -11,0 z
+                          M14.4,16.8 L21.6,16.8 L21.6,19.2 L14.4,19.2 Z" />
 </vector>
