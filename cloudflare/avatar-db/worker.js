@@ -647,7 +647,7 @@ export default {
           shardScheme: "filehex3-full",
           shardCount: 4096,
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
-          version: 23,   // short TTL on search-index buckets (fix stale-cache flicker) + drain 150->300
+          version: 24,   // gated+lean fold re-emit (no more iq: flood) + one-time iq: compaction + no index purge
         });
       }
 
@@ -734,9 +734,12 @@ const STALE_CUTOFF_MS = 30 * 24 * 60 * 60 * 1000;
 // behind this, the reconcile lap emits an ADD index op for every needsFold() entry so its NFKC-FOLDED
 // (plain-ASCII) tokens enter the search index (the old fancy-glyph tokens stay as harmless orphans).
 // After that lap, plain-text search finds fancy-named/authored avatars. Set on clean lap completion.
-const FOLD_VER = 3;   // bumped: tokenizeFields now emits raw ∪ folded -> re-index rebuilds every fancy entry
-                      // under BOTH forms as one consistent set (fixes folded tokens getting stripped while
-                      // the raw fancy tokens were orphaned -> "searchable in fancy font but not plain text")
+const FOLD_VER = 4;   // bumped 3->4: re-arm a FRESH fold lap AFTER the one-time iq: compaction below, so the
+                      // now-GATED fold pass re-emits ONLY genuinely-desynced entries into the emptied queue
+                      // (the pre-gating lap flooded iq: with ~all-fancy no-op re-adds that never drained).
+                      // tokenizeFields emits raw ∪ folded so every fancy entry is indexed under BOTH forms as
+                      // one consistent set (fixes folded tokens stripped while raw fancy tokens were orphaned
+                      // -> "searchable in fancy font but not plain text"). Set on clean lap completion.
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   // ONE-TIME migration: zero the frozen legacy staleCount NOW (kills the phantom "queued" immediately)
@@ -778,6 +781,7 @@ async function reconcileIndex(env) {
   const rcStaleBefore = Date.now() - STALE_CUTOFF_MS;   // recount stale cutoff for this lap
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
+  const idxCache = {};         // index-bucket -> { token -> Set(ids) } (per-run cache for the fold gate)
   const missing = [];          // ADD index ops for entries not yet indexed
   // Accumulate (across the multi-run lap) EVERY shard prefix that still holds an unfilled avatar. On
   // lap completion this becomes the AUTHORITATIVE fill worklist — the fix for the endless whole-catalog
@@ -825,12 +829,36 @@ async function reconcileIndex(env) {
         const op = buildIndexOp(null, e, fid);   // ADD: writes fragment + avtr + tokens
         if (op) { missing.push(op); avtrCache[b].add(id); }   // add to cache so siblings this run aren't re-flagged
       } else if (foldPass && needsFold(e)) {
-        // Present in the index but tokenized under FANCY glyphs → emit an ADD so its FOLDED (NFKC,
-        // plain-ASCII) tokens enter the index. buildIndexOp uses the now-folding tokenizeFields; the
-        // applyIndexOps no-op guards mean only the genuinely-new folded tokens get written (avtr/frag
-        // are already present → skipped). Runs once per entry until foldVer is stamped.
-        const op = buildIndexOp(null, e, fid);
-        if (op) missing.push(op);
+        // Present in the index but its FOLDED (NFKC/plain-ASCII) tokens may be missing (the pre-union
+        // desync). GATE the re-emit on ACTUALLY being broken: check each folded token's index bucket
+        // (cached per run) and only emit if the entry's id is genuinely absent from one. Without this
+        // gate the fold pass re-emitted EVERY fancy entry EVERY lap — refilling iq: as fast as it drains
+        // (a stalemate that never let foldVer stamp and buried genuine repairs behind ~all-no-op re-adds).
+        // The op is LEAN — frag:null + avtr:null (both already present for an indexed entry), only the
+        // union token adds — so it touches ONLY index buckets and same-author folds collapse into the
+        // same few buckets, keeping the drain cheap. tokensOf gives raw ∪ folded so the repair is complete.
+        const ftoks = [];
+        for (const f of [e.name, e.author]) {
+          if (!f) continue;
+          for (const w of foldFancy(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) ftoks.push(w);
+        }
+        let broken = false;
+        for (const t of ftoks) {
+          const ib = indexBucketFor(t);
+          if (!(ib in idxCache)) {
+            const m = {};
+            try {
+              const o = await env.CATALOG.get(`index/${ib}.json`);
+              if (o) { const j = await o.json(); if (j && j.t) for (const [tk, arr] of Object.entries(j.t)) m[tk] = new Set(Array.isArray(arr) ? arr : []); }
+              idxCache[ib] = m;
+            } catch (_) { idxCache[ib] = null; }   // read failed → treat as broken (repair is an idempotent no-op if actually present)
+          }
+          const buckets = idxCache[ib];
+          if (buckets === null) { broken = true; break; }
+          const s = buckets[t];
+          if (!s || !s.has(id)) { broken = true; break; }
+        }
+        if (broken) missing.push({ id: e.id, del: false, frag: null, add: [...tokensOf(e)], rem: [], avtr: null });
       }
     }
     if (shardHasUnfilled) fillSeen.add(prefix);   // this shard belongs in the fill worklist
@@ -1105,6 +1133,29 @@ async function flushR2(env) {
   if (!pendNames.length && !admuNames.length && !admrNames.length && !admkNames.length &&
       !repNames.length && !hasIndexQueue) return;
 
+  // ONE-TIME iq: COMPACTION. The pre-gating fold laps flooded iq: with ~1400 keys of no-op re-adds
+  // (already-present tokens). They drain only ~1 key/flush (~300 cheap-but-full ops), so ~47h to clear,
+  // and genuine repairs (e.g. a desynced fancy author's avatars) are buried in random UUID order behind
+  // them. They are SAFE to drop: applyIndexOps already no-op-guarded them (nothing pending changes a
+  // bucket), and the re-armed GATED fold lap (FOLD_VER bump) + the reconcile presence-heal re-emit
+  // anything genuinely missing into the now-empty queue, where it drains in a flush or two. Bounded to
+  // IQ_COMPACT_DELETE_BUDGET deletes/flush to stay under the subrequest limit; a meta version flag makes
+  // it run once. While compacting we dedicate the flush to it (skip the normal shard/index work) and
+  // write meta so /health reflects progress — it completes in a handful of 1-min flushes.
+  const IQ_COMPACT_V = 1, IQ_COMPACT_DELETE_BUDGET = 500;
+  if ((prevMeta.iqCompactV || 0) < IQ_COMPACT_V) {
+    const stale = await listPrefix(env, "iq:", IQ_COMPACT_DELETE_BUDGET);
+    for (const kn of stale) await env.AVATAR_KV.delete(kn);
+    const done = (await env.AVATAR_KV.list({ prefix: "iq:", limit: 1 })).keys.length === 0;
+    await env.AVATAR_KV.put("meta", JSON.stringify({
+      ...prevMeta, iqDepth: done ? 0 : (prevMeta.iqDepth || 0),
+      ...(done ? { iqCompactV: IQ_COMPACT_V } : {}),
+      lastFlush: new Date().toISOString(),
+      lastCommit: done ? "iq: compaction done" : `iq: compacting (-${stale.length} keys)`,
+    }));
+    return;   // resume normal flushing next tick (queue now empty; gated lap re-emits only broken)
+  }
+
   // Group every pending op by shard prefix so each shard is read + written ONCE.
   const shardOps = {};
   const S = (sp) => (shardOps[sp] ||= { adds: {}, upserts: {}, removes: new Set(), checked: new Set(), renames: {} });
@@ -1335,7 +1386,12 @@ async function flushR2(env) {
     const toApply = all.slice(0, MAX_INDEX_OPS_PER_FLUSH);
     let applied = true;
     if (toApply.length) {
-      try { const urls = await applyIndexOps(env, toApply); if (urls.length) await purgeCatalogUrls(env, urls); }
+      // NO edge-cache purge on the index buckets (fragments/avtr/index): those carry the 5-min INDEX_TTL,
+      // so a skipped purge self-heals within 5 min — and purges are slow HTTP calls that dominate the
+      // flush's WALL time (the v21 jam). Dropping them lets the flush drain far more index ops per tick
+      // within budget; search freshness lags at most INDEX_TTL, which is fine (clone-shard purges, which
+      // users hit live, are unaffected — those still happen in flushR2's shard-write path).
+      try { await applyIndexOps(env, toApply); }
       catch (_) { applied = false; }
     }
     for (const kn of drained) await env.AVATAR_KV.delete(kn);
