@@ -294,7 +294,14 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    FriendButton(m, ctx, scope)
+                    // key on isFriend so the button is REBUILT the instant the friendship
+                    // flag flips — its local "sent"/"unfriended" state (remember) otherwise
+                    // survives recomposition and can leave the greyed "sent" look stuck even
+                    // though m.isFriend already turned true (the name colour flips but the
+                    // button didn't). Rebuilding forces a clean add⇄unfriend state.
+                    androidx.compose.runtime.key(m.userId, m.isFriend) {
+                        FriendButton(m, ctx, scope)
+                    }
                     CloneButton(m, ctx, scope)
                 }
             }
