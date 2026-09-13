@@ -667,8 +667,15 @@ export default {
 // no reason to keep reading R2 forever. Re-run it any time with GET /admin/reconcile?key=… (resets the
 // cursor) if a future audit ever suspects drift. Bounded per run: RECONCILE_SHARDS_PER_RUN shard reads
 // + one avtr/ read per distinct id-bucket seen (cached within the run).
-const RECONCILE_SHARDS_PER_RUN = 8;   // one-time pass → go a bit faster (~8.5h) then STOP; stays under
-                                      // the subrequest budget alongside flushR2
+const RECONCILE_SHARDS_PER_RUN = 24;  // one-time pass → ~5h for a full lap then STOP. Bumped 8→24 to
+                                      // roll the fancy-Unicode fold re-index out ~3x faster (plain-text
+                                      // search for fancy-named/authored avatars needs the folded tokens
+                                      // in the index). COST-NEUTRAL vs the bill emergency: this only adds
+                                      // Class B shard READS per run; it does NOT touch MAX_INDEX_OPS_PER_FLUSH
+                                      // (the write-rate cap), and the flush drain (75 ops/min) still has
+                                      // spare capacity over the raised emission (~97/min), so the TTL-free
+                                      // iq: queue absorbs any transient backlog. Stays far under the
+                                      // subrequest budget alongside flushR2 (~40 extra reads/run).
 const RC_MAX_ATTEMPTS = 3;            // retry a tainted (read-failed) count pass this many times, then
                                       // give up and keep the incremental count (never adopt a bad one)
 // PERIODIC RE-ARM: the incremental `unfilled`/`entries` counts DRIFT over time (a fill that doesn't
