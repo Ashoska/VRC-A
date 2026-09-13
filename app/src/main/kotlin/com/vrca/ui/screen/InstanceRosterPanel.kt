@@ -235,7 +235,7 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                 // stretch the row taller than its neighbours. The lineHeight pin alone wasn't enough
                 // — a fallback font's own line metrics for such glyphs still grew the Text — so the
                 // fixed-height box is the bulletproof clamp. maxLines=1 + softWrap=false keep it one line.
-                Box(Modifier.height(20.dp), contentAlignment = Alignment.CenterStart) {
+                Box(Modifier.height(18.dp), contentAlignment = Alignment.CenterStart) {
                     Text(
                         m.displayName,
                         style = MaterialTheme.typography.bodyMedium.copy(
@@ -261,7 +261,7 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                 if (statusText.isNotBlank()) {
                     // Fixed-height row so a tall glyph in the status text can't grow the row either.
                     Row(
-                        modifier = Modifier.height(16.dp),
+                        modifier = Modifier.height(15.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
