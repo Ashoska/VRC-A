@@ -377,6 +377,24 @@ private fun FriendButton(
     var sent by remember(m.userId) { mutableStateOf(false) }
     val isFriend = m.isFriend && !unfriended
     val justSent = sent && !isFriend
+    // After a request is SENT, VRChat's `friend-add` pipeline event doesn't reliably reach
+    // the requester when the other person accepts — so the button could sit greyed ("sent")
+    // forever. While we're in that state, verify the real friend status directly and, once
+    // accepted, mark it in the roster so the button flips add→unfriend (and the name colour
+    // updates too). Bounded + user-initiated (only runs after a manual send); stops the
+    // instant we become friends or the user unfriends.
+    LaunchedEffect(m.userId, justSent) {
+        val uid = m.userId
+        if (uid == null || !justSent) return@LaunchedEffect
+        for (d in longArrayOf(4000, 8000, 15000, 30000, 60000, 60000)) {
+            kotlinx.coroutines.delay(d)
+            val st = com.vrca.vrchat.VrchatAuthManager.getFriendStatus(ctx, uid)
+            if (st?.isFriend == true) {
+                InstanceRosterManager.markFriended(uid)
+                return@LaunchedEffect
+            }
+        }
+    }
     RosterActionButton(enabled = !busy && !justSent, onClick = {
         if (!busy) {
             busy = true

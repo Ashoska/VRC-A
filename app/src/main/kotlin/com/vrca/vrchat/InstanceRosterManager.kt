@@ -239,6 +239,13 @@ object InstanceRosterManager {
     private val statusDescCache = ConcurrentHashMap<String, String>()
     private val trustCache = ConcurrentHashMap<String, String>()
     private val enrichInFlight = ConcurrentHashMap.newKeySet<String>()
+    // Locally-confirmed friendships: when the roster's Add-friend button verifies (via
+    // getFriendStatus) that a just-sent request was accepted, it marks the userId here so
+    // the button flips add→unfriend AND the name colour turns friend-yellow, EVEN IF the
+    // `friend-add` pipeline event never reaches the requester (VRChat doesn't always emit
+    // it to the sender). ORed into the isFriend derivation; cleared on instance leave/hop
+    // (by then the real FriendsCacheStore has caught up via the periodic friends refresh).
+    private val locallyFriended = ConcurrentHashMap.newKeySet<String>()
     // avatarName last seen per user → detect a SWITCH to refetch that pic 5s later.
     private val lastAvatarByUser = ConcurrentHashMap<String, String>()
     // Last published roster entries (carry joinedAtMs) for the periodic pfp sweep.
@@ -875,7 +882,7 @@ object InstanceRosterManager {
                 avatarCreator = e.avatarCreator,
                 avatarId = avaId,
                 cloneFileId = if (!isSelfMember) e.userId?.let { avatarCloneFileIdCache[it] } else null,
-                isFriend = e.userId != null && friends.contains(e.userId),
+                isFriend = e.userId != null && (friends.contains(e.userId) || locallyFriended.contains(e.userId)),
                 isSelf = isSelfMember,
                 profilePicUrl = pfp,
                 status = stat,
@@ -1102,6 +1109,7 @@ object InstanceRosterManager {
         avatarLoadingSince.clear(); avatarSlowRetryAt.clear()
         loadingWatchKeys.clear()
         avatarNameSince.clear()
+        locallyFriended.clear()
         VrchatAuthManager.clearResolveTraces()
         com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
     }
@@ -1293,8 +1301,25 @@ object InstanceRosterManager {
         val friends = friendIds(context)
         val updated = cur.members.map { m ->
             val uid = m.userId
-            val f = uid != null && uid != self && friends.contains(uid)
+            val f = uid != null && uid != self && (friends.contains(uid) || locallyFriended.contains(uid))
             if (m.isFriend != f) m.copy(isFriend = f) else m
+        }
+        if (updated != cur.members) _flow.value = cur.copy(members = updated)
+    }
+
+    /** Called by the roster's Add-friend button once it VERIFIES (via `getFriendStatus`)
+     *  that a just-sent request was accepted — the `friend-add` pipeline event doesn't
+     *  reliably reach the requester, so the button + name colour would otherwise stay in
+     *  the greyed "sent" state forever. Records the confirmed friendship locally and flips
+     *  isFriend on that member immediately (the ~1s publish re-derive keeps it too). */
+    fun markFriended(userId: String?) {
+        val uid = userId?.trim().orEmpty()
+        if (uid.isBlank()) return
+        if (!locallyFriended.add(uid)) return
+        val cur = _flow.value
+        if (cur.status != Status.LIVE) return
+        val updated = cur.members.map { m ->
+            if (m.userId == uid && !m.isFriend) m.copy(isFriend = true) else m
         }
         if (updated != cur.members) _flow.value = cur.copy(members = updated)
     }
