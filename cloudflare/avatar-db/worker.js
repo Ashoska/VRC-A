@@ -652,7 +652,10 @@ export default {
           shardScheme: "filehex3-full",
           shardCount: 4096,
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
-          version: 25,   // MAX_SHARDS_PER_FLUSH 60->120 (v24 freed wall-time) ~2x intake throughput
+          foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
+          version: 26,   // FOLD_VER 4->5 + foldLapV guard: force ONE dedicated full 0->4096 fold lap per
+                         // FOLD_VER before stamping (v24 could stamp foldVer having gated only a tail slice
+                         // of shards when the bump landed mid-lap -> fancy authors left plain-unsearchable)
         });
       }
 
@@ -739,12 +742,18 @@ const STALE_CUTOFF_MS = 30 * 24 * 60 * 60 * 1000;
 // behind this, the reconcile lap emits an ADD index op for every needsFold() entry so its NFKC-FOLDED
 // (plain-ASCII) tokens enter the search index (the old fancy-glyph tokens stay as harmless orphans).
 // After that lap, plain-text search finds fancy-named/authored avatars. Set on clean lap completion.
-const FOLD_VER = 4;   // bumped 3->4: re-arm a FRESH fold lap AFTER the one-time iq: compaction below, so the
-                      // now-GATED fold pass re-emits ONLY genuinely-desynced entries into the emptied queue
-                      // (the pre-gating lap flooded iq: with ~all-fancy no-op re-adds that never drained).
-                      // tokenizeFields emits raw ∪ folded so every fancy entry is indexed under BOTH forms as
-                      // one consistent set (fixes folded tokens stripped while raw fancy tokens were orphaned
-                      // -> "searchable in fancy font but not plain text"). Set on clean lap completion.
+const FOLD_VER = 5;   // bumped 4->5: the v24 fold lap could stamp foldVer WITHOUT covering all 4096 shards.
+                      // The reset-to-cursor-0 that starts a fresh fold lap was gated on `&& meta.rcDone`, so a
+                      // FOLD_VER bump landing MID-LAP (rcDone=false — the normal case on a deploy during active
+                      // churn) left the carried-over cursor + reconcileScanned untouched; foldPass then rode on
+                      // top of a partial lap that "completed" the instant reconcileScanned crossed 4096 (from
+                      // steps already accumulated) and stamped foldVer having run the fold gate over only a TAIL
+                      // slice of shards. Fancy-authored entries outside that slice (e.g. ᵂᴴᴵᵀᴱ ᵀᴵᴳᴱᴿ's 8 avatars)
+                      // kept their raw tokens but never got the plain folded ones -> unsearchable by plain text,
+                      // and foldPass went dormant so it never retried. The `meta.foldLapV` guard below now forces
+                      // exactly ONE dedicated full 0->4096 lap per FOLD_VER (regardless of rcDone) before foldVer
+                      // is stamped; this bump re-arms that corrected lap. tokenizeFields still emits raw ∪ folded
+                      // so every fancy entry is indexed under BOTH forms as one consistent set.
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   // ONE-TIME migration: zero the frozen legacy staleCount NOW (kills the phantom "queued" immediately)
@@ -762,13 +771,24 @@ async function reconcileIndex(env) {
     } catch (_) {}
     // fall through → run the recount this run (rcDone is now false)
   }
-  // ONE-TIME fold re-index: if foldVer is behind, force a fresh lap (even if a heal is current + within
-  // the re-arm window) so the entry loop can emit folded-token ADD ops for existing fancy entries.
-  if (meta.foldVer !== FOLD_VER && meta.rcDone) {
+  // ONE-TIME fold re-index: if foldVer is behind, run a FRESH full lap DEDICATED to this FOLD_VER so the
+  // entry loop emits folded-token ADD ops for every existing fancy entry, over ALL 4096 shards.
+  //
+  // This reset MUST fire regardless of meta.rcDone. The old `&& meta.rcDone` guard meant a FOLD_VER bump
+  // that landed mid-lap (rcDone=false — the normal case on a deploy during churn) did NOT reset the
+  // carried-over cursor + reconcileScanned, so foldPass rode a partial lap that "completed" as soon as
+  // reconcileScanned crossed 4096 (from prior steps) and stamped foldVer having gated only a tail slice of
+  // shards — leaving fancy entries elsewhere (ᵂᴴᴵᵀᴱ ᵀᴵᴳᴱᴿ's avatars) raw-only + unsearchable by plain text,
+  // with foldPass then dormant. `meta.foldLapV` marks the FOLD_VER the CURRENT fresh lap was started for:
+  // the reset fires once (first run where foldLapV is behind), starts a clean 0->4096 lap, and foldVer is
+  // stamped ONLY when a lap whose foldLapV === FOLD_VER completes (see the completion branch) — so a
+  // partial/carried lap can never mark the fold done.
+  if (meta.foldVer !== FOLD_VER && meta.foldLapV !== FOLD_VER) {
     meta.rcDone = false;
     meta.rc = 0; meta.reconcileScanned = 0;
     meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
-    // fall through → run the lap; foldVer is stamped on clean completion
+    meta.foldLapV = FOLD_VER;   // this fresh lap is dedicated to FOLD_VER; only it may stamp foldVer
+    // fall through → run the lap; foldVer is stamped on clean completion of THIS dedicated lap
   }
   const foldPass = meta.foldVer !== FOLD_VER;   // emit folded-token ADDs for fancy entries this lap
   // Re-arm a completed heal once it's older than the interval, so the count is periodically re-truthed.
@@ -894,7 +914,10 @@ async function reconcileIndex(env) {
     const attempts = (meta.rcAttempts || 0);
     if (clean) {
       meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
-      meta.foldVer = FOLD_VER;   // fancy-entry fold re-index complete (folded tokens now in the index)
+      // Stamp the fold version ONLY when the lap that just completed was the DEDICATED fresh fold lap for
+      // this FOLD_VER (foldLapV set at its start, above). A partial/carried-over lap that happens to cross
+      // 4096 must NOT mark the fold done — that was the v24 bug that left fancy entries un-folded.
+      if (meta.foldLapV === FOLD_VER) meta.foldVer = FOLD_VER;   // fancy-entry fold re-index complete
       meta.entries = meta.rcEntries || 0;
       meta.unfilled = meta.rcUnfilled || 0;
       meta.stale = meta.rcStale || 0;   // adopt the TRUE liveness backlog (drains live via the flush)
