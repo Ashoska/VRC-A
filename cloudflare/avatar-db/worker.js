@@ -328,6 +328,12 @@ function buildIndexOp(oldE, newE, fileId) {
   if (!oldE) return { id: newE.id, del: false, frag: fragSummary(newE, fileId), add: [...tokensOf(newE)], rem: [], avtr: "a" };
   const relevant = (oldE.name || "") !== (newE.name || "") || (oldE.author || "") !== (newE.author || "") ||
     (oldE.authorId || "") !== (newE.authorId || "") || platMask(oldE.platforms) !== platMask(newE.platforms) ||
+    // desc is tokenized into the index (tokensOf reads e.desc), so a description edit MUST re-index — else
+    // searching a word added to a bio wouldn't find it (and a removed word would still match) until the next
+    // name/author change or fold re-lap. The shard already rewrites on a desc change (entryEquivalent
+    // compares desc), so this only adds the changed-desc token diff (no-op-guarded per token) — bounded by
+    // genuine bio edits, not harvest churn.
+    (oldE.desc || "") !== (newE.desc || "") ||
     // perf rank rides the fragment summary (search badge), so a perf-only change must refresh it too.
     (oldE.perfPc ?? 5) !== (newE.perfPc ?? 5) || (oldE.perfQuest ?? 5) !== (newE.perfQuest ?? 5) ||
     (oldE.perfIos ?? 5) !== (newE.perfIos ?? 5);
@@ -711,10 +717,10 @@ export default {
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
-          version: 27,   // foldFancy overhaul: strip zalgo combining marks + cross-script CONFUSABLES map
-                         // (Cyrillic/Greek/IPA look-alikes -> ASCII) + per-char Latin accent-fold; +
-                         // "unconverted" registry (GET /unconverted); FOLD_VER 5->6 re-lap under the v26
-                         // foldLapV guard so the whole catalog re-folds under the corrected fold
+          version: 28,   // desc edits now re-index (buildIndexOp `relevant` includes desc) so a bio-word
+                         // change updates search tokens, not just the stored bio. Prior (v27): foldFancy
+                         // overhaul (zalgo strip + CONFUSABLES + accent-fold) + "unconverted" registry
+                         // (GET /unconverted) + FOLD_VER 6 re-lap under the foldLapV guard.
         });
       }
 
