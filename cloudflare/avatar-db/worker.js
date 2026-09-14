@@ -732,13 +732,18 @@ export default {
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
-          version: 29,   // applyIndexOps now applies REMS before ADDS (and SET before DEL for fragments)
-                         // so a same-flush same-avatarId conflict resolves ADD/SET-wins. This fixes the
-                         // RE-KEY strip: an avatar whose image changed is remove(old fileId)+add(new
-                         // fileId) in one flush; the old add-then-rem order let the stale rem delete the
-                         // id the add just inserted, so the live avatar vanished from search ("appeared
-                         // then disappeared", esp. fancy-authored entries the bots re-key). No FOLD_VER
-                         // bump — the running fold lap's re-adds now STICK. Prior (v28): desc re-index.
+          version: 30,   // FOLD is now maintained by the LIVENESS bots' own walk: a checked-only bump
+                         // (bot re-verified an UNCHANGED fancy avatar, so buildIndexOp never fires)
+                         // re-asserts the entry's union (raw ∪ folded) tokens, no-op-guarded by
+                         // applyIndexOps — so both token sets stay indexed via the sweep the bots already
+                         // do (no new reads/VRChat/APK, ~1 read/fancy avatar/30d). Fill bots already
+                         // maintain it via buildIndexOp on the material `filled` change. Prior (v29):
+                         // applyIndexOps REMS-before-ADDS / SET-before-DEL so a same-flush same-avatarId
+                         // conflict resolves ADD/SET-wins, fixing the RE-KEY strip (an avatar whose image
+                         // changed is remove(old fileId)+add(new fileId) in one flush; the old add-then-
+                         // rem order let the stale rem delete the id the add just inserted → the live
+                         // avatar vanished from search, esp. fancy authors the bots re-key). No FOLD_VER
+                         // bump for either.
         });
       }
 
@@ -1483,6 +1488,16 @@ async function flushR2(env) {
       // A recheck that lands on a DUE entry drains the liveness backlog by one.
       if (((e[fid].checked || e[fid].added || 0)) < staleCutoff) sStale--;
       e[fid].checked = nowChecked; dirty = true;
+      // FOLD MAINTENANCE via the LIVENESS sweep (cheapest path). A checked-only bump means a bot
+      // re-verified an UNCHANGED avatar, so buildIndexOp never fires for it — the one path that
+      // previously left old fancy entries' plain (folded) tokens to the separate reconcile lap. If the
+      // entry is fancy (needsFold), re-assert its FULL union (raw ∪ folded) tokens so BOTH token sets
+      // stay indexed. applyIndexOps no-op-guards this per token (a cheap Class B read when already
+      // present, a one-token heal when the fold desynced), so the liveness bots maintain the fold as
+      // they walk — riding the checked write they already do, no new reads/VRChat/APK. Cost is ~1 read
+      // per fancy avatar per 30d liveness cycle. avtr:null/frag:null (both already correct for an
+      // indexed entry) keeps it index-token-only.
+      if (needsFold(e[fid])) sIndexOps.push({ id: e[fid].id, del: false, frag: null, add: [...tokensOf(e[fid])], rem: [], avtr: null });
     }
     for (const fid of ops.removes) if (e[fid]) {
       const prev = e[fid]; delete e[fid]; sRemoved++; dirty = true; contentDirty = true;
