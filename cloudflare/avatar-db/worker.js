@@ -222,7 +222,12 @@ const MAX_INDEX_OPS_PER_FLUSH = 300;   // raised 150->300: the FOLD_VER re-lap +
 // one overloaded flush. 60 shards keeps each flush well within budget so it COMPLETES and the downstream
 // reconcile/drain actually run. Contribution intake is slower, which is fine (and desirable) while the
 // passive-harvest inflow is the thing overloading the pipeline.
-const MAX_SHARDS_PER_FLUSH = 60;
+const MAX_SHARDS_PER_FLUSH = 120;   // raised 60->120: v24 dropped the index-bucket CDN purges that were the
+// flush's WALL-time hog (the v21 jam), so there's headroom to place ~2x the shards (and thus ~2x the
+// avatars, since small batches already fuse by shard within a flush) per tick. Budget stays safe: worst
+// case ~120 shard reads + writes + a lean 300-op index drain + reconcile's bounded reads ≈ ~800
+// subrequests, under Cloudflare's ~1000/invocation limit; shard purges are batched 30/call and only fire
+// on genuine content change (dupe churn = +0 = no purge). Contribution intake ~doubles; no ingest change.
 // Coalesce _manifest.json writes. The LIVE entry count already rides `meta.entries` (which /health
 // max()es against the manifest), so the _manifest.json copy only needs periodic freshening, not a
 // write+purge on every count-moving flush during steady growth. Rewrite it at most every N ms OR once
@@ -647,7 +652,7 @@ export default {
           shardScheme: "filehex3-full",
           shardCount: 4096,
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
-          version: 24,   // gated+lean fold re-emit (no more iq: flood) + one-time iq: compaction + no index purge
+          version: 25,   // MAX_SHARDS_PER_FLUSH 60->120 (v24 freed wall-time) ~2x intake throughput
         });
       }
 
