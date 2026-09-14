@@ -2024,9 +2024,31 @@ object VrchatAuthManager {
         'ᴀ' to 'a','ʙ' to 'b','ᴄ' to 'c','ᴅ' to 'd','ᴇ' to 'e','ꜰ' to 'f','ɢ' to 'g','ʜ' to 'h','ɪ' to 'i',
         'ᴊ' to 'j','ᴋ' to 'k','ʟ' to 'l','ᴍ' to 'm','ɴ' to 'n','ᴏ' to 'o','ᴘ' to 'p','ꞯ' to 'q','ʀ' to 'r',
         'ꜱ' to 's','ᴛ' to 't','ᴜ' to 'u','ᴠ' to 'v','ᴡ' to 'w','ʏ' to 'y','ᴢ' to 'z')
+    // Cross-script LOOK-ALIKES of ASCII Latin letters + decorative letter-punctuation (-> '.', a separator).
+    // MUST match the Worker's CONFUSABLES / AvatarGlobalDb.CONFUSABLES byte-for-byte.
+    private val CONFUSABLES = mapOf(
+        'а' to 'a','А' to 'a','е' to 'e','Е' to 'e','о' to 'o','О' to 'o','с' to 'c','С' to 'c','х' to 'x','Х' to 'x','р' to 'p','Р' to 'p','у' to 'y','У' to 'y',
+        'і' to 'i','І' to 'i','ј' to 'j','Ј' to 'j','ѕ' to 's','Ѕ' to 's','к' to 'k','К' to 'k','м' to 'm','М' to 'm','т' to 't','Т' to 't','н' to 'h','Н' to 'h',
+        'в' to 'b','В' to 'b','є' to 'e','Є' to 'e','ө' to 'o','Ө' to 'o','ғ' to 'f','Ғ' to 'f','ҽ' to 'e','Ҽ' to 'e','ѵ' to 'v','Ԁ' to 'd','ԁ' to 'd','һ' to 'h','Һ' to 'h','ԛ' to 'q','ԝ' to 'w',
+        'α' to 'a','Α' to 'a','β' to 'b','Β' to 'b','ε' to 'e','Ε' to 'e','ι' to 'i','Ι' to 'i','κ' to 'k','Κ' to 'k','ν' to 'v','Ν' to 'n','ο' to 'o','Ο' to 'o',
+        'ρ' to 'p','Ρ' to 'p','τ' to 't','Τ' to 't','υ' to 'u','Υ' to 'y','χ' to 'x','Χ' to 'x','η' to 'n','Η' to 'h','Ζ' to 'z','Μ' to 'm',
+        'ɾ' to 'r','ɳ' to 'n','ɫ' to 'l','ɡ' to 'g','ɐ' to 'a','ɘ' to 'e','ɔ' to 'o','ǝ' to 'e','ɓ' to 'b','ø' to 'o','Ø' to 'o','đ' to 'd','Đ' to 'd','ħ' to 'h','ı' to 'i',
+        'ǃ' to '.','ʚ' to '.','ɞ' to '.','ǀ' to '.','ǁ' to '.','ǂ' to '.','ˎ' to '.','ˊ' to '.','ˋ' to '.','˗' to '.')
     private fun fancyFold(s: String): String {
         val n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC)
-        val folded = if (n.none { it in SMALLCAPS }) n else buildString(n.length) { for (c in n) append(SMALLCAPS[c] ?: c) }
+        val folded = buildString(n.length) {
+            // Mirror the Worker's foldFancy byte-for-byte: strip zalgo marks -> small-caps/look-alikes ->
+            // per-char accent-fold of accented Latin only (composed non-Latin stays composed).
+            for (c in n) {
+                val t = Character.getType(c)
+                if (t == Character.NON_SPACING_MARK.toInt() || t == Character.COMBINING_SPACING_MARK.toInt() ||
+                    t == Character.ENCLOSING_MARK.toInt()) continue
+                val m = SMALLCAPS[c] ?: CONFUSABLES[c]
+                if (m != null) { append(m); continue }
+                val d = java.text.Normalizer.normalize(c.toString(), java.text.Normalizer.Form.NFKD)
+                if (d.length > 1 && (d[0] in 'a'..'z' || d[0] in 'A'..'Z')) append(d[0]) else append(c)
+            }
+        }
         return folded.trim().lowercase()
     }
 

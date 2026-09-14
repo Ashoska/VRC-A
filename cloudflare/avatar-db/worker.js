@@ -156,10 +156,56 @@ function platMask(platforms) {
 // AFTER NFKC so smallcaps names index/search as plain. MUST stay byte-identical to the app maps
 // (AvatarGlobalDb.SMALLCAPS / VrchatAuthManager.SMALLCAPS).
 const SMALLCAPS = { "ᴀ":"a","ʙ":"b","ᴄ":"c","ᴅ":"d","ᴇ":"e","ꜰ":"f","ɢ":"g","ʜ":"h","ɪ":"i","ᴊ":"j","ᴋ":"k","ʟ":"l","ᴍ":"m","ɴ":"n","ᴏ":"o","ᴘ":"p","ꞯ":"q","ʀ":"r","ꜱ":"s","ᴛ":"t","ᴜ":"u","ᴠ":"v","ᴡ":"w","ʏ":"y","ᴢ":"z" };
+const COMBINING_MARK = /\p{M}/u;   // Unicode General_Category Mark (Mn+Mc+Me)
+// Cross-script LOOK-ALIKES of ASCII Latin letters (Cyrillic/Greek/IPA/Latin-extended) that NFKC does NOT
+// fold, plus decorative letter-punctuation mapped to "." (a tokenizer separator, i.e. dropped). VRChat
+// display names constantly spell Latin words in these look-alikes (ᴛᴜғғʟᴇ, νεκο, аԁміn), so a plain-text
+// search can only find them if they fold to ASCII. MUST match the client AvatarGlobalDb.CONFUSABLES /
+// VrchatAuthManager.CONFUSABLES byte-for-byte (else index tokens and query tokens disagree). Genuine
+// non-Latin scripts (kana/CJK/Hangul/Georgian/…) are intentionally NOT here — they are real names,
+// searchable in their own script; the "unconverted" registry surfaces anything still un-folded so the
+// map can be extended incrementally.
+const CONFUSABLES = {
+  "а":"a","А":"a","е":"e","Е":"e","о":"o","О":"o","с":"c","С":"c","х":"x","Х":"x","р":"p","Р":"p","у":"y","У":"y",
+  "і":"i","І":"i","ј":"j","Ј":"j","ѕ":"s","Ѕ":"s","к":"k","К":"k","м":"m","М":"m","т":"t","Т":"t","н":"h","Н":"h",
+  "в":"b","В":"b","є":"e","Є":"e","ө":"o","Ө":"o","ғ":"f","Ғ":"f","ҽ":"e","Ҽ":"e","ѵ":"v","Ԁ":"d","ԁ":"d","һ":"h","Һ":"h","ԛ":"q","ԝ":"w",
+  "α":"a","Α":"a","β":"b","Β":"b","ε":"e","Ε":"e","ι":"i","Ι":"i","κ":"k","Κ":"k","ν":"v","Ν":"n","ο":"o","Ο":"o",
+  "ρ":"p","Ρ":"p","τ":"t","Τ":"t","υ":"u","Υ":"y","χ":"x","Χ":"x","η":"n","Η":"h","Ζ":"z","Μ":"m",
+  "ɾ":"r","ɳ":"n","ɫ":"l","ɡ":"g","ɐ":"a","ɘ":"e","ɔ":"o","ǝ":"e","ɓ":"b","ø":"o","Ø":"o","đ":"d","Đ":"d","ħ":"h","ı":"i",
+  "ǃ":".","ʚ":".","ɞ":".","ǀ":".","ǁ":".","ǂ":".","ˎ":".","ˊ":".","ˋ":".","˗":"."
+};
 function foldFancy(s) {
   let out = "";
-  for (const ch of String(s).normalize("NFKC")) out += (SMALLCAPS[ch] || ch);
+  for (const ch of String(s).normalize("NFKC")) {
+    // 1) Strip DECORATIVE combining marks NFKC couldn't compose (zalgo / stacked diacritics, e.g.
+    //    sʟᴇᴇͥᴘͫʏᴍͣᴏʟʟɪᴇ). They're SEPARATORS in the /[^\p{L}\p{N}]+/ tokenizer, so left in they FRAGMENT a
+    //    fancy name into junk (slee/ym/ollie); stripped it folds to one clean token (sleepymollie).
+    if (COMBINING_MARK.test(ch)) continue;
+    // 2) Small-caps + cross-script look-alikes -> plain ASCII.
+    const m = SMALLCAPS[ch] || CONFUSABLES[ch];
+    if (m) { out += m; continue; }
+    // 3) Accent-fold ONLY accented LATIN (café -> cafe, Nöel -> Noel): if this single char NFKD-decomposes
+    //    and its base is an ASCII letter, keep the base. Composed non-Latin (Hangul 가, CJK) decompose to a
+    //    NON-ASCII base, so they're left composed + searchable in their own script (not broken into jamo).
+    const d = ch.normalize("NFKD");
+    out += (d.length > 1 && /[A-Za-z]/.test(d[0])) ? d[0] : ch;
+  }
   return out;
+}
+// A folded string still carrying a non-ASCII LETTER did NOT fully convert to plain text (an unmapped
+// look-alike font, an exotic decoration, or a genuine non-Latin script). Returns the distinct residual
+// letter codepoints, which the reconcile lap tallies into the "unconverted" registry (GET /unconverted)
+// so unfoldable fonts surface and CONFUSABLES can be extended over time.
+function foldResidualCps(e) {
+  const cps = new Set();
+  for (const f of [e.name, e.author]) {
+    if (!f) continue;
+    for (const ch of foldFancy(f)) {
+      const cp = ch.codePointAt(0);
+      if (cp > 127 && /\p{L}/u.test(ch)) cps.add(cp);
+    }
+  }
+  return cps;
 }
 function tokenizeFields(...fields) {
   const set = new Set();
@@ -595,6 +641,17 @@ export default {
         });
       }
 
+      // The "unconverted" registry: everything whose fancy name/author didn't fully fold to ASCII, as a
+      // per-codepoint histogram (what to add to CONFUSABLES) + a capped avatar sample. Written by the
+      // reconcile lap; this just serves the R2 file (edge-cached).
+      if (req.method === "GET" && url.pathname === "/unconverted") {
+        if (!env.CATALOG) return json({ ok: false, error: "R2 not configured" }, 503);
+        try {
+          const o = await env.CATALOG.get("unconverted.json");
+          if (!o) return json({ ok: true, pending: true, note: "no lap has completed since the registry shipped" });
+          return new Response(o.body, { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
+        } catch (e) { return json({ ok: false, error: String(e) }, 500); }
+      }
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
         // ONE cheap KV read (no list ops — those have a tight free-tier limit and this is
         // polled every 15s). Counts come from meta (set at flush).
@@ -653,9 +710,11 @@ export default {
           shardCount: 4096,
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
-          version: 26,   // FOLD_VER 4->5 + foldLapV guard: force ONE dedicated full 0->4096 fold lap per
-                         // FOLD_VER before stamping (v24 could stamp foldVer having gated only a tail slice
-                         // of shards when the bump landed mid-lap -> fancy authors left plain-unsearchable)
+          unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
+          version: 27,   // foldFancy overhaul: strip zalgo combining marks + cross-script CONFUSABLES map
+                         // (Cyrillic/Greek/IPA look-alikes -> ASCII) + per-char Latin accent-fold; +
+                         // "unconverted" registry (GET /unconverted); FOLD_VER 5->6 re-lap under the v26
+                         // foldLapV guard so the whole catalog re-folds under the corrected fold
         });
       }
 
@@ -742,7 +801,11 @@ const STALE_CUTOFF_MS = 30 * 24 * 60 * 60 * 1000;
 // behind this, the reconcile lap emits an ADD index op for every needsFold() entry so its NFKC-FOLDED
 // (plain-ASCII) tokens enter the search index (the old fancy-glyph tokens stay as harmless orphans).
 // After that lap, plain-text search finds fancy-named/authored avatars. Set on clean lap completion.
-const FOLD_VER = 5;   // bumped 4->5: the v24 fold lap could stamp foldVer WITHOUT covering all 4096 shards.
+const FOLD_VER = 6;   // bumped 5->6: foldFancy overhaul (strip zalgo marks + CONFUSABLES cross-script
+                      // look-alikes + per-char Latin accent-fold), so re-arm ONE fresh full lap to re-fold
+                      // the whole catalog under the corrected fold + populate the "unconverted" registry.
+                      // Prior note (v4->5, still in force via the foldLapV guard below): the v24 fold lap
+                      // could stamp foldVer WITHOUT covering all 4096 shards (bump landing mid-lap).
                       // The reset-to-cursor-0 that starts a fresh fold lap was gated on `&& meta.rcDone`, so a
                       // FOLD_VER bump landing MID-LAP (rcDone=false — the normal case on a deploy during active
                       // churn) left the carried-over cursor + reconcileScanned untouched; foldPass then rode on
@@ -817,6 +880,14 @@ async function reconcileIndex(env) {
   // the count, so it looped forever. With the recount (which reads every shard anyway) writing them into
   // the worklist, the bots walk ONLY the worklist and the walk terminates when it drains.
   const fillSeen = new Set(Array.isArray(meta.rcFill) ? meta.rcFill : []);
+  // "UNCONVERTED" registry — accumulate, across the lap, every entry whose folded name/author STILL holds
+  // a non-ASCII letter (an unmapped look-alike font, exotic decoration, or genuine non-Latin script). On
+  // clean lap completion this is written to `unconverted.json` (GET /unconverted): a per-codepoint
+  // histogram (what to add to CONFUSABLES next) + a capped sample of {id,name,author} to eyeball. This is
+  // the "fetch everything that didn't convert" tool — extend CONFUSABLES from the histogram, re-lap, repeat.
+  const unconvHist = Object.assign({}, meta.rcUnconvHist || {});
+  const unconvSample = Array.isArray(meta.rcUnconvSample) ? meta.rcUnconvSample.slice() : [];
+  const UNCONV_SAMPLE_CAP = 400;
   // Recount the AUTHORITATIVE entry + unfilled totals as we read every shard, to correct the running
   // incremental counts that drift with no full rebuild — a drifted `unfilled` makes the FILL bots
   // churn the whole catalog forever on a phantom backlog they can never drain ("queued 247, checked
@@ -844,6 +915,14 @@ async function reconcileIndex(env) {
       entriesSeen++;
       if (e.filled !== true) { unfilledSeen++; shardHasUnfilled = true; }
       if (((e.checked || e.added || 0)) < rcStaleBefore) staleSeen++;   // due for a 30d liveness recheck
+      // Tally anything that didn't fully fold to ASCII (see foldResidualCps / the "unconverted" registry).
+      const resid = foldResidualCps(e);
+      if (resid.size) {
+        for (const cp of resid) unconvHist[cp] = (unconvHist[cp] || 0) + 1;
+        if (unconvSample.length < UNCONV_SAMPLE_CAP)
+          unconvSample.push({ id, n: (e.name || "").slice(0, 48), au: (e.author || "").slice(0, 48),
+            r: Array.from(resid) });
+      }
       const b = fragBucketFor(id);
       if (!(b in avtrCache)) {
         let ids = new Set();
@@ -892,6 +971,8 @@ async function reconcileIndex(env) {
   for (let i = 0; i < missing.length; i += MAX_INDEX_OPS_PER_FLUSH)
     await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(missing.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
   meta.rcFill = Array.from(fillSeen);   // accumulate the fill-shard set across the lap (adopted on completion)
+  meta.rcUnconvHist = unconvHist;       // accumulate the unconverted histogram + sample across the lap
+  meta.rcUnconvSample = unconvSample;
   meta.rc = cursor;
   meta.lastReconcile = new Date().toISOString();
   // reconcileScanned now counts STEPS (shards visited), so completion is exactly one 4096-shard lap —
@@ -945,12 +1026,30 @@ async function reconcileIndex(env) {
           { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
         if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_worklist.json"]);
       } catch (_) {}
+      // Publish the "unconverted" registry (see foldResidualCps): a per-codepoint histogram of every
+      // non-ASCII letter that survived folding + a capped sample of the avatars. Fetch GET /unconverted
+      // (or /catalog/unconverted.json) to see exactly which fonts still don't convert, extend CONFUSABLES
+      // from the histogram, bump FOLD_VER, and they clear on the next lap.
+      try {
+        const hist = meta.rcUnconvHist || {};
+        let total = 0; for (const k in hist) total += hist[k];
+        const top = Object.entries(hist).map(([cp, n]) => ({ cp: +cp, ch: String.fromCodePoint(+cp), n }))
+          .sort((a, b) => b.n - a.n);
+        meta.unconverted = top.length;   // distinct residual codepoints (surfaced in /health)
+        await env.CATALOG.put("unconverted.json",
+          JSON.stringify({ v: 1, ts: new Date().toISOString(), distinctCodepoints: top.length,
+            totalHits: total, codepoints: top, sample: (meta.rcUnconvSample || []) }),
+          { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=60" } });
+        if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/unconverted.json"]);
+      } catch (_) {}
       meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
       meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];   // reset accumulators for a future re-arm
+      meta.rcUnconvHist = {}; meta.rcUnconvSample = [];
     } else if (attempts < RC_MAX_ATTEMPTS) {
       // Tainted lap → retry a fresh full pass (index repairs already enqueued above are idempotent).
       meta.rcAttempts = attempts + 1;
       meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcFill = [];
+      meta.rcUnconvHist = {}; meta.rcUnconvSample = [];
       // rcDone stays false → the next cron re-walks the whole catalog for a clean count.
     } else {
       // Couldn't get a clean read after the retries → give up and KEEP the incremental count
@@ -959,6 +1058,7 @@ async function reconcileIndex(env) {
       meta.rcAdoptSkipped = (meta.rcReadFail || 0);
       meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
       meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
+      meta.rcUnconvHist = {}; meta.rcUnconvSample = [];
     }
   }
   await env.AVATAR_KV.put("meta", JSON.stringify(meta));
