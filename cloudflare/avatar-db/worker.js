@@ -732,12 +732,15 @@ export default {
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
-          version: 30,   // FOLD is now maintained by the LIVENESS bots' own walk: a checked-only bump
-                         // (bot re-verified an UNCHANGED fancy avatar, so buildIndexOp never fires)
-                         // re-asserts the entry's union (raw ∪ folded) tokens, no-op-guarded by
-                         // applyIndexOps — so both token sets stay indexed via the sweep the bots already
-                         // do (no new reads/VRChat/APK, ~1 read/fancy avatar/30d). Fill bots already
-                         // maintain it via buildIndexOp on the material `filled` change. Prior (v29):
+          version: 31,   // FOLD is now maintained SOLELY by the LIVENESS bots' continuous walk — the
+                         // reconcile's fold re-emit pass is REMOVED (no more full fold re-laps). A
+                         // checked-only bump (bot re-verified an UNCHANGED fancy avatar) re-asserts the
+                         // entry's union (raw ∪ folded) tokens with the CURRENT foldFancy, no-op-guarded
+                         // by applyIndexOps — so both token sets stay indexed AND a new CONFUSABLES entry
+                         // is picked up as the walk re-checks each avatar (~one continuous lap, ~15h),
+                         // with NO FOLD_VER bump. Fill bots maintain it via buildIndexOp on the material
+                         // `filled` change; name/author changes already re-index. Prior (v30 = the same
+                         // liveness fold-ensure but still alongside the reconcile fold lap). And (v29):
                          // applyIndexOps REMS-before-ADDS / SET-before-DEL so a same-flush same-avatarId
                          // conflict resolves ADD/SET-wins, fixing the RE-KEY strip (an avatar whose image
                          // changed is remove(old fileId)+add(new fileId) in one flush; the old add-then-
@@ -961,38 +964,15 @@ async function reconcileIndex(env) {
       if (!avtrCache[b].has(id)) {
         const op = buildIndexOp(null, e, fid);   // ADD: writes fragment + avtr + tokens
         if (op) { missing.push(op); avtrCache[b].add(id); }   // add to cache so siblings this run aren't re-flagged
-      } else if (foldPass && needsFold(e)) {
-        // Present in the index but its FOLDED (NFKC/plain-ASCII) tokens may be missing (the pre-union
-        // desync). GATE the re-emit on ACTUALLY being broken: check each folded token's index bucket
-        // (cached per run) and only emit if the entry's id is genuinely absent from one. Without this
-        // gate the fold pass re-emitted EVERY fancy entry EVERY lap — refilling iq: as fast as it drains
-        // (a stalemate that never let foldVer stamp and buried genuine repairs behind ~all-no-op re-adds).
-        // The op is LEAN — frag:null + avtr:null (both already present for an indexed entry), only the
-        // union token adds — so it touches ONLY index buckets and same-author folds collapse into the
-        // same few buckets, keeping the drain cheap. tokensOf gives raw ∪ folded so the repair is complete.
-        const ftoks = [];
-        for (const f of [e.name, e.author]) {
-          if (!f) continue;
-          for (const w of foldFancy(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) ftoks.push(w);
-        }
-        let broken = false;
-        for (const t of ftoks) {
-          const ib = indexBucketFor(t);
-          if (!(ib in idxCache)) {
-            const m = {};
-            try {
-              const o = await env.CATALOG.get(`index/${ib}.json`);
-              if (o) { const j = await o.json(); if (j && j.t) for (const [tk, arr] of Object.entries(j.t)) m[tk] = new Set(Array.isArray(arr) ? arr : []); }
-              idxCache[ib] = m;
-            } catch (_) { idxCache[ib] = null; }   // read failed → treat as broken (repair is an idempotent no-op if actually present)
-          }
-          const buckets = idxCache[ib];
-          if (buckets === null) { broken = true; break; }
-          const s = buckets[t];
-          if (!s || !s.has(id)) { broken = true; break; }
-        }
-        if (broken) missing.push({ id: e.id, del: false, frag: null, add: [...tokensOf(e)], rem: [], avtr: null });
       }
+      // NO FOLD RE-EMIT PASS ANYMORE. Fold maintenance (re-asserting a fancy entry's plain/folded
+      // tokens) is now owned entirely by the LIVENESS bots' continuous walk (v30): their `checked` bump
+      // on a fancy avatar re-asserts its union (raw ∪ folded) tokens, no-op-guarded by applyIndexOps. So
+      // a CONFUSABLES addition needs NO FOLD_VER bump and NO full re-lap — liveness picks up the new fold
+      // as it re-checks each avatar (~one continuous liveness lap, ~15h at 4 bots). This reconcile still
+      // does the recount / unconverted registry / fill-worklist + the genuinely-absent index heal above,
+      // just not folding. `foldPass`/`FOLD_VER`/`foldLapV`/`idxCache` are vestigial (kept only so an
+      // in-flight lap settles cleanly). DO NOT bump FOLD_VER to "start a new fold" — liveness handles it.
     }
     if (shardHasUnfilled) fillSeen.add(prefix);   // this shard belongs in the fill worklist
   }
@@ -1494,8 +1474,11 @@ async function flushR2(env) {
       // entry is fancy (needsFold), re-assert its FULL union (raw ∪ folded) tokens so BOTH token sets
       // stay indexed. applyIndexOps no-op-guards this per token (a cheap Class B read when already
       // present, a one-token heal when the fold desynced), so the liveness bots maintain the fold as
-      // they walk — riding the checked write they already do, no new reads/VRChat/APK. Cost is ~1 read
-      // per fancy avatar per 30d liveness cycle. avtr:null/frag:null (both already correct for an
+      // they walk — riding the checked write they already do, no new reads/VRChat/APK. The liveness walk
+      // is CONTINUOUS (oldest-swept-first, no 30d due gate), so every fancy avatar is re-asserted ~once
+      // per full lap (~15h at 4 bots) — cost ~1 index read per fancy avatar per lap. This re-assert uses
+      // the CURRENT foldFancy, so a new CONFUSABLES entry is picked up automatically as the walk re-checks
+      // each avatar — NO FOLD_VER bump / re-lap needed. avtr:null/frag:null (both already correct for an
       // indexed entry) keeps it index-token-only.
       if (needsFold(e[fid])) sIndexOps.push({ id: e[fid].id, del: false, frag: null, add: [...tokensOf(e[fid])], rem: [], avtr: null });
     }
