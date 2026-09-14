@@ -354,8 +354,11 @@ async function applyIndexOps(env, ops) {
     const id = o.id; if (!id || !String(id).startsWith("avtr_")) continue;
     const fp = fragBucketFor(id);
     const fw = (fragWork[fp] ||= { set: {}, del: new Set() });
-    if (o.del) { fw.del.add(id); delete fw.set[id]; }
-    else if (o.frag) { fw.set[id] = o.frag; fw.del.delete(id); }
+    // Collect del + set INDEPENDENTLY (do NOT let one cancel the other here); the apply step below
+    // resolves a same-id conflict as SET-wins, so a re-key (remove old fileId + add new fileId, SAME
+    // avatarId, one flush) keeps the fragment instead of dropping it on op order.
+    if (o.del) fw.del.add(id);
+    if (o.frag) fw.set[id] = o.frag;
     if (o.avtr === "a") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).add.add(id);
     else if (o.avtr === "r") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).rem.add(id);
     for (const t of (o.add || [])) ((idxWork[indexBucketFor(t)] ||= {})[t] ||= { add: new Set(), rem: new Set() }).add.add(id);
@@ -375,10 +378,13 @@ async function applyIndexOps(env, ops) {
       // avatar whose summary is identical, or a delete of an absent id, must not rewrite the bucket).
       // This is the frag/avtr/index equivalent of the shard `dirty` flag — the biggest wasted Class A.
       let dirty = false;
+      // DEL before SET so SET wins a same-id conflict: a re-key's remove(old fileId) + add(new fileId)
+      // for the SAME avatarId both land here; deleting first then setting keeps the fragment. A del whose
+      // id is also being set is skipped entirely (the avatar is alive under the new key).
+      for (const id of fw.del) { if (!(id in fw.set) && id in cur.e) { delete cur.e[id]; dirty = true; } }
       for (const [id, summary] of Object.entries(fw.set)) {
         if (JSON.stringify(cur.e[id]) !== JSON.stringify(summary)) { cur.e[id] = summary; dirty = true; }
       }
-      for (const id of fw.del) { if (id in cur.e) { delete cur.e[id]; dirty = true; } }
       if (dirty) {
         try { await env.CATALOG.put(`fragments/${p}.json`, JSON.stringify({ v: 1, e: cur.e }), ttl);
           if (base) changed.push(base + `/fragments/${p}.json`); } catch (_) {}
@@ -391,9 +397,11 @@ async function applyIndexOps(env, ops) {
       const s = new Set(cur.ids);
       // NO-OP GUARD: only dirty when a membership actually changes (add of an id already present /
       // remove of an absent id rewrote the bucket identically — the reconcile re-add + requeue waste).
+      // REM before ADD so ADD wins a same-id conflict (see the index-token loop below for the full
+      // re-key rationale): a re-keyed avatar stays in the avtr/ presence set.
       let dirty = false;
-      for (const id of aw.add) { if (!s.has(id)) { s.add(id); dirty = true; } }
       for (const id of aw.rem) { if (s.has(id)) { s.delete(id); dirty = true; } }
+      for (const id of aw.add) { if (!s.has(id)) { s.add(id); dirty = true; } }
       if (dirty) {
         try { await env.CATALOG.put(`avtr/${p}.json`, JSON.stringify({ v: 1, ids: Array.from(s) }), ttl);
           if (base) changed.push(base + `/avtr/${p}.json`); } catch (_) {}
@@ -411,9 +419,16 @@ async function applyIndexOps(env, ops) {
     let dirty = false;
     for (const [tok, ch] of Object.entries(toks)) {
       const s = new Set(Array.isArray(cur.t[tok]) ? cur.t[tok] : []);
+      // REM before ADD so ADD wins a same-id conflict. On a RE-KEY (an avatar whose image changed:
+      // remove under the OLD fileId + add under the NEW fileId, SAME avatarId, ONE flush) both a rem and
+      // an add for this avatarId land in this token's posting list. The old add-then-rem order let the
+      // stale rem delete the id the add just inserted, so the (still-alive) avatar VANISHED from search
+      // until the next fold lap re-added it — then the next re-key stripped it again ("appeared then
+      // disappeared"). Applying rem first then add keeps a re-keyed avatar searchable; a genuine delete
+      // (rem only, no add) still removes it.
       let tdirty = false;
-      for (const id of ch.add) { if (!s.has(id)) { s.add(id); tdirty = true; } }
       for (const id of ch.rem) { if (s.has(id)) { s.delete(id); tdirty = true; } }
+      for (const id of ch.add) { if (!s.has(id)) { s.add(id); tdirty = true; } }
       if (!tdirty) continue;
       let ids = Array.from(s);
       if (ids.length > INDEX_HOT_TOKEN_CAP) ids = ids.slice(0, INDEX_HOT_TOKEN_CAP);
@@ -717,10 +732,13 @@ export default {
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
-          version: 28,   // desc edits now re-index (buildIndexOp `relevant` includes desc) so a bio-word
-                         // change updates search tokens, not just the stored bio. Prior (v27): foldFancy
-                         // overhaul (zalgo strip + CONFUSABLES + accent-fold) + "unconverted" registry
-                         // (GET /unconverted) + FOLD_VER 6 re-lap under the foldLapV guard.
+          version: 29,   // applyIndexOps now applies REMS before ADDS (and SET before DEL for fragments)
+                         // so a same-flush same-avatarId conflict resolves ADD/SET-wins. This fixes the
+                         // RE-KEY strip: an avatar whose image changed is remove(old fileId)+add(new
+                         // fileId) in one flush; the old add-then-rem order let the stale rem delete the
+                         // id the add just inserted, so the live avatar vanished from search ("appeared
+                         // then disappeared", esp. fancy-authored entries the bots re-key). No FOLD_VER
+                         // bump — the running fold lap's re-adds now STICK. Prior (v28): desc re-index.
         });
       }
 
