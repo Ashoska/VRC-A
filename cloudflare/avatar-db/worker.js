@@ -745,7 +745,13 @@ export default {
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
-          version: 33,   // v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
+          // DIAGNOSTIC (v34, temporary): prove whether self-invocation works. selfBinding=SELF service
+          // binding present; selfUrl=WORKER_SELF_URL var deployed; contHits=times the /flush?cont chain
+          // handler actually ran (grows ⇒ self-invocation works; stuck at 0 ⇒ it's broken).
+          selfBinding: !!env.SELF,
+          selfUrl: env.WORKER_SELF_URL || null,
+          contHits: (parseInt((await env.AVATAR_KV.get("conthits")) || "0", 10) || 0),
+          version: 34,   // v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
                          // budget and chains until the queue drains, so the per-invocation ceiling is no
                          // longer a throughput cap (a backlog clears in one chain, not one chunk per 2-min
@@ -784,6 +790,9 @@ export default {
         const cont = url.searchParams.get("cont");
         const isChain = !!cont && !!env.ADMIN_KEY && cont === env.ADMIN_KEY;
         if (isChain) {
+          // DIAGNOSTIC (v34): count how many times a continuation step actually re-entered here, so
+          // /health can prove whether self-invocation works at all. Remove once confirmed.
+          try { const c = (parseInt(await env.AVATAR_KV.get("conthits") || "0", 10) || 0) + 1; await env.AVATAR_KV.put("conthits", String(c)); } catch (_) {}
           await chainLockPut(env);   // refresh the single-flight lock so the cron keeps yielding
           let res = null;
           try { res = await flushR2(env); } catch (e) { console.log("flush chain err", e); }
