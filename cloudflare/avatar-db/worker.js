@@ -777,7 +777,9 @@ export default {
           selfBinding: !!env.SELF,
           selfUrl: env.WORKER_SELF_URL || null,
           contHits: (parseInt((await env.AVATAR_KV.get("conthits")) || "0", 10) || 0),
-          version: 35,   // v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
+          lastDiag: meta.lastDiag || null,   // TEMP: last flush's consumed/cleared/shards/failed/ok
+          version: 36,   // v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
+                         // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
                          // budget and chains until the queue drains, so the per-invocation ceiling is no
                          // longer a throughput cap (a backlog clears in one chain, not one chunk per 2-min
@@ -1650,55 +1652,15 @@ async function flushR2(env) {
   // purge token is configured.
   if (allShardsOk && purgePrefixes.length > 0) await purgeShards(env, purgePrefixes);
 
-  // FULL incremental SEARCH INDEX (add / rename / remove + avtr presence) — computed above from the
-  // SAME shard reads (no re-fetch). Drain any carried-over ops first, then this flush's, up to the
-  // per-flush cap; the remainder carries forward in an `iq:` queue and drains over the next flushes,
-  // so a big burst never drops and subrequests stay bounded. Only runs when shards wrote OK (so we
-  // index exactly what persisted; a failed apply re-queues everything and re-applies idempotently).
-  if (allShardsOk) {
-    const iqNames = await listPrefix(env, "iq:", 1000);   // own cursor (never crowded out); we drain only a few
-    iqDepthNow = iqNames.length;   // queue depth at flush start (keys) → meta.iqDepth for /health, ticks to 0
-    let queued = []; const drained = [];
-    for (const kn of iqNames) {
-      // Reserve this flush's own NEW contribution ops (indexOps) budget first, then read only enough
-      // BACKLOG keys to fill the rest. This is what makes a freshly-added avatar searchable within a
-      // flush or two instead of queuing behind a large backlog (a fold re-lap can leave hundreds of
-      // iq: keys). Old ops still drain with the remaining budget, so the backlog keeps clearing too.
-      if (indexOps.length + queued.length >= MAX_INDEX_OPS_PER_FLUSH) break;
-      const val = await env.AVATAR_KV.get(kn); drained.push(kn);
-      if (val) try { const a = JSON.parse(val); if (Array.isArray(a)) queued.push(...a); } catch (_) {}
-    }
-    const all = [...indexOps, ...queued];   // NEW contributions FIRST, then backlog
-    const toApply = all.slice(0, MAX_INDEX_OPS_PER_FLUSH);
-    let applied = true;
-    if (toApply.length) {
-      // NO edge-cache purge on the index buckets (fragments/avtr/index): those carry the 5-min INDEX_TTL,
-      // so a skipped purge self-heals within 5 min — and purges are slow HTTP calls that dominate the
-      // flush's WALL time (the v21 jam). Dropping them lets the flush drain far more index ops per tick
-      // within budget; search freshness lags at most INDEX_TTL, which is fine (clone-shard purges, which
-      // users hit live, are unaffected — those still happen in flushR2's shard-write path).
-      try { await applyIndexOps(env, toApply); }
-      catch (_) { applied = false; }
-    }
-    for (const kn of drained) await env.AVATAR_KV.delete(kn);
-    const requeue = applied ? all.slice(MAX_INDEX_OPS_PER_FLUSH) : all;   // on failure retry all (idempotent)
-    for (let i = 0; i < requeue.length; i += MAX_INDEX_OPS_PER_FLUSH)
-      // NO expiry: a search-index op is the ONLY thing that makes an avatar searchable, so it must
-      // NEVER be dropped. The old 7-day TTL silently EXPIRED queued ops whenever the backlog outlived
-      // it (heavy harvesting, or while the full rebuild was down), leaving avatars cloneable-but-
-      // unsearchable forever. The queue self-drains as flushes catch up; the paginated listPrefix read
-      // keeps it from crowding out pend:/rep:, and the full rebuild reconciles fragments/index from the
-      // clone shards, so an un-drained op is at worst redundant, never lost.
-      await env.AVATAR_KV.put("iq:" + crypto.randomUUID(),
-        JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
-  }
-
-  // Clear each key whose touched shards ALL persisted (idempotent retry for the rest — nothing lost).
-  // PER-KEY, not all-or-nothing: a single failed shard no longer strands every batch in the flush (the
-  // "batches stuck at N" cause). Only keys touching a genuinely-failed shard are kept for the next
-  // flush; everything else drains → real progress even on a partial-failure flush. A key with no
-  // recorded shards (empty/garbage batch, or a moot report needing no write) never intersects
-  // failedShards → clears.
+  // Clear the drained KV keys FIRST — BEFORE the (expensive) index drain. Clearing depends ONLY on the
+  // shard-loop result (allShardsOk / failedShards), so doing it first guarantees a batch whose shards
+  // persisted is deleted even if the index drain below later blows the ~1000-subrequest ceiling and
+  // throws. THIS ORDER IS THE FIX for "nothing drains": the index drain used to run FIRST, and its ~300
+  // index ops (each new-avatar op touches fragment+avtr+index buckets) + the shard ops exceeded the
+  // ceiling, killing the invocation BEFORE this clear ever ran → pend keys never deleted → the whole
+  // queue stuck (verified live: pendCleared=0 every flush). PER-KEY (not all-or-nothing): only keys
+  // touching a genuinely-failed shard are kept for retry; a key with no recorded shards (empty/garbage
+  // batch, moot report) always clears.
   const keyClears = (kn, map) => { const s = map.get(kn); if (!s) return true; for (const sp of s) if (failedShards.has(sp)) return false; return true; };
   let pendCleared = 0, repCleared = 0;
   for (const n of pendKeys) if (keyClears(n, pendKeyShards)) { await env.AVATAR_KV.delete(n); pendCleared++; }
@@ -1706,6 +1668,46 @@ async function flushR2(env) {
   for (const n of admrKeys) if (keyClears(n, admrKeyShards)) await env.AVATAR_KV.delete(n);
   for (const n of admkKeys) if (keyClears(n, admkKeyShards)) await env.AVATAR_KV.delete(n);
   for (const n of repClear) if (keyClears(n, repKeyShards)) { await env.AVATAR_KV.delete(n); repCleared++; }
+
+  // FULL incremental SEARCH INDEX (add / rename / remove + avtr presence) — computed above from the SAME
+  // shard reads (no re-fetch). Runs AFTER the clear (above) and is COST-CAPPED + fully WRAPPED so a
+  // subrequest-ceiling throw can never abort the flush: the shards persisted + the batch already
+  // cleared, and any un-applied op stays queued in iq: to drain on a later/lighter flush or chain step.
+  if (allShardsOk) {
+   try {
+    // Dynamic budget: the shard read+write loop already spent ~2*prefixes.length subrequests, and each
+    // index op can touch fragment+avtr+index buckets (read+write). Cap the drain so the TOTAL stays well
+    // under the ~1000 ceiling — a heavy new-avatar batch yields most index work to the iq: queue (drained
+    // by the next chain step) instead of blowing the invocation. Falls to 0 for a very shard-heavy flush.
+    const iqCap = Math.max(0, Math.min(MAX_INDEX_OPS_PER_FLUSH, Math.floor((720 - 2 * prefixes.length) / 5)));
+    const iqNames = await listPrefix(env, "iq:", 1000);   // own cursor (never crowded out); we drain only a few
+    iqDepthNow = iqNames.length;   // queue depth at flush start (keys) → meta.iqDepth for /health
+    let queued = []; const drained = [];
+    for (const kn of iqNames) {
+      // THIS flush's NEW contribution ops (indexOps) get budget first, then only enough BACKLOG keys to
+      // fill the rest — so a freshly-added avatar is searchable within a flush or two, not stuck behind
+      // the backlog.
+      if (indexOps.length + queued.length >= iqCap) break;
+      const val = await env.AVATAR_KV.get(kn); drained.push(kn);
+      if (val) try { const a = JSON.parse(val); if (Array.isArray(a)) queued.push(...a); } catch (_) {}
+    }
+    const all = [...indexOps, ...queued];   // NEW contributions FIRST, then backlog
+    const toApply = all.slice(0, iqCap);
+    let applied = true;
+    if (toApply.length) {
+      // No edge-cache purge on index buckets (they carry the 5-min INDEX_TTL, self-heal), so this is the
+      // cheap path; clone-shard purges (user-facing) already happened in the shard-write loop.
+      try { await applyIndexOps(env, toApply); } catch (_) { applied = false; }
+    }
+    for (const kn of drained) await env.AVATAR_KV.delete(kn);
+    const requeue = applied ? all.slice(iqCap) : all;   // leftover / on-failure-all → requeue (idempotent)
+    for (let i = 0; i < requeue.length; i += MAX_INDEX_OPS_PER_FLUSH)
+      // NO expiry: an index op is the ONLY thing that makes an avatar searchable, so it must NEVER be
+      // dropped. The queue self-drains as flushes catch up; reconcile also reconciles the index from the
+      // clone shards, so an un-drained op is at worst redundant, never lost.
+      await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
+   } catch (_) { /* index drain hit the ceiling — batches ALREADY cleared above; iq: self-heals next flush */ }
+  }
 
   // Manifest — the WORKER now owns it (search + counts are fully incremental, no Action needed).
   // entryCount and unfilled move by the deltas computed above; searchReady is always true. Written
@@ -1791,6 +1793,7 @@ async function flushR2(env) {
       ? `R2 +${added} -${removed} (${prefixes.length} shards)`
       : `R2 partial: ${failedShards.size} shard(s) failed, drained the rest (+${added} -${removed})`,
     pendingBatches: Math.max(0, pendNames.length - pendCleared),   // remaining after THIS flush's per-key drain (drops each flush now)
+    lastDiag: `consumed=${pendKeys.length} cleared=${pendCleared} shards=${prefixes.length} dirty=${dirtyPrefixes.length} failed=${failedShards.size} ok=${allShardsOk}`,   // TEMP flush instrumentation
     reports: Math.max(0, repNames.length - repCleared),
     iqDepth: iqDepthNow,   // search-index op queue depth (keys) — watch it drain to 0 after a fold/rebuild
     backend: "r2",
