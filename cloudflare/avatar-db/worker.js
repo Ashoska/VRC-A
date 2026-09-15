@@ -687,6 +687,32 @@ export default {
         } catch (e) { return json({ ok: false, error: String(e) }, 500); }
       }
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
+        // DEEP PROBE (temporary): /health?deep=1 lists the REAL pend: keys and inspects the first few
+        // — is meta.pendingBatches stale vs the true count, and are the stuck batches dupes/malformed?
+        if (url.searchParams.get("deep") === "1") {
+          const names = await listPrefix(env, "pend:");
+          const sample = [];
+          for (const kn of names.slice(0, 4)) {
+            try {
+              const val = await env.AVATAR_KV.get(kn);
+              if (!val) { sample.push({ kn: kn.slice(0, 18), empty: true }); continue; }
+              const b = JSON.parse(val);
+              const fids = Object.keys(b).filter((f) => FILE_RE.test(f));
+              const shards = new Set(fids.map(shardPrefix));
+              let dupes = 0, checked = 0;
+              for (const sp of [...shards].slice(0, 4)) {
+                try {
+                  const o = await env.CATALOG.get(`shard/${sp}.json`);
+                  const e = o ? ((await o.json()).e || {}) : {};
+                  for (const fid of fids) if (shardPrefix(fid) === sp) { checked++; if (e && e[fid]) dupes++; }
+                } catch (_) {}
+              }
+              sample.push({ kn: kn.slice(0, 18), fids: fids.length, shards: shards.size, dupesInFirst4Shards: `${dupes}/${checked}` });
+            } catch (e) { sample.push({ kn: kn.slice(0, 18), err: String(e).slice(0, 50) }); }
+          }
+          const m = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+          return json({ deep: true, realPend: names.length, metaPend: m.pendingBatches, contHits: parseInt((await env.AVATAR_KV.get("conthits")) || "0", 10) || 0, sample });
+        }
         // ONE cheap KV read (no list ops — those have a tight free-tier limit and this is
         // polled every 15s). Counts come from meta (set at flush).
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
@@ -751,7 +777,7 @@ export default {
           selfBinding: !!env.SELF,
           selfUrl: env.WORKER_SELF_URL || null,
           contHits: (parseInt((await env.AVATAR_KV.get("conthits")) || "0", 10) || 0),
-          version: 34,   // v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
+          version: 35,   // v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
                          // budget and chains until the queue drains, so the per-invocation ceiling is no
                          // longer a throughput cap (a backlog clears in one chain, not one chunk per 2-min
