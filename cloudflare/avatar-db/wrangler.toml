@@ -27,6 +27,14 @@ id = "e72fc7074f9f44c3b9cde9f6ac7a646b"
 binding = "CATALOG"
 bucket_name = "vrca-avatar-catalog"
 
+# Self service-binding: lets the flush continuation invoke THIS worker directly (env.SELF.fetch)
+# for a fresh subrequest budget per drain step. A plain fetch() to our own workers.dev hostname is
+# unreliable for self-invocation (Cloudflare loop-guard / edge-cache), so a service binding is the
+# blessed path — it routes straight to a new invocation of this worker with no DNS/cache in between.
+[[services]]
+binding = "SELF"
+service = "vrca-avatar-db"
+
 [vars]
 # Where the apps + bots read the sharded catalog from (they append /shard/<prefix>.json,
 # /fragments/..., /_manifest.json, /_worklist.json). /health echoes this so a serving change

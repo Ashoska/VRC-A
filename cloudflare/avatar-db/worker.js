@@ -1321,8 +1321,18 @@ async function chainLockPut(env) { try { await env.AVATAR_KV.put("flushlock", St
 async function chainLockDel(env) { try { await env.AVATAR_KV.delete("flushlock"); } catch (_) {} }
 function fireContinuation(env, ctx, depth) {
   if (!env.ADMIN_KEY) return;   // chaining is gated on the internal token; without it, single-flush only
-  const u = `${selfBase(env)}/flush?cont=${encodeURIComponent(env.ADMIN_KEY)}&n=${depth}`;
-  ctx.waitUntil(fetch(u).catch(() => {}));
+  const path = `/flush?cont=${encodeURIComponent(env.ADMIN_KEY)}&n=${depth}`;
+  // PREFER the self service-binding (env.SELF) — a plain fetch() to our own workers.dev hostname is an
+  // unreliable way to self-invoke (Cloudflare loop-guard / edge-cache can drop it, which is why the
+  // chain didn't fire on first deploy). The service binding routes straight to a fresh invocation of
+  // THIS worker (fresh subrequest budget) with no DNS/cache in the path. Global fetch is the fallback.
+  try {
+    if (env.SELF && typeof env.SELF.fetch === "function") {
+      ctx.waitUntil(env.SELF.fetch("https://self" + path).catch(() => {}));
+      return;
+    }
+  } catch (_) {}
+  ctx.waitUntil(fetch(selfBase(env) + path).catch(() => {}));
 }
 
 async function flushR2(env) {
