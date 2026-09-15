@@ -732,7 +732,13 @@ export default {
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
-          version: 31,   // FOLD is now maintained SOLELY by the LIVENESS bots' continuous walk — the
+          version: 32,   // v32: PER-KEY batch drain — a flush that partial-fails on the ~1000-subrequest
+                         // ceiling now clears the batches whose shards persisted and KEEPS only the ones
+                         // touching a genuinely-failed shard (was all-or-nothing, which stranded EVERY
+                         // batch on a single failed shard → "batches stuck at N, flickering"). No cap
+                         // change, so iq/shard throughput is unchanged. `pendingBatches` now reports the
+                         // post-drain remaining count (drops each flush). Prior (v31): FOLD is now
+                         // maintained SOLELY by the LIVENESS bots' continuous walk — the
                          // reconcile's fold re-emit pass is REMOVED (no more full fold re-laps). A
                          // checked-only bump (bot re-verified an UNCHANGED fancy avatar) re-asserts the
                          // entry's union (raw ∪ folded) tokens with the CURRENT foldFancy, no-op-guarded
@@ -1299,6 +1305,17 @@ async function flushR2(env) {
 
   const pendKeys = [];
   const recentBatches = [];   // admin "recent contributions" view (free: built from data already read)
+  // PER-KEY shard sets + the set of shards whose R2 IO FAILED this flush. The KV-clear below deletes a
+  // key ONLY when none of the shards it touched failed — REPLACING the old all-or-nothing "clear only
+  // if EVERY shard wrote OK". A single failed shard write (e.g. brushing the ~1000 subrequest ceiling)
+  // used to strand EVERY batch in the flush → the queue "stuck at N, flickering" churning forever
+  // (re-reading + partially re-writing the same batches every 2 min, thrown away). Now a partial
+  // failure keeps ONLY the batches touching the genuinely-failed shards; the rest drain, so the queue
+  // makes real progress every flush. No cap change → no throughput/iq slowdown.
+  const failedShards = new Set();
+  const pendKeyShards = new Map(), admuKeyShards = new Map(), admrKeyShards = new Map(),
+        admkKeyShards = new Map(), repKeyShards = new Map();
+  const shardsOf = (fids) => { const s = new Set(); for (const fid of fids) if (FILE_RE.test(fid)) s.add(shardPrefix(fid)); return s; };
   // Consume pending USER batches only until MAX_SHARDS_PER_FLUSH distinct shards are queued, then STOP
   // (leave the rest for the next 1-min flush) so a big burst can't blow the subrequest limit and wedge
   // the queue forever. A deferred batch is NOT added to pendKeys, so it isn't deleted → it drains next
@@ -1323,6 +1340,7 @@ async function flushR2(env) {
     const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
     if (!reserve(fids)) break;                                                 // over budget → defer rest
     pendKeys.push(kn);
+    pendKeyShards.set(kn, shardsOf(fids));
     for (const fid of fids) S(shardPrefix(fid)).adds[fid] = batch[fid];
     if (fids.length) recentBatches.push({
       ts: typeof batch.__ts === "number" ? batch.__ts : Date.now(),
@@ -1342,6 +1360,7 @@ async function flushR2(env) {
     const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
     if (!reserve(fids)) break;   // over budget → defer to next flush
     admuKeys.push(kn);
+    admuKeyShards.set(kn, shardsOf(fids));
     for (const fid of fids) S(shardPrefix(fid)).upserts[fid] = batch[fid];
   }
   const admrKeys = [];
@@ -1352,6 +1371,7 @@ async function flushR2(env) {
     const fids = arr.filter((f) => typeof f === "string" && f.startsWith("file_"));
     if (!reserve(fids)) break;   // over budget → defer to next flush
     admrKeys.push(kn);
+    admrKeyShards.set(kn, shardsOf(fids));
     for (const fid of fids) S(shardPrefix(fid)).removes.add(fid);
   }
   const admkKeys = [];
@@ -1362,6 +1382,7 @@ async function flushR2(env) {
     const fids = arr.filter((f) => typeof f === "string" && f.startsWith("file_"));
     if (!reserve(fids)) break;   // over budget → defer to next flush
     admkKeys.push(kn);
+    admkKeyShards.set(kn, shardsOf(fids));
     for (const fid of fids) S(shardPrefix(fid)).checked.add(fid);
   }
   // Reports: rename immediately, remove on quorum; both clear their rep: key. A below-quorum "dead"
@@ -1385,10 +1406,10 @@ async function flushR2(env) {
     let r; try { r = JSON.parse(val); } catch (_) { continue; }
     if (r.status === "renamed" && r.name) {
       if (!reserve([fid])) break;                                   // shard WRITE → budget
-      S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn);
+      S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn); repKeyShards.set(kn, shardsOf([fid]));
     } else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) {
       if (!reserve([fid])) break;                                   // shard WRITE → budget
-      S(shardPrefix(fid)).removes.add(fid); repClear.push(kn);
+      S(shardPrefix(fid)).removes.add(fid); repClear.push(kn); repKeyShards.set(kn, shardsOf([fid]));
     } else if (r.status === "dead" && (Object.keys(repShardCache).length < 30 || shardPrefix(fid) in repShardCache)) {
       // Below quorum: normally waits for a 2nd report or the bot. Drain it here ONLY if the avatar is
       // no longer in the catalog (nothing to remove) — a shard READ, no write, so no budget reserve.
@@ -1418,7 +1439,7 @@ async function flushR2(env) {
       const obj = await env.CATALOG.get(`shard/${sp}.json`);
       cur = obj ? await obj.json() : { v: 1, e: {} };
       if (!cur || typeof cur !== "object" || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
-    } catch (_) { allShardsOk = false; continue; } // read failed -> skip (never wipe), retry next flush
+    } catch (_) { allShardsOk = false; failedShards.add(sp); continue; } // read failed -> skip (never wipe); mark shard so its batches are KEPT, not cleared
     const e = cur.e;
     // Track whether this shard's CONTENT actually changed. A flush where every op is a no-op
     // (harvest re-sending already-known avatars → all adds are dupes; a `checked` bump for an
@@ -1499,7 +1520,7 @@ async function flushR2(env) {
         httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
       });
       wrote = true;
-    } catch (_) { allShardsOk = false; }
+    } catch (_) { allShardsOk = false; failedShards.add(sp); }  // write failed → KEEP this shard's batches (per-key clear below)
     if (wrote) {   // fold the count deltas + index ops ONLY now that the shard actually persisted
       dirtyPrefixes.push(sp);
       if (contentDirty) purgePrefixes.push(sp);   // checked-only writes persist but skip the purge
@@ -1557,14 +1578,19 @@ async function flushR2(env) {
         JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
   }
 
-  // Clear KV only when every touched shard wrote OK (idempotent retry otherwise — nothing lost).
-  if (allShardsOk) {
-    for (const n of pendKeys) await env.AVATAR_KV.delete(n);
-    for (const n of admuKeys) await env.AVATAR_KV.delete(n);
-    for (const n of admrKeys) await env.AVATAR_KV.delete(n);
-    for (const n of admkKeys) await env.AVATAR_KV.delete(n);
-    for (const n of repClear) await env.AVATAR_KV.delete(n);
-  }
+  // Clear each key whose touched shards ALL persisted (idempotent retry for the rest — nothing lost).
+  // PER-KEY, not all-or-nothing: a single failed shard no longer strands every batch in the flush (the
+  // "batches stuck at N" cause). Only keys touching a genuinely-failed shard are kept for the next
+  // flush; everything else drains → real progress even on a partial-failure flush. A key with no
+  // recorded shards (empty/garbage batch, or a moot report needing no write) never intersects
+  // failedShards → clears.
+  const keyClears = (kn, map) => { const s = map.get(kn); if (!s) return true; for (const sp of s) if (failedShards.has(sp)) return false; return true; };
+  let pendCleared = 0, repCleared = 0;
+  for (const n of pendKeys) if (keyClears(n, pendKeyShards)) { await env.AVATAR_KV.delete(n); pendCleared++; }
+  for (const n of admuKeys) if (keyClears(n, admuKeyShards)) await env.AVATAR_KV.delete(n);
+  for (const n of admrKeys) if (keyClears(n, admrKeyShards)) await env.AVATAR_KV.delete(n);
+  for (const n of admkKeys) if (keyClears(n, admkKeyShards)) await env.AVATAR_KV.delete(n);
+  for (const n of repClear) if (keyClears(n, repKeyShards)) { await env.AVATAR_KV.delete(n); repCleared++; }
 
   // Manifest — the WORKER now owns it (search + counts are fully incremental, no Action needed).
   // entryCount and unfilled move by the deltas computed above; searchReady is always true. Written
@@ -1648,9 +1674,9 @@ async function flushR2(env) {
     adoptedRebuild,
     lastCommit: allShardsOk
       ? `R2 +${added} -${removed} (${prefixes.length} shards)`
-      : `R2 partial: some shard IO failed, kept pending (+${added} -${removed})`,
-    pendingBatches: pendNames.length,
-    reports: allShardsOk ? Math.max(0, repNames.length - repClear.length) : repNames.length,
+      : `R2 partial: ${failedShards.size} shard(s) failed, drained the rest (+${added} -${removed})`,
+    pendingBatches: Math.max(0, pendNames.length - pendCleared),   // remaining after THIS flush's per-key drain (drops each flush now)
+    reports: Math.max(0, repNames.length - repCleared),
     iqDepth: iqDepthNow,   // search-index op queue depth (keys) — watch it drain to 0 after a fold/rebuild
     backend: "r2",
   }));
