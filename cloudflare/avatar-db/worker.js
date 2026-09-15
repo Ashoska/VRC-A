@@ -274,6 +274,19 @@ const MAX_SHARDS_PER_FLUSH = 120;   // raised 60->120: v24 dropped the index-buc
 // case ~120 shard reads + writes + a lean 300-op index drain + reconcile's bounded reads ≈ ~800
 // subrequests, under Cloudflare's ~1000/invocation limit; shard purges are batched 30/call and only fire
 // on genuine content change (dupe churn = +0 = no purge). Contribution intake ~doubles; no ingest change.
+
+// ---- Self-chaining flush continuation ----------------------------------------------------------
+// The per-invocation ~1000-subrequest ceiling used to cap the drain to ONE cron flush per 2 min, so a
+// contribution backlog crept up faster than it cleared. Instead of one big (ceiling-risking) flush,
+// each flush that still sees pend work fires a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`), which
+// gets a FRESH budget and drains the next chunk — chaining until the queue is empty. A single-flight KV
+// lock keeps the 2-min cron from starting a second chain AND keeps reconcile from overlapping a chain's
+// flush (which is what raced the shared `meta` record → the pendingBatches/lastFlush flicker). Cost: the
+// chain only runs while there's a backlog and idles back to the plain 2-min cron once pend is empty, so
+// steady state is unchanged; a drain burst adds a lock op + meta write per step (negligible KV).
+const FLUSH_LOCK_TTL_MS = 90_000;      // a chain holds this; the cron skips its cycle while it's fresh
+const MAX_CONTINUATION_DEPTH = 30;     // hard cap on chained steps per drain (runaway guard)
+const DEFAULT_SELF_URL = "https://vrca-avatar-db.shadowash321rulse.workers.dev";  // fallback if WORKER_SELF_URL unset
 // Coalesce _manifest.json writes. The LIVE entry count already rides `meta.entries` (which /health
 // max()es against the manifest), so the _manifest.json copy only needs periodic freshening, not a
 // write+purge on every count-moving flush during steady growth. Rewrite it at most every N ms OR once
@@ -732,7 +745,14 @@ export default {
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
-          version: 32,   // v32: PER-KEY batch drain — a flush that partial-fails on the ~1000-subrequest
+          version: 33,   // v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
+                         // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
+                         // budget and chains until the queue drains, so the per-invocation ceiling is no
+                         // longer a throughput cap (a backlog clears in one chain, not one chunk per 2-min
+                         // cron). A single-flight KV lock (`flushlock`) makes the cron yield while a chain
+                         // runs AND stops reconcile overlapping a chain's flush → the `meta` read-modify-
+                         // write race (pendingBatches/lastFlush flicker) is gone. Idles to the plain cron
+                         // when pend is empty. Prior (v32): PER-KEY batch drain — a flush that partial-fails on the ~1000-subrequest
                          // ceiling now clears the batches whose shards persisted and KEEPS only the ones
                          // touching a genuinely-failed shard (was all-or-nothing, which stranded EVERY
                          // batch on a single failed shard → "batches stuck at N, flickering"). No cap
@@ -757,6 +777,24 @@ export default {
       }
 
       if (req.method === "GET" && url.pathname === "/flush") {
+        // Internal continuation step (fired by fireContinuation with the ADMIN_KEY token). ONLY a
+        // token-bearing request may CHAIN — a plain public /flush stays a single flush exactly as
+        // before, so /flush being public gains no new blast radius (the lock + depth cap bound a chain
+        // to one drain regardless of how it's triggered).
+        const cont = url.searchParams.get("cont");
+        const isChain = !!cont && !!env.ADMIN_KEY && cont === env.ADMIN_KEY;
+        if (isChain) {
+          await chainLockPut(env);   // refresh the single-flight lock so the cron keeps yielding
+          let res = null;
+          try { res = await flushR2(env); } catch (e) { console.log("flush chain err", e); }
+          const depth = parseInt(url.searchParams.get("n") || "1", 10) || 1;
+          if (res && res.pendRemaining > 0 && res.progressed && depth < MAX_CONTINUATION_DEPTH) {
+            fireContinuation(env, ctx, depth + 1);   // more to drain → hand off a fresh budget
+          } else {
+            await chainLockDel(env);   // drained / capped / no progress → release the lock
+          }
+          return json({ chained: true, depth, pendRemaining: res ? res.pendRemaining : -1 });
+        }
         await flushR2(env);
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
         return json({
@@ -786,10 +824,25 @@ export default {
     // reconcile (re-arm + advance the fold lap, enqueues iq: ops) → prune → author-rename, THEN flushR2
     // LAST (now bounded to 60 shards so it completes and drains the iq: ops the earlier tasks queued).
     ctx.waitUntil((async () => {
+      // A continuation chain from a previous cron may still be draining a large backlog. If so, skip
+      // this whole cycle — running reconcile/flush now would overlap the chain's flush and race the
+      // shared `meta` record (the pendingBatches/lastFlush flicker). The chain finishes fast; the cron
+      // just waits one cycle. (A crashed chain self-heals in ≤90s when the lock ages out.)
+      if (await chainBusy(env)) return;
       try { await reconcileIndex(env); } catch (e) { console.log("reconcile err", e); }
       try { await pruneFillWorklist(env); } catch (e) { console.log("prune err", e); }
       try { await propagateAuthorRenames(env); } catch (e) { console.log("arn err", e); }
-      try { await flushR2(env); } catch (e) { console.log("flushR2 err", e); }
+      // Claim the single-flight lock, run one flush, and if pend work remains hand off to a
+      // self-chaining drain (each step a FRESH ~1000-subrequest budget) instead of waiting 2 min for
+      // the next cron. Releases the lock when there's nothing left to chain.
+      await chainLockPut(env);
+      let res = null;
+      try { res = await flushR2(env); } catch (e) { console.log("flushR2 err", e); }
+      if (res && res.pendRemaining > 0 && res.progressed) {
+        fireContinuation(env, ctx, 1);
+      } else {
+        await chainLockDel(env);
+      }
     })());
   },
 };
@@ -1255,6 +1308,23 @@ async function listPrefix(env, prefix, cap = 5000) {
   return out;
 }
 
+// ---- continuation-chain helpers (see the FLUSH_LOCK_TTL_MS block above) --------------------------
+function selfBase(env) { return (env.WORKER_SELF_URL || DEFAULT_SELF_URL).replace(/\/$/, ""); }
+async function chainBusy(env) {
+  try {
+    const v = await env.AVATAR_KV.get("flushlock");
+    if (!v) return false;
+    return (Date.now() - (parseInt(v, 10) || 0)) < FLUSH_LOCK_TTL_MS;
+  } catch (_) { return false; }
+}
+async function chainLockPut(env) { try { await env.AVATAR_KV.put("flushlock", String(Date.now()), { expirationTtl: 120 }); } catch (_) {} }
+async function chainLockDel(env) { try { await env.AVATAR_KV.delete("flushlock"); } catch (_) {} }
+function fireContinuation(env, ctx, depth) {
+  if (!env.ADMIN_KEY) return;   // chaining is gated on the internal token; without it, single-flush only
+  const u = `${selfBase(env)}/flush?cont=${encodeURIComponent(env.ADMIN_KEY)}&n=${depth}`;
+  ctx.waitUntil(fetch(u).catch(() => {}));
+}
+
 async function flushR2(env) {
   const prevMeta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   // iq: index-op queue depth (in KEYS, each ≈ up to MAX_INDEX_OPS_PER_FLUSH ops), stamped from the
@@ -1703,6 +1773,10 @@ async function flushR2(env) {
       await env.AVATAR_KV.put("recent", JSON.stringify(next));
     }
   }
+  // For the self-chaining continuation: pend batches left after THIS flush's per-key drain, and
+  // whether this step made progress (cleared ≥1). The caller chains another fresh-budget flush while
+  // pend work remains AND progress is being made (so a step that can only re-hit failed shards stops).
+  return { pendRemaining: Math.max(0, pendNames.length - pendCleared), progressed: pendCleared > 0 };
 }
 
 // Purge a list of absolute catalog URLs from Cloudflare's edge cache (batches of 30, the

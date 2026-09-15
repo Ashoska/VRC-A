@@ -33,6 +33,11 @@ bucket_name = "vrca-avatar-catalog"
 # (e.g. a new domain) needs no app update. Points at the R2 bucket's custom domain.
 CATALOG_BASE = "https://cdn.gremlininc.app"
 
+# The Worker's OWN routable URL — used by the self-chaining flush continuation to spawn a fresh
+# invocation (fresh subrequest budget) per drain step. Must be a URL that re-enters THIS worker's
+# fetch handler. Defaults to the workers.dev hostname if unset (see DEFAULT_SELF_URL in worker.js).
+WORKER_SELF_URL = "https://vrca-avatar-db.shadowash321rulse.workers.dev"
+
 # Reliable search-index rebuild: the Worker triggers the catalog-rebuild GitHub Action itself
 # (GitHub's own `schedule:` cron drops most runs). Set these + a GH_DISPATCH_TOKEN secret
 # (`wrangler secret put GH_DISPATCH_TOKEN` — a fine-grained PAT with Actions: write on the repo).
