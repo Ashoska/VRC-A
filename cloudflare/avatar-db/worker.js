@@ -778,7 +778,7 @@ export default {
           selfUrl: env.WORKER_SELF_URL || null,
           contHits: (parseInt((await env.AVATAR_KV.get("conthits")) || "0", 10) || 0),
           lastDiag: meta.lastDiag || null,   // TEMP: last flush's consumed/cleared/shards/failed/ok
-          version: 36,   // v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
+          version: 37,   // v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
                          // budget and chains until the queue drains, so the per-invocation ceiling is no
@@ -1778,7 +1778,7 @@ async function flushR2(env) {
     }
   }
 
-  await env.AVATAR_KV.put("meta", JSON.stringify({
+  try { await env.AVATAR_KV.put("meta", JSON.stringify({
     ...prevMeta,
     lastFlush: new Date().toISOString(),
     lastAdded: added, lastRemoved: removed,
@@ -1797,12 +1797,12 @@ async function flushR2(env) {
     reports: Math.max(0, repNames.length - repCleared),
     iqDepth: iqDepthNow,   // search-index op queue depth (keys) — watch it drain to 0 after a fold/rebuild
     backend: "r2",
-  }));
+  })); } catch (_) { /* ceiling: meta stale ONE cycle (self-corrects next flush); the return below is computed from in-memory state so the chain still gets the right pendRemaining */ }
 
   // Rolling log of the most recent USER contribution batches (newest first) with FULL names, in a
   // DEDICATED key so it never bloats meta/health. Only rewritten when batches were processed this
   // flush → +1 small KV write per flush at most, nothing when idle. Capped at 20 batches.
-  if (recentBatches.length) {
+  if (recentBatches.length) try {
     let prev = []; try { const r = await env.AVATAR_KV.get("recent"); if (r) prev = JSON.parse(r); } catch (_) {}
     prev = Array.isArray(prev) ? prev : [];
     // DEDUP the display log by CONTENT (contributor + the exact avatar set), not timestamp: a
@@ -1820,7 +1820,7 @@ async function flushR2(env) {
       const next = [...fresh.reverse(), ...prev].slice(0, 20);
       await env.AVATAR_KV.put("recent", JSON.stringify(next));
     }
-  }
+  } catch (_) { /* best-effort display log; never let it abort the flush's return below */ }
   // For the self-chaining continuation: pend batches left after THIS flush's per-key drain, and
   // whether this step made progress (cleared ≥1). The caller chains another fresh-budget flush while
   // pend work remains AND progress is being made (so a step that can only re-hit failed shards stops).
