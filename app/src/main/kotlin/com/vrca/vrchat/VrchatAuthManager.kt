@@ -1874,6 +1874,37 @@ object VrchatAuthManager {
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "avatar still loading (VRChat fallback) — retrying"
             return@withContext WornAvatarResult(null, loading = true, observedFileId = wornFileId)
         }
+        // === NO WORN IMAGE (VRChat's 2026 privacy change) — resolve by the log name(+author) ===
+        // As of VRChat's 2026 change, `/users/{id}` NO LONGER RETURNS ANY worn-avatar image (a full
+        // /users dump shows currentAvatarThumbnailImageUrl AND currentAvatarImageUrl are GONE — only the
+        // VRC+ profile iconUrl remains), so wornFileId is null for essentially EVERY player now. This is
+        // no longer a rare "impostor/hidden" edge; it is the norm, so refusing to resolve without a worn
+        // image would kill cloning outright. The worn image was only ever a SECOND confirmation on TOP of
+        // the log's name(+author); losing it removes that extra check, not resolution itself.
+        //
+        // Run this BEFORE the file-id lookups + external avtrdb name-search below (which all assume a worn
+        // file id: they either no-op on null or, worse, prematurely grey when avtrdb alone has no hit even
+        // though OUR catalog does). resolveByNameAndAuthor is the SAME safe path the loading/robot branch
+        // uses — it searches our IMAGE-VERIFIED catalog first (a unique EXACT-name match is trustworthy,
+        // author-narrowed when the log gave a "by <author>" line), falls back to avtrdb ONLY with an
+        // author, confirm-lives before serving, and NEVER serves an ambiguous name. Those guards are what
+        // prevent wrong-clones now that the worn image can't add a third check.
+        if (wornFileId == null && avatarName.isNotBlank()) {
+            // Gate on nameStable so a name captured mid-switch can't uniquely match (and clone) the
+            // player's PREVIOUS avatar; the roster's bounded loading watch retries until it settles.
+            if (!nameStable) {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "avatar name not yet stable — waiting"
+                return@withContext WornAvatarResult(null, loading = true)
+            }
+            step("→ no worn image on /users (VRChat removed it) → name${if (author.isNotBlank()) "+author" else ""} lookup")
+            val byName = resolveByNameAndAuthor(context, avatarName, author)
+            step("  ${com.vrca.vrchat.AvatarSearch.Diag.lastReason}")
+            // Resolved (or a decisive dead/private verdict) → return it. Otherwise keep the bounded loading
+            // retry: a transient rate-limit may clear, or the crowdsourced catalog may grow to include this
+            // name, before the roster's 3-min watch greys it out. (No worn image will ever arrive now, so
+            // the watch resolves purely on the name/author signal — exactly what we want.)
+            return@withContext byName ?: WornAvatarResult(null, loading = true)
+        }
         // GLOBAL crowdsourced catalog first — exact, offline, zero network.
         step("→ local catalog (offline map) lookup by fileId")
         com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let { hit ->
@@ -2023,14 +2054,12 @@ object VrchatAuthManager {
                 "${candidates.size} candidates, none matched the worn image (won't name-guess)"
             return@withContext WornAvatarResult(null, noMatch = true)
         }
-        // wornFileId == null (impostor'd / hidden thumb — common for PRIVATE avatars, where
-        // VRChat hides the real thumbnail). We CANNOT verify a candidate is the actual worn
-        // avatar without the worn image file id, so a name/author "best-effort" here just clones
-        // a DIFFERENT same-named public avatar → the user turns into the wrong avatar / robot, and
-        // the clone button wrongly lights up for un-resolvable (private) avatars. Refuse to guess:
-        // grey it out. (This removes the old name-only fallback that caused exactly that.)
+        // wornFileId == null with a name present is now handled EARLIER (right after the robot branch)
+        // via the name(+author) fallback — VRChat removed the worn image from /users, so this is the
+        // normal case and it must run the full catalog+avtrdb path, not the file-id-only paths above.
+        // Reaching here means wornFileId was non-null yet nothing matched → the guarded grey-out.
         com.vrca.vrchat.AvatarSearch.Diag.lastReason =
-            "${candidates.size} candidates but no worn image to confirm (won't name-guess — greyed)"
+            "${candidates.size} candidates but none matched the worn image (won't name-guess — greyed)"
         WornAvatarResult(null, noMatch = true)
         } finally {
             // The terminal outcome (the reason set right before whichever return fired) is the LAST
