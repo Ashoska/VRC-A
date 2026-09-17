@@ -1309,41 +1309,17 @@ object VrchatAuthManager {
         val imageFieldsDiag: String = ""
     )
 
-    /** TEMPORARY DIAGNOSTIC (the VRChat worn-thumbnail removal investigation): dump the WHOLE
-     *  `/users/{id}` shape so we can see if the worn-avatar thumbnail was RENAMED or MOVED (into a
-     *  nested object / array) rather than removed. Two parts:
-     *   (1) `KEYS:` — every top-level key with a compact value (a nested object shows its subkey names,
-     *       so a thumbnail relocated into a new sub-object is visible by name), and
-     *   (2) `FILE/IMG:` — a recursive sweep of EVERY `file_…` id / api-file or image URL at ANY depth,
-     *       reported with its full key path — the surgical answer to "where did the thumbnail go?".
-     *  When VRChat has genuinely removed it, both parts show no worn-avatar file id anywhere. */
+    /** A recursive sweep of the `/users/{id}` response for EVERY `file_…` id / image URL at ANY depth,
+     *  each with its key path. Confirmed (Sept 2026) that VRChat REMOVED the worn-avatar image from
+     *  /users — the only file id that remains is the VRC+ profile `iconUrl`. This is kept as a live
+     *  watchdog: if a SECOND file id ever shows up here (a restored currentAvatarImageUrl / a moved
+     *  field), the roster trace surfaces it and we can re-enable image-verified resolution. */
     private fun buildImageFieldsDiag(j: org.json.JSONObject): String {
-        val out = StringBuilder("KEYS: ")
-        val keys = j.keys().asSequence().toList().sorted()
-        for ((idx, k) in keys.withIndex()) {
-            if (idx > 0) out.append(", ")
-            out.append(k).append('=').append(compactJsonVal(j.opt(k)))
-        }
         val hits = ArrayList<String>()
         scanImageValues(j, "", hits)
-        out.append("  ||  FILE/IMG: ")
-        out.append(if (hits.isEmpty()) "(none anywhere)" else hits.joinToString(", "))
-        return out.toString()
-    }
-
-    /** Compact one JSON value for the KEYS overview — one level only (a nested object lists its subkey
-     *  names so a moved field is discoverable; the recursive sweep pulls the actual ids). */
-    private fun compactJsonVal(v: Any?): String = when (v) {
-        null, org.json.JSONObject.NULL -> "∅"
-        is org.json.JSONObject -> "{" + v.keys().asSequence().toList().joinToString(",") + "}"
-        is org.json.JSONArray -> "[" + v.length() + "]"
-        is String -> when {
-            v.isBlank() -> "\"\""
-            fileIdOf(v) != null -> "file:" + fileIdOf(v)!!.removePrefix("file_").take(8)
-            v.startsWith("http") -> "url"
-            else -> "\"" + v.take(18) + "\""
-        }
-        else -> v.toString().take(18)
+        // Only the profile iconUrl (VRC+ pic) remains post-removal; a SECOND file id here would mean
+        // VRChat restored a worn-avatar image field — which we'd want to see and start using again.
+        return if (hits.isEmpty()) "(no image fields)" else hits.joinToString(", ")
     }
 
     /** Recursively surface every value (ANY depth) that is a `file_…` id or an image/api-file URL,
@@ -1832,11 +1808,9 @@ object VrchatAuthManager {
             else -> "worn image: none (hidden thumb / impostor / no worn avatar)  [fresh /users fetch]"
         })
         if (substituted) step("thumbnail was the VRChat Robot fallback (VRC+/avatar-hidden) → using full worn image fileId $imageFileId instead")
-        // TEMP DIAGNOSTIC (VRChat worn-thumbnail removal hunt): dump the WHOLE /users response on EVERY
-        // resolve — unconditionally, not just the robot branch — so we can see whether the worn-avatar
-        // thumbnail was RENAMED/MOVED (a file id shows up under some other key/path) vs truly REMOVED
-        // (no worn-avatar file id anywhere in FILE/IMG).
-        if (imageFieldsDiag.isNotBlank()) step("  /users dump: $imageFieldsDiag")
+        // WATCHDOG: every file id VRChat returned for this member (post-removal this is only the VRC+
+        // iconUrl). A SECOND file id here = a restored/moved worn-avatar image → re-enable image-verify.
+        if (imageFieldsDiag.isNotBlank()) step("  /users image fields: $imageFieldsDiag")
         if (avatarName.isNotBlank()) step("log avatar name: \"$avatarName\"${if (author.isNotBlank()) " by $author" else ""}")
         // /users FAILED (rate-limited/network): the worn image is UNKNOWN, so don't waste the name
         // search + 6 VRChat confirms on a guess we can't image-verify — that's transient, retry next
