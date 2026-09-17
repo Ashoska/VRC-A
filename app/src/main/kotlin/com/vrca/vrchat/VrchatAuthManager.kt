@@ -1309,28 +1309,61 @@ object VrchatAuthManager {
         val imageFieldsDiag: String = ""
     )
 
-    /** Scan a `/users/{id}` JSON for EVERY key that looks image-bearing and pull its `file_…` id
-     *  (shortened). Surfaces a field we might not be reading — the honest way to answer "is the real
-     *  avatar thumbnail hiding somewhere in the response?" for a VRC+/loading user. */
+    /** TEMPORARY DIAGNOSTIC (the VRChat worn-thumbnail removal investigation): dump the WHOLE
+     *  `/users/{id}` shape so we can see if the worn-avatar thumbnail was RENAMED or MOVED (into a
+     *  nested object / array) rather than removed. Two parts:
+     *   (1) `KEYS:` — every top-level key with a compact value (a nested object shows its subkey names,
+     *       so a thumbnail relocated into a new sub-object is visible by name), and
+     *   (2) `FILE/IMG:` — a recursive sweep of EVERY `file_…` id / api-file or image URL at ANY depth,
+     *       reported with its full key path — the surgical answer to "where did the thumbnail go?".
+     *  When VRChat has genuinely removed it, both parts show no worn-avatar file id anywhere. */
     private fun buildImageFieldsDiag(j: org.json.JSONObject): String {
-        val out = StringBuilder()
-        val keys = j.keys()
-        while (keys.hasNext()) {
-            val k = keys.next()
-            val lk = k.lowercase()
-            if (!(lk.contains("avatar") || lk.contains("image") || lk.contains("icon") || lk.contains("pic"))) continue
-            val v = j.optString(k, "")
-            if (v.isBlank()) continue
-            val fid = fileIdOf(v)
-            val shown = when {
-                fid != null -> fid.removePrefix("file_").take(8)
-                v.startsWith("http") -> "url(no-fileid)"
-                else -> v.take(12)
-            }
-            if (out.isNotEmpty()) out.append("  ")
-            out.append(k).append('=').append(shown)
+        val out = StringBuilder("KEYS: ")
+        val keys = j.keys().asSequence().toList().sorted()
+        for ((idx, k) in keys.withIndex()) {
+            if (idx > 0) out.append(", ")
+            out.append(k).append('=').append(compactJsonVal(j.opt(k)))
         }
-        return if (out.isEmpty()) "(no image fields)" else out.toString()
+        val hits = ArrayList<String>()
+        scanImageValues(j, "", hits)
+        out.append("  ||  FILE/IMG: ")
+        out.append(if (hits.isEmpty()) "(none anywhere)" else hits.joinToString(", "))
+        return out.toString()
+    }
+
+    /** Compact one JSON value for the KEYS overview — one level only (a nested object lists its subkey
+     *  names so a moved field is discoverable; the recursive sweep pulls the actual ids). */
+    private fun compactJsonVal(v: Any?): String = when (v) {
+        null, org.json.JSONObject.NULL -> "∅"
+        is org.json.JSONObject -> "{" + v.keys().asSequence().toList().joinToString(",") + "}"
+        is org.json.JSONArray -> "[" + v.length() + "]"
+        is String -> when {
+            v.isBlank() -> "\"\""
+            fileIdOf(v) != null -> "file:" + fileIdOf(v)!!.removePrefix("file_").take(8)
+            v.startsWith("http") -> "url"
+            else -> "\"" + v.take(18) + "\""
+        }
+        else -> v.toString().take(18)
+    }
+
+    /** Recursively surface every value (ANY depth) that is a `file_…` id or an image/api-file URL,
+     *  keyed by its dotted path — so a worn thumbnail moved into a nested object/array is found. */
+    private fun scanImageValues(node: Any?, path: String, out: MutableList<String>) {
+        when (node) {
+            is org.json.JSONObject -> {
+                val ks = node.keys()
+                while (ks.hasNext()) { val k = ks.next(); scanImageValues(node.opt(k), if (path.isEmpty()) k else "$path.$k", out) }
+            }
+            is org.json.JSONArray -> { for (i in 0 until node.length()) scanImageValues(node.opt(i), "$path[$i]", out) }
+            is String -> {
+                val fid = fileIdOf(node)
+                when {
+                    fid != null -> out.add("$path=file:" + fid.removePrefix("file_").take(8))
+                    node.startsWith("http") && (node.contains("/file/") || node.contains("image", true) || node.contains("/api/1/image")) ->
+                        out.add("$path=url:…" + node.takeLast(20))
+                }
+            }
+        }
     }
 
     suspend fun fetchUserInfo(context: Context, userId: String): VrcUserInfo? = withContext(Dispatchers.IO) {
@@ -1799,6 +1832,11 @@ object VrchatAuthManager {
             else -> "worn image: none (hidden thumb / impostor / no worn avatar)  [fresh /users fetch]"
         })
         if (substituted) step("thumbnail was the VRChat Robot fallback (VRC+/avatar-hidden) → using full worn image fileId $imageFileId instead")
+        // TEMP DIAGNOSTIC (VRChat worn-thumbnail removal hunt): dump the WHOLE /users response on EVERY
+        // resolve — unconditionally, not just the robot branch — so we can see whether the worn-avatar
+        // thumbnail was RENAMED/MOVED (a file id shows up under some other key/path) vs truly REMOVED
+        // (no worn-avatar file id anywhere in FILE/IMG).
+        if (imageFieldsDiag.isNotBlank()) step("  /users dump: $imageFieldsDiag")
         if (avatarName.isNotBlank()) step("log avatar name: \"$avatarName\"${if (author.isNotBlank()) " by $author" else ""}")
         // /users FAILED (rate-limited/network): the worn image is UNKNOWN, so don't waste the name
         // search + 6 VRChat confirms on a guess we can't image-verify — that's transient, retry next
@@ -1818,10 +1856,7 @@ object VrchatAuthManager {
         if (com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(wornFileId)) {
             step("worn image is a VRChat FALLBACK (avatar still loading)" +
                 if (nameStable) " → try unique name+author" else " → name not yet stable, waiting")
-            // DIAGNOSTIC (the "where does VRChat keep the real avatar for a VRC+ user?" hunt): show
-            // EVERY image/avatar/icon/pic field VRChat returned for this member + its file id, so we
-            // can see whether the real worn thumbnail is hiding in a field we don't read.
-            if (imageFieldsDiag.isNotBlank()) step("  /users image fields: $imageFieldsDiag")
+            // (full /users dump already surfaced unconditionally above)
             // The worn image is the fallback, so we can't image-confirm — BUT the log has their REAL
             // avatar name + author. Resolve by a UNIQUE name+author match (the author locks it to the
             // same avatar; a unique match is a lookup, not a guess). This clones a loading/hidden
