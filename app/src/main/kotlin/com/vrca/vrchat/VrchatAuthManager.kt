@@ -1370,7 +1370,16 @@ object VrchatAuthManager {
                     .ifBlank { j.optString("userIcon", "") }
                     .ifBlank { j.optString("currentAvatarThumbnailImageUrl", "") },
                 wornAvatarThumbUrl = j.optString("currentAvatarThumbnailImageUrl", ""),
-                wornAvatarImageUrl = j.optString("currentAvatarImageUrl", ""),
+                // VRChat's 2026 API change makes `currentAvatarImageUrl` a COPY of the profile ICON
+                // (`userIcon`/`iconUrl`), NOT the worn avatar (confirmed by VRCX: "currentAvatarImageUrl
+                // being a copy of userIcon, gimme a break"). If it matches the profile icon's file id it
+                // is useless as a worn image — BLANK it so the resolver's VRC+ full-image substitution
+                // can't clone the profile ICON as an avatar. Kept as-is if it's ever a genuinely
+                // different file id again (VRChat reverts) so image-verification revives automatically.
+                wornAvatarImageUrl = j.optString("currentAvatarImageUrl", "").let { full ->
+                    val iconFid = fileIdOf(j.optString("iconUrl", "").ifBlank { j.optString("userIcon", "") })
+                    if (full.isNotBlank() && iconFid != null && fileIdOf(full) == iconFid) "" else full
+                },
                 imageFieldsDiag = buildImageFieldsDiag(j)
             ).also { cacheWornThumb(userId, it.wornAvatarThumbUrl, it.wornAvatarImageUrl, it.imageFieldsDiag) }
         } catch (e: Exception) {
