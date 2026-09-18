@@ -1777,8 +1777,14 @@ object VrchatAuthManager {
         // instead of a second identical GET /users/{id}. `reused` is surfaced in the trace so the
         // diagnostics show when a call was saved vs a fresh fetch made.
         val reused = cachedWornThumb(userId)
-        val freshInfo = if (reused != null) null else fetchUserInfo(context, userId)
-        val fetchFailed = reused == null && freshInfo == null
+        // VRChat REMOVED the worn-avatar image from /users, so the resolve needs NO /users call —
+        // resolution is name+author (OUR catalog FIRST, then avtrdb) off the log name. A blocking
+        // /users fetch here only added latency + rate-limit retries (a 429 returned usersFailed and
+        // STALLED the clone for 12s+) for a field that's always absent now. Reuse enrich's cached data
+        // ONLY if it's already present (the image WATCHDOG + auto-revival if VRChat restores it); never
+        // fetch. enrichPlatforms still does the /users call for the roster row + the watchdog.
+        val freshInfo: VrcUserInfo? = null
+        val fetchFailed = false
         val wornThumbUrl = reused?.first ?: freshInfo?.wornAvatarThumbUrl.orEmpty()
         val wornImageUrl = reused?.second ?: freshInfo?.wornAvatarImageUrl.orEmpty()
         val imageFieldsDiag = reused?.third ?: freshInfo?.imageFieldsDiag.orEmpty()
@@ -1873,11 +1879,14 @@ object VrchatAuthManager {
             step("→ no worn image on /users (VRChat removed it) → name${if (author.isNotBlank()) "+author" else ""} lookup")
             val byName = resolveByNameAndAuthor(context, avatarName, author)
             step("  ${com.vrca.vrchat.AvatarSearch.Diag.lastReason}")
-            // Resolved (or a decisive dead/private verdict) → return it. Otherwise keep the bounded loading
-            // retry: a transient rate-limit may clear, or the crowdsourced catalog may grow to include this
-            // name, before the roster's 3-min watch greys it out. (No worn image will ever arrive now, so
-            // the watch resolves purely on the name/author signal — exactly what we want.)
-            return@withContext byName ?: WornAvatarResult(null, loading = true)
+            // resolveByNameAndAuthor returns a NON-NULL result for every non-final outcome — a resolved
+            // id, a decisive dead/private verdict, OR a transient (loading=true) that should retry. So a
+            // NULL here is a DEFINITIVE no-match (0 candidates / ambiguous / not in any db): grey it
+            // IMMEDIATELY instead of spinning for the ~40s loading window. Because the resolve is gated on
+            // nameStable (~4s) and the `Unpacking (name by author)` line lands ~1s after a switch, the log
+            // author is virtually always present by the time we resolve, so a definitive no-match here is
+            // genuinely final (a later switch re-resolves via the name-key change).
+            return@withContext byName ?: WornAvatarResult(null, noMatch = true)
         }
         // GLOBAL crowdsourced catalog first — exact, offline, zero network.
         step("→ local catalog (offline map) lookup by fileId")
@@ -2098,6 +2107,38 @@ object VrchatAuthManager {
                 return@withContext null
             }
 
+            // 0. LOCAL CATALOG (offline `map`) FIRST — INSTANT, zero network. The old worn-file-id path
+            //    resolved an in-db avatar with an offline `map[fileId]` hit; name resolution otherwise goes
+            //    through `searchSharded` (an R2 fetch), which is why an already-cataloged avatar stopped
+            //    being near-instant. Apply the SAME unique-exact-name(+author) rule against the on-device
+            //    catalog so an in-db avatar clones with only a single session-cached confirm-live GET, and
+            //    fall through to R2/avtrdb only on a local MISS or AMBIGUITY (`map` ⊆ the full catalog).
+            run {
+                val nameNorm0 = fancyFold(avatarName)
+                val local = com.vrca.vrchat.AvatarGlobalDb.localEntriesByFoldedName(nameNorm0)
+                    .filter { !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.avatarId, it.fileId) }
+                val narrowed = if (authorNorm.isNotBlank()) local.filter { fancyFold(it.author) == authorNorm } else local
+                val unique = narrowed.distinctBy { it.avatarId }
+                if (unique.size == 1) {
+                    val e = unique[0]
+                    val (verdict, plats) = verifyCatalogHit(context, e.avatarId, null)
+                    when (verdict) {
+                        HitVerdict.SERVE -> {
+                            com.vrca.vrchat.AvatarSearch.Diag.lastReason =
+                                if (authorNorm.isNotBlank()) "name+author: unique LOCAL catalog match (instant)"
+                                else "name-only: unique LOCAL catalog match (instant)"
+                            return@withContext WornAvatarResult(e.avatarId, plats.ifEmpty { e.platforms })
+                        }
+                        HitVerdict.DEAD -> {
+                            com.vrca.vrchat.AvatarGlobalDb.report(context, e.fileId, e.avatarId, "dead")
+                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "name+author: local catalog match dead/private — greyed"
+                            return@withContext WornAvatarResult(null, dead = true)
+                        }
+                        else -> {}  // transient confirm → fall through to the R2 path (may still confirm)
+                    }
+                }
+            }
+
             // 1. OUR CATALOG FIRST — served from R2/CDN, so no avtrdb rate-limit, image-verified, and
             //    it already carries platforms (no extra /avatars call). Because our catalog is image-
             //    VERIFIED at contribution time (and we confirm-live before serving), a UNIQUE name match
@@ -2158,7 +2199,7 @@ object VrchatAuthManager {
                             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "name+author: catalog match dead/private — greyed"
                             WornAvatarResult(null, dead = true)
                         }
-                        else -> null   // transient → retry via the loading loop
+                        else -> WornAvatarResult(null, loading = true)   // transient → retry (non-null so caller doesn't grey it as final)
                     }
                 }
                 if (m.size > 1) {
@@ -2217,7 +2258,7 @@ object VrchatAuthManager {
                     if (c.imageFileId != null) com.vrca.vrchat.AvatarGlobalDb.report(context, c.imageFileId!!, c.id, "dead")
                     return@withContext WornAvatarResult(null, dead = true)
                 }
-                null -> return@withContext null   // transient → retry
+                null -> return@withContext WornAvatarResult(null, loading = true)   // transient → retry (not a final grey)
                 else -> {}
             }
             val plats = conf.platforms
