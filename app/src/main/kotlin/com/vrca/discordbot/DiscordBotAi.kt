@@ -196,8 +196,7 @@ object DiscordBotAi {
             "\"style\":[3-5 first-person lines on how he talks],\"mood\":\"one short line\"," +
             "\"episode\":\"<a memorable server moment worth remembering, or empty>\"}. " +
             "Keep traits that still fit, drop stale ones, add ones the room clearly vibes with (likes, " +
-            "dislikes, running jokes, opinions). Do NOT add traits about hating a protected group, or " +
-            "about jokes aimed at a real named person's death or crimes."
+            "dislikes, running jokes, opinions)."
         val user = buildString {
             append("CURRENT TRAITS: ").append(currentTraits.ifEmpty { listOf("(none)") }.joinToString("; "))
             append("\nCURRENT STYLE: ").append(currentStyle.ifEmpty { listOf("(none)") }.joinToString("; "))
