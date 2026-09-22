@@ -115,18 +115,21 @@ object DiscordRest {
         } catch (_: Exception) { }
     }
 
+    /** Result of a send: the created message id (for reaction-learning) + an error string. */
+    data class SendOutcome(val messageId: String?, val error: String?)
+
     /**
      * Posts [content] to [channelId], optionally as a reply to [replyToMessageId].
      * `allowed_mentions.parse=[]` blocks the model's output from ever @-pinging
      * everyone/roles/users, and `replied_user=false` avoids pinging on a reply.
-     * @return null on success, else an error string.
+     * Returns the new message id (so the bot can learn from reactions to its OWN posts).
      */
-    suspend fun sendMessage(
+    suspend fun send(
         token: String,
         channelId: String,
         content: String,
         replyToMessageId: String? = null,
-    ): String? = withContext(Dispatchers.IO) {
+    ): SendOutcome = withContext(Dispatchers.IO) {
         try {
             val payload = JSONObject()
                 .put("content", content.take(MAX_CONTENT))
@@ -145,11 +148,14 @@ object DiscordRest {
                 .post(payload.toString().toRequestBody(JSON))
                 .build()
             client.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) null
-                else "send HTTP ${resp.code}: ${resp.body?.string()?.take(160).orEmpty()}"
+                val raw = resp.body?.string().orEmpty()
+                if (resp.isSuccessful) {
+                    val id = try { JSONObject(raw).optString("id").ifBlank { null } } catch (_: Exception) { null }
+                    SendOutcome(id, null)
+                } else SendOutcome(null, "send HTTP ${resp.code}: ${raw.take(160)}")
             }
         } catch (e: Exception) {
-            "${e.javaClass.simpleName}: ${e.message ?: "network error"}"
+            SendOutcome(null, "${e.javaClass.simpleName}: ${e.message ?: "network error"}")
         }
     }
 }
