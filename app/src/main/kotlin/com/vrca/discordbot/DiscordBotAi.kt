@@ -135,7 +135,13 @@ object DiscordBotAi {
             append("\"summary\":\"<=1 line of what's going on now\",")
             append("\"self\":{\"trait\":\"<one short thing you noticed about yourself, or empty>\",\"mood\":\"\"},")
             append("\"event\":\"<a shared server moment/joke worth remembering, or empty>\"}\n")
-            append("Attribute every fact to the RIGHT person by name — never mix people up. Only fill fields you're SURE of; use empty/[] otherwise. This line is never shown.")
+            append("FACTS RULE: a fact is a DURABLE thing about WHO the person is — what they like/dislike, ")
+            append("their hobbies/job/pets/where they're from, their personality, a nickname THEY have for someone, ")
+            append("a standing relationship. NOT what they just said or did this minute. NEVER write \"mentioned X\", ")
+            append("\"talked about Y\", \"said/asked/imagined Z\", \"brought up W\" — those are chatter, not facts; use []. ")
+            append("If a name like \"John Woman\" is how people here refer to a PERSON, that belongs on THAT person's card, ")
+            append("not as a fact about whoever said it. Attribute every fact to the RIGHT person — never mix people up. ")
+            append("Only fill fields you're SURE of; empty/[] otherwise. This line is never shown.")
         }
         val messages = JSONArray().put(obj("system", sys))
         // Merge consecutive same-author turns so the transcript reads as fewer, fuller turns.
@@ -230,8 +236,10 @@ object DiscordBotAi {
             "\"people\":[{\"about\":\"<name>\",\"facts\":[short strings],\"nickname\":\"\",\"language\":\"\",\"sentiment\":\"\"}]," +
             "\"event\":\"<a shared moment/inside joke worth remembering, or empty>\"," +
             "\"self\":{\"trait\":\"<one short thing Cardinal seems to be like, or empty>\",\"mood\":\"\"}}. " +
-            "Note people even if they're being talked ABOUT rather than present. Attribute facts to the RIGHT person. " +
-            "Only include things clearly true from the chat; empty/[] otherwise. Do NOT record hateful notes about protected groups, or jokes about a real named person's death or crimes."
+            "A fact is a DURABLE thing about WHO a person is (likes/dislikes, hobbies, job, pets, origin, personality, a standing relationship, a nickname they use) — " +
+            "NOT what they just said or did. NEVER write \"mentioned X\", \"talked about Y\", \"said/asked/imagined Z\", \"brought up W\"; those are chatter, use []. " +
+            "You may note a person even if they're only being talked ABOUT — and if a name (e.g. \"John Woman\") is how people refer to a PERSON, put info on THAT person, not on whoever said it. " +
+            "Attribute facts to the RIGHT person. Only clearly-true durable things; empty/[] otherwise. Do NOT record hateful notes about protected groups, or jokes about a real named person's death or crimes."
         val user = "PREVIOUS SUMMARY: ${prevSummary.ifBlank { "(none)" }}\n\nRECENT CHAT:\n$transcript"
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", user))
         return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 350)) {

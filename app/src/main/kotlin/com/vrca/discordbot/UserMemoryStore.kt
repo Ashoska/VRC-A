@@ -104,10 +104,18 @@ object UserMemoryStore {
         "(?i)ignore (all|previous|the above)|system prompt|you are (now|an|a )|disregard|" +
         "new instructions|forget (everything|your)|jailbreak|pretend to be"
     )
+    // Ephemeral "chatter" phrasings — momentary conversation actions, NOT durable facts about a
+    // person. Dropped so a card fills with who someone IS, not a log of what they just said.
+    private val EPHEMERAL = Regex(
+        "(?i)^(mentioned|talked about|talking about|was talking|is talking|brought up|referenced|" +
+        "imagined|posted|shared|said( that)?|says|asked( about| if)?|wanted to know|joked( about)?|" +
+        "was saying|is saying|discussed|responded|replied|reacted|greeted|complained|commented)\\b"
+    )
     private fun cleanFact(s: String): String? {
         val t = s.trim()
         if (t.length < 2 || t.length > 200) return null
         if (POISON.containsMatchIn(t)) return null
+        if (EPHEMERAL.containsMatchIn(t)) return null
         if (t.contains("http://") || t.contains("https://")) return null
         return t
     }
