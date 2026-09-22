@@ -55,8 +55,10 @@ object DiscordBotAi {
             val memDeltas: List<MemDelta>,
             val summary: String,
             val selfTrait: String,
+            val selfStyle: String,
             val selfMood: String,
             val serverEvent: String,
+            val reactEmojis: List<String>,
         ) : ReplyResult()
         data class Error(val message: String) : ReplyResult()
     }
@@ -88,8 +90,10 @@ object DiscordBotAi {
         "- NEVER complain about being pinged, @'d, or tagged. That's just people talking to you.\n" +
         "- Don't give fake refusals or lectures. If it's reasonable, just do it. If you truly won't, brush it off with a quip in one line.\n" +
         "- Be honest, don't make things up. If you don't actually know something, say so or keep it vague; never invent specific facts, names, or events.\n" +
+        "- Have opinions. When someone asks your take on something, actually GIVE one in character (a real stance) instead of bouncing the question back at them.\n" +
+        "- Vary your tone with your MOOD (given below). You are NOT always hyped — be genuine, chill, dry, amused, or excited as the moment fits. Don't SHOUT in all caps unless it truly calls for it.\n" +
         "- Match the room's energy: one short line for banter, a little more only when someone genuinely asks something.\n" +
-        "- Use the person's preferred name/nickname when you know it."
+        "- Use the person's preferred name/nickname when you know it, and adjust how you talk to each person (their card may note it)."
 
     private fun endpoint(cfg: DiscordBotStore.Config, model: String): String =
         if (cfg.cfGatewayId.isNotBlank())
@@ -121,7 +125,8 @@ object DiscordBotAi {
                     .append(". Only switch languages if the person does or asks you to. Write any non-English in its NATIVE script (e.g. 日本語, not romaji).")
             if (c.emojiHint.isNotBlank())
                 append("\n\n[Emojis you can use] ").append(c.emojiHint)
-                    .append(" — write them as :name: and they'll render. Use them naturally, sparingly.")
+                    .append(" — write them as :name: and they'll render. Use them naturally, sparingly. ")
+                    .append("If someone asks you to REACT to their message (not reply), put the emoji names in the tail's \"react\" list and keep any text to a word or nothing.")
             if (c.lastBotReplies.isNotEmpty())
                 append("\n\n[Don't repeat yourself] You recently said: ")
                     .append(c.lastBotReplies.joinToString(" / ") { "\"${it.take(80)}\"" })
@@ -129,20 +134,21 @@ object DiscordBotAi {
             if (c.shortHint) append("\n\nKeep it to one short line.")
             append("\n\n[After your reply] On a NEW line output ").append(MEM_DELIM)
             append(" then ONE JSON object (never shown to anyone):\n")
-            append("{\"people\":[{\"about\":\"<their EXACT name/nickname as shown>\",\"facts\":[short strings],")
-            append("\"forget\":[facts no longer true],\"bit\":\"\",\"nickname\":\"\",\"preferredName\":\"<what they want to be called, or empty>\",")
-            append("\"language\":\"\",\"alsoSpeaks\":[],\"sentiment\":\"\",\"relationship\":\"\",\"howToTreat\":\"\"}],")
+            append("{\"react\":[emoji names to react to their message with, usually []],")
+            append("\"people\":[{\"about\":\"<their EXACT name/nickname as shown>\",\"facts\":[short strings],")
+            append("\"forget\":[facts no longer true],\"bit\":\"\",\"nickname\":\"\",\"preferredName\":\"\",")
+            append("\"language\":\"\",\"alsoSpeaks\":[],\"sentiment\":\"\",\"relationship\":\"\",\"howToTreat\":\"\",\"talkStyle\":\"\"}],")
             append("\"summary\":\"<=1 line of what's going on now\",")
-            append("\"self\":{\"trait\":\"<one short thing you noticed about yourself, or empty>\",\"mood\":\"\"},")
+            append("\"self\":{\"trait\":\"<a durable thing about who YOU are, or empty>\",\"style\":\"<a lasting habit in HOW you talk, or empty>\",\"mood\":\"<your current fleeting mood, one word>\"},")
             append("\"event\":\"<a shared server moment/joke worth remembering, or empty>\"}\n")
-            append("FACTS RULE: a fact is a DURABLE thing about WHO the person is — what they like/dislike, ")
-            append("their hobbies/job/pets/where they're from, their personality, a nickname THEY have for someone, ")
-            append("a standing relationship. NOT what they just said or did this minute. NEVER write \"mentioned X\", ")
-            append("\"talked about Y\", \"said/asked/imagined Z\", \"brought up W\" — those are chatter, not facts; use []. ")
-            append("If a name like \"John Woman\" is how people here refer to a PERSON, that belongs on THAT person's card, ")
-            append("not as a fact about whoever said it. Attribute every fact to the RIGHT person — never mix people up. ")
-            append("Don't restate a fact you already know about them; if it CHANGED, give the corrected version in facts (it replaces the old one). ")
-            append("If something you knew is no longer true, put it in forget. Only fill fields you're SURE of; empty/[] otherwise. This line is never shown.")
+            append("FACTS RULE: a fact is a DURABLE thing about WHO the person is — what they like/dislike (a clear \"I love X\" IS a fact), ")
+            append("their hobbies/job/pets/where they're from, their personality, a nickname THEY use, a standing relationship. ")
+            append("NOT what they just said/did this minute, and NOT a guess from a single message or emoji. NEVER write \"mentioned X\"/\"talked about Y\"/\"said Z\"/\"imagined W\" — chatter, use []. ")
+            append("Do NOT put a fact that just restates their name, nickname, relationship, or how you treat them — those have their own fields. ")
+            append("If a name like \"John Woman\" is how people refer to a PERSON, that belongs on THAT person's card. Attribute every fact to the RIGHT person. ")
+            append("STICKY FIELDS: leave relationship/preferredName/howToTreat/talkStyle/sentiment EMPTY unless it's genuinely NEW or CHANGED — never re-guess or re-state what you already have (don't flip a known relationship). ")
+            append("SELF: only nudge trait/style/mood when you actually notice a real shift; trait is a durable identity thing, style is HOW you talk, mood is a fleeting one-word tone — keep them DIFFERENT (mood is not a trait). ")
+            append("Don't restate a fact you already know; a changed fact goes in facts (it replaces the old), a no-longer-true one goes in forget. Only fill fields you're SURE of. This line is never shown.")
         }
         val messages = JSONArray().put(obj("system", sys))
         // Merge consecutive same-author turns so the transcript reads as fewer, fuller turns.
@@ -157,13 +163,17 @@ object DiscordBotAi {
                 val text = (if (idx >= 0) r.text.substring(0, idx) else r.text).trim()
                 if (text.isBlank()) return ReplyResult.Error("Empty reply")
                 val tail = if (idx >= 0) parseTail(r.text.substring(idx + MEM_DELIM.length)) else null
+                val obj = tail?.second
+                val self = obj?.optJSONObject("self")
                 ReplyResult.Ok(
                     text = text,
                     memDeltas = tail?.first ?: emptyList(),
-                    summary = tail?.second?.optString("summary")?.trim().orEmpty(),
-                    selfTrait = tail?.second?.optJSONObject("self")?.optString("trait")?.trim().orEmpty(),
-                    selfMood = tail?.second?.optJSONObject("self")?.optString("mood")?.trim().orEmpty(),
-                    serverEvent = tail?.second?.optString("event")?.trim().orEmpty(),
+                    summary = obj?.optString("summary")?.trim().orEmpty(),
+                    selfTrait = self?.optString("trait")?.trim().orEmpty(),
+                    selfStyle = self?.optString("style")?.trim().orEmpty(),
+                    selfMood = self?.optString("mood")?.trim().orEmpty(),
+                    serverEvent = obj?.optString("event")?.trim().orEmpty(),
+                    reactEmojis = strList(obj?.optJSONArray("react")).take(4),
                 )
             }
             is Result.Error -> ReplyResult.Error(r.message)
@@ -181,6 +191,10 @@ object DiscordBotAi {
             if (a in 0 until az) Pair(peopleFrom(JSONArray(tail.substring(a, az + 1))), JSONObject()) else null
         }
     } catch (_: Exception) { null }
+
+    private fun strList(a: JSONArray?): List<String> =
+        if (a == null) emptyList()
+        else (0 until a.length()).mapNotNull { a.optString(it).trim().ifBlank { null } }
 
     private fun peopleFrom(arr: JSONArray?): List<MemDelta> {
         if (arr == null) return emptyList()

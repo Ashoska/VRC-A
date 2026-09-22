@@ -474,6 +474,12 @@ class DiscordBotService : Service() {
                             out.messageId?.let { synchronized(recentBotMsgIds) { recentBotMsgIds[it] = ctx.authorId } }
                             lastBotPostMs[ctx.channelId] = now
                             rememberBotReply(ctx.channelId, res.text)
+                            // Real Discord reactions the model asked for (e.g. "react with fire + a server emoji").
+                            for (e in res.reactEmojis) {
+                                DiscordRest.addReaction(cfg.botToken, ctx.channelId, ctx.messageId, EmojiConvert.reactionToken(e))
+                                DiscordBotState.bumpReacted()
+                                delay(300)
+                            }
                             trace(ctx, "reply", if (model == cfg.model) "70B" else "8B", "reply", outText.take(90))
                         } else {
                             DiscordBotState.log("Send failed: ${out.error}")
@@ -502,8 +508,8 @@ class DiscordBotService : Service() {
             if (id != null && id != botId) UserMemoryStore.applyDelta(this, id, md.about, md.json)
         }
         if (res.summary.isNotBlank()) ConversationStore.updateSummary(this, ctx.channelId, res.summary, now)
-        if (res.selfTrait.isNotBlank() || res.selfMood.isNotBlank())
-            PersonalityStore.noteSelf(this, res.selfTrait.ifBlank { null }, res.selfMood.ifBlank { null })
+        if (res.selfTrait.isNotBlank() || res.selfStyle.isNotBlank() || res.selfMood.isNotBlank())
+            PersonalityStore.noteSelf(this, res.selfTrait.ifBlank { null }, res.selfStyle.ifBlank { null }, res.selfMood.ifBlank { null })
         if (res.selfMood.isNotBlank()) DiscordBotState.setMood(res.selfMood)
         if (res.serverEvent.isNotBlank()) ServerMemoryStore.remember(this, res.serverEvent, now)
     }
@@ -546,7 +552,7 @@ class DiscordBotService : Service() {
         }
         if (obs.serverEvent.isNotBlank()) ServerMemoryStore.remember(this, obs.serverEvent, now)
         if (obs.selfTrait.isNotBlank() || obs.selfMood.isNotBlank())
-            PersonalityStore.noteSelf(this, obs.selfTrait.ifBlank { null }, obs.selfMood.ifBlank { null })
+            PersonalityStore.noteSelf(this, obs.selfTrait.ifBlank { null }, null, obs.selfMood.ifBlank { null })
         if (obs.selfMood.isNotBlank()) DiscordBotState.setMood(obs.selfMood)
         DiscordBotState.log("observed $channelId (${obs.memDeltas.size} people)")
     }

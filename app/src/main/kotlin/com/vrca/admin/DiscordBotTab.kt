@@ -60,6 +60,7 @@ import com.vrca.discordbot.DiscordBotService
 import com.vrca.discordbot.DiscordBotState
 import com.vrca.discordbot.DiscordBotStore
 import com.vrca.discordbot.PersonalityStore
+import com.vrca.discordbot.ServerMemoryStore
 import com.vrca.discordbot.UserMemoryStore
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -77,7 +78,7 @@ import java.util.Locale
 @Composable
 internal fun DiscordBotTab() {
     var sub by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Dashboard", "Personality", "Users", "Traces", "Cost", "Controls", "Config")
+    val tabs = listOf("Dashboard", "Personality", "Users", "Server", "Traces", "Cost", "Controls", "Config")
 
     LazyColumn(
         Modifier.fillMaxWidth().padding(12.dp),
@@ -98,9 +99,10 @@ internal fun DiscordBotTab() {
                 0 -> DashboardSection()
                 1 -> PersonalitySection()
                 2 -> UsersSection()
-                3 -> TracesSection()
-                4 -> CostSection()
-                5 -> ControlsSection()
+                3 -> ServerSection()
+                4 -> TracesSection()
+                5 -> CostSection()
+                6 -> ControlsSection()
                 else -> ConfigSection()
             }
         }
@@ -172,8 +174,16 @@ private fun PersonalitySection() {
     val ctx = LocalContext.current
     var tick by remember { mutableIntStateOf(0) }
     val self = remember(tick) { PersonalityStore.load(ctx) }
+    val persona = remember(tick) { PersonalityStore.snapshot(ctx) }
     var teach by remember { mutableStateOf("") }
 
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    // The exact persona block Cardinal injects into every reply — the "full evolved persona".
+    AdminSectionCard(title = "Live persona (what it sends)", icon = Icons.Filled.Chat, tone = AdminTone.Info) {
+        Muted(PersonalityStore.ANCHOR)
+        if (persona.isBlank()) Muted("Nothing evolved yet — it grows as people talk to it.")
+        else Mono(persona)
+    }
     AdminSectionCard(
         title = "Personality (self-grown)",
         icon = Icons.Filled.Face,
@@ -187,7 +197,7 @@ private fun PersonalitySection() {
             self.style.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
         }
         Label("Traits (tap the pin to protect from decay)")
-        if (self.traits.isEmpty()) Muted("None yet — evolves from the chat every ~20 min.")
+        if (self.traits.isEmpty()) Muted("None yet — it grows from replies + the observer as people talk to it.")
         self.traits.forEach { t ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 IconButton(onClick = { PersonalityStore.setTraitPinned(ctx, t.text, !t.pinned); tick++ }) {
@@ -215,6 +225,43 @@ private fun PersonalitySection() {
             onClick = { PersonalityStore.reset(ctx); tick++ },
             modifier = Modifier.fillMaxWidth()
         ) { Text("Reset personality") }
+    }
+    }
+}
+
+// ── Server memory (shared culture) ──────────────────────────────────────────
+@Composable
+private fun ServerSection() {
+    val ctx = LocalContext.current
+    var tick by remember { mutableIntStateOf(0) }
+    val mems = remember(tick) { ServerMemoryStore.list(ctx) }
+    var teach by remember { mutableStateOf("") }
+
+    AdminSectionCard(
+        title = "Server memory (${mems.size})",
+        icon = Icons.Filled.History,
+        tone = AdminTone.Info,
+        trailing = { IconButton(onClick = { tick++ }) { Icon(Icons.Filled.Refresh, "Refresh") } }
+    ) {
+        Muted("Shared culture / inside jokes Cardinal can bring up and recognise. Strength rises each time it's referenced.")
+        if (mems.isEmpty()) Muted("Nothing remembered yet.")
+        mems.forEach { m ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(m.text, style = MaterialTheme.typography.bodySmall)
+                    Muted("strength ${m.strength} · ${com.vrca.discordbot.discordRelTime(m.lastMs, System.currentTimeMillis())}")
+                }
+                TextButtonSmall("Delete") { ServerMemoryStore.delete(ctx, m.text); tick++ }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = teach, onValueChange = { teach = it },
+                label = { Text("Add a server memory") },
+                singleLine = true, modifier = Modifier.weight(1f)
+            )
+            Button(onClick = { if (teach.isNotBlank()) { ServerMemoryStore.teach(ctx, teach); teach = ""; tick++ } }) { Text("Add") }
+        }
     }
 }
 
@@ -295,6 +342,7 @@ private fun UsersSection() {
                         else if (card.alsoSpeaks.isNotEmpty()) KV("Speaks", card.alsoSpeaks.joinToString(", "))
                         if (card.preferredNick.isNotBlank()) KV("Calls them", card.preferredNick)
                         if (card.howToTreat.isNotBlank()) KV("With them", card.howToTreat)
+                        if (card.talkStyle.isNotBlank()) KV("Talks to them", card.talkStyle)
                         if (card.facts.isNotEmpty()) {
                             Label("Knows")
                             Surface(

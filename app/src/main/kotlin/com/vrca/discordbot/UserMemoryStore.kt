@@ -33,6 +33,7 @@ object UserMemoryStore {
         val alsoSpeaks: List<String> = emptyList(),
         val sentiment: String = "",
         val howToTreat: String = "",
+        val talkStyle: String = "",
         val lastSeenMs: Long = 0L,
         val interactions: Int = 0,
         val pinned: Boolean = false,
@@ -60,6 +61,7 @@ object UserMemoryStore {
             alsoSpeaks = strList(o.optJSONArray("also")),
             sentiment = o.optString("s"),
             howToTreat = o.optString("h"),
+            talkStyle = o.optString("ts"),
             lastSeenMs = o.optLong("ls", 0L),
             interactions = o.optInt("ic", 0),
             pinned = o.optBoolean("p", false),
@@ -82,6 +84,7 @@ object UserMemoryStore {
             .put("also", JSONArray(card.alsoSpeaks))
             .put("s", card.sentiment)
             .put("h", card.howToTreat)
+            .put("ts", card.talkStyle)
             .put("ls", card.lastSeenMs)
             .put("ic", card.interactions)
             .put("p", card.pinned)
@@ -192,17 +195,26 @@ object UserMemoryStore {
             addAll(cur.alsoSpeaks); addAll(strList(delta.optJSONArray("alsoSpeaks")))
         }.map { it.trim() }.filter { it.isNotBlank() && it.length <= 24 }
 
+        val relationship = delta.optString("relationship").trim().take(80).ifBlank { cur.relationship }
+        // Drop facts that just restate identity fields (name/nick/relationship/sentiment/how-to-treat)
+        // — those live in their own slots, so a fact like "Creator" when relationship=Creator is noise.
+        val identity = (listOf(relationship, cur.name, name, preferred, cur.sentiment,
+            delta.optString("sentiment").trim()) + mergedNicks)
+            .map { it.trim() }.filter { it.isNotBlank() }
+        val cleanedFacts = mergedFacts.filterNot { f -> identity.any { similar(f, it) } }
+
         save(ctx, cur.copy(
-            name = name.ifBlank { cur.name },
-            facts = mergedFacts,
+            name = cur.name.ifBlank { name.take(60) },   // NEVER let a nickname overwrite the real name
+            facts = cleanedFacts,
             bits = mergedBits,
             nicknames = mergedNicks,
             preferredNick = preferred,
             language = delta.optString("language").trim().take(24).ifBlank { cur.language },
             alsoSpeaks = also,
             sentiment = delta.optString("sentiment").trim().take(60).ifBlank { cur.sentiment },
-            relationship = delta.optString("relationship").trim().take(80).ifBlank { cur.relationship },
+            relationship = relationship,
             howToTreat = delta.optString("howToTreat").trim().take(120).ifBlank { cur.howToTreat },
+            talkStyle = delta.optString("talkStyle").trim().take(80).ifBlank { cur.talkStyle },
         ))
     }
 
@@ -227,6 +239,7 @@ object UserMemoryStore {
                 .append(if (card.alsoSpeaks.isNotEmpty()) " (+ ${card.alsoSpeaks.joinToString(", ")})" else "").append('\n')
         if (card.sentiment.isNotBlank()) sb.append("  vibe: ").append(card.sentiment).append('\n')
         if (card.howToTreat.isNotBlank()) sb.append("  with them: ").append(card.howToTreat).append('\n')
+        if (card.talkStyle.isNotBlank()) sb.append("  talk to them: ").append(card.talkStyle).append('\n')
         val facts = pickFacts(card.facts, keywords, DiscordBotLimits.USER_FACTS_INJECT)
         facts.forEach { sb.append("  · ").append(it).append('\n') }
         if (card.bits.isNotEmpty()) sb.append("  bit: ").append(card.bits.last()).append('\n')

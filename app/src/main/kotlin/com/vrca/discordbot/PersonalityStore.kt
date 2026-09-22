@@ -163,10 +163,14 @@ object PersonalityStore {
      * set a fresh [mood] line. NEVER decays other traits (that's the observer's [applyReflection]),
      * so a single reply can only ever strengthen the self, keeping it stable + free.
      */
-    fun noteSelf(ctx: Context, trait: String?, mood: String? = null) {
-        val t = trait?.trim()?.takeIf { it.isNotBlank() && it.length in 2..80 }
-        val m = mood?.trim()?.takeIf { it.isNotBlank() && it.length <= 80 }
-        if (t == null && m == null) return
+    fun noteSelf(ctx: Context, trait: String?, style: String? = null, mood: String? = null) {
+        val m = mood?.trim()?.takeIf { it.isNotBlank() && it.length <= 40 }
+        // A trait must be DURABLE identity, never just the current mood word (that was the dup bug).
+        val t = trait?.trim()?.takeIf {
+            it.isNotBlank() && it.length in 3..80 && !it.equals(m, true) && !it.equals(mood?.trim(), true)
+        }
+        val s = style?.trim()?.takeIf { it.isNotBlank() && it.length in 4..90 }
+        if (t == null && s == null && m == null) return
         val cur = load(ctx)
         var traits = cur.traits
         if (t != null) {
@@ -181,7 +185,10 @@ object PersonalityStore {
                     .take(DiscordBotLimits.MAX_TRAITS)
             }
         }
-        save(ctx, cur.copy(traits = traits, mood = m ?: cur.mood))
+        // Learned speech habits: dedup near-identical, keep the most recent handful.
+        val newStyle = if (s != null && cur.style.none { it.equals(s, true) })
+            (cur.style + s).takeLast(6) else cur.style
+        save(ctx, cur.copy(traits = traits, style = newStyle, mood = m ?: cur.mood))
     }
 
     /** Admin: pin/unpin a trait (pinned = protected from decay). */
