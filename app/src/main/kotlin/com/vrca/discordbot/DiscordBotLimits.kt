@@ -40,12 +40,11 @@ object DiscordBotLimits {
     const val ANTI_REPEAT_REPLIES = 4
 
     // ── Fluid concurrency + pacing ────────────────────────────────────────
-    const val PER_USER_DEBOUNCE_MS = 1300L
+    /** Short coalescing window so a message sent as two parts gets ONE reply that sees both —
+     *  its only job; kept small so a single message replies as fast as the model allows. */
+    const val PER_USER_DEBOUNCE_MS = 500L
     const val PER_CHANNEL_INFLIGHT = 2
     const val PER_USER_REPLY_COOLDOWN_MS = 3500L
-    /** Short "human" beat before sending (snappier than before). */
-    const val REPLY_DELAY_MIN_MS = 250L
-    const val REPLY_DELAY_MAX_MS = 1100L
 
     // ── Ambient / chattiness ──────────────────────────────────────────────
     const val DEFAULT_AMBIENT_PCT = 22

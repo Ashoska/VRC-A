@@ -462,7 +462,8 @@ class DiscordBotService : Service() {
             when (val res = DiscordBotAi.reply(cfg, model, turns, rc)) {
                 is DiscordBotAi.ReplyResult.Ok -> {
                     charge(DiscordBotLimits.EST_NEURONS_REPLY)
-                    delay((res.text.length * 16L).coerceIn(DiscordBotLimits.REPLY_DELAY_MIN_MS, DiscordBotLimits.REPLY_DELAY_MAX_MS))
+                    // No cosmetic delay — send as soon as the model responds (the typing indicator
+                    // already fired before the call, so it reads as "Cardinal is typing…").
                     val outText = EmojiConvert.convert(res.text)
                     val now = System.currentTimeMillis()
                     if (cfg.shadowMode) {
