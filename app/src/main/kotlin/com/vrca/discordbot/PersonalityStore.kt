@@ -31,7 +31,11 @@ object PersonalityStore {
     const val ANCHOR = "You're Cardinal. You've been a regular in this Discord for a while."
 
     private const val START_STRENGTH = 2
-    private const val MAX_STRENGTH = 6
+    private const val MAX_STRENGTH = 10
+    // Growth OUTPACES fade so a trait mentioned even occasionally net-strengthens and
+    // "settles"; a genuine trait then survives many quiet windows before it can fade out.
+    private const val REINFORCE = 2
+    private const val DECAY = 1
 
     data class Trait(val text: String, val strength: Int, val pinned: Boolean = false)
     data class Self(
@@ -125,13 +129,15 @@ object PersonalityStore {
         for (p in proposedTraits.map { it.trim() }.filter { it.isNotBlank() }) {
             val k = p.lowercase()
             val existing = byKey.remove(k)
-            val s = ((existing?.strength ?: (START_STRENGTH - 1)) + 1).coerceAtMost(MAX_STRENGTH)
+            // New trait starts at START_STRENGTH; a re-affirmed one grows by REINFORCE.
+            val s = if (existing == null) START_STRENGTH
+                else (existing.strength + REINFORCE).coerceAtMost(MAX_STRENGTH)
             out.add(Trait(existing?.text ?: p, s, existing?.pinned ?: false))
         }
-        // Not re-proposed → decay, EXCEPT pinned (kept at strength).
+        // Not re-proposed → fade slowly (never below 1 in a single pass), EXCEPT pinned.
         for (t in byKey.values) {
             if (t.pinned) out.add(t)
-            else if (t.strength - 1 > 0) out.add(Trait(t.text, t.strength - 1, false))
+            else if (t.strength - DECAY > 0) out.add(Trait(t.text, t.strength - DECAY, false))
         }
         val episodes = if (!newEpisode.isNullOrBlank())
             (cur.episodes + newEpisode.trim()).takeLast(DiscordBotLimits.MAX_EPISODES)

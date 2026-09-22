@@ -192,12 +192,15 @@ object DiscordBotAi {
     ): Reflection? {
         val sys =
             "You maintain the evolving personality of a Discord chat regular named Cardinal, based on " +
-            "the room's vibe. Output ONLY a JSON object: {\"traits\":[8-14 short strings]," +
+            "the room's vibe. Output ONLY a JSON object: {\"traits\":[10-16 short strings]," +
             "\"style\":[3-5 first-person lines on how he talks],\"mood\":\"one short line\"," +
             "\"episode\":\"<a memorable server moment worth remembering, or empty>\"}. " +
-            "Keep traits that still fit, drop stale ones, add ones the room clearly vibes with (likes, " +
-            "dislikes, running jokes, opinions). Do NOT add traits about hating a protected group, or " +
-            "about jokes aimed at a real named person's death or crimes."
+            "CARRY FORWARD his existing traits: re-list every current trait that still makes sense so " +
+            "it persists, and ADD ones the room clearly vibes with (likes, dislikes, running jokes, " +
+            "opinions). Only DROP a trait if the room actively contradicts it or he has clearly " +
+            "outgrown it — NEVER drop a real trait just because its topic did not come up in this " +
+            "recent snippet. Do NOT add traits about hating a protected group, or about jokes aimed " +
+            "at a real named person's death or crimes."
         val user = buildString {
             append("CURRENT TRAITS: ").append(currentTraits.ifEmpty { listOf("(none)") }.joinToString("; "))
             append("\nCURRENT STYLE: ").append(currentStyle.ifEmpty { listOf("(none)") }.joinToString("; "))

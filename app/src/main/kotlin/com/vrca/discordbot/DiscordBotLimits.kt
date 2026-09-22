@@ -70,8 +70,8 @@ object DiscordBotLimits {
     // ── Memory ────────────────────────────────────────────────────────────
     /** Per-user card size cap (chars of the rendered card) so the prompt stays lean. */
     const val USER_CARD_MAX_CHARS = 340
-    /** Facts kept per user card. */
-    const val USER_CARD_MAX_FACTS = 5
+    /** Facts kept per user card (pinned/admin-taught facts sort to the front, model facts trim). */
+    const val USER_CARD_MAX_FACTS = 8
     /** Running bits kept per user card. */
     const val USER_CARD_MAX_BITS = 4
     /** Personality digest cap (chars) injected into every reply prompt. */
