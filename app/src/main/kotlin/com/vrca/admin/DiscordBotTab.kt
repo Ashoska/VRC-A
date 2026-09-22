@@ -2,6 +2,8 @@ package com.vrca.admin
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -217,6 +219,7 @@ private fun PersonalitySection() {
 }
 
 // ── Users (per-user memory) ─────────────────────────────────────────────────
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun UsersSection() {
     val ctx = LocalContext.current
@@ -280,17 +283,40 @@ private fun UsersSection() {
                             maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                         )
                     } else {
-                        if (card.relationship.isNotBlank()) KV("Relationship", card.relationship)
-                        if (card.preferredNick.isNotBlank()) KV("Calls them", card.preferredNick)
+                        // Quick, scannable meta chips.
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (card.relationship.isNotBlank()) MemChip(card.relationship)
+                            MemChip("${card.interactions} chats")
+                            val seen = com.vrca.discordbot.discordRelTime(card.lastSeenMs, System.currentTimeMillis())
+                            if (seen.isNotBlank()) MemChip("seen $seen")
+                        }
                         if (card.language.isNotBlank())
-                            KV("Language", card.language + (if (card.alsoSpeaks.isNotEmpty()) " (+ ${card.alsoSpeaks.joinToString(", ")})" else ""))
+                            KV("Speaks", card.language + (if (card.alsoSpeaks.isNotEmpty()) " (+ ${card.alsoSpeaks.joinToString(", ")})" else ""))
+                        else if (card.alsoSpeaks.isNotEmpty()) KV("Speaks", card.alsoSpeaks.joinToString(", "))
+                        if (card.preferredNick.isNotBlank()) KV("Calls them", card.preferredNick)
                         if (card.howToTreat.isNotBlank()) KV("With them", card.howToTreat)
                         if (card.facts.isNotEmpty()) {
                             Label("Knows")
-                            card.facts.forEach { Text("•  $it", style = MaterialTheme.typography.bodySmall) }
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = MaterialTheme.shapes.small,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    card.facts.forEach { Text("•  $it", style = MaterialTheme.typography.bodySmall) }
+                                }
+                            }
                         }
-                        if (card.bits.isNotEmpty()) KV("Running bits", card.bits.joinToString(", "))
-                        KV("Interactions", "${card.interactions}")
+                        if (card.bits.isNotEmpty()) {
+                            Label("Running bits")
+                            card.bits.forEach {
+                                Text("•  $it", style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        Text(card.id, style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             TextButtonSmall(if (card.pinned) "Unpin" else "Pin") {
                                 UserMemoryStore.setPinned(ctx, card.id, !card.pinned); tick++

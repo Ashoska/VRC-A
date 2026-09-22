@@ -130,7 +130,7 @@ object DiscordBotAi {
             append("\n\n[After your reply] On a NEW line output ").append(MEM_DELIM)
             append(" then ONE JSON object (never shown to anyone):\n")
             append("{\"people\":[{\"about\":\"<their EXACT name/nickname as shown>\",\"facts\":[short strings],")
-            append("\"bit\":\"\",\"nickname\":\"\",\"preferredName\":\"<what they want to be called, or empty>\",")
+            append("\"forget\":[facts no longer true],\"bit\":\"\",\"nickname\":\"\",\"preferredName\":\"<what they want to be called, or empty>\",")
             append("\"language\":\"\",\"alsoSpeaks\":[],\"sentiment\":\"\",\"relationship\":\"\",\"howToTreat\":\"\"}],")
             append("\"summary\":\"<=1 line of what's going on now\",")
             append("\"self\":{\"trait\":\"<one short thing you noticed about yourself, or empty>\",\"mood\":\"\"},")
@@ -141,7 +141,8 @@ object DiscordBotAi {
             append("\"talked about Y\", \"said/asked/imagined Z\", \"brought up W\" — those are chatter, not facts; use []. ")
             append("If a name like \"John Woman\" is how people here refer to a PERSON, that belongs on THAT person's card, ")
             append("not as a fact about whoever said it. Attribute every fact to the RIGHT person — never mix people up. ")
-            append("Only fill fields you're SURE of; empty/[] otherwise. This line is never shown.")
+            append("Don't restate a fact you already know about them; if it CHANGED, give the corrected version in facts (it replaces the old one). ")
+            append("If something you knew is no longer true, put it in forget. Only fill fields you're SURE of; empty/[] otherwise. This line is never shown.")
         }
         val messages = JSONArray().put(obj("system", sys))
         // Merge consecutive same-author turns so the transcript reads as fewer, fuller turns.

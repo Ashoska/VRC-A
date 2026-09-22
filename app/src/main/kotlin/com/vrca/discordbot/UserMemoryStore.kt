@@ -127,6 +127,33 @@ object UserMemoryStore {
         return t
     }
 
+    // ── near-duplicate fact handling (merge, don't pile up paraphrases) ──
+    private fun norm(s: String): String =
+        Regex("[^\\p{L}\\p{N} ]").replace(s.lowercase(), " ").replace(Regex("\\s+"), " ").trim()
+    private fun toks(s: String): Set<String> = norm(s).split(' ').filter { it.length >= 3 }.toSet()
+    /** Two facts are "the same fact" if one contains the other, or their words heavily overlap. */
+    private fun similar(a: String, b: String): Boolean {
+        val na = norm(a); val nb = norm(b)
+        if (na.isBlank() || nb.isBlank()) return false
+        if (na == nb || na.contains(nb) || nb.contains(na)) return true
+        val ta = toks(a); val tb = toks(b)
+        if (ta.isEmpty() || tb.isEmpty()) return false
+        val inter = ta.count { it in tb }
+        val union = (ta + tb).size
+        return union > 0 && inter.toDouble() / union >= 0.6
+    }
+    /** Merge [incoming] into [existing]: a near-duplicate REPLACES with the more informative (longer)
+     *  version instead of adding a second; genuinely new facts are appended. */
+    private fun mergeFacts(existing: List<String>, incoming: List<String>): List<String> {
+        val out = existing.toMutableList()
+        for (inc in incoming) {
+            val i = out.indexOfFirst { similar(it, inc) }
+            if (i >= 0) { if (inc.length > out[i].length) out[i] = inc }   // corrected/fuller wins
+            else out.add(inc)
+        }
+        return out.distinct()
+    }
+
     /**
      * Merge a model-proposed memory delta (from the reply tail). Recognised keys:
      * `facts` (array), `bit`, `nickname`/`nicknames`, `preferredName` (sets the address Cardinal
@@ -138,8 +165,14 @@ object UserMemoryStore {
         val cur = load(ctx, id) ?: Card(id = id)
         val ownNames = setOf(name, cur.name).filter { it.isNotBlank() }.toSet()
 
+        // Forget: drop facts the model says are no longer true (fuzzy match) — but never on a
+        // PINNED (admin-protected) card. Then merge in new facts, collapsing near-duplicates.
+        val forget = strList(delta.optJSONArray("forget"))
+        val kept = if (cur.pinned) cur.facts
+            else cur.facts.filter { f -> forget.none { similar(f, it) } }
+        val selfCollapsed = mergeFacts(emptyList(), kept)   // clean up existing near-dups too
         val newFacts = strList(delta.optJSONArray("facts")).mapNotNull { cleanFact(it) }
-        val mergedFacts = LinkedHashSet<String>().apply { addAll(cur.facts); addAll(newFacts) }.toList()
+        val mergedFacts = mergeFacts(selfCollapsed, newFacts)
 
         val bit = cleanFact(delta.optString("bit"))
         val mergedBits = if (bit != null)
