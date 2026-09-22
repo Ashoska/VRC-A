@@ -112,13 +112,24 @@ object UserMemoryStore {
     private val EPHEMERAL = Regex(
         "(?i)^(mentioned|talked about|talking about|was talking|is talking|brought up|referenced|" +
         "imagined|posted|shared|said( that)?|says|asked( about| if)?|wanted to know|joked( about)?|" +
-        "was saying|is saying|discussed|responded|replied|reacted|greeted|complained|commented)\\b"
+        "was saying|is saying|discussed|responded|replied|reacted|greeted|complained|commented|" +
+        "pinged|tagged|@ed|dm'?ed|messaged)\\b"
+    )
+    // META text about USING Cardinal / the app itself — never a fact about who a person IS. Rejects
+    // the "I asked it to edit my profile", "changed nickname recently", "reset the bot" junk that
+    // filled cards. Bot-meta / self-referential app plumbing is not durable identity.
+    private val META = Regex(
+        "(?i)\\b(profile|personality|memory|memories|nickname changed|changed (their |his |her )?nickname|" +
+        "edit(ed|ing)? (my |their |the )?(profile|memory|card|name)|reset|the bot|cardinal'?s|" +
+        "asked (it|cardinal|the bot)|wants? (you|cardinal) to|told (you|cardinal|it) to|" +
+        "no message|with no message|pinged|prompt|instructions?)\\b"
     )
     private fun cleanFact(s: String): String? {
         val t = s.trim()
         if (t.length < 2 || t.length > 200) return null
         if (POISON.containsMatchIn(t)) return null
         if (EPHEMERAL.containsMatchIn(t)) return null
+        if (META.containsMatchIn(t)) return null
         if (t.contains("http://") || t.contains("https://")) return null
         return t
     }
@@ -222,16 +233,20 @@ object UserMemoryStore {
     fun addressName(card: Card): String = card.preferredNick.ifBlank { card.name.ifBlank { "them" } }
 
     /**
-     * RETRIEVAL-LIMITED prompt block for one card: pinned/relationship always, then the facts most
-     * relevant to [keywords] (up to [DiscordBotLimits.USER_FACTS_INJECT]), the preferred address,
-     * language, and the strongest bit. Empty when there's nothing worth saying.
+     * Prompt block for one card. The REAL name is the head; a casual nickname is labelled separately
+     * so the model uses ONE name at a time by register (never "twinium's Michael"), and one person's
+     * nicknames can never bleed onto another. [full] = a recall query directly named this person, so
+     * inject their WHOLE card (all facts) rather than the keyword-relevant few. Empty when there's
+     * nothing worth saying.
      */
-    fun renderForPrompt(card: Card, keywords: Set<String>): String {
+    fun renderForPrompt(card: Card, keywords: Set<String>, full: Boolean = false): String {
         val sb = StringBuilder()
-        val who = addressName(card)
-        sb.append(who)
-        val aka = card.nicknames.filter { !it.equals(who, true) }
-        if (aka.isNotEmpty()) sb.append(" (also called ").append(aka.take(4).joinToString(", ")).append(")")
+        val real = card.name.ifBlank { card.preferredNick.ifBlank { "them" } }
+        sb.append(real)
+        val casual = card.preferredNick.takeIf { it.isNotBlank() && !it.equals(real, true) }
+        if (casual != null) sb.append("  [casual nickname: ").append(casual).append("]")
+        val otherNicks = card.nicknames.filter { !it.equals(real, true) && !it.equals(casual ?: "", true) }
+        if (otherNicks.isNotEmpty()) sb.append(" (also goes by: ").append(otherNicks.take(3).joinToString(", ")).append(")")
         if (card.relationship.isNotBlank()) sb.append(" — ").append(card.relationship)
         sb.append('\n')
         if (card.language.isNotBlank())
@@ -240,11 +255,12 @@ object UserMemoryStore {
         if (card.sentiment.isNotBlank()) sb.append("  vibe: ").append(card.sentiment).append('\n')
         if (card.howToTreat.isNotBlank()) sb.append("  with them: ").append(card.howToTreat).append('\n')
         if (card.talkStyle.isNotBlank()) sb.append("  talk to them: ").append(card.talkStyle).append('\n')
-        val facts = pickFacts(card.facts, keywords, DiscordBotLimits.USER_FACTS_INJECT)
+        val factLimit = if (full) 12 else DiscordBotLimits.USER_FACTS_INJECT
+        val facts = if (full) card.facts.takeLast(factLimit) else pickFacts(card.facts, keywords, factLimit)
         facts.forEach { sb.append("  · ").append(it).append('\n') }
         if (card.bits.isNotEmpty()) sb.append("  bit: ").append(card.bits.last()).append('\n')
         val out = sb.toString().trim()
-        return if (out == who) "" else out.take(DiscordBotLimits.USER_CARD_MAX_CHARS)
+        return if (out == real) "" else out.take(DiscordBotLimits.USER_CARD_MAX_CHARS)
     }
 
     /** Keyword-relevance pick with a recency-ish fallback so a card with no match still says something. */
@@ -259,14 +275,24 @@ object UserMemoryStore {
         return (relevant + facts.reversed()).distinct().take(limit)
     }
 
-    /** Render the ACTIVE participants' cards for a reply prompt, folded to what's relevant now. */
-    fun activeCardsBlock(ctx: Context, ids: Collection<String>, keywords: Set<String>): String {
+    /**
+     * Render the participants' cards for a reply prompt, folded to what's relevant now. [emphasizeIds]
+     * are people the current message directly ASKED ABOUT (e.g. "who is Michael", "info about X") —
+     * their card is rendered FULL (all facts) so Cardinal can actually answer from memory instead of
+     * claiming it doesn't know someone it does. Each card is a DISTINCT person; the block header says so.
+     */
+    fun activeCardsBlock(
+        ctx: Context, ids: Collection<String>, keywords: Set<String>, emphasizeIds: Set<String> = emptySet(),
+    ): String {
+        fun hasContent(c: Card) = c.facts.isNotEmpty() || c.relationship.isNotBlank() || c.bits.isNotEmpty() ||
+            c.howToTreat.isNotBlank() || c.preferredNick.isNotBlank() || c.language.isNotBlank() || c.sentiment.isNotBlank()
         val blocks = ids.distinct().mapNotNull { load(ctx, it) }
-            .filter { it.facts.isNotEmpty() || it.relationship.isNotBlank() || it.bits.isNotEmpty() ||
-                it.howToTreat.isNotBlank() || it.preferredNick.isNotBlank() || it.language.isNotBlank() }
-            .map { renderForPrompt(it, keywords) }
+            .filter { hasContent(it) }
+            .map { renderForPrompt(it, keywords, full = it.id in emphasizeIds) }
             .filter { it.isNotBlank() }
-        return if (blocks.isEmpty()) "" else "People here you know:\n" + blocks.joinToString("\n")
+        return if (blocks.isEmpty()) "" else
+            "People here you know (each is a DISTINCT person — never mix up their names/nicknames/facts):\n" +
+                blocks.joinToString("\n")
     }
 
     // ── nickname-aware resolution ──

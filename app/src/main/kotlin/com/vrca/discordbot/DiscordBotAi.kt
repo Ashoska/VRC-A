@@ -13,18 +13,20 @@ import java.util.concurrent.TimeUnit
 /**
  * Cloudflare **Workers AI** layer for Cardinal. Three roles, cheapest-first:
  *
- *  1. [reply] — the strong model writes the message AND, in a trailing `%%MEM%%` JSON tail, does
- *     ALL the bookkeeping in the SAME call: per-person memory deltas, the rolled conversation
- *     summary, an inline personality note (so the self develops from message one — no reflection
- *     timer), and an optional shared server-culture memory. One call, everything.
+ *  1. [reply] — the strong 70B writes ONLY the message text. It carries NO bookkeeping tail (that
+ *     halved the per-reply cost AND fixed the junk-memory bugs the rushed inline tail produced) —
+ *     all memory/summary/self/culture writing is done by the cheap 8B [observe] LEARN pass instead.
  *  2. [director] — the cheap 8B routes an AMBIGUOUS/ambient moment: reply/react/ignore + emoji.
- *  3. [observe] — the cheap 8B CATCH-UP pass, fired only when notable UNREPLIED activity piles up:
- *     refreshes the summary, learns about people who were talked about (even absent ones), notes
- *     server culture, and lightly nudges the self. Event-driven, never on a timer.
+ *  3. [observe] — the cheap 8B LEARN pass: refreshes the summary, learns durable facts about people
+ *     (present AND merely talked-about), notes shared server culture + channel bits, and nudges the
+ *     self. It runs on an unreplied pileup AND (throttled) right after a reply, so memory keeps up
+ *     without ever sitting on the hot reply path. Strong GOOD/BAD guidance so it stores who someone
+ *     IS, never chatter or app-meta.
  *
- * The prompt is assembled in a deliberate order (identity → self → server culture/topics →
- * people here → summary → instruction+tail spec → transcript last) so the model reads only what's
- * needed, labelled, no redundancy. Routes through **AI Gateway** when a gateway id is set.
+ * The reply prompt is assembled in a deliberate order (identity → self → where/culture/bits/cross-ref
+ * → people here → summary → who you're answering → language/emoji/anti-repeat → transcript last) so
+ * the model reads only what's needed, labelled, no redundancy. Routes through **AI Gateway** when a
+ * gateway id is set.
  */
 object DiscordBotAi {
     private val client: OkHttpClient by lazy {
@@ -50,16 +52,8 @@ object DiscordBotAi {
     }
 
     sealed class ReplyResult {
-        data class Ok(
-            val text: String,
-            val memDeltas: List<MemDelta>,
-            val summary: String,
-            val selfTrait: String,
-            val selfStyle: String,
-            val selfMood: String,
-            val serverEvent: String,
-            val reactEmojis: List<String>,
-        ) : ReplyResult()
+        /** The 70B reply is now JUST the message text — no memory/summary/self tail (see [observe]). */
+        data class Ok(val text: String) : ReplyResult()
         data class Error(val message: String) : ReplyResult()
     }
 
@@ -70,6 +64,7 @@ object DiscordBotAi {
         val summary: String,
         val memDeltas: List<MemDelta>,
         val serverEvent: String,
+        val channelBit: String,   // a running joke/norm specific to THIS channel, or empty
         val selfTrait: String,
         val selfMood: String,
     )
@@ -104,9 +99,13 @@ object DiscordBotAi {
     /** Everything the reply prompt needs, assembled in the caller and passed as one bundle. */
     data class ReplyCtx(
         val selfDigest: String,
+        val channelInfo: String,     // "#general — <topic>": where you are, so you read the register
         val serverCulture: String,   // core + retrieved server memories + revived topics
+        val channelBits: String,     // a running bit specific to THIS channel, deployed occasionally
+        val crossRef: String,        // labelled recent messages from a channel the person referenced
         val cardsBlock: String,      // active participants' cards (retrieval-limited)
         val summary: String,         // rolling channel summary
+        val replyingTo: String,      // the exact person you're answering (interleaved speakers = context)
         val lastBotReplies: List<String>,
         val emojiHint: String,       // usable :shortcodes: (custom + common)
         val langHint: String,        // language to answer in (from the person / their card)
@@ -117,9 +116,21 @@ object DiscordBotAi {
         val sys = buildString {
             append(PersonalityStore.ANCHOR).append('\n').append(SEED)
             if (c.selfDigest.isNotBlank()) append("\n\n[Who you are right now]\n").append(c.selfDigest)
+            if (c.channelInfo.isNotBlank())
+                append("\n\n[Where you are] You're in ").append(c.channelInfo)
+                    .append(". Match this channel's vibe and what it's for; don't drag in other channels' business unless someone brings it up.")
             if (c.serverCulture.isNotBlank()) append("\n\n[This server's culture / past moments]\n").append(c.serverCulture)
+            if (c.channelBits.isNotBlank())
+                append("\n\n[A running bit in this channel] ").append(c.channelBits)
+                    .append(" — you MAY lean on it if it fits naturally right now, like a person who's made the joke before. Do it at most once and only if it actually lands; otherwise ignore it.")
+            if (c.crossRef.isNotBlank())
+                append("\n\n[For reference, recent messages from another channel they pointed at]\n").append(c.crossRef)
+                    .append("\n(These are from a DIFFERENT channel — talk ABOUT them if asked, but your reply still belongs to THIS channel.)")
             if (c.cardsBlock.isNotBlank()) append("\n\n[").append(c.cardsBlock)   // block starts "People here you know:"
             if (c.summary.isNotBlank()) append("\n\n[What's going on]\n").append(c.summary)
+            if (c.replyingTo.isNotBlank())
+                append("\n\n[Replying to] You're answering ").append(c.replyingTo)
+                    .append(". Anyone else in the transcript is just background context — don't mix up who said what or answer the wrong person.")
             if (c.langHint.isNotBlank())
                 append("\n\n[Language] Reply in ").append(c.langHint)
                     .append(". Only switch languages if the person does or asks you to. Write any non-English in its NATIVE script (e.g. 日本語, not romaji).")
@@ -131,25 +142,17 @@ object DiscordBotAi {
                 append("\n\n[Don't repeat yourself] You recently said: ")
                     .append(c.lastBotReplies.joinToString(" / ") { "\"${it.take(80)}\"" })
                     .append(". Say something different.")
+            // Names/register + recall rules (cheap, always on) — the fixes for "twinium's Michael"
+            // stacking, one person's nickname bleeding onto another, and "I don't know them" when a
+            // card exists.
+            append("\n\n[Names] Call each person by ONE name at a time and pick it by register: their casual nickname in banter, ")
+            append("their real name when you're being serious or formal. NEVER stack two names together (not \"twinium's Michael\"), ")
+            append("and NEVER use one person's nickname for a DIFFERENT person — the people list above says who's who.")
+            append("\n\n[Answering about people or past stuff] If someone asks what you know about a person, a past event, or the server, ")
+            append("ANSWER from the memory above — it's real. Don't say you don't know someone or something when there's a card or a memory for them. ")
+            append("If there genuinely is nothing in memory, say so briefly in character (don't invent details).")
             if (c.shortHint) append("\n\nKeep it to one short line.")
-            append("\n\n[After your reply] On a NEW line output ").append(MEM_DELIM)
-            append(" then ONE JSON object (never shown to anyone):\n")
-            append("{\"react\":[emoji names to react to their message with, usually []],")
-            append("\"people\":[{\"about\":\"<their EXACT name/nickname as shown>\",\"facts\":[short strings],")
-            append("\"forget\":[facts no longer true],\"bit\":\"\",\"nickname\":\"\",\"preferredName\":\"\",")
-            append("\"language\":\"\",\"alsoSpeaks\":[],\"sentiment\":\"\",\"relationship\":\"\",\"howToTreat\":\"\",\"talkStyle\":\"\"}],")
-            append("\"summary\":\"<=1 line of what's going on now\",")
-            append("\"self\":{\"trait\":\"<a durable thing about who YOU are, or empty>\",\"style\":\"<a lasting habit in HOW you talk, or empty>\",\"mood\":\"<your current fleeting mood, one word>\"},")
-            append("\"event\":\"<a shared server moment/joke worth remembering, or empty>\"}\n")
-            append("FACTS RULE: a fact is a DURABLE thing about WHO the person is — what they like/dislike (a clear \"I love X\" IS a fact), ")
-            append("their hobbies/job/pets/where they're from, their personality, a nickname THEY use, a standing relationship. ")
-            append("NOT what they just said/did this minute, and NOT a guess from a single message or emoji. NEVER write \"mentioned X\"/\"talked about Y\"/\"said Z\"/\"imagined W\" — chatter, use []. ")
-            append("Do NOT put a fact that just restates their name, nickname, relationship, or how you treat them — those have their own fields. ")
-            append("If a name like \"John Woman\" is how people refer to a PERSON, that belongs on THAT person's card. Attribute every fact to the RIGHT person. ")
-            append("STICKY FIELDS: leave relationship/preferredName/howToTreat/talkStyle/sentiment EMPTY unless it's genuinely NEW or CHANGED — never re-guess or re-state what you already have. ")
-            append("A relationship CAN change over time, but only with a CLEAR reason (you actually became friends, they were repeatedly hostile, they told you who they are) — never flip an established one from a single throwaway message. ")
-            append("SELF: only nudge trait/style/mood when you actually notice a real shift; trait is a durable identity thing, style is HOW you talk, mood is a fleeting one-word tone — keep them DIFFERENT (mood is not a trait). ")
-            append("Don't restate a fact you already know; a changed fact goes in facts (it replaces the old), a no-longer-true one goes in forget. Only fill fields you're SURE of. This line is never shown.")
+            append("\n\nReply with ONLY your message — no notes, no JSON, no labels, just what Cardinal says.")
         }
         val messages = JSONArray().put(obj("system", sys))
         // Merge consecutive same-author turns so the transcript reads as fewer, fuller turns.
@@ -160,38 +163,14 @@ object DiscordBotAi {
         val maxTok = if (c.shortHint) DiscordBotLimits.SHORT_REPLY_MAX_TOKENS else DiscordBotLimits.REPLY_MAX_TOKENS
         return when (val r = call(cfg, model, messages, maxTok)) {
             is Result.Ok -> {
+                // Defensive: strip any stray tail if the model still emits one out of habit.
                 val idx = r.text.indexOf(MEM_DELIM)
                 val text = (if (idx >= 0) r.text.substring(0, idx) else r.text).trim()
-                if (text.isBlank()) return ReplyResult.Error("Empty reply")
-                val tail = if (idx >= 0) parseTail(r.text.substring(idx + MEM_DELIM.length)) else null
-                val obj = tail?.second
-                val self = obj?.optJSONObject("self")
-                ReplyResult.Ok(
-                    text = text,
-                    memDeltas = tail?.first ?: emptyList(),
-                    summary = obj?.optString("summary")?.trim().orEmpty(),
-                    selfTrait = self?.optString("trait")?.trim().orEmpty(),
-                    selfStyle = self?.optString("style")?.trim().orEmpty(),
-                    selfMood = self?.optString("mood")?.trim().orEmpty(),
-                    serverEvent = obj?.optString("event")?.trim().orEmpty(),
-                    reactEmojis = strList(obj?.optJSONArray("react")).take(4),
-                )
+                if (text.isBlank()) ReplyResult.Error("Empty reply") else ReplyResult.Ok(text)
             }
             is Result.Error -> ReplyResult.Error(r.message)
         }
     }
-
-    /** Parse the tail into (people deltas, the raw object for summary/self/event). Tolerant of an old bare array. */
-    private fun parseTail(tail: String): Pair<List<MemDelta>, JSONObject>? = try {
-        val s = tail.indexOf('{'); val e = tail.lastIndexOf('}')
-        if (s in 0 until e) {
-            val o = JSONObject(tail.substring(s, e + 1))
-            Pair(peopleFrom(o.optJSONArray("people")), o)
-        } else {
-            val a = tail.indexOf('['); val az = tail.lastIndexOf(']')
-            if (a in 0 until az) Pair(peopleFrom(JSONArray(tail.substring(a, az + 1))), JSONObject()) else null
-        }
-    } catch (_: Exception) { null }
 
     private fun strList(a: JSONArray?): List<String> =
         if (a == null) emptyList()
@@ -246,19 +225,33 @@ object DiscordBotAi {
         val transcript = mergeTurns(turns).takeLast(DiscordBotLimits.HISTORY_FETCH).joinToString("\n") {
             if (it.isBot) "Cardinal: ${it.text}" else "${it.name}: ${it.text}"
         }
-        val sys =
-            "You quietly keep notes for a Discord regular named Cardinal (you do NOT write a reply). " +
-            "Read the recent chat and output ONLY JSON: {\"summary\":\"<=1 line of what's going on\"," +
-            "\"people\":[{\"about\":\"<name>\",\"facts\":[short strings],\"nickname\":\"\",\"language\":\"\",\"sentiment\":\"\"}]," +
-            "\"event\":\"<a shared moment/inside joke worth remembering, or empty>\"," +
-            "\"self\":{\"trait\":\"<one short thing Cardinal seems to be like, or empty>\",\"mood\":\"\"}}. " +
-            "A fact is a DURABLE thing about WHO a person is (likes/dislikes, hobbies, job, pets, origin, personality, a standing relationship, a nickname they use) — " +
-            "NOT what they just said or did. NEVER write \"mentioned X\", \"talked about Y\", \"said/asked/imagined Z\", \"brought up W\"; those are chatter, use []. " +
-            "You may note a person even if they're only being talked ABOUT — and if a name (e.g. \"John Woman\") is how people refer to a PERSON, put info on THAT person, not on whoever said it. " +
-            "Attribute facts to the RIGHT person. Only clearly-true durable things; empty/[] otherwise. Do NOT record hateful notes about protected groups, or jokes about a real named person's death or crimes."
+        val sys = buildString {
+            append("You quietly keep MEMORY for a Discord regular named Cardinal (you do NOT write a reply). ")
+            append("Read the recent chat and output ONLY JSON:\n")
+            append("{\"summary\":\"<=1 line of what's going on now\",")
+            append("\"people\":[{\"about\":\"<the person's EXACT name/nickname as shown>\",")
+            append("\"facts\":[durable facts about WHO they are],\"forget\":[facts no longer true],")
+            append("\"nickname\":\"<a casual nickname OTHERS actually use for them, or empty>\",")
+            append("\"preferredName\":\"<what they asked to be called, or empty>\",")
+            append("\"relationship\":\"<only if genuinely new/changed, e.g. friend/regular/creator, else empty>\",")
+            append("\"howToTreat\":\"<only if clearly established, e.g. 'playful', else empty>\",")
+            append("\"language\":\"\",\"sentiment\":\"\"}],")
+            append("\"event\":\"<a shared SERVER-WIDE moment/inside joke worth remembering, or empty>\",")
+            append("\"channelBit\":\"<a running joke/norm specific to THIS channel, or empty>\",")
+            append("\"self\":{\"trait\":\"<one durable thing Cardinal seems to be like, or empty>\",\"mood\":\"\"}}\n")
+            append("A FACT is a DURABLE thing about WHO a person is. ")
+            append("GOOD facts: \"loves cats\", \"plays Valorant\", \"from Brazil\", \"studies art\", \"hates mornings\". ")
+            append("BAD (never store these, use []): anything they just said/did (\"asked about X\", \"posted a pic\", \"pinged you\", \"greeted everyone\"), ")
+            append("anything about USING CARDINAL or the app (\"asked to edit their profile\", \"changed their nickname\", \"wants a memory\", \"reset the bot\"), ")
+            append("and restating their name/nickname/relationship (those have their own fields). ")
+            append("A single message or emoji is NOT enough to invent a fact — only note what's clearly, durably true. ")
+            append("Each person is DISTINCT: put a nickname on the RIGHT person and NEVER copy one person's nickname/facts onto another. ")
+            append("If a name is how people refer to a PERSON who isn't speaking, put their info on THAT person, not on whoever mentioned them. ")
+            append("Leave every field empty/[] unless you're sure. Do NOT record hateful notes about protected groups, or jokes about a real named person's death or crimes.")
+        }
         val user = "PREVIOUS SUMMARY: ${prevSummary.ifBlank { "(none)" }}\n\nRECENT CHAT:\n$transcript"
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", user))
-        return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 350)) {
+        return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 420)) {
             is Result.Ok -> parseObservation(r.text)
             is Result.Error -> null
         }
@@ -272,6 +265,7 @@ object DiscordBotAi {
                 summary = o.optString("summary").trim().take(DiscordBotLimits.SUMMARY_MAX_CHARS),
                 memDeltas = peopleFrom(o.optJSONArray("people")),
                 serverEvent = o.optString("event").trim(),
+                channelBit = o.optString("channelBit").trim(),
                 selfTrait = o.optJSONObject("self")?.optString("trait")?.trim().orEmpty(),
                 selfMood = o.optJSONObject("self")?.optString("mood")?.trim().orEmpty(),
             )

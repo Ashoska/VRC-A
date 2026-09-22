@@ -40,9 +40,11 @@ object DiscordBotLimits {
     const val ANTI_REPEAT_REPLIES = 4
 
     // ── Fluid concurrency + pacing ────────────────────────────────────────
-    /** Short coalescing window so a message sent as two parts gets ONE reply that sees both —
-     *  its only job; kept small so a single message replies as fast as the model allows. */
-    const val PER_USER_DEBOUNCE_MS = 500L
+    // No upfront debounce/settle: a reply fires the moment its trigger lands. Ordering is the
+    // per-channel reply mutex (finish-the-thought), and buildContext runs INSIDE that lock so a
+    // queued message always sees the freshest state — anything typed while it waited is folded in
+    // for free, and a same-person follow-up that arrived AFTER the last reply is caught by the free
+    // "already covered" snowflake check instead of an upfront wait.
     const val PER_CHANNEL_INFLIGHT = 2
     const val PER_USER_REPLY_COOLDOWN_MS = 3500L
 
@@ -83,6 +85,16 @@ object DiscordBotLimits {
     const val TOPIC_STORE_MAX = 60
     /** Shared server event-memories kept (unbounded by design; a sane FIFO ceiling). */
     const val SERVER_MEMORY_STORE_MAX = 400
+
+    // ── Channel awareness (identity + per-channel running bits) ───────────
+    /** Per-channel running bits kept (unbounded by design; a sane ceiling). */
+    const val CHANNEL_MEMORY_STORE_MAX = 60
+    /** A bit won't redeploy for this long, so a running joke stays occasional (30 min). */
+    const val CHANNEL_BIT_DEPLOY_COOLDOWN_MS = 30 * 60 * 1000L
+    /** % chance an eligible bit actually surfaces — most triggers pass with no joke. */
+    const val CHANNEL_BIT_DEPLOY_CHANCE = 35
+    /** Messages pulled from a channel someone cross-references ("did you see that in #media"). */
+    const val CROSSREF_FETCH = 10
 
     // ── Traces / observability ────────────────────────────────────────────
     const val TRACE_RING = 60

@@ -235,6 +235,7 @@ private fun ServerSection() {
     val ctx = LocalContext.current
     var tick by remember { mutableIntStateOf(0) }
     val mems = remember(tick) { ServerMemoryStore.list(ctx) }
+    val chBits = remember(tick) { com.vrca.discordbot.ChannelMemoryStore.listAll(ctx) }
     var teach by remember { mutableStateOf("") }
 
     AdminSectionCard(
@@ -261,6 +262,29 @@ private fun ServerSection() {
                 singleLine = true, modifier = Modifier.weight(1f)
             )
             Button(onClick = { if (teach.isNotBlank()) { ServerMemoryStore.teach(ctx, teach); teach = ""; tick++ } }) { Text("Add") }
+        }
+    }
+
+    val bitCount = chBits.values.sumOf { it.size }
+    AdminSectionCard(
+        title = "Channel bits ($bitCount)",
+        icon = Icons.Filled.History,
+        tone = AdminTone.Neutral,
+    ) {
+        Muted("Running jokes / norms specific to ONE channel (e.g. \"posting an image in #general gets ribbed\"). Cardinal deploys these occasionally, never every time, and never in another channel.")
+        if (chBits.isEmpty()) Muted("No channel bits yet.")
+        chBits.forEach { (channelId, bits) ->
+            val chName = com.vrca.discordbot.ChannelInfoStore.name(channelId)?.let { "#$it" } ?: "channel $channelId"
+            Text(chName, style = MaterialTheme.typography.labelLarge)
+            bits.forEach { b ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(b.text, style = MaterialTheme.typography.bodySmall)
+                        Muted("strength ${b.strength} · ${com.vrca.discordbot.discordRelTime(b.lastMs, System.currentTimeMillis())}")
+                    }
+                    TextButtonSmall("Delete") { com.vrca.discordbot.ChannelMemoryStore.delete(ctx, channelId, b.text); tick++ }
+                }
+            }
         }
     }
 }

@@ -65,6 +65,13 @@ class DiscordBotService : Service() {
         private const val MAX_BACKOFF_MS = 30_000L
         private val URL_RE = Regex("""https?://\S+""")
         private val STOP_RE = Regex("(?i)\\b(stop|shut ?up|shush|be quiet|leave me alone|stop replying|go away|not now|quit it)\\b")
+        // Someone asking Cardinal to recall a person / event / memory (drives full-card injection).
+        private val RECALL_RE = Regex("(?i)(who is|who'?s |what do you know|know about|tell me about|info(rmation)? (on|about)|remember (when|that)|about (him|her|them|me)\\b|from your (profile|memory|notes)|in your (profile|memory))")
+        private val SELF_RECALL_RE = Regex("(?i)(about me\\b|know about me|my (profile|info|memory)|remember me|who am i)")
+        // Explicit "react to my message with X" request → react, no reply.
+        private val REACT_REQ_RE = Regex("(?i)^\\s*(can you |could you |please |pls |plz )?react\\b|react (to )?(this|that|my|the)\\b")
+        private val SHORTCODE_RE = Regex(":([a-zA-Z0-9_]{2,32}):|<a?:([a-zA-Z0-9_]{2,32}):\\d+>")
+        private val UNICODE_EMOJI_RE = Regex("[\\uD83C-\\uDBFF][\\uDC00-\\uDFFF]|[\\u2600-\\u27BF\\u2B00-\\u2BFF\\u2190-\\u21FF\\u2900-\\u297F]")
 
         fun start(context: Context) {
             if (!BuildConfig.IS_ADMIN_BUILD) return
@@ -106,12 +113,13 @@ class DiscordBotService : Service() {
     private val lastBotPostMs = ConcurrentHashMap<String, Long>()        // channel -> last bot post ms
     private val perUserReplyAt = ConcurrentHashMap<String, Long>()       // channel:user -> last reply ms
     private val channelMutex = ConcurrentHashMap<String, Mutex>()        // channel -> reply serialiser
-    private val pendingByUser = ConcurrentHashMap<String, Job>()         // channel:user -> debounce job
     private val backoffUntil = ConcurrentHashMap<String, Long>()         // channel -> back-off deadline
     private val observeUnreplied = ConcurrentHashMap<String, Int>()      // channel -> msgs since last observe
     private val lastObserveAt = ConcurrentHashMap<String, Long>()        // channel -> last observe ms
     private val activityWindow = ConcurrentHashMap<String, ArrayDeque<Long>>() // channel -> recent msg times
     private val recentBotReplies = ConcurrentHashMap<String, ArrayDeque<String>>() // channel -> last replies
+    private val lastCoveredId = ConcurrentHashMap<String, Long>()        // channel -> max message id a reply has already seen/answered
+    private val routeJobs = ConcurrentHashMap.newKeySet<Job>()           // in-flight route coroutines (cancelled on teardown)
     // Our recent message ids (reaction-learning): id -> the user we replied to.
     private val recentBotMsgIds = object : LinkedHashMap<String, String>(64, 0.75f, false) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 80
@@ -121,6 +129,7 @@ class DiscordBotService : Service() {
         val channelId: String, val messageId: String, val authorId: String, val authorName: String,
         val userText: String, val addressed: Boolean,
         val refTurn: DiscordBotAi.Turn?, val refId: String?,
+        val hasImage: Boolean, val refChannels: List<String>,
     )
 
     override fun onCreate() {
@@ -244,8 +253,11 @@ class DiscordBotService : Service() {
             }
             "GUILD_CREATE" -> {
                 EmojiConvert.putGuildEmojis(d?.optJSONArray("emojis"))
-                DiscordBotState.log("Loaded ${EmojiConvert.customNames().size} server emojis")
+                ChannelInfoStore.putGuildChannels(d?.optJSONArray("channels"))
+                DiscordBotState.log("Loaded ${EmojiConvert.customNames().size} emojis, ${ChannelInfoStore.size()} channels")
             }
+            "CHANNEL_CREATE", "CHANNEL_UPDATE" ->
+                if (d != null) ChannelInfoStore.putGuildChannels(JSONArray().put(d))
             "GUILD_EMOJIS_UPDATE" -> EmojiConvert.putGuildEmojis(d?.optJSONArray("emojis"))
             "MESSAGE_CREATE" -> if (d != null) handleMessage(d)
             "MESSAGE_REACTION_ADD" -> if (d != null) handleReactionAdd(d)
@@ -344,10 +356,16 @@ class DiscordBotService : Service() {
         val repliedToBot = botId.isNotBlank() && ref?.optJSONObject("author")?.optString("id") == botId
         val addressed = mentioned || repliedToBot
 
-        val userTextRaw = DiscordRest.resolveMentions(stripBotMentions(rawContent), d.optJSONArray("mentions"))
+        val userMentionsResolved = DiscordRest.resolveMentions(stripBotMentions(rawContent), d.optJSONArray("mentions"))
+        // Which other channels does this message point at (e.g. "did you see that in #media")?
+        val refChannels = ChannelInfoStore.referencedIds(userMentionsResolved)
+        // Resolve <#id> to #name for readability once the ids are captured.
+        val userTextRaw = ChannelInfoStore.resolveMentions(userMentionsResolved)
+        val hasImage = imageAttached(d.optJSONArray("attachments"))
 
-        // Recognise + reinforce any shared-culture reference in what people say.
+        // Recognise + reinforce any shared-culture / channel-bit reference in what people say.
         ServerMemoryStore.reinforceReferenced(this, userTextRaw, now)
+        ChannelMemoryStore.reinforceReferenced(this, channelId, userTextRaw, now)
 
         // "Stop" directed at the bot → back off in this channel (don't be annoying).
         if (addressed && STOP_RE.containsMatchIn(userTextRaw)) {
@@ -369,7 +387,9 @@ class DiscordBotService : Service() {
             if (!eligible) return
         }
 
-        val userText = userTextRaw.ifBlank { "(they pinged you with no message)" }
+        val userTextBase = userTextRaw.ifBlank { if (hasImage) "" else "(they pinged you with no message)" }
+        // A situational cue so the model + channel-bit retrieval know an image was posted.
+        val userText = if (hasImage) (userTextBase + " (posted an image)").trim() else userTextBase
         val authorName = author.optString("global_name").ifBlank { author.optString("username") }.ifBlank { "someone" }
 
         var refTurn: DiscordBotAi.Turn? = null
@@ -387,15 +407,25 @@ class DiscordBotService : Service() {
             }
         }
 
-        val ctx = MsgCtx(channelId, messageId, authorId, authorName, tokenize(userText), addressed, refTurn, refId)
+        val ctx = MsgCtx(channelId, messageId, authorId, authorName, tokenize(userText), addressed, refTurn, refId, hasImage, refChannels)
 
-        // ── Per-USER debounce bucket: B's message never cancels A's pending reply. ──
-        val bucket = "$channelId:$authorId"
-        pendingByUser[bucket]?.cancel()
-        pendingByUser[bucket] = scope.launch {
-            delay(DiscordBotLimits.PER_USER_DEBOUNCE_MS)
-            try { route(ctx) } catch (_: Exception) { }
+        // No upfront wait: fire immediately. Ordering is the per-channel reply mutex; a follow-up
+        // that lands while a reply is generating is either folded into the fresh in-lock context or
+        // caught by the free "already covered" check — so latency is never the coalescing mechanism.
+        val job = scope.launch { try { route(ctx) } catch (_: Exception) { } }
+        routeJobs.add(job)
+        job.invokeOnCompletion { routeJobs.remove(job) }
+    }
+
+    /** True if the message carries an image attachment (the "posted an image" situational cue). */
+    private fun imageAttached(attachments: JSONArray?): Boolean {
+        if (attachments == null) return false
+        for (i in 0 until attachments.length()) {
+            val a = attachments.optJSONObject(i) ?: continue
+            if (a.optString("content_type").startsWith("image")) return true
+            if (Regex("(?i)\\.(png|jpe?g|gif|webp)$").containsMatchIn(a.optString("filename"))) return true
         }
+        return false
     }
 
     private suspend fun route(ctx: MsgCtx) {
@@ -404,13 +434,42 @@ class DiscordBotService : Service() {
 
         // Trivial addressed message → a human just reacts, no model call.
         if (ctx.addressed && isTrivial(ctx.userText)) { reactTo(ctx, pickEmoji(ctx.userText)); return }
+
+        // Explicit "react to my message with X" → do exactly that (custom :name: or unicode), no
+        // reply, no model call. Fixes Cardinal typing `react: [:mpreg:]` as a MESSAGE instead of reacting.
+        if (ctx.addressed) {
+            val asked = parseReactRequest(ctx.userText)
+            if (asked != null) {
+                for (e in asked) { reactTo(ctx, e); delay(250) }
+                trace(ctx, "react-req", "heuristic", "react", asked.joinToString(" "))
+                return
+            }
+        }
         if (rung == DiscordBotState.Rung.REACT_ONLY) {
             if (ctx.addressed) reactTo(ctx, pickEmoji(ctx.userText))
             else trace(ctx, "budget", "ladder", "dropped", "react-only rung")
             return
         }
 
-        val built = buildContext(ctx)
+        // Everything real happens under the per-channel lock (finish-the-thought), and the context
+        // is fetched INSIDE it — so a message that queued while a reply was generating sees the
+        // freshest state, and the ambient/covered decision is made against reality, not a stale snapshot.
+        val mutex = channelMutex.getOrPut(ctx.channelId) { Mutex() }
+        mutex.withLock { generateLocked(ctx, rung) }
+    }
+
+    private class Built(
+        val turns: List<DiscordBotAi.Turn>,
+        val ids: Set<String>,
+        val nameToId: Map<String, String>,
+        val keywords: Set<String>,
+        val targetIsLatest: Boolean,   // nothing newer than the message we're answering
+        val maxSeenId: Long,           // highest message id folded in (for the "already covered" check)
+        val emphasizeIds: Set<String>, // people the message ASKED ABOUT → inject their FULL card
+    )
+
+    private suspend fun generateLocked(ctx: MsgCtx, rung: DiscordBotState.Rung) {
+        val built = buildContext(ctx)   // fresh: folds in anything sent while this was queued
         var short = rung == DiscordBotState.Rung.TRIM || rung == DiscordBotState.Rung.CHEAP
 
         if (!ctx.addressed) {
@@ -421,101 +480,121 @@ class DiscordBotService : Service() {
                 DiscordBotAi.Act.REACT -> { reactTo(ctx, plan.emoji.ifBlank { pickEmoji(ctx.userText) }); return }
                 DiscordBotAi.Act.REPLY -> { ambientCooldown[ctx.channelId] = System.currentTimeMillis(); if (plan.short) short = true }
             }
+        } else {
+            // Addressed dequeue re-check (zero cost, no upfront wait): if we JUST replied to this
+            // person, only continue when THIS message is genuinely new — i.e. it arrived AFTER the
+            // last reply's context. A message the last reply already saw is a fragment we've covered.
+            val ukey = "${ctx.channelId}:${ctx.authorId}"
+            if (System.currentTimeMillis() - (perUserReplyAt[ukey] ?: 0L) < DiscordBotLimits.PER_USER_REPLY_COOLDOWN_MS) {
+                val thisId = ctx.messageId.toLongOrNull() ?: 0L
+                if (thisId <= (lastCoveredId[ctx.channelId] ?: 0L)) {
+                    trace(ctx, "covered", "heuristic", "dropped", "already answered in last reply"); return
+                }
+                short = true   // a real follow-up since the last reply → keep it tight, like a person
+            }
         }
 
-        generateAndSend(ctx, built, rung, short)
-    }
+        val model = if (rung == DiscordBotState.Rung.CHEAP) DiscordBotLimits.CHEAP_MODEL else cfg.model
+        val turns = if (rung == DiscordBotState.Rung.TRIM || rung == DiscordBotState.Rung.CHEAP)
+            built.turns.takeLast(DiscordBotLimits.CONTEXT_RAW_TURNS / 2) else built.turns
 
-    private class Built(
-        val turns: List<DiscordBotAi.Turn>,
-        val ids: Set<String>,
-        val nameToId: Map<String, String>,
-        val keywords: Set<String>,
-        val targetIsLatest: Boolean,   // nothing newer than the message we're answering
-    )
+        val rc = DiscordBotAi.ReplyCtx(
+            selfDigest = PersonalityStore.snapshot(this),
+            channelInfo = ChannelInfoStore.describe(ctx.channelId),
+            serverCulture = buildServerCulture(ctx.channelId, ctx.userText),
+            channelBits = ChannelMemoryStore.pickDeployable(this, ctx.channelId, ctx.userText, situationCues(ctx), System.currentTimeMillis()).orEmpty(),
+            crossRef = buildCrossRef(ctx),
+            cardsBlock = UserMemoryStore.activeCardsBlock(this, built.ids, built.keywords, built.emphasizeIds),
+            summary = ConversationStore.summary(ctx.channelId),
+            replyingTo = ctx.authorName,
+            lastBotReplies = recentBotReplies[ctx.channelId]?.toList() ?: emptyList(),
+            emojiHint = emojiHint(),
+            langHint = detectLang(ctx.userText),
+            shortHint = short,
+        )
 
-    private suspend fun generateAndSend(ctx: MsgCtx, built: Built, rung: DiscordBotState.Rung, short: Boolean) {
-        val ukey = "${ctx.channelId}:${ctx.authorId}"
-        val lastReply = perUserReplyAt[ukey] ?: 0L
-        if (System.currentTimeMillis() - lastReply < DiscordBotLimits.PER_USER_REPLY_COOLDOWN_MS) {
-            trace(ctx, "cooldown", "heuristic", "dropped", "per-user cooldown"); return
-        }
-
-        val mutex = channelMutex.getOrPut(ctx.channelId) { Mutex() }
-        mutex.withLock {   // finish-the-thought: A completes before B in this channel
-            val model = if (rung == DiscordBotState.Rung.CHEAP) DiscordBotLimits.CHEAP_MODEL else cfg.model
-            val turns = if (rung == DiscordBotState.Rung.TRIM || rung == DiscordBotState.Rung.CHEAP)
-                built.turns.takeLast(DiscordBotLimits.CONTEXT_RAW_TURNS / 2) else built.turns
-
-            val rc = DiscordBotAi.ReplyCtx(
-                selfDigest = PersonalityStore.snapshot(this),
-                serverCulture = buildServerCulture(ctx.channelId, ctx.userText),
-                cardsBlock = UserMemoryStore.activeCardsBlock(this, built.ids, built.keywords),
-                summary = ConversationStore.summary(ctx.channelId),
-                lastBotReplies = recentBotReplies[ctx.channelId]?.toList() ?: emptyList(),
-                emojiHint = emojiHint(),
-                langHint = detectLang(ctx.userText),
-                shortHint = short,
-            )
-
-            if (!cfg.shadowMode) DiscordRest.triggerTyping(cfg.botToken, ctx.channelId)  // instant typing
-            when (val res = DiscordBotAi.reply(cfg, model, turns, rc)) {
-                is DiscordBotAi.ReplyResult.Ok -> {
-                    charge(DiscordBotLimits.EST_NEURONS_REPLY)
-                    // No cosmetic delay — send as soon as the model responds (the typing indicator
-                    // already fired before the call, so it reads as "Cardinal is typing…").
-                    val outText = EmojiConvert.convert(res.text)
-                    val now = System.currentTimeMillis()
-                    if (cfg.shadowMode) {
-                        DiscordBotState.log("shadow ↩ ${ctx.authorName}: ${outText.take(60)}")
-                        trace(ctx, "reply", "shadow", "shadow", outText.take(90))
+        if (!cfg.shadowMode) DiscordRest.triggerTyping(cfg.botToken, ctx.channelId)  // instant typing
+        when (val res = DiscordBotAi.reply(cfg, model, turns, rc)) {
+            is DiscordBotAi.ReplyResult.Ok -> {
+                charge(DiscordBotLimits.EST_NEURONS_REPLY)
+                val outText = EmojiConvert.convert(res.text)
+                val now = System.currentTimeMillis()
+                if (cfg.shadowMode) {
+                    DiscordBotState.log("shadow ↩ ${ctx.authorName}: ${outText.take(60)}")
+                    trace(ctx, "reply", "shadow", "shadow", outText.take(90))
+                } else {
+                    // Only @-reply-thread when the convo moved past their message (out-of-order);
+                    // if we're answering the latest message, just talk plainly like a person.
+                    val out = DiscordRest.send(cfg.botToken, ctx.channelId, outText,
+                        replyToMessageId = if (ctx.addressed && !built.targetIsLatest) ctx.messageId else null)
+                    if (out.error == null) {
+                        out.messageId?.let { synchronized(recentBotMsgIds) { recentBotMsgIds[it] = ctx.authorId } }
+                        lastBotPostMs[ctx.channelId] = now
+                        rememberBotReply(ctx.channelId, res.text)
+                        trace(ctx, "reply", if (model == cfg.model) "70B" else "8B", "reply", outText.take(90))
                     } else {
-                        // Only @-reply-thread when the convo moved past their message (out-of-order);
-                        // if we're answering the latest message, just talk plainly like a person.
-                        val out = DiscordRest.send(cfg.botToken, ctx.channelId, outText,
-                            replyToMessageId = if (ctx.addressed && !built.targetIsLatest) ctx.messageId else null)
-                        if (out.error == null) {
-                            out.messageId?.let { synchronized(recentBotMsgIds) { recentBotMsgIds[it] = ctx.authorId } }
-                            lastBotPostMs[ctx.channelId] = now
-                            rememberBotReply(ctx.channelId, res.text)
-                            // Real Discord reactions the model asked for (e.g. "react with fire + a server emoji").
-                            for (e in res.reactEmojis) {
-                                DiscordRest.addReaction(cfg.botToken, ctx.channelId, ctx.messageId, EmojiConvert.reactionToken(e))
-                                DiscordBotState.bumpReacted()
-                                delay(300)
-                            }
-                            trace(ctx, "reply", if (model == cfg.model) "70B" else "8B", "reply", outText.take(90))
-                        } else {
-                            DiscordBotState.log("Send failed: ${out.error}")
-                            trace(ctx, "reply", "70B", "send-fail", out.error)
-                        }
+                        DiscordBotState.log("Send failed: ${out.error}")
+                        trace(ctx, "reply", "70B", "send-fail", out.error)
                     }
-                    applyReplyTail(ctx, built, res, now)
-                    observeUnreplied[ctx.channelId] = 0   // a reply IS a catch-up
-                    DiscordBotState.bumpReplied()
-                    perUserReplyAt[ukey] = now
                 }
-                is DiscordBotAi.ReplyResult.Error -> {
-                    DiscordBotState.log("AI error: ${res.message}")
-                    trace(ctx, "reply", "70B", "error", res.message)
-                }
+                afterReply(ctx, built, now)
+                DiscordBotState.bumpReplied()
+                perUserReplyAt["${ctx.channelId}:${ctx.authorId}"] = now
+                // Everything up to here is answered — so an earlier same-person fragment won't
+                // re-fire, while a genuinely newer message still will (the "already covered" check).
+                lastCoveredId[ctx.channelId] = maxOf(lastCoveredId[ctx.channelId] ?: 0L, built.maxSeenId)
+            }
+            is DiscordBotAi.ReplyResult.Error -> {
+                DiscordBotState.log("AI error: ${res.message}")
+                trace(ctx, "reply", "70B", "error", res.message)
             }
         }
     }
 
-    /** Apply everything the ONE reply call proposed: memory, summary, self-nudge, server culture. */
-    private fun applyReplyTail(ctx: MsgCtx, built: Built, res: DiscordBotAi.ReplyResult.Ok, now: Long) {
+    /**
+     * After a reply lands: mark the author seen and schedule the cheap 8B LEARN pass (throttled) so
+     * memory/summary/self/culture are written OFF the reply's hot path. The 70B reply itself no
+     * longer carries any bookkeeping tail — halving its cost and killing the rushed-inline junk-memory
+     * bugs. The learn pass reuses the reply's OWN transcript (no extra fetch).
+     */
+    private fun afterReply(ctx: MsgCtx, built: Built, now: Long) {
         UserMemoryStore.touch(this, ctx.authorId, ctx.authorName)
-        val globalIndex by lazy { UserMemoryStore.nameIndex(this) }
-        for (md in res.memDeltas) {
-            val id = resolveAbout(md.about, built.nameToId, globalIndex, ctx)
+        observeUnreplied[ctx.channelId] = 0   // a reply IS a catch-up for the pileup path
+        if (DiscordBotState.currentRung() == DiscordBotState.Rung.SILENT) return
+        if (now - (lastObserveAt[ctx.channelId] ?: 0L) < DiscordBotLimits.OBSERVER_MIN_INTERVAL_MS) return
+        lastObserveAt[ctx.channelId] = now
+        val turns = built.turns
+        val nameToId = built.nameToId
+        val channelId = ctx.channelId
+        scope.launch { try { runLearn(channelId, turns, nameToId) } catch (_: Exception) { } }
+    }
+
+    /** The LEARN pass over an already-built transcript (reply path): one 8B call, no extra fetch. */
+    private suspend fun runLearn(channelId: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>) {
+        if (!::cfg.isInitialized || !cfg.isComplete) return
+        val usable = turns.filter { it.text.isNotBlank() }
+        if (usable.size < 3) return
+        val obs = DiscordBotAi.observe(cfg, usable, ConversationStore.summary(channelId)) ?: return
+        charge(DiscordBotLimits.EST_NEURONS_CHEAP)
+        applyObservation(channelId, obs, nameToId, System.currentTimeMillis())
+        DiscordBotState.log("learned $channelId (${obs.memDeltas.size} people)")
+    }
+
+    /** Persist one observation (shared by the reply-driven learn pass AND the pileup observer). */
+    private fun applyObservation(
+        channelId: String, obs: DiscordBotAi.Observation, nameToId: Map<String, String>, now: Long,
+    ) {
+        val globalIndex = UserMemoryStore.nameIndex(this)
+        if (obs.summary.isNotBlank()) ConversationStore.updateSummary(this, channelId, obs.summary, now)
+        for (md in obs.memDeltas) {
+            val id = resolveObserveAbout(md.about, nameToId, globalIndex)
             if (id != null && id != botId) UserMemoryStore.applyDelta(this, id, md.about, md.json)
         }
-        if (res.summary.isNotBlank()) ConversationStore.updateSummary(this, ctx.channelId, res.summary, now)
-        if (res.selfTrait.isNotBlank() || res.selfStyle.isNotBlank() || res.selfMood.isNotBlank())
-            PersonalityStore.noteSelf(this, res.selfTrait.ifBlank { null }, res.selfStyle.ifBlank { null }, res.selfMood.ifBlank { null })
-        if (res.selfMood.isNotBlank()) DiscordBotState.setMood(res.selfMood)
-        if (res.serverEvent.isNotBlank()) ServerMemoryStore.remember(this, res.serverEvent, now)
+        if (obs.serverEvent.isNotBlank()) ServerMemoryStore.remember(this, obs.serverEvent, now)
+        if (obs.channelBit.isNotBlank()) ChannelMemoryStore.remember(this, channelId, obs.channelBit, now)
+        if (obs.selfTrait.isNotBlank() || obs.selfMood.isNotBlank())
+            PersonalityStore.noteSelf(this, obs.selfTrait.ifBlank { null }, null, obs.selfMood.ifBlank { null })
+        if (obs.selfMood.isNotBlank()) DiscordBotState.setMood(obs.selfMood)
     }
 
     private suspend fun reactTo(ctx: MsgCtx, emoji: String) {
@@ -543,21 +622,11 @@ class DiscordBotService : Service() {
         if (recent.size < 4) return
         val turns = recent.filter { tokenize(stripBotMentions(it.content)).isNotBlank() }
             .map { DiscordBotAi.Turn(it.authorId == botId, it.authorName, tokenize(stripBotMentions(it.content))) }
-        val globalIndex = UserMemoryStore.nameIndex(this)
         val nameToId = HashMap<String, String>()
         recent.forEach { if (it.authorId != botId) nameToId[it.authorName.lowercase().trim()] = it.authorId }
         val obs = DiscordBotAi.observe(cfg, turns, ConversationStore.summary(channelId)) ?: return
         charge(DiscordBotLimits.EST_NEURONS_CHEAP)
-        val now = System.currentTimeMillis()
-        if (obs.summary.isNotBlank()) ConversationStore.updateSummary(this, channelId, obs.summary, now)
-        for (md in obs.memDeltas) {
-            val id = resolveObserveAbout(md.about, nameToId, globalIndex)
-            if (id != null && id != botId) UserMemoryStore.applyDelta(this, id, md.about, md.json)
-        }
-        if (obs.serverEvent.isNotBlank()) ServerMemoryStore.remember(this, obs.serverEvent, now)
-        if (obs.selfTrait.isNotBlank() || obs.selfMood.isNotBlank())
-            PersonalityStore.noteSelf(this, obs.selfTrait.ifBlank { null }, null, obs.selfMood.ifBlank { null })
-        if (obs.selfMood.isNotBlank()) DiscordBotState.setMood(obs.selfMood)
+        applyObservation(channelId, obs, nameToId, System.currentTimeMillis())
         DiscordBotState.log("observed $channelId (${obs.memDeltas.size} people)")
     }
 
@@ -571,14 +640,17 @@ class DiscordBotService : Service() {
         val seen = HashSet<String>()
         var newerExists = false
         val ctxIdL = ctx.messageId.toLongOrNull() ?: Long.MAX_VALUE
+        var maxSeenId = ctx.messageId.toLongOrNull() ?: 0L
         if (cfg.contextTurns > 0) {
             val recent = DiscordRest.fetchRecentMessages(cfg.botToken, ctx.channelId, cfg.contextTurns)
             for (m in recent) {
+                val mid = m.id.toLongOrNull() ?: 0L
+                if (mid > maxSeenId) maxSeenId = mid
                 if (m.id == ctx.messageId) continue
                 // A higher snowflake id = a message that arrived AFTER the one we're answering.
-                if ((m.id.toLongOrNull() ?: 0L) > ctxIdL) newerExists = true
+                if (mid > ctxIdL) newerExists = true
                 seen.add(m.id)
-                val text = tokenize(stripBotMentions(m.content))
+                val text = tokenize(ChannelInfoStore.resolveMentions(stripBotMentions(m.content)))
                 if (text.isBlank()) continue
                 ids.add(m.authorId)
                 if (m.authorId != botId) nameToId[m.authorName.lowercase().trim()] = m.authorId
@@ -588,7 +660,53 @@ class DiscordBotService : Service() {
         if (ctx.refTurn != null && (ctx.refId == null || ctx.refId !in seen)) turns.add(ctx.refTurn)
         turns.add(DiscordBotAi.Turn(false, ctx.authorName, ctx.userText))
         val keywords = keywordsOf(buildString { turns.takeLast(4).forEach { append(it.text).append(' ') }; append(ctx.userText) })
-        return Built(turns, ids, nameToId, keywords, targetIsLatest = !newerExists)
+
+        // Absent-person / recall injection: if the message NAMES someone Cardinal has a card for
+        // (even if they aren't speaking), pull their card into context so it can actually answer
+        // instead of claiming it doesn't know them. On a recall query ("who is X", "info about X",
+        // "from your profile") the named card renders FULL (all facts).
+        val emphasize = HashSet<String>()
+        val isRecall = RECALL_RE.containsMatchIn(ctx.userText)
+        val nameIndex = UserMemoryStore.nameIndex(this)
+        if (nameIndex.isNotEmpty()) {
+            val normMsg = " " + ctx.userText.lowercase()
+                .replace(Regex("[^\\p{L}\\p{N} ]"), " ").replace(Regex("\\s+"), " ").trim() + " "
+            var injected = 0
+            for ((nameKey, uid) in nameIndex) {
+                if (uid == botId || uid == ctx.authorId || nameKey.length < 3) continue
+                if (normMsg.contains(" $nameKey ")) {
+                    ids.add(uid); if (isRecall) emphasize.add(uid)
+                    if (++injected >= 3) break   // bound the prompt
+                }
+            }
+        }
+        if (isRecall && SELF_RECALL_RE.containsMatchIn(ctx.userText)) emphasize.add(ctx.authorId)
+
+        return Built(turns, ids, nameToId, keywords, targetIsLatest = !newerExists, maxSeenId = maxSeenId, emphasizeIds = emphasize)
+    }
+
+    /** Situational cue words for channel-bit retrieval (e.g. someone posted an image). */
+    private fun situationCues(ctx: MsgCtx): Set<String> =
+        if (ctx.hasImage) setOf("image", "images", "pic", "post", "posting") else emptySet()
+
+    /**
+     * When a message points at another channel ("did you see that in #media"), pull that channel's
+     * recent messages as a clearly-labelled block so Cardinal can talk ABOUT it without confusing it
+     * with the current channel. Bounded (one channel, [DiscordBotLimits.CROSSREF_FETCH] messages) and
+     * permission-aware: if the bot can't read it, it says so instead of hallucinating.
+     */
+    private suspend fun buildCrossRef(ctx: MsgCtx): String {
+        val targetCh = ctx.refChannels.firstOrNull { it != ctx.channelId } ?: return ""
+        val name = ChannelInfoStore.name(targetCh) ?: return ""   // unknown → skip silently
+        val msgs = DiscordRest.fetchRecentMessages(cfg.botToken, targetCh, DiscordBotLimits.CROSSREF_FETCH)
+        if (msgs.isEmpty()) return "#$name: (you can't see this channel right now)"
+        val sb = StringBuilder("#").append(name).append(":\n")
+        for (m in msgs) {
+            val t = tokenize(ChannelInfoStore.resolveMentions(stripBotMentions(m.content)))
+            if (t.isBlank()) continue
+            sb.append("- ").append(if (m.authorId == botId) "Cardinal" else m.authorName).append(": ").append(t).append('\n')
+        }
+        return sb.toString().trim()
     }
 
     /** Server culture block = strongest core memories + those relevant now + any revived dead topic. */
@@ -606,23 +724,17 @@ class DiscordBotService : Service() {
         return sb.toString().trim()
     }
 
-    /** Resolve a reply-tail "about" NAME/nickname to a Discord id (conversation first, then global). */
-    private fun resolveAbout(about: String, nameToId: Map<String, String>, global: Map<String, String>, ctx: MsgCtx): String? {
-        val key = about.lowercase().trim()
-        if (key.isBlank()) return null
-        nameToId[key]?.let { return it }
-        global[key]?.let { return it }
-        val hits = nameToId.entries.filter { key in it.key || it.key in key }
-        if (hits.size == 1) return hits.first().value
-        return if (key in ctx.authorName.lowercase()) ctx.authorId else null
-    }
-
+    /**
+     * Resolve a learn-pass "about" NAME/nickname to a Discord id — EXACT match only (conversation
+     * names first, then the global name/nickname index). A fuzzy substring fallback was the cause of
+     * one person's facts/nicknames landing on a DIFFERENT person (John Pork getting Michael's nicks),
+     * so an unresolved name is DROPPED rather than guessed — safer than contaminating a card.
+     */
     private fun resolveObserveAbout(about: String, nameToId: Map<String, String>, global: Map<String, String>): String? {
         val key = about.lowercase().trim(); if (key.isBlank()) return null
         nameToId[key]?.let { return it }
         global[key]?.let { return it }
-        val hits = nameToId.entries.filter { key in it.key || it.key in key }
-        return if (hits.size == 1) hits.first().value else null
+        return null
     }
 
     private fun handleReactionAdd(d: JSONObject) {
@@ -703,6 +815,22 @@ class DiscordBotService : Service() {
         if (n in triviaWords) return true
         return n.length <= 2 || n.none { it.isLetterOrDigit() }
     }
+    /**
+     * Parse an explicit react request into emoji tokens (custom `:name:` / `<:name:id>` or unicode).
+     * Returns null unless the message clearly asks Cardinal to REACT (so normal chat is untouched) AND
+     * carries at least one emoji. The tokens pass through [EmojiConvert.reactionToken] at react time.
+     */
+    private fun parseReactRequest(text: String): List<String>? {
+        if (!REACT_REQ_RE.containsMatchIn(text)) return null
+        val out = LinkedHashSet<String>()
+        SHORTCODE_RE.findAll(text).forEach { m ->
+            val name = m.groupValues[1].ifBlank { m.groupValues[2] }
+            if (name.isNotBlank()) out.add(name)
+        }
+        UNICODE_EMOJI_RE.findAll(text).forEach { out.add(it.value) }
+        return if (out.isEmpty()) null else out.take(4).toList()
+    }
+
     private val reactEmojis = listOf("👍", "😂", "💀", "👀", "🔥", "😭", "🙏")
     private fun pickEmoji(text: String): String {
         val t = text.lowercase()
@@ -756,7 +884,7 @@ class DiscordBotService : Service() {
         heartbeatJob?.cancel(); heartbeatJob = null
         reconnectJob?.cancel(); reconnectJob = null
         budgetJob?.cancel(); budgetJob = null
-        pendingByUser.values.forEach { it.cancel() }; pendingByUser.clear()
+        routeJobs.forEach { it.cancel() }; routeJobs.clear()
         try { webSocket?.close(1000, reason) } catch (_: Exception) {}
         webSocket = null
         DiscordBotState.setRunning(false)
