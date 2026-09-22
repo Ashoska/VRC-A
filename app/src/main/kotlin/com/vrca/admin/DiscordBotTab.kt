@@ -1,31 +1,43 @@
 package com.vrca.admin
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Payments
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -41,231 +53,420 @@ import com.vrca.discordbot.DiscordBotService
 import com.vrca.discordbot.DiscordBotState
 import com.vrca.discordbot.DiscordBotStore
 import com.vrca.discordbot.PersonalityStore
+import com.vrca.discordbot.UserMemoryStore
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
- * Admin tab to configure and run the Discord AI bot ([DiscordBotService]).
- * Secrets are entered here and stored encrypted on-device ([DiscordBotStore]) — never
- * in source. Mirrors the [BotsTab] layout language (AdminSectionCard + StatusPill).
+ * Admin control surface for the Discord AI bot (Cardinal), redesigned as a clean sub-tab area so
+ * the operator can freely browse everything the AI is doing: Dashboard (status + counts + mood),
+ * Personality (self-grown, view + pin/teach/reset — never a typed persona), Users (per-user memory,
+ * moderatable), Traces (why it replied/ignored), Cost (neurons + budget ladder), Controls (shadow /
+ * ambient / mute), and Config (secrets). Reads [DiscordBotState] flows; secrets in [DiscordBotStore].
  */
 @Composable
 internal fun DiscordBotTab() {
-    val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
+    var sub by remember { mutableIntStateOf(0) }
+    val tabs = listOf("Dashboard", "Personality", "Users", "Traces", "Cost", "Controls", "Config")
 
+    LazyColumn(
+        Modifier.fillMaxWidth().padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                tabs.forEachIndexed { i, label ->
+                    FilterChip(selected = sub == i, onClick = { sub = i }, label = { Text(label) })
+                }
+            }
+        }
+        item {
+            when (sub) {
+                0 -> DashboardSection()
+                1 -> PersonalitySection()
+                2 -> UsersSection()
+                3 -> TracesSection()
+                4 -> CostSection()
+                5 -> ControlsSection()
+                else -> ConfigSection()
+            }
+        }
+    }
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────
+@Composable
+private fun DashboardSection() {
+    val ctx = LocalContext.current
     val status by DiscordBotState.statusFlow.collectAsState()
     val detail by DiscordBotState.detailFlow.collectAsState()
     val botName by DiscordBotState.botNameFlow.collectAsState()
+    val mood by DiscordBotState.moodFlow.collectAsState()
+    val seen by DiscordBotState.seenFlow.collectAsState()
+    val replied by DiscordBotState.repliedFlow.collectAsState()
+    val reacted by DiscordBotState.reactedFlow.collectAsState()
+    val rung by DiscordBotState.rungFlow.collectAsState()
     val log by DiscordBotState.logFlow.collectAsState()
+    val running = status != DiscordBotState.Status.IDLE && status != DiscordBotState.Status.FAILED
 
-    // Config fields, seeded once from the encrypted store.
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        AdminSectionCard(
+            title = "Cardinal",
+            icon = Icons.Filled.Chat,
+            tone = AdminTone.Primary,
+            trailing = {
+                val tone = when (status) {
+                    DiscordBotState.Status.CONNECTED -> AdminTone.Success
+                    DiscordBotState.Status.CONNECTING, DiscordBotState.Status.RECONNECTING -> AdminTone.Warn
+                    DiscordBotState.Status.FAILED -> AdminTone.Error
+                    DiscordBotState.Status.IDLE -> AdminTone.Neutral
+                }
+                StatusPill(status.name.lowercase().replaceFirstChar { it.uppercase() }, tone)
+            }
+        ) {
+            if (botName.isNotBlank()) AdminLabeledRow("Account", botName)
+            if (detail.isNotBlank()) Muted(detail)
+            if (mood.isNotBlank()) AdminLabeledRow("Mood", mood)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Stat("Seen", seen.toString())
+                Stat("Replied", replied.toString())
+                Stat("Reacted", reacted.toString())
+                Stat("Rung", rung.name)
+            }
+            if (running) {
+                Button(
+                    onClick = { DiscordBotService.stop(ctx) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Icon(Icons.Filled.Stop, null); Spacer(Modifier.width(6.dp)); Text("Stop bot") }
+            } else {
+                Button(
+                    onClick = { DiscordBotStore.setEnabled(ctx, true); DiscordBotService.start(ctx) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Icon(Icons.Filled.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Start bot") }
+            }
+        }
+        AdminSectionCard(title = "Recent activity", icon = Icons.Filled.History, tone = AdminTone.Neutral) {
+            if (log.isEmpty()) Muted("Nothing yet.")
+            else Mono(log.takeLast(16).reversed().joinToString("\n"))
+        }
+    }
+}
+
+// ── Personality ───────────────────────────────────────────────────────────
+@Composable
+private fun PersonalitySection() {
+    val ctx = LocalContext.current
+    var tick by remember { mutableIntStateOf(0) }
+    val self = remember(tick) { PersonalityStore.load(ctx) }
+    var teach by remember { mutableStateOf("") }
+
+    AdminSectionCard(
+        title = "Personality (self-grown)",
+        icon = Icons.Filled.Face,
+        tone = AdminTone.Primary,
+        trailing = { IconButton(onClick = { tick++ }) { Icon(Icons.Filled.Refresh, "Refresh") } }
+    ) {
+        Muted("Fixed: ${PersonalityStore.ANCHOR}")
+        if (self.mood.isNotBlank()) AdminLabeledRow("Mood", self.mood)
+        if (self.style.isNotEmpty()) {
+            Label("How he talks")
+            self.style.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
+        }
+        Label("Traits (tap the pin to protect from decay)")
+        if (self.traits.isEmpty()) Muted("None yet — evolves from the chat every ~20 min.")
+        self.traits.forEach { t ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                IconButton(onClick = { PersonalityStore.setTraitPinned(ctx, t.text, !t.pinned); tick++ }) {
+                    Icon(
+                        Icons.Filled.PushPin, if (t.pinned) "Unpin" else "Pin",
+                        tint = if (t.pinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text("${t.text}  ·  ${t.strength}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+            }
+        }
+        if (self.episodes.isNotEmpty()) {
+            Label("Remembers")
+            self.episodes.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = teach, onValueChange = { teach = it },
+                label = { Text("Teach a trait (correction)") },
+                singleLine = true, modifier = Modifier.weight(1f)
+            )
+            Button(onClick = { if (teach.isNotBlank()) { PersonalityStore.teachTrait(ctx, teach); teach = ""; tick++ } }) { Text("Add") }
+        }
+        OutlinedButton(
+            onClick = { PersonalityStore.reset(ctx); tick++ },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Reset personality") }
+    }
+}
+
+// ── Users (per-user memory) ─────────────────────────────────────────────────
+@Composable
+private fun UsersSection() {
+    val ctx = LocalContext.current
+    var tick by remember { mutableIntStateOf(0) }
+    var query by remember { mutableStateOf("") }
+    val cards = remember(tick, query) { UserMemoryStore.search(ctx, query) }
+    var expanded by remember { mutableStateOf<String?>(null) }
+
+    AdminSectionCard(
+        title = "User memory (${UserMemoryStore.count(ctx)})",
+        icon = Icons.Filled.Person,
+        tone = AdminTone.Info,
+        trailing = { IconButton(onClick = { tick++ }) { Icon(Icons.Filled.Refresh, "Refresh") } }
+    ) {
+        OutlinedTextField(
+            value = query, onValueChange = { query = it },
+            label = { Text("Search name / fact / id") },
+            singleLine = true, modifier = Modifier.fillMaxWidth()
+        )
+        if (cards.isEmpty()) Muted("No memory cards yet.")
+        cards.take(60).forEach { card ->
+            val open = expanded == card.id
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(10.dp)) {
+                    Row(Modifier.fillMaxWidth().padding(bottom = 2.dp)) {
+                        Text(
+                            card.name.ifBlank { card.id },
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButtonSmall(if (open) "Hide" else "Open") { expanded = if (open) null else card.id }
+                    }
+                    if (card.sentiment.isNotBlank()) Muted("vibe: ${card.sentiment}")
+                    val render = UserMemoryStore.render(card)
+                    if (open && render.isNotBlank()) {
+                        Mono(render)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButtonSmall(if (card.pinned) "Unpin" else "Pin") {
+                                UserMemoryStore.setPinned(ctx, card.id, !card.pinned); tick++
+                            }
+                            TextButtonSmall("Delete") { UserMemoryStore.delete(ctx, card.id); expanded = null; tick++ }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Traces (Why) ────────────────────────────────────────────────────────────
+@Composable
+private fun TracesSection() {
+    val traces by DiscordBotState.tracesFlow.collectAsState()
+    val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
+    AdminSectionCard(title = "Traces (why it acted)", icon = Icons.Filled.History, tone = AdminTone.Neutral) {
+        if (traces.isEmpty()) Muted("No decisions recorded yet.")
+        traces.reversed().take(40).forEach { t ->
+            Mono("${fmt.format(Date(t.atMs))} [${t.action}] ${t.author} · ${t.score} · ${t.plan}\n  ${t.detail}")
+        }
+    }
+}
+
+// ── Cost ─────────────────────────────────────────────────────────────────────
+@Composable
+private fun CostSection() {
+    val neurons by DiscordBotState.neuronsFlow.collectAsState()
+    val rung by DiscordBotState.rungFlow.collectAsState()
+    val replied by DiscordBotState.repliedFlow.collectAsState()
+    val reacted by DiscordBotState.reactedFlow.collectAsState()
+    val budget = com.vrca.discordbot.DiscordBotLimits.DAILY_NEURON_BUDGET
+    AdminSectionCard(title = "Cost today", icon = Icons.Filled.Payments, tone = AdminTone.Info) {
+        AdminLabeledRow("Neurons (est.)", "$neurons / $budget")
+        AdminLabeledRow("Budget rung", rung.name)
+        AdminLabeledRow("Replies / reactions", "$replied / $reacted")
+        Muted(
+            "Ladder degrades automatically as the budget fills: FULL → TRIM (trimmed context) → " +
+            "CHEAP (8B replies) → REACT_ONLY → SILENT. Resets daily. Estimate only, not billed."
+        )
+    }
+}
+
+// ── Controls ─────────────────────────────────────────────────────────────────
+@Composable
+private fun ControlsSection() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val cfg = remember { DiscordBotStore.load(ctx) }
+    var shadow by remember { mutableStateOf(cfg.shadowMode) }
+    var ambient by remember { mutableStateOf(cfg.ambientPercent.toString()) }
+    var cooldown by remember { mutableStateOf(cfg.ambientCooldownSec.toString()) }
+    var turns by remember { mutableStateOf(cfg.contextTurns.toString()) }
+    var muteId by remember { mutableStateOf("") }
+    var muted by remember { mutableStateOf(cfg.mutedChannels) }
+    var saved by remember { mutableStateOf(false) }
+
+    AdminSectionCard(title = "Controls", icon = Icons.Filled.Tune, tone = AdminTone.Neutral) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Text("Shadow mode (compute, don't send)", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            Switch(checked = shadow, onCheckedChange = {
+                shadow = it; DiscordBotStore.setShadowMode(ctx, it); restartIfRunning(ctx, scope)
+            })
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = ambient, onValueChange = { ambient = it.filter(Char::isDigit).take(3); saved = false },
+                label = { Text("Ambient %") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true, modifier = Modifier.weight(1f)
+            )
+            OutlinedTextField(
+                value = cooldown, onValueChange = { cooldown = it.filter(Char::isDigit).take(5); saved = false },
+                label = { Text("Cooldown (s)") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true, modifier = Modifier.weight(1f)
+            )
+            OutlinedTextField(
+                value = turns, onValueChange = { turns = it.filter(Char::isDigit).take(2); saved = false },
+                label = { Text("Context") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true, modifier = Modifier.weight(1f)
+            )
+        }
+        Button(
+            onClick = {
+                val c = DiscordBotStore.load(ctx)  // keep the encrypted secrets
+                DiscordBotStore.save(
+                    ctx, c.botToken, c.cfAccountId, c.cfApiToken, c.cfGatewayId, c.model,
+                    ambient.toIntOrNull() ?: DiscordBotStore.DEFAULT_AMBIENT_PCT,
+                    cooldown.toIntOrNull() ?: DiscordBotStore.DEFAULT_AMBIENT_COOLDOWN_SEC,
+                    turns.toIntOrNull() ?: DiscordBotStore.DEFAULT_CONTEXT_TURNS,
+                )
+                saved = true; restartIfRunning(ctx, scope)
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text(if (saved) "Saved" else "Save controls") }
+
+        Label("Muted channels")
+        if (muted.isEmpty()) Muted("None.")
+        else muted.forEach { id ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Mono(id); Spacer(Modifier.weight(1f))
+                TextButtonSmall("Unmute") { muted = DiscordBotStore.toggleMutedChannel(ctx, id); restartIfRunning(ctx, scope) }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = muteId, onValueChange = { muteId = it }, label = { Text("Channel id to mute") },
+                singleLine = true, modifier = Modifier.weight(1f)
+            )
+            Button(onClick = {
+                if (muteId.isNotBlank()) { muted = DiscordBotStore.toggleMutedChannel(ctx, muteId); muteId = ""; restartIfRunning(ctx, scope) }
+            }) { Text("Mute") }
+        }
+        Muted("Ambient % = chance to consider an unaddressed message; cooldown limits it per channel. " +
+            "Context = recent messages read for a reply. Changes restart a running bot.")
+    }
+}
+
+// ── Config (secrets) ──────────────────────────────────────────────────────────
+@Composable
+private fun ConfigSection() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     val initial = remember { DiscordBotStore.load(ctx) }
     var botToken by remember { mutableStateOf(initial.botToken) }
     var cfAccount by remember { mutableStateOf(initial.cfAccountId) }
     var cfToken by remember { mutableStateOf(initial.cfApiToken) }
     var cfGateway by remember { mutableStateOf(initial.cfGatewayId) }
     var model by remember { mutableStateOf(initial.model) }
-    var systemPrompt by remember { mutableStateOf(initial.systemPrompt) }
-    var ambientPct by remember { mutableStateOf(initial.ambientPercent.toString()) }
-    var cooldown by remember { mutableStateOf(initial.ambientCooldownSec.toString()) }
-    var history by remember { mutableStateOf(initial.historyLimit.toString()) }
     var saved by remember { mutableStateOf(false) }
-    var personality by remember { mutableStateOf(PersonalityStore.snapshot(ctx)) }
 
-    val running = status != DiscordBotState.Status.IDLE && status != DiscordBotState.Status.FAILED
-
-    LazyColumn(
-        Modifier.fillMaxWidth().padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // ── Status + Start/Stop + live log ──
-        item {
-            AdminSectionCard(
-                title = "Discord Bot",
-                icon = Icons.Filled.Chat,
-                tone = AdminTone.Primary,
-                trailing = {
-                    val tone = when (status) {
-                        DiscordBotState.Status.CONNECTED -> AdminTone.Success
-                        DiscordBotState.Status.CONNECTING, DiscordBotState.Status.RECONNECTING -> AdminTone.Warn
-                        DiscordBotState.Status.FAILED -> AdminTone.Error
-                        DiscordBotState.Status.IDLE -> AdminTone.Neutral
-                    }
-                    StatusPill(status.name.lowercase().replaceFirstChar { it.uppercase() }, tone)
-                }
-            ) {
-                if (botName.isNotBlank()) AdminLabeledRow("Account", botName)
-                if (detail.isNotBlank()) {
-                    Text(detail, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (running) {
-                        Button(
-                            onClick = { DiscordBotService.stop(ctx) },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.error)
-                        ) {
-                            Icon(Icons.Filled.Stop, null); Spacer(Modifier.width(6.dp)); Text("Stop bot")
-                        }
-                    } else {
-                        Button(
-                            onClick = {
-                                DiscordBotStore.setEnabled(ctx, true)
-                                DiscordBotService.start(ctx)
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Filled.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Start bot")
-                        }
-                    }
-                }
-                // Live activity log (newest last).
-                if (log.isNotEmpty()) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = MaterialTheme.shapes.small
-                    ) {
-                        Text(
-                            log.takeLast(12).joinToString("\n"),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.fillMaxWidth().padding(10.dp)
-                        )
-                    }
-                }
-            }
-        }
-
-        // ── Configuration ──
-        item {
-            AdminSectionCard(title = "Configuration", icon = Icons.Filled.Settings, tone = AdminTone.Info) {
-                OutlinedTextField(
-                    value = botToken, onValueChange = { botToken = it; saved = false },
-                    label = { Text("Discord bot token") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = cfAccount, onValueChange = { cfAccount = it; saved = false },
-                    label = { Text("Cloudflare account id") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = cfToken, onValueChange = { cfToken = it; saved = false },
-                    label = { Text("Workers AI API token") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = cfGateway, onValueChange = { cfGateway = it; saved = false },
-                    label = { Text("AI Gateway id (optional)") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = model, onValueChange = { model = it; saved = false },
-                    label = { Text("Model") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = systemPrompt, onValueChange = { systemPrompt = it; saved = false },
-                    label = { Text("System prompt (persona)") },
-                    minLines = 2, maxLines = 5, modifier = Modifier.fillMaxWidth()
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = ambientPct, onValueChange = { ambientPct = it.filter(Char::isDigit).take(3); saved = false },
-                        label = { Text("Ambient %") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        singleLine = true, modifier = Modifier.weight(1f)
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        AdminSectionCard(title = "Configuration", icon = Icons.Filled.Settings, tone = AdminTone.Info) {
+            OutlinedTextField(
+                value = botToken, onValueChange = { botToken = it; saved = false },
+                label = { Text("Discord bot token") }, singleLine = true,
+                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = cfAccount, onValueChange = { cfAccount = it; saved = false },
+                label = { Text("Cloudflare account id") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = cfToken, onValueChange = { cfToken = it; saved = false },
+                label = { Text("Workers AI API token") }, singleLine = true,
+                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = cfGateway, onValueChange = { cfGateway = it; saved = false },
+                label = { Text("AI Gateway id (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = model, onValueChange = { model = it; saved = false },
+                label = { Text("Reply model") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+            )
+            Button(
+                onClick = {
+                    val c = DiscordBotStore.load(ctx)
+                    DiscordBotStore.save(
+                        ctx, botToken, cfAccount, cfToken, cfGateway, model,
+                        c.ambientPercent, c.ambientCooldownSec, c.contextTurns
                     )
-                    OutlinedTextField(
-                        value = cooldown, onValueChange = { cooldown = it.filter(Char::isDigit).take(5); saved = false },
-                        label = { Text("Cooldown (s)") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        singleLine = true, modifier = Modifier.weight(1f)
-                    )
-                }
-                OutlinedTextField(
-                    value = history, onValueChange = { history = it.filter(Char::isDigit).take(2); saved = false },
-                    label = { Text("Memory (recent messages)") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true, modifier = Modifier.fillMaxWidth()
-                )
-                Text(
-                    "Ambient % = chance to jump into an unaddressed message; cooldown limits how " +
-                        "often it does so per channel. Mentions and replies always answer. " +
-                        "Memory = how many recent channel messages the bot reads for context each " +
-                        "reply (0 = off; higher = more context but slightly slower/pricier).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Button(
-                    onClick = {
-                        val pct = ambientPct.toIntOrNull() ?: DiscordBotStore.DEFAULT_AMBIENT_PCT
-                        val cd = cooldown.toIntOrNull() ?: DiscordBotStore.DEFAULT_AMBIENT_COOLDOWN_SEC
-                        val hist = history.toIntOrNull() ?: DiscordBotStore.DEFAULT_HISTORY
-                        DiscordBotStore.save(
-                            ctx, botToken, cfAccount, cfToken, cfGateway, model, systemPrompt, pct, cd, hist
-                        )
-                        saved = true
-                        // Apply live config to a running bot by cycling it.
-                        if (running) scope.launch {
-                            DiscordBotService.stop(ctx)
-                            delay(1200)
-                            DiscordBotStore.setEnabled(ctx, true)
-                            DiscordBotService.start(ctx)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text(if (saved) "Saved" else "Save configuration") }
-            }
+                    saved = true; restartIfRunning(ctx, scope)
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(if (saved) "Saved" else "Save configuration") }
         }
-
-        // ── Evolving personality ──
-        item {
-            AdminSectionCard(
-                title = "Personality (evolving)",
-                icon = Icons.Filled.Face,
-                tone = AdminTone.Primary,
-                trailing = {
-                    IconButton(onClick = { personality = PersonalityStore.snapshot(ctx) }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
-                    }
-                }
-            ) {
-                Text(
-                    personality.ifBlank {
-                        "No personality yet — Cardinal develops one from the chat (evolves every ~20 min)."
-                    },
-                    style = MaterialTheme.typography.bodySmall
-                )
-                OutlinedButton(
-                    onClick = { PersonalityStore.reset(ctx); personality = "" },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Reset personality") }
-            }
-        }
-
-        // ── Setup checklist ──
-        item {
-            AdminSectionCard(title = "Setup", icon = Icons.Filled.Settings, tone = AdminTone.Neutral) {
-                Text(
-                    "1. Discord Developer Portal → your app → Bot → enable the MESSAGE CONTENT intent " +
-                        "(required for ambient replies).\n" +
-                        "2. Invite the bot with the bot scope + View Channels, Send Messages, Read " +
-                        "Message History.\n" +
-                        "3. Cloudflare: an account id + a scoped Workers AI (Read/Run) token. Optionally " +
-                        "an AI Gateway id for cost/observability.\n" +
-                        "Secrets are stored encrypted on this device only — rotate the bot token if it " +
-                        "was ever shared.",
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
+        AdminSectionCard(title = "Setup", icon = Icons.Filled.Settings, tone = AdminTone.Neutral) {
+            Muted(
+                "1. Discord Developer Portal → your app → Bot → enable MESSAGE CONTENT + SERVER MEMBERS " +
+                "intents (message content is required; reactions ride the gateway).\n" +
+                "2. Invite with the bot scope + View Channels, Send Messages, Read Message History, " +
+                "Add Reactions.\n" +
+                "3. Cloudflare: an account id + a scoped Workers AI (Read/Run) token. Optionally an AI " +
+                "Gateway id. Cardinal grows his own personality — there is no persona to type.\n" +
+                "Secrets are stored encrypted on this device only."
+            )
         }
     }
 }
+
+// ── small shared bits ─────────────────────────────────────────────────────────
+private fun restartIfRunning(ctx: android.content.Context, scope: kotlinx.coroutines.CoroutineScope) {
+    if (DiscordBotState.isRunning) scope.launch {
+        DiscordBotService.stop(ctx); delay(1200)
+        DiscordBotStore.setEnabled(ctx, true); DiscordBotService.start(ctx)
+    }
+}
+
+@Composable
+private fun Stat(label: String, value: String) {
+    Column {
+        Text(value, style = MaterialTheme.typography.titleMedium)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun Muted(text: String) =
+    Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+@Composable
+private fun Label(text: String) =
+    Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+
+@Composable
+private fun Mono(text: String) = Text(
+    text, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+    modifier = Modifier.fillMaxWidth()
+)
+
+@Composable
+private fun TextButtonSmall(label: String, onClick: () -> Unit) =
+    androidx.compose.material3.TextButton(onClick = onClick) { Text(label, style = MaterialTheme.typography.labelMedium) }
