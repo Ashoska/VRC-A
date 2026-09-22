@@ -34,17 +34,17 @@ import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
 /**
- * Admin-only foreground service running **Cardinal** — a self-hosted Discord gateway bot
- * (raw gateway over OkHttp WebSocket) with a self-grown personality, per-user memory, and a
- * cheap heuristic→director→reply routing path. See [PersonalityStore]/[UserMemoryStore]/
- * [DiscordBotAi]/[DiscordBotLimits].
+ * Admin-only foreground service running **Cardinal** — a self-hosted Discord gateway bot with a
+ * self-grown personality, per-user memory, shared server culture, a revivable topic archive, cheap
+ * event-driven routing, and a real Cloudflare neuron budget.
  *
- * Routing per message: a FREE heuristic decides ignore / react / reply / consider-ambient.
- * A single-person addressed message goes straight to the 70B [DiscordBotAi.reply] (whose
- * `%%MEM%%` tail also updates memory). An ambient/ambiguous message pays one cheap 8B
- * [DiscordBotAi.director] call first. Per-USER debounce buckets mean B messaging never cancels
- * A's pending reply, and a per-channel reply mutex sequences them (finish-the-thought). A daily
- * neuron budget degrades gracefully. Reactions to the bot's own posts feed sentiment back.
+ * Per message: a FREE heuristic decides ignore / react / reply / consider-ambient. An addressed
+ * single-person message goes straight to the 70B [DiscordBotAi.reply] (whose `%%MEM%%` tail does
+ * ALL bookkeeping in one call — memory, summary, self-nudge, server culture). An ambient moment
+ * pays one cheap 8B [DiscordBotAi.director]. When unreplied activity piles up, a cheap 8B
+ * [DiscordBotAi.observe] catches up memory/summary/culture. Per-USER debounce + per-channel reply
+ * mutex keep it fluid; a daily neuron budget degrades gracefully. Custom + standard emojis render
+ * via [EmojiConvert]; the gateway subscribes GUILD_EMOJIS to learn the server's set.
  */
 class DiscordBotService : Service() {
 
@@ -58,13 +58,13 @@ class DiscordBotService : Service() {
 
         private const val GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 
-        // GUILDS(1) | GUILD_MESSAGES(1<<9) | GUILD_MESSAGE_REACTIONS(1<<10) |
-        // DIRECT_MESSAGES(1<<12) | MESSAGE_CONTENT(1<<15) = 38401
-        private const val INTENTS = 1 or 512 or 1024 or 4096 or 32768
+        // GUILDS(1) | GUILD_EMOJIS(1<<3) | GUILD_MESSAGES(1<<9) | GUILD_MESSAGE_REACTIONS(1<<10) |
+        // DIRECT_MESSAGES(1<<12) | MESSAGE_CONTENT(1<<15) = 38409
+        private const val INTENTS = 1 or 8 or 512 or 1024 or 4096 or 32768
 
         private const val MAX_BACKOFF_MS = 30_000L
-
         private val URL_RE = Regex("""https?://\S+""")
+        private val STOP_RE = Regex("(?i)\\b(stop|shut ?up|shush|be quiet|leave me alone|stop replying|go away|not now|quit it)\\b")
 
         fun start(context: Context) {
             if (!BuildConfig.IS_ADMIN_BUILD) return
@@ -88,9 +88,7 @@ class DiscordBotService : Service() {
     @Volatile private var webSocket: WebSocket? = null
     private var heartbeatJob: Job? = null
     private var reconnectJob: Job? = null
-    private var reflectionJob: Job? = null
-
-    @Volatile private var lastActiveChannel: String = ""
+    private var budgetJob: Job? = null
 
     // Gateway session state
     @Volatile private var lastSeq: Int? = null
@@ -104,12 +102,16 @@ class DiscordBotService : Service() {
     private lateinit var cfg: DiscordBotStore.Config
 
     // Routing state
-    private val ambientCooldown = ConcurrentHashMap<String, Long>()   // channel -> last ambient ms
-    private val lastBotPostMs = ConcurrentHashMap<String, Long>()      // channel -> last bot post ms
-    private val perUserReplyAt = ConcurrentHashMap<String, Long>()     // channel:user -> last reply ms
-    private val threadSummary = ConcurrentHashMap<String, String>()    // channel -> rolling summary
-    private val channelMutex = ConcurrentHashMap<String, Mutex>()      // channel -> reply serialiser
-    private val pendingByUser = ConcurrentHashMap<String, Job>()       // channel:user -> debounce job
+    private val ambientCooldown = ConcurrentHashMap<String, Long>()     // channel -> last ambient reply ms
+    private val lastBotPostMs = ConcurrentHashMap<String, Long>()        // channel -> last bot post ms
+    private val perUserReplyAt = ConcurrentHashMap<String, Long>()       // channel:user -> last reply ms
+    private val channelMutex = ConcurrentHashMap<String, Mutex>()        // channel -> reply serialiser
+    private val pendingByUser = ConcurrentHashMap<String, Job>()         // channel:user -> debounce job
+    private val backoffUntil = ConcurrentHashMap<String, Long>()         // channel -> back-off deadline
+    private val observeUnreplied = ConcurrentHashMap<String, Int>()      // channel -> msgs since last observe
+    private val lastObserveAt = ConcurrentHashMap<String, Long>()        // channel -> last observe ms
+    private val activityWindow = ConcurrentHashMap<String, ArrayDeque<Long>>() // channel -> recent msg times
+    private val recentBotReplies = ConcurrentHashMap<String, ArrayDeque<String>>() // channel -> last replies
     // Our recent message ids (reaction-learning): id -> the user we replied to.
     private val recentBotMsgIds = object : LinkedHashMap<String, String>(64, 0.75f, false) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 80
@@ -163,10 +165,11 @@ class DiscordBotService : Service() {
                     DiscordBotState.setRunning(true)
                     DiscordBotState.setStatus(DiscordBotState.Status.CONNECTING, "Connecting to Discord…")
                     DiscordBotState.setMood(PersonalityStore.mood(this))
+                    DiscordBotState.setNeuronsAbsolute(NeuronBudget.current(this))
                     DiscordBotState.log("Starting Cardinal")
                     reconnectAttempt = 0
                     openSocket(resume = false)
-                    startReflectionLoop()
+                    startBudgetLoop()
                 }
                 return START_STICKY
             }
@@ -239,6 +242,11 @@ class DiscordBotService : Service() {
                 DiscordBotState.setStatus(DiscordBotState.Status.CONNECTED, "Reconnected")
                 DiscordBotState.log("Session resumed")
             }
+            "GUILD_CREATE" -> {
+                EmojiConvert.putGuildEmojis(d?.optJSONArray("emojis"))
+                DiscordBotState.log("Loaded ${EmojiConvert.customNames().size} server emojis")
+            }
+            "GUILD_EMOJIS_UPDATE" -> EmojiConvert.putGuildEmojis(d?.optJSONArray("emojis"))
             "MESSAGE_CREATE" -> if (d != null) handleMessage(d)
             "MESSAGE_REACTION_ADD" -> if (d != null) handleReactionAdd(d)
         }
@@ -291,6 +299,26 @@ class DiscordBotService : Service() {
         }
     }
 
+    // ── Budget sync (real Cloudflare usage) ───────────────────────────────
+
+    private fun startBudgetLoop() {
+        if (budgetJob?.isActive == true) return
+        budgetJob = scope.launch {
+            while (true) {
+                delay(DiscordBotLimits.USAGE_SYNC_INTERVAL_MS)
+                try {
+                    val real = NeuronBudget.syncReal(this@DiscordBotService, cfg)
+                    if (real != null) DiscordBotState.setNeuronsAbsolute(real)
+                } catch (_: Exception) { }
+            }
+        }
+    }
+
+    /** Charge a model call to the persisted budget + reflect the authoritative total in the UI. */
+    private fun charge(est: Long) {
+        DiscordBotState.setNeuronsAbsolute(NeuronBudget.add(this, est))
+    }
+
     // ── Message routing ───────────────────────────────────────────────────
 
     private fun handleMessage(d: JSONObject) {
@@ -303,8 +331,12 @@ class DiscordBotService : Service() {
         val messageId = d.optString("id")
         if (channelId.isBlank()) return
         if (channelId in cfg.mutedChannels) return
-        lastActiveChannel = channelId
         DiscordBotState.bumpSeen()
+
+        val now = System.currentTimeMillis()
+        noteActivity(channelId, now)
+        ConversationStore.touch(channelId, now)
+        observeUnreplied.merge(channelId, 1, Int::plus)
 
         val rawContent = d.optString("content")
         val mentioned = messageMentionsBot(d, rawContent)
@@ -312,21 +344,32 @@ class DiscordBotService : Service() {
         val repliedToBot = botId.isNotBlank() && ref?.optJSONObject("author")?.optString("id") == botId
         val addressed = mentioned || repliedToBot
 
+        val userTextRaw = DiscordRest.resolveMentions(stripBotMentions(rawContent), d.optJSONArray("mentions"))
+
+        // Recognise + reinforce any shared-culture reference in what people say.
+        ServerMemoryStore.reinforceReferenced(this, userTextRaw, now)
+
+        // "Stop" directed at the bot → back off in this channel (don't be annoying).
+        if (addressed && STOP_RE.containsMatchIn(userTextRaw)) {
+            backoffUntil[channelId] = now + DiscordBotLimits.BACKOFF_MS
+            DiscordBotState.log("backing off in $channelId"); return
+        }
+
+        // Consider an event-driven observer catch-up (cheap, off the reply path).
+        maybeObserve(channelId, now)
+
         // ── Free heuristic prefilter ──
         if (!addressed) {
-            // Clearly aimed at someone else (a reply to another user, no bot mention) → stay out.
-            val repliesToOther = ref != null && !repliedToBot
-            if (repliesToOther) return
+            if (now < (backoffUntil[channelId] ?: 0L)) return
             val eligible = rawContent.isNotBlank() &&
                 cfg.ambientPercent > 0 &&
-                Random.nextInt(100) < cfg.ambientPercent &&
-                ambientCooldownOk(channelId) &&
-                !postedRecently(channelId)
+                Random.nextInt(100) < effectiveAmbient(channelId) &&
+                ambientCooldownOk(channelId, now) &&
+                !postedRecently(channelId, now)
             if (!eligible) return
         }
 
-        val userText = DiscordRest.resolveMentions(stripBotMentions(rawContent), d.optJSONArray("mentions"))
-            .ifBlank { "(they pinged you with no message)" }
+        val userText = userTextRaw.ifBlank { "(they pinged you with no message)" }
         val authorName = author.optString("global_name").ifBlank { author.optString("username") }.ifBlank { "someone" }
 
         var refTurn: DiscordBotAi.Turn? = null
@@ -359,7 +402,7 @@ class DiscordBotService : Service() {
         val rung = DiscordBotState.currentRung()
         if (rung == DiscordBotState.Rung.SILENT) { trace(ctx, "silent", "heuristic", "dropped", "budget spent"); return }
 
-        // Trivial addressed message → a human reacts, no model call.
+        // Trivial addressed message → a human just reacts, no model call.
         if (ctx.addressed && isTrivial(ctx.userText)) { reactTo(ctx, pickEmoji(ctx.userText)); return }
         if (rung == DiscordBotState.Rung.REACT_ONLY) {
             if (ctx.addressed) reactTo(ctx, pickEmoji(ctx.userText))
@@ -367,29 +410,30 @@ class DiscordBotService : Service() {
             return
         }
 
-        val turns = buildContext(ctx)
+        val built = buildContext(ctx)
         var short = rung == DiscordBotState.Rung.TRIM || rung == DiscordBotState.Rung.CHEAP
 
         if (!ctx.addressed) {
-            // Ambient → one cheap director call decides + emits the rolling summary.
-            val plan = DiscordBotAi.director(cfg, turns.first, addressed = false, prevSummary = threadSummary[ctx.channelId] ?: "")
-            DiscordBotState.noteNeurons(DiscordBotLimits.EST_NEURONS_CHEAP)
-            if (plan != null && plan.summary.isNotBlank()) threadSummary[ctx.channelId] = plan.summary
+            val plan = DiscordBotAi.director(cfg, built.turns)
+            charge(DiscordBotLimits.EST_NEURONS_CHEAP)
             when (plan?.action) {
-                null, DiscordBotAi.Act.IGNORE -> { trace(ctx, "ambient", "director", "ignore", plan?.summary ?: "no plan"); return }
+                null, DiscordBotAi.Act.IGNORE -> { trace(ctx, "ambient", "director", "ignore", plan?.let { "no add" } ?: "no plan"); return }
                 DiscordBotAi.Act.REACT -> { reactTo(ctx, plan.emoji.ifBlank { pickEmoji(ctx.userText) }); return }
-                DiscordBotAi.Act.REPLY -> { ambientCooldown[ctx.channelId] = System.currentTimeMillis(); if (plan.lengthShort) short = true }
+                DiscordBotAi.Act.REPLY -> { ambientCooldown[ctx.channelId] = System.currentTimeMillis(); if (plan.short) short = true }
             }
         }
 
-        generateAndSend(ctx, turns, rung, short)
+        generateAndSend(ctx, built, rung, short)
     }
 
-    private suspend fun generateAndSend(
-        ctx: MsgCtx, ctxData: Pair<List<DiscordBotAi.Turn>, Set<String>>,
-        rung: DiscordBotState.Rung, short: Boolean,
-    ) {
-        // Per-person cooldown so one user can't monopolise the bot.
+    private class Built(
+        val turns: List<DiscordBotAi.Turn>,
+        val ids: Set<String>,
+        val nameToId: Map<String, String>,
+        val keywords: Set<String>,
+    )
+
+    private suspend fun generateAndSend(ctx: MsgCtx, built: Built, rung: DiscordBotState.Rung, short: Boolean) {
         val ukey = "${ctx.channelId}:${ctx.authorId}"
         val lastReply = perUserReplyAt[ukey] ?: 0L
         if (System.currentTimeMillis() - lastReply < DiscordBotLimits.PER_USER_REPLY_COOLDOWN_MS) {
@@ -400,36 +444,46 @@ class DiscordBotService : Service() {
         mutex.withLock {   // finish-the-thought: A completes before B in this channel
             val model = if (rung == DiscordBotState.Rung.CHEAP) DiscordBotLimits.CHEAP_MODEL else cfg.model
             val turns = if (rung == DiscordBotState.Rung.TRIM || rung == DiscordBotState.Rung.CHEAP)
-                ctxData.first.takeLast(4) else ctxData.first
-            val digest = PersonalityStore.snapshot(this)
-            val cards = UserMemoryStore.activeCardsBlock(this, ctxData.second)
-            val summary = threadSummary[ctx.channelId] ?: ""
+                built.turns.takeLast(DiscordBotLimits.CONTEXT_RAW_TURNS / 2) else built.turns
 
-            if (!cfg.shadowMode) DiscordRest.triggerTyping(cfg.botToken, ctx.channelId)
-            when (val res = DiscordBotAi.reply(cfg, model, digest, cards, summary, turns, short)) {
+            val rc = DiscordBotAi.ReplyCtx(
+                selfDigest = PersonalityStore.snapshot(this),
+                serverCulture = buildServerCulture(ctx.channelId, ctx.userText),
+                cardsBlock = UserMemoryStore.activeCardsBlock(this, built.ids, built.keywords),
+                summary = ConversationStore.summary(ctx.channelId),
+                lastBotReplies = recentBotReplies[ctx.channelId]?.toList() ?: emptyList(),
+                emojiHint = emojiHint(),
+                langHint = detectLang(ctx.userText),
+                shortHint = short,
+            )
+
+            if (!cfg.shadowMode) DiscordRest.triggerTyping(cfg.botToken, ctx.channelId)  // instant typing
+            when (val res = DiscordBotAi.reply(cfg, model, turns, rc)) {
                 is DiscordBotAi.ReplyResult.Ok -> {
-                    DiscordBotState.noteNeurons(DiscordBotLimits.EST_NEURONS_REPLY)
-                    delay((res.text.length * 20L).coerceIn(400L, 2500L))   // human pacing
+                    charge(DiscordBotLimits.EST_NEURONS_REPLY)
+                    delay((res.text.length * 16L).coerceIn(DiscordBotLimits.REPLY_DELAY_MIN_MS, DiscordBotLimits.REPLY_DELAY_MAX_MS))
+                    val outText = EmojiConvert.convert(res.text)
+                    val now = System.currentTimeMillis()
                     if (cfg.shadowMode) {
-                        DiscordBotState.log("shadow ↩ ${ctx.authorName}: ${res.text.take(60)}")
-                        trace(ctx, "reply", "shadow", "shadow", res.text.take(90))
+                        DiscordBotState.log("shadow ↩ ${ctx.authorName}: ${outText.take(60)}")
+                        trace(ctx, "reply", "shadow", "shadow", outText.take(90))
                     } else {
-                        val out = DiscordRest.send(cfg.botToken, ctx.channelId, res.text,
+                        val out = DiscordRest.send(cfg.botToken, ctx.channelId, outText,
                             replyToMessageId = if (ctx.addressed) ctx.messageId else null)
                         if (out.error == null) {
                             out.messageId?.let { synchronized(recentBotMsgIds) { recentBotMsgIds[it] = ctx.authorId } }
-                            lastBotPostMs[ctx.channelId] = System.currentTimeMillis()
-                            trace(ctx, "reply", "70B", "reply", res.text.take(90))
+                            lastBotPostMs[ctx.channelId] = now
+                            rememberBotReply(ctx.channelId, res.text)
+                            trace(ctx, "reply", if (model == cfg.model) "70B" else "8B", "reply", outText.take(90))
                         } else {
                             DiscordBotState.log("Send failed: ${out.error}")
                             trace(ctx, "reply", "70B", "send-fail", out.error)
                         }
                     }
-                    // Memory: touch + apply the reply's own deltas tail (no extra model call).
-                    UserMemoryStore.touch(this, ctx.authorId, ctx.authorName)
-                    res.memDelta?.let { UserMemoryStore.applyDelta(this, ctx.authorId, ctx.authorName, it) }
+                    applyReplyTail(ctx, built, res, now)
+                    observeUnreplied[ctx.channelId] = 0   // a reply IS a catch-up
                     DiscordBotState.bumpReplied()
-                    perUserReplyAt[ukey] = System.currentTimeMillis()
+                    perUserReplyAt[ukey] = now
                 }
                 is DiscordBotAi.ReplyResult.Error -> {
                     DiscordBotState.log("AI error: ${res.message}")
@@ -439,20 +493,71 @@ class DiscordBotService : Service() {
         }
     }
 
+    /** Apply everything the ONE reply call proposed: memory, summary, self-nudge, server culture. */
+    private fun applyReplyTail(ctx: MsgCtx, built: Built, res: DiscordBotAi.ReplyResult.Ok, now: Long) {
+        UserMemoryStore.touch(this, ctx.authorId, ctx.authorName)
+        val globalIndex by lazy { UserMemoryStore.nameIndex(this) }
+        for (md in res.memDeltas) {
+            val id = resolveAbout(md.about, built.nameToId, globalIndex, ctx)
+            if (id != null && id != botId) UserMemoryStore.applyDelta(this, id, md.about, md.json)
+        }
+        if (res.summary.isNotBlank()) ConversationStore.updateSummary(this, ctx.channelId, res.summary, now)
+        if (res.selfTrait.isNotBlank() || res.selfMood.isNotBlank())
+            PersonalityStore.noteSelf(this, res.selfTrait.ifBlank { null }, res.selfMood.ifBlank { null })
+        if (res.selfMood.isNotBlank()) DiscordBotState.setMood(res.selfMood)
+        if (res.serverEvent.isNotBlank()) ServerMemoryStore.remember(this, res.serverEvent, now)
+    }
+
     private suspend fun reactTo(ctx: MsgCtx, emoji: String) {
         if (cfg.shadowMode) { trace(ctx, "react", "heuristic", "shadow", emoji); return }
-        DiscordRest.addReaction(cfg.botToken, ctx.channelId, ctx.messageId, emoji)
+        DiscordRest.addReaction(cfg.botToken, ctx.channelId, ctx.messageId, EmojiConvert.reactionToken(emoji))
         DiscordBotState.bumpReacted()
         trace(ctx, "react", "heuristic", "react", emoji)
     }
 
-    /**
-     * Build the reply context: a tight, tokenised transcript (URLs stripped, per-message capped)
-     * plus the set of participant ids so only their memory cards get loaded. Returns (turns, ids).
-     */
-    private suspend fun buildContext(ctx: MsgCtx): Pair<List<DiscordBotAi.Turn>, Set<String>> {
+    // ── Observer (event-driven memory/summary/culture catch-up) ───────────
+
+    private fun maybeObserve(channelId: String, now: Long) {
+        val unreplied = observeUnreplied[channelId] ?: 0
+        if (unreplied < DiscordBotLimits.OBSERVER_MIN_NEW_MSGS) return
+        if (now - (lastObserveAt[channelId] ?: 0L) < DiscordBotLimits.OBSERVER_MIN_INTERVAL_MS) return
+        if (DiscordBotState.currentRung() == DiscordBotState.Rung.SILENT) return
+        lastObserveAt[channelId] = now
+        observeUnreplied[channelId] = 0
+        scope.launch { try { runObserve(channelId) } catch (_: Exception) { } }
+    }
+
+    private suspend fun runObserve(channelId: String) {
+        if (!::cfg.isInitialized || !cfg.isComplete) return
+        val recent = DiscordRest.fetchRecentMessages(cfg.botToken, channelId, DiscordBotLimits.HISTORY_FETCH)
+        if (recent.size < 4) return
+        val turns = recent.filter { tokenize(stripBotMentions(it.content)).isNotBlank() }
+            .map { DiscordBotAi.Turn(it.authorId == botId, it.authorName, tokenize(stripBotMentions(it.content))) }
+        val globalIndex = UserMemoryStore.nameIndex(this)
+        val nameToId = HashMap<String, String>()
+        recent.forEach { if (it.authorId != botId) nameToId[it.authorName.lowercase().trim()] = it.authorId }
+        val obs = DiscordBotAi.observe(cfg, turns, ConversationStore.summary(channelId)) ?: return
+        charge(DiscordBotLimits.EST_NEURONS_CHEAP)
+        val now = System.currentTimeMillis()
+        if (obs.summary.isNotBlank()) ConversationStore.updateSummary(this, channelId, obs.summary, now)
+        for (md in obs.memDeltas) {
+            val id = resolveObserveAbout(md.about, nameToId, globalIndex)
+            if (id != null && id != botId) UserMemoryStore.applyDelta(this, id, md.about, md.json)
+        }
+        if (obs.serverEvent.isNotBlank()) ServerMemoryStore.remember(this, obs.serverEvent, now)
+        if (obs.selfTrait.isNotBlank() || obs.selfMood.isNotBlank())
+            PersonalityStore.noteSelf(this, obs.selfTrait.ifBlank { null }, obs.selfMood.ifBlank { null })
+        if (obs.selfMood.isNotBlank()) DiscordBotState.setMood(obs.selfMood)
+        DiscordBotState.log("observed $channelId (${obs.memDeltas.size} people)")
+    }
+
+    // ── Context assembly (ordered, retrieval-limited) ─────────────────────
+
+    private suspend fun buildContext(ctx: MsgCtx): Built {
         val turns = ArrayList<DiscordBotAi.Turn>()
         val ids = HashSet<String>().apply { add(ctx.authorId) }
+        val nameToId = HashMap<String, String>()
+        nameToId[ctx.authorName.lowercase().trim()] = ctx.authorId
         val seen = HashSet<String>()
         if (cfg.contextTurns > 0) {
             val recent = DiscordRest.fetchRecentMessages(cfg.botToken, ctx.channelId, cfg.contextTurns)
@@ -462,12 +567,48 @@ class DiscordBotService : Service() {
                 val text = tokenize(stripBotMentions(m.content))
                 if (text.isBlank()) continue
                 ids.add(m.authorId)
+                if (m.authorId != botId) nameToId[m.authorName.lowercase().trim()] = m.authorId
                 turns.add(DiscordBotAi.Turn(m.authorId == botId, m.authorName, text))
             }
         }
         if (ctx.refTurn != null && (ctx.refId == null || ctx.refId !in seen)) turns.add(ctx.refTurn)
         turns.add(DiscordBotAi.Turn(false, ctx.authorName, ctx.userText))
-        return turns to ids
+        val keywords = keywordsOf(buildString { turns.takeLast(4).forEach { append(it.text).append(' ') }; append(ctx.userText) })
+        return Built(turns, ids, nameToId, keywords)
+    }
+
+    /** Server culture block = strongest core memories + those relevant now + any revived dead topic. */
+    private fun buildServerCulture(channelId: String, text: String): String {
+        val core = ServerMemoryStore.core(this)
+        val rel = ServerMemoryStore.retrieveFor(this, text)
+        val mem = LinkedHashSet<String>().apply { addAll(core); addAll(rel) }.toList()
+        val topics = ConversationStore.reviveFor(this, channelId, text)
+        val sb = StringBuilder()
+        mem.forEach { sb.append("- ").append(it).append('\n') }
+        if (topics.isNotEmpty()) {
+            sb.append("Earlier here:\n")
+            topics.forEach { sb.append("- ").append(it).append('\n') }
+        }
+        return sb.toString().trim()
+    }
+
+    /** Resolve a reply-tail "about" NAME/nickname to a Discord id (conversation first, then global). */
+    private fun resolveAbout(about: String, nameToId: Map<String, String>, global: Map<String, String>, ctx: MsgCtx): String? {
+        val key = about.lowercase().trim()
+        if (key.isBlank()) return null
+        nameToId[key]?.let { return it }
+        global[key]?.let { return it }
+        val hits = nameToId.entries.filter { key in it.key || it.key in key }
+        if (hits.size == 1) return hits.first().value
+        return if (key in ctx.authorName.lowercase()) ctx.authorId else null
+    }
+
+    private fun resolveObserveAbout(about: String, nameToId: Map<String, String>, global: Map<String, String>): String? {
+        val key = about.lowercase().trim(); if (key.isBlank()) return null
+        nameToId[key]?.let { return it }
+        global[key]?.let { return it }
+        val hits = nameToId.entries.filter { key in it.key || it.key in key }
+        return if (hits.size == 1) hits.first().value else null
     }
 
     private fun handleReactionAdd(d: JSONObject) {
@@ -482,7 +623,6 @@ class DiscordBotService : Service() {
             emoji in NEGATIVE_REACTS -> "cool (reacted ${emoji})"
             else -> return
         }
-        // Learn from how the room reacts to Cardinal: nudge the reactor's card sentiment.
         scope.launch {
             val cur = UserMemoryStore.load(this@DiscordBotService, reactorId) ?: UserMemoryStore.Card(id = reactorId)
             UserMemoryStore.save(this@DiscordBotService, cur.copy(sentiment = sentiment))
@@ -490,30 +630,53 @@ class DiscordBotService : Service() {
         }
     }
 
-    // ── Reflection (self-evolution, off the hot path) ─────────────────────
+    // ── Chattiness + activity ─────────────────────────────────────────────
 
-    private fun startReflectionLoop() {
-        if (reflectionJob?.isActive == true) return
-        reflectionJob = scope.launch {
-            while (true) {
-                delay(DiscordBotLimits.REFLECT_INTERVAL_MS)
-                try { runReflection() } catch (_: Exception) { }
-            }
+    private fun noteActivity(channelId: String, now: Long) {
+        val dq = activityWindow.getOrPut(channelId) { ArrayDeque() }
+        synchronized(dq) {
+            dq.addLast(now)
+            while (dq.isNotEmpty() && now - dq.first() > 60_000L) dq.removeFirst()
         }
     }
 
-    private suspend fun runReflection() {
-        val ch = lastActiveChannel
-        if (ch.isBlank() || !::cfg.isInitialized || !cfg.isComplete) return
-        val recent = DiscordRest.fetchRecentMessages(cfg.botToken, ch, DiscordBotLimits.REFLECT_SAMPLE_MSGS)
-        if (recent.size < 4) return
-        val transcript = recent.joinToString("\n") { "${it.authorName}: ${tokenize(stripBotMentions(it.content))}" }.take(3000)
-        val self = PersonalityStore.load(this)
-        val r = DiscordBotAi.reflect(cfg, self.traits.map { it.text }, self.style, self.mood, transcript) ?: return
-        DiscordBotState.noteNeurons(DiscordBotLimits.EST_NEURONS_CHEAP)
-        PersonalityStore.applyReflection(this, r.traits, r.style, r.mood, r.episode.ifBlank { null })
-        DiscordBotState.setMood(PersonalityStore.mood(this))
-        DiscordBotState.log("personality evolved (${r.traits.size} traits)")
+    private fun channelActivity(channelId: String): Int =
+        activityWindow[channelId]?.let { synchronized(it) { it.size } } ?: 0
+
+    /** Ambient chance scales with how busy the channel is (more chatter → a little more likely). */
+    private fun effectiveAmbient(channelId: String): Int {
+        val base = cfg.ambientPercent
+        val boost = channelActivity(channelId).coerceAtMost(10)   // +0..+50%
+        return (base * (1.0 + boost / 20.0)).toInt().coerceIn(0, 100)
+    }
+
+    private fun rememberBotReply(channelId: String, text: String) {
+        val dq = recentBotReplies.getOrPut(channelId) { ArrayDeque() }
+        synchronized(dq) {
+            dq.addLast(text.take(DiscordBotLimits.MAX_MSG_CHARS))
+            while (dq.size > DiscordBotLimits.ANTI_REPEAT_REPLIES) dq.removeFirst()
+        }
+    }
+
+    // ── Language / emoji hints ────────────────────────────────────────────
+
+    /** Nudge the reply language from the message's script (the person switching, per the rule). */
+    private fun detectLang(text: String): String {
+        val byScript = when {
+            text.any { it in '぀'..'ヿ' || it in 'ㇰ'..'ㇿ' } -> "Japanese (日本語)"
+            text.any { it in '가'..'힣' } -> "Korean (한국어)"
+            text.any { it in '一'..'鿿' } -> "Chinese (中文)"
+            text.any { it in 'Ѐ'..'ӿ' } -> "Russian (Русский)"
+            text.any { it in '؀'..'ۿ' } -> "Arabic (العربية)"
+            else -> ""
+        }
+        if (byScript.isNotBlank()) return byScript
+        return ""   // Latin script → let Cardinal match naturally (English or the person's language)
+    }
+
+    private fun emojiHint(): String {
+        val custom = EmojiConvert.customNames().take(20).joinToString(", ") { ":$it:" }
+        return custom
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
@@ -538,6 +701,14 @@ class DiscordBotService : Service() {
         }
     }
 
+    private val KW_STOP = setOf(
+        "the","a","an","and","or","but","to","of","in","on","for","with","is","are","was","this",
+        "that","it","you","your","they","just","like","lol","cardinal","what","why","how","when"
+    )
+    private fun keywordsOf(s: String): Set<String> =
+        Regex("[\\p{L}\\p{N}]+").findAll(s.lowercase()).map { it.value }
+            .filter { it.length >= 4 && it !in KW_STOP }.take(16).toHashSet()
+
     private fun tokenize(content: String): String =
         URL_RE.replace(content, "[link]").trim().take(DiscordBotLimits.MAX_MSG_CHARS)
 
@@ -551,11 +722,11 @@ class DiscordBotService : Service() {
     private fun stripBotMentions(content: String): String =
         content.replace("<@$botId>", "").replace("<@!$botId>", "").trim()
 
-    private fun ambientCooldownOk(channelId: String): Boolean =
-        System.currentTimeMillis() - (ambientCooldown[channelId] ?: 0L) >= cfg.ambientCooldownSec * 1000L
+    private fun ambientCooldownOk(channelId: String, now: Long): Boolean =
+        now - (ambientCooldown[channelId] ?: 0L) >= cfg.ambientCooldownSec * 1000L
 
-    private fun postedRecently(channelId: String): Boolean =
-        System.currentTimeMillis() - (lastBotPostMs[channelId] ?: 0L) < DiscordBotLimits.SELF_RECENT_QUIET_MS
+    private fun postedRecently(channelId: String, now: Long): Boolean =
+        now - (lastBotPostMs[channelId] ?: 0L) < DiscordBotLimits.SELF_RECENT_QUIET_MS
 
     private fun trace(ctx: MsgCtx, score: String, plan: String, action: String, detail: String) {
         DiscordBotState.addTrace(DiscordBotState.Trace(
@@ -572,7 +743,7 @@ class DiscordBotService : Service() {
     private fun teardown(reason: String) {
         heartbeatJob?.cancel(); heartbeatJob = null
         reconnectJob?.cancel(); reconnectJob = null
-        reflectionJob?.cancel(); reflectionJob = null
+        budgetJob?.cancel(); budgetJob = null
         pendingByUser.values.forEach { it.cancel() }; pendingByUser.clear()
         try { webSocket?.close(1000, reason) } catch (_: Exception) {}
         webSocket = null

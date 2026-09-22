@@ -7,12 +7,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Payments
@@ -42,9 +45,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.text.KeyboardOptions
@@ -235,24 +240,58 @@ private fun UsersSection() {
         cards.take(60).forEach { card ->
             val open = expanded == card.id
             Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.surface,
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 2.dp,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(Modifier.padding(10.dp)) {
-                    Row(Modifier.fillMaxWidth().padding(bottom = 2.dp)) {
-                        Text(
-                            card.name.ifBlank { card.id },
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f)
+                Column(
+                    Modifier.fillMaxWidth()
+                        .clickable { expanded = if (open) null else card.id }
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                card.name.ifBlank { card.id },
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            val akas = (listOfNotNull(card.preferredNick.ifBlank { null }) + card.nicknames).distinct()
+                            if (akas.isNotEmpty()) Muted("aka ${akas.joinToString(", ")}")
+                        }
+                        if (card.pinned) Icon(
+                            Icons.Filled.PushPin, "pinned",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(end = 6.dp)
                         )
-                        TextButtonSmall(if (open) "Hide" else "Open") { expanded = if (open) null else card.id }
+                        if (card.sentiment.isNotBlank()) MemChip(card.sentiment)
+                        Icon(
+                            if (open) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                    if (card.sentiment.isNotBlank()) Muted("vibe: ${card.sentiment}")
-                    val render = UserMemoryStore.render(card)
-                    if (open && render.isNotBlank()) {
-                        Mono(render)
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!open) {
+                        val preview = card.relationship.ifBlank { card.facts.firstOrNull().orEmpty() }
+                        if (preview.isNotBlank()) Text(
+                            preview, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                    } else {
+                        if (card.relationship.isNotBlank()) KV("Relationship", card.relationship)
+                        if (card.preferredNick.isNotBlank()) KV("Calls them", card.preferredNick)
+                        if (card.language.isNotBlank())
+                            KV("Language", card.language + (if (card.alsoSpeaks.isNotEmpty()) " (+ ${card.alsoSpeaks.joinToString(", ")})" else ""))
+                        if (card.howToTreat.isNotBlank()) KV("With them", card.howToTreat)
+                        if (card.facts.isNotEmpty()) {
+                            Label("Knows")
+                            card.facts.forEach { Text("•  $it", style = MaterialTheme.typography.bodySmall) }
+                        }
+                        if (card.bits.isNotEmpty()) KV("Running bits", card.bits.joinToString(", "))
+                        KV("Interactions", "${card.interactions}")
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             TextButtonSmall(if (card.pinned) "Unpin" else "Pin") {
                                 UserMemoryStore.setPinned(ctx, card.id, !card.pinned); tick++
                             }
@@ -262,6 +301,32 @@ private fun UsersSection() {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun MemChip(text: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.padding(end = 6.dp)
+    ) {
+        Text(
+            text, style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun KV(key: String, value: String) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            "$key:", style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text("$value", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
     }
 }
 
@@ -287,12 +352,13 @@ private fun CostSection() {
     val reacted by DiscordBotState.reactedFlow.collectAsState()
     val budget = com.vrca.discordbot.DiscordBotLimits.DAILY_NEURON_BUDGET
     AdminSectionCard(title = "Cost today", icon = Icons.Filled.Payments, tone = AdminTone.Info) {
-        AdminLabeledRow("Neurons (est.)", "$neurons / $budget")
+        AdminLabeledRow("Neurons today", "$neurons / $budget")
         AdminLabeledRow("Budget rung", rung.name)
         AdminLabeledRow("Replies / reactions", "$replied / $reacted")
         Muted(
             "Ladder degrades automatically as the budget fills: FULL → TRIM (trimmed context) → " +
-            "CHEAP (8B replies) → REACT_ONLY → SILENT. Resets daily. Estimate only, not billed."
+            "CHEAP (8B replies) → REACT_ONLY → SILENT. Resets at UTC midnight. Shows REAL Cloudflare " +
+            "usage when an Analytics token is set, otherwise a persisted calibrated estimate."
         )
     }
 }
@@ -342,7 +408,7 @@ private fun ControlsSection() {
             onClick = {
                 val c = DiscordBotStore.load(ctx)  // keep the encrypted secrets
                 DiscordBotStore.save(
-                    ctx, c.botToken, c.cfAccountId, c.cfApiToken, c.cfGatewayId, c.model,
+                    ctx, c.botToken, c.cfAccountId, c.cfApiToken, c.cfGatewayId, c.analyticsToken, c.model,
                     ambient.toIntOrNull() ?: DiscordBotStore.DEFAULT_AMBIENT_PCT,
                     cooldown.toIntOrNull() ?: DiscordBotStore.DEFAULT_AMBIENT_COOLDOWN_SEC,
                     turns.toIntOrNull() ?: DiscordBotStore.DEFAULT_CONTEXT_TURNS,
@@ -384,6 +450,7 @@ private fun ConfigSection() {
     var cfAccount by remember { mutableStateOf(initial.cfAccountId) }
     var cfToken by remember { mutableStateOf(initial.cfApiToken) }
     var cfGateway by remember { mutableStateOf(initial.cfGatewayId) }
+    var analytics by remember { mutableStateOf(initial.analyticsToken) }
     var model by remember { mutableStateOf(initial.model) }
     var saved by remember { mutableStateOf(false) }
 
@@ -408,6 +475,11 @@ private fun ConfigSection() {
                 label = { Text("AI Gateway id (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth()
             )
             OutlinedTextField(
+                value = analytics, onValueChange = { analytics = it; saved = false },
+                label = { Text("Analytics token (optional, real usage)") }, singleLine = true,
+                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
                 value = model, onValueChange = { model = it; saved = false },
                 label = { Text("Reply model") }, singleLine = true, modifier = Modifier.fillMaxWidth()
             )
@@ -415,7 +487,7 @@ private fun ConfigSection() {
                 onClick = {
                     val c = DiscordBotStore.load(ctx)
                     DiscordBotStore.save(
-                        ctx, botToken, cfAccount, cfToken, cfGateway, model,
+                        ctx, botToken, cfAccount, cfToken, cfGateway, analytics, model,
                         c.ambientPercent, c.ambientCooldownSec, c.contextTurns
                     )
                     saved = true; restartIfRunning(ctx, scope)
@@ -430,7 +502,8 @@ private fun ConfigSection() {
                 "2. Invite with the bot scope + View Channels, Send Messages, Read Message History, " +
                 "Add Reactions.\n" +
                 "3. Cloudflare: an account id + a scoped Workers AI (Read/Run) token. Optionally an AI " +
-                "Gateway id. Cardinal grows his own personality — there is no persona to type.\n" +
+                "Gateway id, and an Analytics token (Account Analytics: Read) so the budget shows REAL " +
+                "neuron usage instead of the estimate. Cardinal grows his own personality — no persona to type.\n" +
                 "Secrets are stored encrypted on this device only."
             )
         }

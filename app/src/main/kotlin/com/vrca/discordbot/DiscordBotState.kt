@@ -102,6 +102,13 @@ object DiscordBotState {
         _rung.value = computeRung(_neurons.value)
     }
 
+    /** Adopt an AUTHORITATIVE day total (persisted estimate or a real Cloudflare usage sync). */
+    fun setNeuronsAbsolute(total: Long) {
+        rolloverIfNeeded()
+        _neurons.value = total.coerceAtLeast(0L)
+        _rung.value = computeRung(_neurons.value)
+    }
+
     fun currentRung(): Rung { rolloverIfNeeded(); return computeRung(_neurons.value) }
 
     private fun computeRung(spent: Long): Rung {

@@ -151,6 +151,33 @@ object PersonalityStore {
         ))
     }
 
+    /**
+     * INLINE self-nudge from a reply's tail — personality develops from message one, no reflection
+     * timer. Reinforces one proposed [trait] if it matches (or adds it at start strength), and may
+     * set a fresh [mood] line. NEVER decays other traits (that's the observer's [applyReflection]),
+     * so a single reply can only ever strengthen the self, keeping it stable + free.
+     */
+    fun noteSelf(ctx: Context, trait: String?, mood: String? = null) {
+        val t = trait?.trim()?.takeIf { it.isNotBlank() && it.length in 2..80 }
+        val m = mood?.trim()?.takeIf { it.isNotBlank() && it.length <= 80 }
+        if (t == null && m == null) return
+        val cur = load(ctx)
+        var traits = cur.traits
+        if (t != null) {
+            val idx = traits.indexOfFirst { it.text.equals(t, true) }
+            traits = if (idx >= 0) {
+                traits.mapIndexed { i, tr ->
+                    if (i == idx) tr.copy(strength = (tr.strength + 1).coerceAtMost(MAX_STRENGTH)) else tr
+                }
+            } else {
+                (traits + Trait(t, START_STRENGTH))
+                    .sortedByDescending { (if (it.pinned) 100 else 0) + it.strength }
+                    .take(DiscordBotLimits.MAX_TRAITS)
+            }
+        }
+        save(ctx, cur.copy(traits = traits, mood = m ?: cur.mood))
+    }
+
     /** Admin: pin/unpin a trait (pinned = protected from decay). */
     fun setTraitPinned(ctx: Context, traitText: String, pinned: Boolean) {
         val cur = load(ctx)

@@ -24,6 +24,7 @@ object DiscordBotStore {
     private const val KEY_CF_ACCOUNT = "cf_account_id"
     private const val KEY_CF_TOKEN = "cf_api_token"
     private const val KEY_CF_GATEWAY = "cf_gateway_id"
+    private const val KEY_ANALYTICS = "cf_analytics_token"
     private const val KEY_MODEL = "cf_model"
     private const val KEY_AMBIENT_PCT = "ambient_percent"
     private const val KEY_AMBIENT_COOLDOWN = "ambient_cooldown_sec"
@@ -43,6 +44,7 @@ object DiscordBotStore {
         val cfAccountId: String,
         val cfApiToken: String,
         val cfGatewayId: String,
+        val analyticsToken: String,
         val model: String,
         val ambientPercent: Int,
         val ambientCooldownSec: Int,
@@ -83,6 +85,7 @@ object DiscordBotStore {
             cfAccountId = p?.getString(KEY_CF_ACCOUNT, "").orEmpty().trim(),
             cfApiToken = p?.getString(KEY_CF_TOKEN, "").orEmpty().trim(),
             cfGatewayId = p?.getString(KEY_CF_GATEWAY, "").orEmpty().trim(),
+            analyticsToken = p?.getString(KEY_ANALYTICS, "").orEmpty().trim(),
             model = p?.getString(KEY_MODEL, DEFAULT_MODEL).orEmpty().ifBlank { DEFAULT_MODEL },
             ambientPercent = (p?.getInt(KEY_AMBIENT_PCT, DEFAULT_AMBIENT_PCT) ?: DEFAULT_AMBIENT_PCT)
                 .coerceIn(0, 100),
@@ -101,6 +104,7 @@ object DiscordBotStore {
         cfAccountId: String,
         cfApiToken: String,
         cfGatewayId: String,
+        analyticsToken: String,
         model: String,
         ambientPercent: Int,
         ambientCooldownSec: Int,
@@ -111,6 +115,7 @@ object DiscordBotStore {
             ?.putString(KEY_CF_ACCOUNT, cfAccountId.trim())
             ?.putString(KEY_CF_TOKEN, cfApiToken.trim())
             ?.putString(KEY_CF_GATEWAY, cfGatewayId.trim())
+            ?.putString(KEY_ANALYTICS, analyticsToken.trim())
             ?.putString(KEY_MODEL, model.trim().ifBlank { DEFAULT_MODEL })
             ?.putInt(KEY_AMBIENT_PCT, ambientPercent.coerceIn(0, 100))
             ?.putInt(KEY_AMBIENT_COOLDOWN, ambientCooldownSec.coerceAtLeast(0))
