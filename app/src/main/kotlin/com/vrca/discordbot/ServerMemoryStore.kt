@@ -5,6 +5,24 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
+ * Rough "how long ago" for a stored timestamp, so injected memories/topics read with real recency
+ * (Cardinal won't call a 3-week-old moment "just now"). Blank for unknown/0. Shared across the
+ * discordbot stores. Never stored — computed at render time so it can't stale.
+ */
+internal fun discordRelTime(thenMs: Long, nowMs: Long): String {
+    if (thenMs <= 0L) return ""
+    val d = nowMs - thenMs
+    return when {
+        d < 2 * 60_000L -> "just now"
+        d < 60 * 60_000L -> "${d / 60_000L}m ago"
+        d < 24 * 3_600_000L -> "${d / 3_600_000L}h ago"
+        d < 7 * 86_400_000L -> "${d / 86_400_000L}d ago"
+        d < 30 * 86_400_000L -> "${d / (7 * 86_400_000L)}w ago"
+        else -> "a while back"
+    }
+}
+
+/**
  * Shared **server culture** — memorable moments, running jokes and inside references the whole
  * server shares, that Cardinal can bring up AND recognise when someone else references them.
  *
@@ -95,20 +113,28 @@ object ServerMemoryStore {
         if (changed) save(ctx, out)
     }
 
+    private fun withAgo(m: Memory, now: Long): String {
+        val ago = discordRelTime(m.lastMs, now)
+        return if (ago.isBlank()) m.text else "${m.text} ($ago)"
+    }
+
     /** The strongest memories, always folded into the digest so shared culture is ambient. */
-    fun core(ctx: Context): List<String> =
-        load(ctx).sortedByDescending { it.strength }
-            .take(DiscordBotLimits.CORE_MEMORIES_INJECT).map { it.text }
+    fun core(ctx: Context): List<String> {
+        val now = System.currentTimeMillis()
+        return load(ctx).sortedByDescending { it.strength }
+            .take(DiscordBotLimits.CORE_MEMORIES_INJECT).map { withAgo(it, now) }
+    }
 
     /** Retrieve memories relevant to [text] (keyword overlap), beyond the always-on core. */
     fun retrieveFor(ctx: Context, text: String): List<String> {
         val want = keywordsOf(text).toSet(); if (want.isEmpty()) return emptyList()
+        val now = System.currentTimeMillis()
         return load(ctx)
             .map { it to it.keywords.count { k -> k in want } }
             .filter { it.second >= 2 }
             .sortedByDescending { it.second * 10 + it.first.strength }
             .take(DiscordBotLimits.EVENT_RETRIEVE_MAX)
-            .map { it.first.text }
+            .map { withAgo(it.first, now) }
     }
 
     private val STOP = setOf(

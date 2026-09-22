@@ -74,7 +74,12 @@ object PersonalityStore {
         }
     } catch (_: Exception) { emptyList() }
 
+    // Process-global digest cache (one bot). Invalidated on every write so it can't go stale;
+    // saves re-parsing the personality JSON on the hot reply path.
+    @Volatile private var cachedDigest: String? = null
+
     private fun save(ctx: Context, self: Self) {
+        cachedDigest = null
         val traitArr = JSONArray()
         self.traits.forEach {
             traitArr.put(JSONObject().put("t", it.text).put("s", it.strength).put("p", it.pinned))
@@ -89,6 +94,7 @@ object PersonalityStore {
 
     /** Compact digest injected into the reply prompt (below the anchor). Blank until evolved. */
     fun snapshot(ctx: Context): String {
+        cachedDigest?.let { return it }
         val s = load(ctx)
         val sb = StringBuilder()
         if (s.mood.isNotBlank()) sb.append("Mood: ").append(s.mood).append('\n')
@@ -105,7 +111,7 @@ object PersonalityStore {
             sb.append("You remember:\n")
             s.episodes.takeLast(3).forEach { sb.append("- ").append(it).append('\n') }
         }
-        return sb.toString().trim().take(DiscordBotLimits.SELF_DIGEST_MAX_CHARS)
+        return sb.toString().trim().take(DiscordBotLimits.SELF_DIGEST_MAX_CHARS).also { cachedDigest = it }
     }
 
     /** One-line mood for the admin dashboard. */
@@ -197,6 +203,7 @@ object PersonalityStore {
     }
 
     fun reset(ctx: Context) {
+        cachedDigest = null
         prefs(ctx).edit().clear().apply()
     }
 }

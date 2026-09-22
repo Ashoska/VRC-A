@@ -84,12 +84,13 @@ object ConversationStore {
         if (topics.isEmpty()) return emptyList()
         val want = keywordsOf(text).toSet()
         if (want.isEmpty()) return emptyList()
+        val now = System.currentTimeMillis()
         return topics
             .map { it to it.keywords.count { k -> k in want } }
             .filter { it.second >= 2 }                       // at least two shared keywords
             .sortedByDescending { it.second }
             .take(DiscordBotLimits.TOPIC_RETRIEVE_MAX)
-            .map { it.first.summary }
+            .map { (t, _) -> val ago = discordRelTime(t.closedMs, now); if (ago.isBlank()) t.summary else "${t.summary} ($ago)" }
     }
 
     // ── keyword extraction (tiny, dependency-free) ──
