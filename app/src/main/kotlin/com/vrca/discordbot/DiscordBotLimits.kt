@@ -55,8 +55,10 @@ object DiscordBotLimits {
     const val BACKOFF_MS = 120_000L
 
     // ── Observer (event-driven memory/summary catch-up when it stays silent) ─
-    const val OBSERVER_MIN_NEW_MSGS = 6
-    const val OBSERVER_MIN_INTERVAL_MS = 90_000L
+    // Fires only after this many unreplied messages pile up, and at most this often — kept
+    // conservative so the cheap catch-up costs little in a busy channel.
+    const val OBSERVER_MIN_NEW_MSGS = 8
+    const val OBSERVER_MIN_INTERVAL_MS = 150_000L
     /** Quiet gap that ends the active conversation segment → archived as a topic. */
     const val CONVO_GAP_MS = 12 * 60 * 1000L
 

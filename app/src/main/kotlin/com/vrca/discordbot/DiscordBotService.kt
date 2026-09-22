@@ -431,6 +431,7 @@ class DiscordBotService : Service() {
         val ids: Set<String>,
         val nameToId: Map<String, String>,
         val keywords: Set<String>,
+        val targetIsLatest: Boolean,   // nothing newer than the message we're answering
     )
 
     private suspend fun generateAndSend(ctx: MsgCtx, built: Built, rung: DiscordBotState.Rung, short: Boolean) {
@@ -468,8 +469,10 @@ class DiscordBotService : Service() {
                         DiscordBotState.log("shadow ↩ ${ctx.authorName}: ${outText.take(60)}")
                         trace(ctx, "reply", "shadow", "shadow", outText.take(90))
                     } else {
+                        // Only @-reply-thread when the convo moved past their message (out-of-order);
+                        // if we're answering the latest message, just talk plainly like a person.
                         val out = DiscordRest.send(cfg.botToken, ctx.channelId, outText,
-                            replyToMessageId = if (ctx.addressed) ctx.messageId else null)
+                            replyToMessageId = if (ctx.addressed && !built.targetIsLatest) ctx.messageId else null)
                         if (out.error == null) {
                             out.messageId?.let { synchronized(recentBotMsgIds) { recentBotMsgIds[it] = ctx.authorId } }
                             lastBotPostMs[ctx.channelId] = now
@@ -565,10 +568,14 @@ class DiscordBotService : Service() {
         val nameToId = HashMap<String, String>()
         nameToId[ctx.authorName.lowercase().trim()] = ctx.authorId
         val seen = HashSet<String>()
+        var newerExists = false
+        val ctxIdL = ctx.messageId.toLongOrNull() ?: Long.MAX_VALUE
         if (cfg.contextTurns > 0) {
             val recent = DiscordRest.fetchRecentMessages(cfg.botToken, ctx.channelId, cfg.contextTurns)
             for (m in recent) {
                 if (m.id == ctx.messageId) continue
+                // A higher snowflake id = a message that arrived AFTER the one we're answering.
+                if ((m.id.toLongOrNull() ?: 0L) > ctxIdL) newerExists = true
                 seen.add(m.id)
                 val text = tokenize(stripBotMentions(m.content))
                 if (text.isBlank()) continue
@@ -580,7 +587,7 @@ class DiscordBotService : Service() {
         if (ctx.refTurn != null && (ctx.refId == null || ctx.refId !in seen)) turns.add(ctx.refTurn)
         turns.add(DiscordBotAi.Turn(false, ctx.authorName, ctx.userText))
         val keywords = keywordsOf(buildString { turns.takeLast(4).forEach { append(it.text).append(' ') }; append(ctx.userText) })
-        return Built(turns, ids, nameToId, keywords)
+        return Built(turns, ids, nameToId, keywords, targetIsLatest = !newerExists)
     }
 
     /** Server culture block = strongest core memories + those relevant now + any revived dead topic. */
@@ -680,10 +687,8 @@ class DiscordBotService : Service() {
         return ""   // Latin script → let Cardinal match naturally (English or the person's language)
     }
 
-    private fun emojiHint(): String {
-        val custom = EmojiConvert.customNames().take(20).joinToString(", ") { ":$it:" }
-        return custom
-    }
+    private fun emojiHint(): String =
+        EmojiConvert.customNames().take(12).joinToString(", ") { ":$it:" }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 

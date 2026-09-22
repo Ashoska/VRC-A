@@ -146,7 +146,8 @@ object DiscordBotAi {
             append("NOT what they just said/did this minute, and NOT a guess from a single message or emoji. NEVER write \"mentioned X\"/\"talked about Y\"/\"said Z\"/\"imagined W\" — chatter, use []. ")
             append("Do NOT put a fact that just restates their name, nickname, relationship, or how you treat them — those have their own fields. ")
             append("If a name like \"John Woman\" is how people refer to a PERSON, that belongs on THAT person's card. Attribute every fact to the RIGHT person. ")
-            append("STICKY FIELDS: leave relationship/preferredName/howToTreat/talkStyle/sentiment EMPTY unless it's genuinely NEW or CHANGED — never re-guess or re-state what you already have (don't flip a known relationship). ")
+            append("STICKY FIELDS: leave relationship/preferredName/howToTreat/talkStyle/sentiment EMPTY unless it's genuinely NEW or CHANGED — never re-guess or re-state what you already have. ")
+            append("A relationship CAN change over time, but only with a CLEAR reason (you actually became friends, they were repeatedly hostile, they told you who they are) — never flip an established one from a single throwaway message. ")
             append("SELF: only nudge trait/style/mood when you actually notice a real shift; trait is a durable identity thing, style is HOW you talk, mood is a fleeting one-word tone — keep them DIFFERENT (mood is not a trait). ")
             append("Don't restate a fact you already know; a changed fact goes in facts (it replaces the old), a no-longer-true one goes in forget. Only fill fields you're SURE of. This line is never shown.")
         }
