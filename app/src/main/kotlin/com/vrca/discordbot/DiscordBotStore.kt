@@ -32,6 +32,14 @@ object DiscordBotStore {
     private const val KEY_SHADOW = "shadow_mode"
     private const val KEY_MUTED = "muted_channels"
     private const val KEY_ENABLED = "enabled"
+    private const val KEY_DAILY_BUDGET = "daily_neuron_budget"
+    // Per-rung enable flags for the budget degradation ladder (admin can disable any saver stage).
+    private const val KEY_TRIM_ENABLED = "ladder_trim_enabled"
+    private const val KEY_CHEAP_ENABLED = "ladder_cheap_enabled"
+    private const val KEY_REACT_ONLY_ENABLED = "ladder_react_only_enabled"
+    private const val KEY_HARD_STOP_ENABLED = "ladder_hard_stop_enabled"
+
+    const val DEFAULT_DAILY_BUDGET = DiscordBotLimits.DAILY_NEURON_BUDGET
 
     const val DEFAULT_MODEL = DiscordBotLimits.REPLY_MODEL
     const val DEFAULT_AMBIENT_PCT = DiscordBotLimits.DEFAULT_AMBIENT_PCT
@@ -51,6 +59,12 @@ object DiscordBotStore {
         val contextTurns: Int,
         val shadowMode: Boolean,
         val mutedChannelsCsv: String,
+        val dailyBudget: Long,          // where Cardinal STOPS (SILENT); the other rungs are fractions of it
+        // Budget-ladder saver stages — the admin can turn any of them OFF (all off = full quality until the hard stop):
+        val trimEnabled: Boolean,       // TRIM: trimmed context + short replies at ~80%
+        val cheapEnabled: Boolean,      // CHEAP: 8B replies at ~92%
+        val reactOnlyEnabled: Boolean,  // REACT_ONLY: emoji-only at ~99%
+        val hardStopEnabled: Boolean,   // SILENT: stop entirely at 100% of the budget
     ) {
         val isComplete: Boolean
             get() = botToken.isNotBlank() && cfAccountId.isNotBlank() && cfApiToken.isNotBlank()
@@ -95,7 +109,30 @@ object DiscordBotStore {
                 .coerceIn(0, 20),
             shadowMode = p?.getBoolean(KEY_SHADOW, false) ?: false,
             mutedChannelsCsv = p?.getString(KEY_MUTED, "").orEmpty(),
+            dailyBudget = (p?.getLong(KEY_DAILY_BUDGET, DEFAULT_DAILY_BUDGET) ?: DEFAULT_DAILY_BUDGET)
+                .coerceAtLeast(100L),
+            trimEnabled = p?.getBoolean(KEY_TRIM_ENABLED, true) ?: true,
+            cheapEnabled = p?.getBoolean(KEY_CHEAP_ENABLED, true) ?: true,
+            reactOnlyEnabled = p?.getBoolean(KEY_REACT_ONLY_ENABLED, true) ?: true,
+            hardStopEnabled = p?.getBoolean(KEY_HARD_STOP_ENABLED, true) ?: true,
         )
+    }
+
+    /** Where Cardinal stops for the day (SILENT). The FULL/TRIM/CHEAP thresholds are fractions of this. */
+    fun setDailyBudget(context: Context, budget: Long) {
+        prefs(context)?.edit()?.putLong(KEY_DAILY_BUDGET, budget.coerceAtLeast(100L))?.apply()
+    }
+
+    /** Enable/disable one saver rung by its enum name (TRIM / CHEAP / REACT_ONLY / SILENT). */
+    fun setLadderRungEnabled(context: Context, rung: DiscordBotState.Rung, enabled: Boolean) {
+        val key = when (rung) {
+            DiscordBotState.Rung.TRIM -> KEY_TRIM_ENABLED
+            DiscordBotState.Rung.CHEAP -> KEY_CHEAP_ENABLED
+            DiscordBotState.Rung.REACT_ONLY -> KEY_REACT_ONLY_ENABLED
+            DiscordBotState.Rung.SILENT -> KEY_HARD_STOP_ENABLED
+            DiscordBotState.Rung.FULL -> return   // FULL is not a saver stage
+        }
+        prefs(context)?.edit()?.putBoolean(key, enabled)?.apply()
     }
 
     fun save(

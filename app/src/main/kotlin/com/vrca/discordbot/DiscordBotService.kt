@@ -158,6 +158,8 @@ class DiscordBotService : Service() {
                 }
 
                 cfg = DiscordBotStore.load(this)
+                DiscordBotState.configureLadder(
+                    cfg.dailyBudget, cfg.trimEnabled, cfg.cheapEnabled, cfg.reactOnlyEnabled, cfg.hardStopEnabled)
                 if (!cfg.isComplete) {
                     DiscordBotState.setStatus(
                         DiscordBotState.Status.FAILED,

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Savings
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
@@ -448,7 +449,7 @@ private fun CostSection() {
     val rung by DiscordBotState.rungFlow.collectAsState()
     val replied by DiscordBotState.repliedFlow.collectAsState()
     val reacted by DiscordBotState.reactedFlow.collectAsState()
-    val budget = com.vrca.discordbot.DiscordBotLimits.DAILY_NEURON_BUDGET
+    val budget = DiscordBotState.budget()
     AdminSectionCard(title = "Cost today", icon = Icons.Filled.Payments, tone = AdminTone.Info) {
         AdminLabeledRow("Neurons today", "$neurons / $budget")
         AdminLabeledRow("Budget rung", rung.name)
@@ -474,6 +475,46 @@ private fun ControlsSection() {
     var muteId by remember { mutableStateOf("") }
     var muted by remember { mutableStateOf(cfg.mutedChannels) }
     var saved by remember { mutableStateOf(false) }
+
+    // Budget + saver-ladder config
+    var budget by remember { mutableStateOf(cfg.dailyBudget.toString()) }
+    var trimOn by remember { mutableStateOf(cfg.trimEnabled) }
+    var cheapOn by remember { mutableStateOf(cfg.cheapEnabled) }
+    var reactOn by remember { mutableStateOf(cfg.reactOnlyEnabled) }
+    var stopOn by remember { mutableStateOf(cfg.hardStopEnabled) }
+    var budgetSaved by remember { mutableStateOf(false) }
+    fun pushLadder() {
+        val b = budget.toLongOrNull()?.coerceAtLeast(100L) ?: DiscordBotStore.DEFAULT_DAILY_BUDGET
+        DiscordBotStore.setDailyBudget(ctx, b)
+        DiscordBotStore.setLadderRungEnabled(ctx, DiscordBotState.Rung.TRIM, trimOn)
+        DiscordBotStore.setLadderRungEnabled(ctx, DiscordBotState.Rung.CHEAP, cheapOn)
+        DiscordBotStore.setLadderRungEnabled(ctx, DiscordBotState.Rung.REACT_ONLY, reactOn)
+        DiscordBotStore.setLadderRungEnabled(ctx, DiscordBotState.Rung.SILENT, stopOn)
+        // Apply live even while running (no restart needed for the ladder).
+        DiscordBotState.configureLadder(b, trimOn, cheapOn, reactOn, stopOn)
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    AdminSectionCard(title = "Budget & saver modes", icon = Icons.Filled.Savings, tone = AdminTone.Info) {
+        OutlinedTextField(
+            value = budget,
+            onValueChange = { budget = it.filter(Char::isDigit).take(8); budgetSaved = false },
+            label = { Text("Daily neuron budget (where it stops)") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            singleLine = true, modifier = Modifier.fillMaxWidth()
+        )
+        Muted("Cardinal goes SILENT at 100% of this. The saver stages below kick in at fractions of it " +
+            "(TRIM ~80%, CHEAP ~92%, react-only ~99%). Free Cloudflare tier is 10,000/day.")
+        SaverToggle("TRIM — trim context + shorter replies (~80%)", trimOn) { trimOn = it; budgetSaved = false; pushLadder() }
+        SaverToggle("CHEAP — switch to the 8B model (~92%)", cheapOn) { cheapOn = it; budgetSaved = false; pushLadder() }
+        SaverToggle("React-only — emoji reactions, no replies (~99%)", reactOn) { reactOn = it; budgetSaved = false; pushLadder() }
+        SaverToggle("Hard stop — go silent at the budget (100%)", stopOn) { stopOn = it; budgetSaved = false; pushLadder() }
+        Button(onClick = { pushLadder(); budgetSaved = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(if (budgetSaved) "Saved" else "Save budget")
+        }
+        if (!stopOn) Muted("Hard stop is OFF — Cardinal will keep spending past the budget (can exceed the free tier).")
+        if (!trimOn && !cheapOn && !reactOn) Muted("All saver stages off — full quality until the hard stop.")
+    }
 
     AdminSectionCard(title = "Controls", icon = Icons.Filled.Tune, tone = AdminTone.Neutral) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -535,6 +576,16 @@ private fun ControlsSection() {
         }
         Muted("Ambient % = chance to consider an unaddressed message; cooldown limits it per channel. " +
             "Context = recent messages read for a reply. Changes restart a running bot.")
+    }
+    }
+}
+
+/** A compact enable-row for one budget saver stage. */
+@Composable
+private fun SaverToggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 
