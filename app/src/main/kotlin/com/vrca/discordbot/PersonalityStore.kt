@@ -103,18 +103,19 @@ object PersonalityStore {
     fun snapshot(ctx: Context): String {
         cachedDigest?.let { return it }
         val s = load(ctx)
-        val parts = ArrayList<String>()
-        if (s.mood.isNotBlank()) parts.add("Mood: ${s.mood.trim().trimEnd('.')}.")
-        // Strongest first; among equals the most recently shown, so a fresh trait can surface.
+        val sb = StringBuilder()
+        if (s.mood.isNotBlank()) sb.append("Mood: ").append(s.mood.trim().trimEnd('.')).append('.')
+        // EVERY trait, strongest first (so he never strays from who he's become); each is a short phrase.
         val traits = s.traits.sortedWith(
             compareByDescending<Trait> { (if (it.pinned) 100 else 0) + it.strength }.thenByDescending { it.lastMs }
-        ).take(DiscordBotLimits.DIGEST_TRAITS_INJECT).map { it.text.trim().trimEnd('.') }
-        if (traits.isNotEmpty()) parts.add("Traits: ${traits.joinToString("; ")}.")
-        if (s.style.isNotEmpty()) parts.add("How you talk: ${s.style.take(3).joinToString("; ") { it.trim().trimEnd('.') }}.")
-        if (s.episodes.isNotEmpty()) parts.add("You remember: ${s.episodes.takeLast(2).joinToString("; ") { it.trim().trimEnd('.') }}.")
-        val sb = StringBuilder()
-        for (p in parts) {
-            if (sb.length + p.length + 1 > DiscordBotLimits.SELF_DIGEST_MAX_CHARS && sb.isNotEmpty()) break
+        ).map { it.text.trim().trimEnd('.') }
+        if (traits.isNotEmpty()) sb.append(if (sb.isEmpty()) "" else " ").append("Traits: ").append(traits.joinToString("; ")).append('.')
+        // Admin-taught extras (rare) stay bounded.
+        val extras = ArrayList<String>()
+        if (s.style.isNotEmpty()) extras.add("How you talk: ${s.style.take(3).joinToString("; ") { it.trim().trimEnd('.') }}.")
+        if (s.episodes.isNotEmpty()) extras.add("You remember: ${s.episodes.takeLast(2).joinToString("; ") { it.trim().trimEnd('.') }}.")
+        for (p in extras) {
+            if (sb.length + p.length + 1 > DiscordBotLimits.SELF_DIGEST_MAX_CHARS + traits.sumOf { it.length }) break
             if (sb.isNotEmpty()) sb.append(' ')
             sb.append(p)
         }
@@ -137,6 +138,7 @@ object PersonalityStore {
         "humour", "sense", "good", "great", "sarcastic", "snarky", "cheeky", "teasing", "joking", "jokey",
         "friendly", "helpful", "nice", "kind", "polite", "engaging", "responsive", "supportive",
         "informative", "knowledgeable", "confident", "lively", "energetic", "fun", "cool",
+        "humorist", "comedian", "jokester", "joker", "prankster", "entertaining", "amusing", "silly", "goofy",
     )
     private val FILLER = setOf(
         "a", "an", "and", "the", "of", "very", "super", "really", "quite", "bit", "little", "kinda",
@@ -255,6 +257,24 @@ object PersonalityStore {
             else cur.traits.mapIndexed { i, tr -> if (i == idx) tr.copy(strength = left) else tr }
         save(ctx, cur.copy(traits = traits))
         return hit.text
+    }
+
+    /**
+     * A trait EVOLVED ("married to Shrek" → "in a poly relationship with Shrek and bob", "divorced from
+     * Shrek"): the old one is rewritten in place, keeping its strength (it's the same part of him, changed).
+     * A pinned old trait is left as is and the new one is added. Returns true when something changed.
+     */
+    fun replaceTrait(ctx: Context, oldText: String, newText: String): Boolean {
+        val n = newText.trim().trimEnd('.')
+        if (n.length !in 3..80 || GENERIC_SELF.matches(n) || restatesCore(n)) return false
+        val cur = load(ctx)
+        val idx = cur.traits.indexOfFirst { it.text.equals(oldText.trim(), true) || sameTrait(it.text, oldText) }
+        if (idx < 0 || cur.traits[idx].pinned) { noteSelf(ctx, n); return idx >= 0 }
+        val now = System.currentTimeMillis()
+        val traits = cur.traits.mapIndexed { i, t -> if (i == idx) t.copy(text = n, lastMs = now) else t }
+            .filterIndexed { i, t -> i == idx || !sameTrait(t.text, n) }
+        save(ctx, cur.copy(traits = traits))
+        return true
     }
 
     /** Current traits, strongest first (for the learner's correction view). */

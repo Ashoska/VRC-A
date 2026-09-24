@@ -88,6 +88,7 @@ object DiscordBotAi {
         val selfMood: String,
         val moments: List<String> = emptyList(),  // funny/notable things that happened (→ the day log)
         val wrong: List<Int> = emptyList(),      // numbers of stored items the chat says are wrong / unwanted
+        val selfReplaces: String = "",           // "T2" / "5": the known trait the new self.trait updates
     )
 
     /**
@@ -134,26 +135,27 @@ object DiscordBotAi {
         val sys = buildString {
             append(CORE)
             if (c.selfDigest.isNotBlank()) append("\n\n[You] ").append(c.selfDigest)
-                .append(" Your quirks come out when they fit the moment, not in every message.")
+                .append(" Your quirks come out when they fit the moment, not in every message, and can evolve if the room steers them somewhere fun.")
             if (c.channelInfo.isNotBlank()) append("\n\n[Channel] ").append(c.channelInfo)
-            if (c.serverCulture.isNotBlank()) append("\n\n[Server memories]\n").append(c.serverCulture)
-            if (c.channelBits.isNotBlank()) append("\n\n[Running bit here, only if it fits] ").append(c.channelBits)
-            if (c.crossRef.isNotBlank()) append("\n\n[Another channel they mentioned]\n").append(c.crossRef)
+            // Who he's talking to first, then background knowledge, then rules.
             if (c.answering.isNotBlank()) {
                 append("\n\n[Answering] ").append(c.answering)
                 if (c.othersPresent) append(" (others in the chat are background)")
             }
             if (c.othersBlock.isNotBlank()) append("\n\n[Others]\n").append(c.othersBlock)
             if (c.summary.isNotBlank()) append("\n\n[Earlier] ").append(c.summary)
+            if (c.serverCulture.isNotBlank()) append("\n\n[Server memories]\n").append(c.serverCulture)
+            if (c.channelBits.isNotBlank()) append("\n\n[Running bit here, only if it fits] ").append(c.channelBits)
+            if (c.crossRef.isNotBlank()) append("\n\n[Another channel they mentioned]\n").append(c.crossRef)
             if (c.dayLog.isNotBlank()) append("\n\n[What happened, from your notes — other people's doings unless it says Cardinal]\n").append(c.dayLog)
-            if (c.namesRule) append("\n\n[Names] One name per person at a time; never give someone another person's nickname.")
+            if (c.namesRule) append("\n\n[Names] Use one name per person; never swap nicknames between people.")
             if (c.recall) append("\n\n[Memory question] Answer from what's above; if there's nothing, say so. Don't invent.")
             if (c.langHint.isNotBlank()) append("\n\n[Language] Reply in ").append(c.langHint).append(", native script.")
             if (c.emojiHint.isNotBlank())
                 append("\n\n[Emojis] Optional, written :name: — ").append(c.emojiHint)
                     .append(" (normal emojis too). Most messages need none; vary them.")
             if (c.olderBotLines.isNotEmpty())
-                append("\n\n[Don't repeat] Recently said: ").append(c.olderBotLines.joinToString(" / ") { "\"${it.take(80)}\"" })
+                append("\n\n[Don't repeat] Recently said: ").append(c.olderBotLines.joinToString(" / ") { "\"${it.take(50)}\"" })
             else if (c.ownLinesVisible) append("\n\n[Don't repeat] your earlier lines.")
             if (c.shortHint) append("\n\nKeep it to one short line.")
             append("\n\nReply with just your message, no name prefix.")
@@ -219,6 +221,39 @@ object DiscordBotAi {
         val start = text.indexOf('{'); if (start < 0) return null
         val end = text.lastIndexOf('}')
         if (end > start) try { return JSONObject(text.substring(start, end + 1)) } catch (_: Exception) { }
+        val cleaned = escapeStrayQuotes(text.substring(start))
+        if (cleaned != text.substring(start)) jsonObjectIn(cleaned)?.let { return it }
+        return closeUnbalanced(text.substring(start))
+    }
+
+    /**
+     * `"summary":"bob's "fork soup" incident"` — a quote inside a value that the model forgot to escape.
+     * A quote inside a string only CLOSES it when the next non-space char is `:` `,` `}` `]` (or the end);
+     * any other one is escaped. Heuristic, but it rescues the common case instead of dropping the pass.
+     */
+    private fun escapeStrayQuotes(t: String): String {
+        val sb = StringBuilder(t.length + 8)
+        var inStr = false; var esc = false
+        for (i in t.indices) {
+            val ch = t[i]
+            if (inStr) {
+                when {
+                    esc -> esc = false
+                    ch == '\\' -> esc = true
+                    ch == '"' -> {
+                        var j = i + 1
+                        while (j < t.length && t[j].isWhitespace()) j++
+                        if (j >= t.length || t[j] in ":,}]") inStr = false else { sb.append('\\') }
+                    }
+                }
+            } else if (ch == '"') inStr = true
+            sb.append(ch)
+        }
+        return sb.toString()
+    }
+
+    private fun closeUnbalanced(text: String): JSONObject? {
+        val start = 0
         val sb = StringBuilder(); val stack = ArrayDeque<Char>()
         var inStr = false; var esc = false
         for (ch in text.substring(start)) {
@@ -253,7 +288,7 @@ object DiscordBotAi {
      */
     suspend fun observe(
         cfg: DiscordBotStore.Config, turns: List<Turn>, prevSummary: String, stored: String = "",
-        selfTraits: List<String> = emptyList(),
+        selfTraits: List<String> = emptyList(), knownPeople: String = "",
     ): Observation? {
         val transcript = mergeTurns(turns).takeLast(DiscordBotLimits.LEARN_FETCH).joinToString("\n") {
             if (it.isBot) "Cardinal: ${it.text}" else "${it.name}: ${it.text}"
@@ -264,17 +299,19 @@ object DiscordBotAi {
         val fix = stored.isNotBlank()
         val sys = buildString {
             append("You keep long-term MEMORY for Cardinal, a member of this Discord. Don't write a reply. ")
-            append("Read the chat and output only this JSON:\n")
+            append("Read the chat and output only this JSON (use 'single quotes' inside text):\n")
             append("{\"summary\":\"<one short sentence, under 20 words: who is talking about what right now>\",")
-            append("\"moments\":[\"<a funny or notable thing that happened here, with who (0-2; skip ordinary chat)>\"],")
+            append("\"moments\":[\"<at most 2 funny or notable things that happened here, one short sentence each, with who; [] if none>\"],")
             if (fix) append("\"wrong\":[<numbers of STORED items the chat says are untrue or out of date, or that people asked Cardinal to stop>],")
             append("\"self\":{\"trait\":\"<a new lasting quirk, habit, opinion, role or bit of Cardinal's (shown in his own messages, or given to him by others and he went along with it; not a one-off event)>\",")
             append("\"mood\":\"<a word or two>\"},")
-            append("\"people\":[{\"about\":\"<name exactly as shown (not Cardinal)>\",\"facts\":[\"<new lasting fact about who they are>\"]}]}\n")
+            append("\"people\":[{\"about\":\"<name exactly as shown (not Cardinal)>\",\"facts\":[\"<new lasting fact about who they are>\"]}],")
+            append("\"event\":\"<an inside joke or legendary moment the server will keep bringing up, or empty>\"}\n")
             append("Optional keys: add them ONLY when the chat clearly shows it, otherwise leave the key out entirely (no empty values). ")
             append("Per person: nickname (what others call them), relationship (their role here), language (if not English)")
             if (fix) append(", forget (a stored fact of theirs that's no longer true), notNickname (a name they said not to call them), avoid (something they asked Cardinal to stop doing to them)")
-            append(". Top level: event (an inside joke or legendary moment worth remembering for weeks), channelBit (a running joke in THIS channel). ")
+            append(". Top level: channelBit (a running joke in THIS channel). ")
+            append("If one of Cardinal's traits CHANGED (e.g. a relationship moved on), write the new version as self.trait and copy the old trait into self.replaces. ")
             append("summary and moments are required (moments may be []); leave out self.trait if there's nothing new.\n")
             append("Only list people you learned something NEW and lasting about. A fact must be said or clearly shown in THIS chat ")
             append("(a question someone asks or a joke isn't a fact about them): ")
@@ -283,11 +320,14 @@ object DiscordBotAi {
             append("their name. Keep each person's info on that person; Cardinal's own quirks go only in self, never in people. ")
             append("Never record hateful notes about groups or jokes about a real person's death or crimes.")
             if (selfTraits.isNotEmpty() && !fix)
-                append("\nAlready known about Cardinal (don't repeat or reword these): ").append(selfTraits.joinToString("; "))
+                append("\nCardinal's known traits (don't repeat or reword these): ").append(selfTraits.joinToString("; "))
+            if (knownPeople.isNotBlank() && !fix)
+                append("\nAlready known about people here (only add what's NEW):\n").append(knownPeople)
             if (fix) {
                 append("\n\nSTORED MEMORY (numbered):\n").append(stored).append('\n')
                 append("If the chat says a stored item is untrue or out of date (the person themselves, or others clearly agreeing), or people ")
-                append("asked Cardinal to stop doing it, put its number in wrong, and add the correct fact if one was given. ")
+                append("really asked Cardinal to stop doing it, put its number in wrong, and add the correct fact if one was given. ")
+                append("Teasing or laughing along (\"stop 😂\", \"so cringe lol\") is not a real request. ")
                 append("Don't re-add stored items. Otherwise leave stored memory alone.")
             }
         }
@@ -329,9 +369,13 @@ object DiscordBotAi {
                 memDeltas = others,
                 serverEvent = o.optString("event").trim(),
                 channelBit = o.optString("channelBit").trim(),
-                selfTrait = o.optJSONObject("self")?.optString("trait")?.trim().orEmpty().ifBlank { salvaged },
+                // A bare number/"none" isn't a trait (the small model sometimes answers with a list index).
+                selfTrait = o.optJSONObject("self")?.optString("trait")?.trim().orEmpty()
+                    .takeUnless { it.all { c -> c.isDigit() } || it.equals("none", true) || it.equals("null", true) }
+                    .orEmpty().ifBlank { salvaged },
                 selfMood = o.optJSONObject("self")?.optString("mood")?.trim().orEmpty(),
-                moments = strList(o.optJSONArray("moments")),
+                moments = strList(o.optJSONArray("moments")).filter { it.split(' ').size >= 3 }.take(2),
+                selfReplaces = o.optJSONObject("self")?.optString("replaces")?.trim().orEmpty(),
                 wrong = o.optJSONArray("wrong")?.let { a -> (0 until a.length()).mapNotNull {
                     a.opt(it)?.toString()?.let { v -> Regex("\\d+").find(v)?.value?.toIntOrNull() } } }.orEmpty(),
             )
@@ -367,14 +411,27 @@ object DiscordBotAi {
         } else first
     }
 
+    // Per-model "don't think, just answer" switches (verified LIVE): these accept chat_template_kwargs;
+    // qwen3 answers in the wrong field with that, so it gets the /no_think prompt flag instead.
+    private val THINKING_KWARG_MODELS = listOf("gemma-4", "glm-4", "glm-5")
+    private fun withoutThinking(model: String, messages: JSONArray): JSONArray {
+        if (!model.contains("qwen3")) return messages
+        val out = JSONArray(messages.toString())
+        out.optJSONObject(0)?.takeIf { it.optString("role") == "system" }?.let { it.put("content", "/no_think " + it.optString("content")) }
+        return out
+    }
+
     private val TRANSIENT_ERR = Regex("HTTP (500|502|503|504|520|522|524)\\b|IOException|SocketTimeout|timeout|reset", RegexOption.IGNORE_CASE)
 
     private fun callOnce(
         cfg: DiscordBotStore.Config, model: String, messages: JSONArray, maxTokens: Int, temperature: Double?,
     ): Result {
         return try {
-            val payload = JSONObject().put("messages", messages).put("max_tokens", maxTokens)
+            val payload = JSONObject().put("messages", withoutThinking(model, messages)).put("max_tokens", maxTokens)
             if (temperature != null) payload.put("temperature", temperature)
+            // Reasoning models spend the whole budget "thinking" (and answer nothing) unless it's switched off.
+            if (THINKING_KWARG_MODELS.any { model.contains(it) })
+                payload.put("chat_template_kwargs", JSONObject().put("enable_thinking", false))
             val body = payload.toString().toRequestBody(JSON)
             val req = Request.Builder()
                 .url(endpoint(cfg, model))
@@ -386,7 +443,7 @@ object DiscordBotAi {
                 if (!resp.isSuccessful)
                     return Result.Error("Workers AI HTTP ${resp.code}: ${extractError(raw) ?: raw.take(180)}")
                 billingSink?.invoke(billedNeurons(raw, model, messages))
-                val text = extractResponse(raw)
+                val text = extractResponse(raw)?.replace(Regex("(?s)<think>.*?</think>"), "")?.trim()
                 if (text.isNullOrBlank()) Result.Error("Empty AI response") else Result.Ok(text.trim())
             }
         } catch (e: Exception) {

@@ -41,12 +41,13 @@ object DiscordBotLimits {
     /** Cards found by searching everyone's facts for a "who …?" question with nobody named. */
     const val RECALL_SEARCH_MAX = 2
     /** Custom server emojis offered in the prompt (most-used first). */
-    const val EMOJI_HINT_MAX = 12
+    const val EMOJI_HINT_MAX = 8
+    /** Extra custom emojis whose NAME matches the conversation, added on top of the most-used ones. */
+    const val EMOJI_TOPICAL_MAX = 4
     /** Revived topics / relevant server memories injected for a given message. */
     const val TOPIC_RETRIEVE_MAX = 2
     const val EVENT_RETRIEVE_MAX = 3
-    /** Traits folded into the always-injected personality digest (store holds more). */
-    const val DIGEST_TRAITS_INJECT = 10
+    /** Cap for the admin-taught extras in the personality digest (every trait is always shown). */
     const val SELF_DIGEST_MAX_CHARS = 600
     /** Admin-side full render cap (prompt uses the retrieval-limited render). */
     const val USER_CARD_MAX_CHARS = 600

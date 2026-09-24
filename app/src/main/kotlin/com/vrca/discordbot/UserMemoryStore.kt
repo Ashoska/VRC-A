@@ -275,7 +275,8 @@ object UserMemoryStore {
         // card that already has one is recorded as "also speaks" instead of replacing it.
         // English is the default (never shown), so the learner saying "English" adds nothing.
         val incomingLang = value(delta.optString("language")).take(24)
-            .takeUnless { it.equals("english", true) || it.equals("en", true) }.orEmpty()
+            .takeUnless { it.contains("english", true) || it.equals("en", true) || it.contains("assum", true) ||
+                it.contains("unknown", true) || it.contains("?") }.orEmpty()
         val keepMainLang = cur.language.isNotBlank() && incomingLang.isNotBlank() && !incomingLang.equals(cur.language, true)
         val also = LinkedHashSet<String>().apply {
             addAll(cur.alsoSpeaks); addAll(strList(delta.optJSONArray("alsoSpeaks")).map { value(it) })
@@ -328,6 +329,11 @@ object UserMemoryStore {
                     .distinctBy { it.lowercase() }
                 c.facts.takeLast(8).map { Triple(c.id, c.name, it) } + nicks.map { Triple(c.id, c.name, "goes by $it") }
             }
+
+    /** "alice: from Toronto; owns a cat named Miso" per person — so the learner only adds what's new. */
+    fun knownFactsLine(ctx: Context, ids: Collection<String>, perPerson: Int = 6): String =
+        ids.distinct().mapNotNull { load(ctx, it) }.filter { it.facts.isNotEmpty() && it.name.isNotBlank() }
+            .joinToString("\n") { c -> c.name + ": " + c.facts.takeLast(perPerson).joinToString("; ") { it.trim().trimEnd('.') } }
 
     /** The chat said this stored item is wrong / unwanted: drop the fact, or stop using the nickname. */
     fun forgetItem(ctx: Context, id: String, item: String) {

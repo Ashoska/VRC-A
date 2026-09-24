@@ -16,7 +16,7 @@ import java.util.Locale
  * Fed for free by the learn pass, which already reads EVERY message (replied to or not): each pass
  * adds its one-line "what's going on" summary and the notable/funny moments it saw. Once a day with
  * enough entries is over, one cheap 8B call condenses it into a short digest ([needsDigest] →
- * [setDigest]); small days are read as-is. Days are keyed by the phone's local date.
+ * [setDigest]); small days are read as-is. Days are UTC (+0) dates; times are shown in UTC.
  *
  * Plain SharedPreferences (`vrca_discord_days`), one JSON object per `d_<yyyy-MM-dd>`. Raw entries
  * are dropped once a day is older than [DiscordBotLimits.DAY_RAW_KEEP_DAYS] and has a digest; whole
@@ -31,7 +31,8 @@ object DayLogStore {
     data class Day(val date: LocalDate, val entries: List<Entry>, val digest: String)
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private val zone: ZoneId get() = ZoneId.systemDefault()
+    // Days are UTC (+0) so a "day" is the same for everyone in the server, whatever the phone's zone.
+    private val zone: ZoneId = java.time.ZoneOffset.UTC
     fun dateOf(ms: Long): LocalDate = Instant.ofEpochMilli(ms).atZone(zone).toLocalDate()
     private fun key(d: LocalDate) = PREFIX + d.toString()
 
@@ -127,12 +128,12 @@ object DayLogStore {
         save(ctx, cur.copy(digest = digest.trim().take(DiscordBotLimits.DAY_DIGEST_MAX_CHARS)))
     }
 
-    private val TIME = DateTimeFormatter.ofPattern("h a", Locale.US)
+    private val TIME = DateTimeFormatter.ofPattern("HH:mm", Locale.US)
     private val LABEL = DateTimeFormatter.ofPattern("EEEE MMM d", Locale.US)
     fun label(d: LocalDate, today: LocalDate): String = when (today.toEpochDay() - d.toEpochDay()) {
-        0L -> "Today (${d.format(LABEL)})"
-        1L -> "Yesterday (${d.format(LABEL)})"
-        else -> d.format(LABEL)
+        0L -> "Today (${d.format(LABEL)}, UTC)"
+        1L -> "Yesterday (${d.format(LABEL)}, UTC)"
+        else -> "${today.toEpochDay() - d.toEpochDay()} days ago (${d.format(LABEL)}, UTC)"
     }
 
     /** The day as the digest-writer sees it: every entry with its time and channel. */

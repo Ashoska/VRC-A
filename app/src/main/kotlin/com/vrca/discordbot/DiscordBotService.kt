@@ -96,6 +96,9 @@ class DiscordBotService : Service() {
         private val CALL_ME_RE = Regex("(?i)\\b(just call me|you can call me|call me|i go by|everyone calls me)\\s+([\\p{L}\\p{N}_]{2,32})")
         private val CALL_ME_STOP = setOf("when", "later", "back", "out", "if", "tomorrow", "sometime", "maybe", "that", "a", "an", "the", "it", "him", "her", "anything", "crazy", "whatever")
         private val CALL_ME_NOT_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|never|no more) call(?:ing)? me ([\\p{L}\\p{N}_]{2,32})")
+        private val JOKE_RE = Regex("(?i)\\b(lol+|lmf?ao+|rofl|ha(ha)+|he(he)+|xd+|jk|/j|kidding|just kidding)\\b|😂|🤣|😭|💀|😆|🙃|😜")
+        private val SERIOUS_RE = Regex("(?i)\\b(genuinely|seriously|for real|not joking|no joke|i mean it|please|pls|plz|actually annoying)\\b")
+        private val ENCOURAGE_RE = Regex("(?i)\\b(keep going|keep it up|love (it|this|that)|don'?t stop|never stop|more of this|so good|iconic|canon|lives rent free|we need more)\\b")
         // Someone telling Cardinal to cut something out.
         private val COMPLAINT_RE = Regex("(?i)\\b(stop|drop it|enough|annoying|cringe|got old|getting old|quit|not funny|over it|tired of|shut up about|so done|give it a rest)\\b")
         // A correction, a dispute or a complaint somewhere in a learn batch → correction mode.
@@ -108,6 +111,7 @@ class DiscordBotService : Service() {
         private const val EMOJI_PREFS = "vrca_discord_emoji"
         // Explicit "react to my message with X" request → react, no reply.
         private val REACT_REQ_RE = Regex("(?i)^\\s*(can you |could you |please |pls |plz )?react\\b|react (to )?(this|that|my|the)\\b")
+        private val TRAILING_EMOJI_RE = Regex("(\\s*(:[a-zA-Z0-9_]{2,32}:|<a?:[a-zA-Z0-9_]{2,32}:\\d+>|[\\uD83C-\\uDBFF][\\uDC00-\\uDFFF]|[\\u2600-\\u27BF]\\uFE0F?))+\\s*$")
         private val SHORTCODE_RE = Regex(":([a-zA-Z0-9_]{2,32}):|<a?:([a-zA-Z0-9_]{2,32}):\\d+>")
         private val UNICODE_EMOJI_RE = Regex("[\\uD83C-\\uDBFF][\\uDC00-\\uDFFF]|[\\u2600-\\u27BF\\u2B00-\\u2BFF\\u2190-\\u21FF\\u2900-\\u297F]")
 
@@ -645,7 +649,8 @@ class DiscordBotService : Service() {
 
         when (val res = DiscordBotAi.reply(cfg, model, turns, rc)) {
             is DiscordBotAi.ReplyResult.Ok -> {
-                val outText = EmojiConvert.convert(res.text)
+                val replyText = tameEmoji(ctx.channelId, res.text)
+                val outText = EmojiConvert.convert(replyText)
                 val now = System.currentTimeMillis()
                 if (cfg.shadowMode) {
                     DiscordBotState.log("shadow ↩ ${ctx.authorName}: ${outText.take(60)}")
@@ -658,8 +663,8 @@ class DiscordBotService : Service() {
                     if (out.error == null) {
                         out.messageId?.let { synchronized(recentBotMsgIds) { recentBotMsgIds[it] = ctx.authorId } }
                         lastBotPostMs[ctx.channelId] = now
-                        rememberBotReply(ctx.channelId, res.text)
-                        trace(ctx, "reply", if (model == cfg.model) "70B" else "8B", "reply", outText.take(90))
+                        rememberBotReply(ctx.channelId, replyText)
+                        trace(ctx, "reply", model.substringAfterLast('/').substringBefore("-instruct").take(24), "reply", outText.take(90))
                         learnPending.merge(ctx.channelId, 1, Int::plus)   // its own line is part of what gets learned
                     } else {
                         DiscordBotState.log("Send failed: ${out.error}")
@@ -747,11 +752,13 @@ class DiscordBotService : Service() {
         val humanText = turns.filter { !it.isBot }.joinToString("\n") { it.text }
         val items = if (CORRECTION_RE.containsMatchIn(humanText)) correctionItems(humanText, fresh) else emptyList()
         val stored = items.mapIndexed { i, it -> "[${i + 1}] ${it.second}: ${it.third}" }.joinToString("\n")
-        val obs = DiscordBotAi.observe(cfg, turns, ConversationStore.summary(channelId), stored,
-            PersonalityStore.traitTexts(this, DiscordBotLimits.DIGEST_TRAITS_INJECT))
+        val known = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS)
+        val speakers = fresh.filter { it.authorId != botId }.map { it.authorId }.distinct()
+        val knownPeople = if (items.isEmpty()) UserMemoryStore.knownFactsLine(this, speakers) else ""
+        val obs = DiscordBotAi.observe(cfg, turns, ConversationStore.summary(channelId), stored, known, knownPeople)
         if (obs == null) { learnPending.merge(channelId, taken, Int::plus); return }   // retried with the next batch
         lastLearnedId[channelId] = maxOf(after, fresh.maxOf { it.id.toLongOrNull() ?: 0L })
-        applyObservation(channelId, obs, nameToId, System.currentTimeMillis(), turns, correcting = items.isNotEmpty(), items = items)
+        applyObservation(channelId, obs, nameToId, System.currentTimeMillis(), turns, correcting = items.isNotEmpty(), items = items, known = known)
         DiscordBotState.log("learned $channelId (${turns.size} msgs, ${obs.memDeltas.size} people" +
             (if (stored.isNotBlank()) ", checked corrections" else "") + ")")
         maybeDigestDay()
@@ -803,6 +810,7 @@ class DiscordBotService : Service() {
         channelId: String, obs: DiscordBotAi.Observation, nameToId: Map<String, String>, now: Long,
         turns: List<DiscordBotAi.Turn>, correcting: Boolean = false,
         items: List<Triple<String, String, String>> = emptyList(),
+        known: List<String> = emptyList(),
     ) {
         val globalIndex = UserMemoryStore.nameIndex(this)
         if (obs.summary.isNotBlank()) ConversationStore.updateSummary(this, channelId, obs.summary, now)
@@ -820,7 +828,9 @@ class DiscordBotService : Service() {
         }
         if (dropped.isNotEmpty())
             DiscordBotState.log("learn: skipped ${dropped.size} unsupported fact(s), e.g. \"${dropped.first().take(60)}\"")
-        if (obs.serverEvent.isNotBlank()) ServerMemoryStore.remember(this, obs.serverEvent, now)
+        // Inside jokes: the model's event, or (free) a phrase three or more different people repeated.
+        val event = obs.serverEvent.ifBlank { catchphraseEvent(turns, obs) }
+        if (event.isNotBlank()) ServerMemoryStore.remember(this, event, now)
         if (obs.channelBit.isNotBlank()) ChannelMemoryStore.remember(this, channelId, obs.channelBit, now)
         // Stored items the chat said are wrong / unwanted: a person's fact or nickname is dropped; one of
         // Cardinal's traits is toned down (gone if it was new). Never re-added in the same pass.
@@ -829,10 +839,15 @@ class DiscordBotService : Service() {
         // the small model sometimes marks every stored item "wrong" at once.
         val humanLow = turns.filter { !it.isBot }.joinToString(" ") { it.text }.lowercase()
         val humanWords = groundWords(humanLow)
+        val seriousWords = groundWords(turns.filter { !it.isBot && !isJoking(it.text) }.joinToString(" ") { it.text })
         for (n in obs.wrong.distinct()) {
             val it = items.getOrNull(n - 1) ?: continue
-            val mentioned = if (it.third.startsWith("goes by ")) humanLow.contains(it.third.removePrefix("goes by ").lowercase())
-                else groundWords(it.third).any { w -> w in humanWords }
+            // One of Cardinal's traits needs someone meaning it (teasing / laughing along doesn't count).
+            val mentioned = when {
+                it.third.startsWith("goes by ") -> humanLow.contains(it.third.removePrefix("goes by ").lowercase())
+                it.first.isEmpty() -> groundWords(it.third).any { w -> w in seriousWords }
+                else -> groundWords(it.third).any { w -> w in humanWords }
+            }
             if (!mentioned) continue
             if (it.first.isEmpty()) PersonalityStore.disputeTrait(this, it.third)?.let { t -> disputed.add(t) }
             else UserMemoryStore.forgetItem(this, it.first, it.third)
@@ -872,24 +887,68 @@ class DiscordBotService : Service() {
         // Free backstop: two or more different people complaining about something one of Cardinal's traits
         // is about ("enough birds", "the bird thing got old") tones it down even if the model missed it.
         if (correcting) {
-            val complaints = turns.filter { !it.isBot && COMPLAINT_RE.containsMatchIn(it.text) }
+            val complaints = turns.filter { !it.isBot && COMPLAINT_RE.containsMatchIn(it.text) && !isJoking(it.text) }
+            val fans = turns.filter { !it.isBot && ENCOURAGE_RE.containsMatchIn(it.text) }
             for (t in PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS)) {
                 if (disputed.any { PersonalityStore.isSameTrait(it, t) }) continue
                 val tw = groundWords(t)
                 val who = complaints.filter { c -> groundWords(c.text).any { it in tw } }.map { it.name.lowercase() }.toSet()
-                if (who.size >= 2) PersonalityStore.disputeTrait(this, t)?.let { disputed.add(it) }
+                val cheering = fans.filter { c -> groundWords(c.text).any { it in tw } || c.text.length < 40 }.map { it.name.lowercase() }.toSet() - who
+                if (who.size >= 2 && who.size > cheering.size) PersonalityStore.disputeTrait(this, t)?.let { disputed.add(it) }
             }
         }
         if (obs.wrong.isNotEmpty() || disputed.isNotEmpty())
             DiscordBotState.log("corrected ${obs.wrong.size} stored item(s)" + (if (disputed.isNotEmpty()) ", toned down \"${disputed.first().take(50)}\"" else ""))
+        // A trait needs Cardinal in the batch (he spoke, or people talked to/about him) — otherwise the
+        // small model is describing someone else's joke as his.
+        val cardinalInBatch = turns.any { it.isBot || Regex("(?i)\\bcardinal\\b").containsMatchIn(it.text) }
+        val emojiNames = EmojiConvert.customNames().map { it.lowercase() }.toSet()
         val newTrait = obs.selfTrait.takeIf { t ->
-            t.isNotBlank() && disputed.none { PersonalityStore.isSameTrait(t, it) }
+            cardinalInBatch && t.isNotBlank() && disputed.none { PersonalityStore.isSameTrait(t, it) } &&
+                t.trim(':', ' ').lowercase() !in emojiNames   // "clueless" from :clueless: isn't a personality
         }
-        if (newTrait != null || obs.selfMood.isNotBlank()) {
-            PersonalityStore.noteSelf(this, newTrait, null, obs.selfMood.ifBlank { null })
+        // A trait that evolved replaces the one it came from (the learner names the old one in self.replaces).
+        val replaced = newTrait?.let { nt ->
+            val r = obs.selfReplaces.trim().trimEnd('.')
+            if (r.length < 3) return@let null
+            // The learner copies the old trait's text; match it to a known trait (exact or same trait reworded).
+            val old = known.firstOrNull { it.equals(r, true) } ?: known.firstOrNull { PersonalityStore.isSameTrait(it, r) }
+            // A "new" trait that's just another known trait repeated isn't a change.
+            val repeat = known.any { k -> !k.equals(old, true) && PersonalityStore.isSameTrait(k, nt) }
+            old?.takeIf { !repeat && !PersonalityStore.isSameTrait(it, nt) && PersonalityStore.replaceTrait(this, it, nt) }
+        }
+        if (replaced != null) DiscordBotState.log("self: \"${replaced.take(40)}\" → \"${newTrait.take(40)}\"")
+        if ((newTrait != null && replaced == null) || obs.selfMood.isNotBlank()) {
+            PersonalityStore.noteSelf(this, newTrait.takeIf { replaced == null }, null, obs.selfMood.ifBlank { null })
             DiscordBotState.setMood(PersonalityStore.mood(this))
         }
     }
+
+    /**
+     * A running joke the room made while nobody tagged it: a two-word phrase ("fork soup") said by three or
+     * more different people in this batch. Described with the moment/summary that mentions it. Free.
+     */
+    private fun catchphraseEvent(turns: List<DiscordBotAi.Turn>, obs: DiscordBotAi.Observation): String {
+        val speakers = HashMap<String, MutableSet<String>>()
+        for (t in turns) {
+            if (t.isBot) continue
+            val w = Regex("[\\p{L}\\p{N}']+").findAll(t.text.lowercase()).map { it.value }.toList()
+            for (i in 0 until w.size - 1) {
+                val a = w[i]; val b = w[i + 1]
+                if (a.length < 3 || b.length < 3 || a in PHRASE_STOP || b in PHRASE_STOP) continue
+                speakers.getOrPut("$a $b") { HashSet() }.add(t.name.lowercase())
+            }
+        }
+        val (phrase, who) = speakers.entries.filter { it.value.size >= 3 }.maxByOrNull { it.value.size }?.toPair() ?: return ""
+        val words = phrase.split(' ')
+        val describe = (obs.moments + listOf(obs.summary)).firstOrNull { d -> words.all { d.lowercase().contains(it) } }
+        return (describe ?: "\"$phrase\" — a running joke here").trim().take(160).also {
+            DiscordBotState.log("inside joke: \"$phrase\" (${who.size} people)")
+        }
+    }
+    private val PHRASE_STOP = setOf("the", "and", "you", "your", "that", "this", "what", "just", "like", "lol", "lmao",
+        "was", "are", "for", "with", "have", "not", "but", "its", "it's", "i'm", "can", "all", "get", "got", "yeah",
+        "who", "how", "why", "now", "his", "her", "him", "she", "they", "them", "one", "out", "too", "any", "cardinal")
 
     /**
      * Keep only what the chat actually supports. A learned fact must mostly use words that were said
@@ -1093,7 +1152,7 @@ class DiscordBotService : Service() {
                 ConversationStore.freshSummary(ctx.channelId, now, DiscordBotLimits.CONVO_GAP_MS) else "",
             olderBotLines = older,
             ownLinesVisible = visible.isNotEmpty(),
-            emojiHint = emojiHint(),
+            emojiHint = emojiHint(built.keywords),
             langHint = detectLang(ctx.userText),
             namesRule = answering.hasNick || others.any { it.hasNick },
             recall = built.recall || built.dayAsk != null,
@@ -1222,6 +1281,21 @@ class DiscordBotService : Service() {
         return (base * (1.0 + boost / 20.0)).toInt().coerceIn(0, 100)
     }
 
+    /**
+     * People don't end every message with an emoji. When Cardinal already used a custom emoji in 2 of his
+     * last 3 messages here — or would repeat the same one — a TRAILING emoji is dropped from this reply
+     * (mid-sentence ones stay). Free; emojis remain available whenever they're not overused.
+     */
+    private fun tameEmoji(channelId: String, text: String): String {
+        val m = TRAILING_EMOJI_RE.find(text) ?: return text
+        val recent = recentBotReplies[channelId]?.let { synchronized(it) { it.toList() } }.orEmpty().takeLast(3)
+        val used = recent.count { SHORTCODE_RE.containsMatchIn(it) || UNICODE_EMOJI_RE.containsMatchIn(it) }
+        val same = recent.any { it.contains(m.value.trim()) }
+        if (used < 2 && !same) return text
+        val cut = text.substring(0, m.range.first).trimEnd()
+        return cut.ifBlank { text }
+    }
+
     private fun rememberBotReply(channelId: String, text: String) {
         val dq = recentBotReplies.getOrPut(channelId) { ArrayDeque() }
         synchronized(dq) {
@@ -1246,8 +1320,19 @@ class DiscordBotService : Service() {
         return ""   // Latin script → let Cardinal match naturally (English or the person's language)
     }
 
-    private fun emojiHint(): String =
-        EmojiConvert.topNames(DiscordBotLimits.EMOJI_HINT_MAX).joinToString(", ") { ":$it:" }
+    /**
+     * The server's most-used custom emojis, plus any whose name matches what's being talked about
+     * (":pizza_cat:" when pizza comes up) — so every emoji is reachable without paying for all of them
+     * on every reply. Unicode emojis are always available.
+     */
+    private fun emojiHint(keywords: Set<String>): String {
+        val top = EmojiConvert.topNames(DiscordBotLimits.EMOJI_HINT_MAX)
+        val want = keywords.filter { it.length >= 3 }.map { discordStem(it.lowercase()) }.toSet()
+        val topical = if (want.isEmpty()) emptyList() else EmojiConvert.customNames().filter { n ->
+            n !in top && n.lowercase().split('_', '-').plus(n.lowercase()).any { p -> p.length >= 3 && discordStem(p) in want }
+        }.take(DiscordBotLimits.EMOJI_TOPICAL_MAX)
+        return (top + topical).joinToString(", ") { ":$it:" }
+    }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -1255,7 +1340,14 @@ class DiscordBotService : Service() {
         "lol", "lmao", "lmfao", "lel", "kek", "ok", "kk", "k", "nice", "fr", "real",
         "bruh", "true", "yep", "yup", "nah", "w", "l", "based", "same", "mood"
     )
+    /**
+     * Banter, not a real request: laughing/teasing markers ("shut up lmao", "stop 😂", "you're so cringe
+     * lol") with nothing that makes it serious ("genuinely", "for real", "please", "i mean it").
+     */
+    private fun isJoking(text: String): Boolean = JOKE_RE.containsMatchIn(text) && !SERIOUS_RE.containsMatchIn(text)
+
     private fun isStopRequest(text: String): Boolean {
+        if (isJoking(text)) return false
         val t = text.lowercase().replace(Regex("[^\\p{L}\\p{N}'’ ]"), " ").replace(Regex("\\s+"), " ").trim()
         if (t.isEmpty()) return false
         if (STOP_WHOLE_RE.matches(t)) return true

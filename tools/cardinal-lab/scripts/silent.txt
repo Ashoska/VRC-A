@@ -1,0 +1,27 @@
+# Memory forms while Cardinal says NOTHING: an inside joke, a channel running bit and the day log all
+# come from chat he never replied to (ambient off, no mentions), then he's asked about them.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+[general]
+bob: guys i just ate soup with a fork for 20 minutes before realising
+alice: BOB
+carol: the fork soup incident, never forget
+finn: fork soup bob lmao
+dave: someone make that a server emoji
+alice: bob is now legally the fork soup guy
+bob: i will never live this down
+carol: every time bob eats anything now: "fork or spoon bob?"
+finn: fork soup is canon now
+dave: ok real talk who's coming to movie night friday
+alice: me, we're watching shrek 2
+carol: shrek 2 is peak cinema
+bob: i'll bring snacks. and a spoon.
+finn: LMAO he learned
+> sleep 70000
+> wait
+> expect server contains (?i)(fork|soup)
+> expect day 0 contains (?i)(fork|soup)
+dave: @Cardinal did you see what happened with bob earlier
+> expect contains (?i)(fork|soup)
+ember: @Cardinal whats the fork soup thing everyone keeps saying
+> expect contains (?i)(bob|fork|soup)

@@ -1,0 +1,36 @@
+# Paraphrase pile (seen on a real card): one topic reworded many times. After a learn pass touching the
+# person, the pile is merged — but genuinely different facts (and other topics) must survive.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+> teach card alice studies AI and machine learning
+> teach card alice can create custom AI engines
+> teach card alice can test and train AI models
+> teach card alice has a lab where she works on AI projects
+> teach card alice can tweak AI models for accuracy
+> teach card alice uses a custom AI engine
+> teach card alice owns a black cat named Miso
+> teach card alice hosts the Saturday VRChat karaoke events
+> teach card alice lives in Toronto
+> teach card bob hosts VRChat movie nights
+> teach card bob made his own VRChat avatar
+> teach card bob has 3000 hours in VRChat
+> teach card bob is a VRChat group moderator
+[general]
+alice: finally home, long day at the lab
+bob: welcome back, how's the ai stuff going
+alice: slowly lol, models are being dramatic today
+carol: same energy as my cat
+alice: miso knocked my coffee over this morning too
+bob: movie night friday btw, i'm hosting in vrchat again
+carol: i'm in
+alice: me too
+> sleep 70000
+> wait
+> expect card alice contains (?i)miso
+> expect card alice contains (?i)toronto
+> expect card alice contains (?i)karaoke
+> expect card alice contains (?i)\bAI\b
+> expect card bob contains (?i)movie
+> expect card bob contains (?i)3000
+> expect card bob contains (?i)moderator
+> expect card bob contains (?i)avatar
