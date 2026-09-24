@@ -77,6 +77,11 @@ object DiscordBotLimits {
     /** After asking the director about a channel, don't ask again for this long (it's asked on a
      *  random share of messages; without a gap a busy room paid for a call every few messages). */
     const val DIRECTOR_MIN_GAP_MS = 20_000L
+    /** After Cardinal replies to someone, their next messages (no @, no reply) may still be to him for
+     *  this long — each exchange renews it. Only people inside this window are ever checked. */
+    const val FOLLOW_WINDOW_MS = 3 * 60_000L
+    /** A follow-up check that says "not to Cardinal" this many times in a row ends that conversation. */
+    const val FOLLOW_MISSES_TO_END = 2
     /** An unprompted (ambient) emoji reaction at most this often per channel. */
     const val AMBIENT_REACT_COOLDOWN_MS = 90_000L
     /** When told to stop, back off in that channel for this long. */

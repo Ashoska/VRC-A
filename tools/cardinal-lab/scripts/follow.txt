@@ -1,0 +1,43 @@
+# Conversation following: once Cardinal is talking with someone, their next messages reach him without an
+# @ or a reply — but only while that conversation is live, only for them, never a line meant for someone
+# else, and for several people at once. People he isn't talking with are never checked (no model call).
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+[general]
+alice: @Cardinal what's the best pizza topping
+> expect reply
+alice !wait: ok but what about pineapple
+> expect reply
+alice !wait: lol true
+> expect respond
+bob: hey alice you coming to movie night on friday?
+alice !wait: yeah i'll be there bob, bringing snacks
+> expect quiet
+# two people talking to him at once
+carol: @Cardinal settle this, cats or dogs
+> expect reply
+dave: @Cardinal and what's your take on cheese
+> expect reply
+carol !wait: that's so cowardly, just pick one
+> expect reply
+dave !wait: cheese is elite though right
+> expect reply
+# someone else chimes in, then they carry on with him (the unclear case: one cheap check)
+frank: @Cardinal best game of all time?
+> expect reply
+gina: lmao here we go
+frank !wait: wait so you'd really pick that over minecraft?
+> expect reply
+# someone he isn't talking with
+erin !wait: that episode last night was so good
+> expect quiet
+# a short reaction to his answer is a reaction, not a greeting
+ghost: @Cardinal what's the newest marvel movie you know about
+> expect reply
+ghost ^bot: ohh shit
+> expect respond
+> expect not-contains (?i)^\W*(yo+|hey+|sup|what'?s (good|up)|hi+)\b
+# the conversation window closes after a few quiet minutes
+> sleep 200000
+carol !wait: anyway what do you think about the new map
+> expect quiet

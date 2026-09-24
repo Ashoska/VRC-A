@@ -63,7 +63,7 @@ into TRIM/CHEAP/SILENT for the rest of the UTC day). `--cap` is a hard per-run c
 |---|---|
 | `--live` | real Workers AI (needs the env vars above) |
 | `--cap N` | hard LIVE neuron ceiling for the run (default 1500) |
-| `--remap A=B,...` | swap a model at the proxy: `@cf/meta/llama-3.3-70b-instruct-fp8-fast=@cf/google/gemma-4-26b-a4b-it`, or by role: `observe=@cf/meta/llama-3.1-8b-instruct-fp8`, `director=...`, `reply=...` |
+| `--remap A=B,...` | swap a model at the proxy: `@cf/meta/llama-3.3-70b-instruct-fp8-fast=@cf/qwen/...`, or by role: `observe=@cf/meta/llama-3.1-8b-instruct-fp8`, `director=...`, `reply=...`. For a **thinking** model (gemma-4, qwen3) use `--set model=` instead: the bot only turns thinking off for a model it knows it's calling, so a remapped one spends its tokens thinking |
 | `--state FILE` | start from a saved memory (`lab-runs/<run>/state-final.json`) |
 | `--set ambient=N` / `cooldown=` / `context=` / `model=` / `shadow=1` / `spent=N` | bot config (same knobs as the admin tab) |
 | `--set gap=MS` / `quiet=MS` / `idle=MIN` | pacing between non-waited lines / settle quiet window / interactive idle exit |
@@ -80,6 +80,7 @@ into TRIM/CHEAP/SILENT for the rest of the UTC day). `--cap` is a hard per-run c
 [general]                         switch channel
 alice: hey @Cardinal what's up    a message. @Cardinal = real mention, @bob and #media resolve too
 alice ^bot: lol no                reply to Cardinal's last message here (^bob = bob's last)
+~rtl84: hi                        a user with no display name (Discord sends global_name: null)
 alice +img: look at this          attach an image          (!wait / !nowait force waiting)
 > wait                            let the bot finish (incl. background learning)
 > sleep 3000 · > react carol bot 😂 · > checkpoint name · > note text
@@ -90,7 +91,8 @@ alice +img: look at this          attach an image          (!wait / !nowait forc
 > teach card|nick|prefer|rel|lang <name> <text>   seed a user card
 > teach server <text> · > teach bit <channel> <text> · > teach summary <text>
 > teach day -1 21 general moment|topic <text>     seed the day log (days back, hour, channel, kind)
-> expect reply | no-reply | react | contains <regex> | not-contains <regex>
+> expect reply | no-reply | react | respond (reply or react) | quiet (neither) | contains <regex> | not-contains <regex>
+> expect cards contains|not-contains <regex>       (every memory card's name, e.g. no card called "null")
 > expect card <name> contains|not-contains <regex> · self contains|not-contains <regex> · server|summary contains <regex>
 > expect day -1 contains|not-contains <regex>       (that day's recap + notes)
 > expect status CONNECTED|RECONNECTING|FAILED|...
@@ -124,6 +126,12 @@ Addressed lines (mention or `^bot`) wait until the bot has decided and gone quie
 | `traits.txt` | personality: a bit the room gives Cardinal becomes a trait; odd seeded traits (married to Shrek, bird conspiracy, 💀) change replies without taking over; a trait the room pushes back on is dropped (LIVE) |
 | `corrections.txt` | people's facts change: a move, a disputed job, "stop calling me X" — and an unrelated fact must survive (LIVE) |
 | `lifecycle.txt` | service restart + server-side drop: stale-socket callbacks ignored, RESUME works |
+| `basics.txt` | everyday asks: native-script Japanese, "are you a bot", maths, no invented birthday, a haiku, Spanish/French/German answered in kind, an English line with a foreign phrase stays English (LIVE) |
+| `silent.txt` | memory forms while Cardinal says nothing (ambient off): an inside joke, the day log, then he's asked about it (LIVE) |
+| `routes.txt` | a relationship trait evolves with the room (poly, then a breakup) instead of refusing; joking complaints don't silence him (LIVE) |
+| `pile.txt` | paraphrased facts about one topic are merged into 1-2 notes that keep every detail (LIVE) |
+| `edge-replies.txt` | called by name without an @, talked ABOUT by name, nickname lookup, an unknown person, prompt injection, two questions at once, a new person, "ping everyone", emoji-only ping, stop then ask (LIVE) |
+| `edge-learning.txt` | from a real chat: a joke age, what someone's doing right now, slang aimed at someone else, a reworded fact, family facts, what-ifs, sarcasm, a troll, a user with no display name (LIVE) |
 | `gateway-codes.txt` | server-initiated close resumes in ~1 s; a 4014 intents rejection stops with FAILED + reason |
 
 ## Production observability

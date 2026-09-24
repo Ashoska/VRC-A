@@ -19,13 +19,14 @@ import org.json.JSONObject
  * alice ^bot: lol no                    (reply to Cardinal's last message here; ^bob = bob's last)
  * alice +img: look at this              (attach an image)   · !wait / !nowait force waiting
  * > wait | > sleep 3000 | > react carol bot 😂 | > checkpoint name | > drop-gateway | > note text
- * > expect reply | no-reply | react | contains <re> | not-contains <re>
+ * > expect reply | no-reply | react | respond (reply or react) | quiet (neither) | contains <re> | not-contains <re>
+ * > expect cards contains|not-contains <re>   (all memory card names)
  * > expect card <name> contains|not-contains <re> | server contains <re> | self contains <re> | summary contains <re>
  * ```
  * Addressed lines (mention / ^bot) wait for the bot to settle; other lines just pace by the gap.
  */
 internal class LabScript(private val d: LabDriver) {
-    private val msgRe = Regex("^([A-Za-z0-9_.-]+)((?:\\s+[\\^+!][^\\s:]*)*)\\s*:\\s?(.*)$")
+    private val msgRe = Regex("^([A-Za-z0-9_.~-]+)((?:\\s+[\\^+!][^\\s:]*)*)\\s*:\\s?(.*)$")
     private var gapMs = d.cfg.gapMs
     private var lastHumanAt = 0L
     private var lastHumanAuthor: String? = null
@@ -196,6 +197,15 @@ internal class LabScript(private val d: LabDriver) {
         val (pass, detail) = when (parts[0]) {
             "reply" -> (replies.isNotEmpty()) to (replies.lastOrNull() ?: "no reply")
             "no-reply" -> (replies.isEmpty()) to (replies.lastOrNull() ?: "silent")
+            "respond" -> (replies.isNotEmpty() || reacts.isNotEmpty()) to (replies.lastOrNull() ?: reacts.joinToString { it.data.optString("emoji") }.ifBlank { "nothing" })
+            "quiet" -> (replies.isEmpty() && reacts.isEmpty()) to (replies.lastOrNull() ?: reacts.joinToString { it.data.optString("emoji") }.ifBlank { "nothing" })
+            "cards" -> {
+                val all = UserMemoryStore.list(d.ctx).joinToString(" | ") { it.name }
+                val body = spec.removePrefix("cards").trim()
+                val neg = body.startsWith("not-contains")
+                val hit = re(body.removePrefix("not-contains").removePrefix("contains").trim()).containsMatchIn(all)
+                (if (neg) !hit else hit) to all.take(200)
+            }
             "react" -> (reacts.isNotEmpty()) to (reacts.joinToString { it.data.optString("emoji") }.ifBlank { "no react" })
             "contains" -> replies.any { re(spec.removePrefix("contains").trim()).containsMatchIn(it) } to (replies.lastOrNull() ?: "no reply")
             "not-contains" -> replies.none { re(spec.removePrefix("not-contains").trim()).containsMatchIn(it) } to (replies.lastOrNull() ?: "no reply")

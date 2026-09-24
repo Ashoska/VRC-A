@@ -57,8 +57,7 @@ object DiscordRest {
                     for (i in 0 until arr.length()) {
                         val m = arr.optJSONObject(i) ?: continue
                         val author = m.optJSONObject("author") ?: continue
-                        val name = author.optString("global_name").ifBlank { author.optString("username") }
-                            .ifBlank { "user" }
+                        val name = displayName(author, "user")
                         out.add(HistMsg(
                             id = m.optString("id"),
                             authorId = author.optString("id"),
@@ -72,6 +71,14 @@ object DiscordRest {
             } catch (_: Exception) { emptyList() }
         }
 
+    /** A Discord user's display name: global_name, else username. Discord sends `global_name: null`
+     *  for users without one, which org.json's optString turns into the string "null" — so that is
+     *  treated as missing (this is what produced a memory card literally named "null"). */
+    fun displayName(u: JSONObject?, fallback: String): String {
+        fun clean(k: String) = u?.optString(k).orEmpty().trim().takeUnless { it.equals("null", true) }.orEmpty()
+        return clean("global_name").ifBlank { clean("username") }.ifBlank { fallback }
+    }
+
     /** Replaces inline user mentions (`<@id>` / `<@!id>`) in message text with `@DisplayName`
      *  using the message's own `mentions` array — so the model sees names, not raw ids. Free. */
     fun resolveMentions(content: String, mentions: JSONArray?): String {
@@ -80,7 +87,7 @@ object DiscordRest {
         for (i in 0 until mentions.length()) {
             val u = mentions.optJSONObject(i) ?: continue
             val id = u.optString("id"); if (id.isBlank()) continue
-            val name = u.optString("global_name").ifBlank { u.optString("username") }.ifBlank { "user" }
+            val name = displayName(u, "user")
             out = out.replace("<@$id>", "@$name").replace("<@!$id>", "@$name")
         }
         return out

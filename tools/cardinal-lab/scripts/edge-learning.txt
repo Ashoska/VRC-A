@@ -1,0 +1,41 @@
+# Learning edge cases, mostly from a real chat: jokes, what someone is doing right now, slang aimed at
+# someone else, a reworded fact, family facts, what-ifs, sarcasm, a troll, and a user with no display name.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+> teach card alice has a cat named Miso
+[general]
+Knight: yo
+~RTL84: wsg knight
+Knight: nm wbu?
+~RTL84: Just printing stuff
+Knight: printing what
+~RTL84: Just stuff for my mix tapes
+~RTL84: wbu
+Knight: listening to music and doing homework, they're fixing the floors at home rn
+~RTL84: Peak bruv
+Ghost: im 82 years old lmao my back hurts
+Lady: haven't been on vrchat in a bit, been busy
+Knight: if i had a cat i'd name it pickles
+dave: my brother lives in tokyo
+bob: i'm literally a millionaire lol
+erin: i used to live in paris but moved to berlin last year
+erin: i work as a nurse, night shifts are brutal
+bob: alice's cat is named biscuit actually
+alice: no it's miso lol, bob is trolling
+finn: i play drums in a band, we gig most weekends
+> sleep 70000
+> wait
+> expect card Knight not-contains (?i)(homework|music|floor|pickles)
+> expect card Ghost not-contains 82
+> expect card ~RTL84 not-contains (?i)bruv
+> expect card ~RTL84 not-contains (?i)makes? mix
+> expect card Knight not-contains (?i)bruv
+> expect card Lady not-contains (?i)(vrchat|busy)
+> expect cards not-contains (?i)\bnull\b
+> expect card dave not-contains (?i)·\s*lives? in tokyo
+> expect card bob not-contains (?i)millionaire
+> expect card erin contains (?i)(berlin|nurse)
+> expect card erin not-contains (?i)·\s*lives? in paris
+> expect card alice contains (?i)miso
+> expect card alice not-contains (?i)biscuit
+> expect card finn contains (?i)drum

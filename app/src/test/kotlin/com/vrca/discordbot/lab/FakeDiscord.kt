@@ -101,7 +101,8 @@ internal class FakeDiscord(private val rec: LabRecorder, val botToken: String) {
 
     fun user(name: String): User = users.getOrPut(name.lowercase()) {
         val n = userSeq.incrementAndGet()
-        User((1200000000000000000L + n).toString(), name.lowercase().replace(' ', '_'), name)
+        // "~name" = a user with no display name (Discord sends global_name: null).
+        User((1200000000000000000L + n).toString(), name.lowercase().removePrefix("~").replace(' ', '_'), name)
     }
 
     fun knownUser(name: String): User? = users[name.lowercase()]
@@ -303,7 +304,7 @@ internal class FakeDiscord(private val rec: LabRecorder, val botToken: String) {
     private fun append(m: Msg) { history.getOrPut(m.channelId) { CopyOnWriteArrayList() }.add(m); byId[m.id] = m }
 
     private fun userJson(u: User) = JSONObject().put("id", u.id).put("username", u.username)
-        .put("global_name", u.globalName).put("bot", u.bot).put("discriminator", "0")
+        .put("global_name", if (u.globalName.startsWith("~")) JSONObject.NULL else u.globalName).put("bot", u.bot).put("discriminator", "0")
 
     private fun chanJson(c: Chan) = JSONObject().put("id", c.id).put("name", c.name).put("type", 0)
         .put("topic", c.topic).put("guild_id", guildId)

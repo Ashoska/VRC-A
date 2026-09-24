@@ -129,13 +129,16 @@ object DiscordBotAi {
         val recall: Boolean,         // they asked what Cardinal knows → answer-from-memory rule
         val shortHint: Boolean,
         val dayLog: String = "",     // "what happened <day>?" → that day's log/recap
+        val aboutSelf: Boolean = false,  // they're asking about Cardinal himself (his job/role/what he's known for)
+        val reactingToYou: Boolean = false, // a short reaction ("ohh shit", "no way") to what Cardinal just said
     )
 
     suspend fun reply(cfg: DiscordBotStore.Config, model: String, turns: List<Turn>, c: ReplyCtx): ReplyResult {
         val sys = buildString {
             append(CORE)
             if (c.selfDigest.isNotBlank()) append("\n\n[You] ").append(c.selfDigest)
-                .append(" Your quirks come out when they fit the moment, not in every message, and can evolve if the room steers them somewhere fun. Asked about yourself, name the real ones above.")
+                .append(" Your quirks come out when they fit the moment, not in every message, and can evolve: when the room pushes a fun twist on one of your bits, you usually play along. Asked about yourself, name the real ones above.")
+                .append(if (c.aboutSelf) " They're asking about you right now: say your role or quirk plainly (its actual name), then add flavour." else "")
             if (c.channelInfo.isNotBlank()) append("\n\n[Channel] ").append(c.channelInfo)
             // Who he's talking to first, then background knowledge, then rules.
             if (c.answering.isNotBlank()) {
@@ -149,7 +152,7 @@ object DiscordBotAi {
             if (c.crossRef.isNotBlank()) append("\n\n[Another channel they mentioned]\n").append(c.crossRef)
             if (c.dayLog.isNotBlank()) append("\n\n[What happened, from your notes — other people's doings unless it says Cardinal]\n").append(c.dayLog)
             if (c.namesRule) append("\n\n[Names] Use one name per person; never swap nicknames between people.")
-            if (c.recall) append("\n\n[Memory question] Answer from what's above; if there's nothing, say so. Don't invent.")
+            if (c.recall) append("\n\n[Memory question] Answer from what's above with the specifics (who, what, the details), not a vague 'yeah I saw'. If there's nothing, say so. Don't invent.")
             if (c.langHint.isNotBlank()) append("\n\n[Language] Reply in ").append(c.langHint).append(", native script.")
             if (c.emojiHint.isNotBlank())
                 append("\n\n[Emojis] Optional, written :name: — ").append(c.emojiHint)
@@ -157,6 +160,7 @@ object DiscordBotAi {
             if (c.olderBotLines.isNotEmpty())
                 append("\n\n[Don't repeat] Recently said: ").append(c.olderBotLines.joinToString(" / ") { "\"${it.take(50)}\"" })
             else if (c.ownLinesVisible) append("\n\n[Don't repeat] your earlier lines.")
+            if (c.reactingToYou) append("\n\nTheir message is a reaction to what you just said (surprise, agreement, a laugh), not a greeting: respond to that.")
             if (c.shortHint) append("\n\nKeep it to one short line.")
             append("\n\nReply with just your message, no name prefix.")
         }
@@ -195,16 +199,32 @@ object DiscordBotAi {
      * The cheap DIRECTOR — an ambient reply/react/ignore call. He's a chatty regular, so lean toward
      * joining in unless it's a genuine private 1:1 or pure noise. Null on error (caller stays quiet).
      */
-    suspend fun director(cfg: DiscordBotStore.Config, turns: List<Turn>, channelInfo: String = ""): Plan? {
+    suspend fun director(
+        cfg: DiscordBotStore.Config, turns: List<Turn>, channelInfo: String = "", named: Boolean = false,
+        followWith: String = "",
+    ): Plan? {
         val transcript = mergeTurns(turns).takeLast(8).joinToString("\n") {
             if (it.isBot) "Cardinal: ${it.text}" else "${it.name}: ${it.text}"
+        }
+        // Follow-up mode: someone Cardinal was just talking with wrote again without @-ing him.
+        if (followWith.isNotBlank()) {
+            val sys = "Cardinal (a member of this Discord) was just talking with $followWith. Is $followWith's LAST message still " +
+                "to Cardinal (answering or asking him, reacting to what he said, carrying on that topic with him), or to someone " +
+                "else / the room? Output only JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<emoji or empty>\"}. " +
+                "To Cardinal: reply (react if it's only 'lol'/'true'/an emoji). Answering someone else's question, or naming someone else, means it's to them: ignore. To the room: ignore."
+            val messages = JSONArray().put(obj("system", sys)).put(obj("user", "RECENT CHAT:\n$transcript"))
+            return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 80, DiscordBotLimits.DIRECTOR_TEMPERATURE)) {
+                is Result.Ok -> parsePlan(r.text) ?: run { logIssue("Follow-up check", "unreadable answer: ${r.text.take(60)}"); null }
+                is Result.Error -> { logIssue("Follow-up check", r.message); null }
+            }
         }
         val sys =
             "Decide whether Cardinal, a chatty, sassy member of this Discord, joins in after the LAST message. " +
             (if (channelInfo.isNotBlank()) "Channel: $channelInfo. " else "") +
             "Output only JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<emoji or empty>\"}. " +
             "Reply to add a joke, an opinion or an answer; react to a low-value 'lol'; ignore private 1:1 talk or noise. " +
-            "In an active room lean reply/react."
+            "In an active room lean reply/react." +
+            (if (named) " The last message talks about Cardinal by name: answer it or react (a comeback to a roast, thanks for a compliment), ignore only if it's clearly not meant to reach him." else "")
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", "RECENT CHAT:\n$transcript"))
         return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 80, DiscordBotLimits.DIRECTOR_TEMPERATURE)) {
             is Result.Ok -> parsePlan(r.text) ?: run { logIssue("Director", "unreadable answer: ${r.text.take(60)}"); null }
@@ -362,7 +382,7 @@ object DiscordBotAi {
             append("Only list people you learned something NEW and lasting about. A fact must be said or clearly shown in THIS chat ")
             append("(a question someone asks or a joke isn't a fact about them): ")
             append("never guess, and never reuse wording from these instructions. Lasting means who someone is (hobbies, games, work, ")
-            append("where they're from, pets, tastes). Not lasting: what they just said or did (a one-off event like a burnt toaster goes in moments, not facts), what they think of someone else, anything about using Cardinal or this app, ")
+            append("where they're from, pets, tastes), in the words they used (\"printing stuff for my mix tapes\" is not \"makes mix tapes\"). Not lasting: what they're doing right now (homework, music, chores), jokes and what-ifs (\"i'm 82 lol\"), what they just said or did (a one-off event like a burnt toaster goes in moments, not facts), things about their family or friends, what they think of someone else, anything about using Cardinal or this app, ")
             append("their name. Keep each person's info on that person; Cardinal's own quirks go only in self, never in people. ")
             append("Never record hateful notes about groups or jokes about a real person's death or crimes.")
             if (selfTraits.isNotEmpty() && !fix)
@@ -429,23 +449,29 @@ object DiscordBotAi {
                     .map { it.trim().replace(Regex("(?i)^(he'?s|he is|he|cardinal is|cardinal)\\s+"), "") }
                     .firstOrNull { it.length in 3..80 }
             }.orEmpty()
+            fun str(v: String?) = v?.trim().orEmpty().takeUnless { PLACEHOLDER.matches(it) }.orEmpty()
             Observation(
-                summary = o.optString("summary").trim().take(DiscordBotLimits.SUMMARY_MAX_CHARS),
+                summary = str(o.optString("summary")).take(DiscordBotLimits.SUMMARY_MAX_CHARS),
                 memDeltas = others,
-                serverEvent = o.optString("event").trim(),
-                channelBit = o.optString("channelBit").trim(),
+                serverEvent = str(o.optString("event")),
+                channelBit = str(o.optString("channelBit")),
                 // A bare number/"none" isn't a trait (the small model sometimes answers with a list index).
                 selfTrait = o.optJSONObject("self")?.optString("trait")?.trim().orEmpty()
-                    .takeUnless { it.all { c -> c.isDigit() } || it.equals("none", true) || it.equals("null", true) }
+                    .takeUnless { it.all { c -> c.isDigit() } || PLACEHOLDER.matches(it) }
                     .orEmpty().ifBlank { salvaged },
-                selfMood = o.optJSONObject("self")?.optString("mood")?.trim().orEmpty(),
-                moments = strList(o.optJSONArray("moments")).filter { it.split(' ').size >= 3 }.take(2),
+                selfMood = str(o.optJSONObject("self")?.optString("mood")),
+                // "a; b" is two moments (each is checked against the chat on its own).
+                moments = strList(o.optJSONArray("moments")).flatMap { it.split(';') }.map { it.trim() }
+                    .filter { !PLACEHOLDER.matches(it) && it.split(' ').size >= 3 }.take(3),
                 selfReplaces = o.optJSONObject("self")?.optString("replaces")?.trim().orEmpty(),
                 wrong = o.optJSONArray("wrong")?.let { a -> (0 until a.length()).mapNotNull {
                     a.opt(it)?.toString()?.let { v -> Regex("\\d+").find(v)?.value?.toIntOrNull() } } }.orEmpty(),
             )
         }
     } catch (_: Exception) { null }
+
+    // "[none]", "none", "n/a", "-" — the small model's way of saying there's nothing.
+    private val PLACEHOLDER = Regex("(?i)^\\W*(none|null|nil|n/?a|nothing|no|empty|unknown|not applicable|no (moments?|event|mood|trait))?\\W*$")
 
     private fun obj(role: String, content: String) = JSONObject().put("role", role).put("content", content)
 
