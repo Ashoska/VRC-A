@@ -1,0 +1,61 @@
+# Seed a lived-in memory (what months of chat would produce), then trigger replies so every prompt
+# section is populated: personality digest, people cards (incl. a recall), server culture, a channel
+# bit, the rolling summary, a cross-channel pull, an image cue and a Japanese turn.
+# DRY is enough for this one — it's about prompt SIZE and STRUCTURE.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+@channel media pics, clips, screenshots
+> teach mood amused and a little sleepy
+> teach self roasts people affectionately
+> teach self hates pineapple on pizza jokes getting old
+> teach self loves cats more than people
+> teach self pretends not to care but always shows up
+> teach self thinks beat saber is cardio disguised as fun
+> teach self sassy
+> teach self playful
+> teach self dry humor
+> teach self night owl energy
+> teach self calls out bad takes
+> teach card alice owns a black cat named Miso
+> teach card alice from Toronto, Canada
+> teach card alice plays Beat Saber on Expert+
+> teach card alice hosts the Saturday VRChat events
+> teach card alice likes pineapple on pizza
+> teach nick alice ali
+> teach rel alice server regular, basically runs events
+> teach card bob plays Valorant
+> teach card bob lives in Australia
+> teach card bob night owl
+> teach card carol avatar artist, makes her own avatars
+> teach card carol her cat destroys expensive things
+> teach card carol learning Japanese
+> teach card ember speaks Japanese, lives in Osaka
+> teach lang ember Japanese
+> teach card finn meme lord of the server
+> teach card finn hit a ceiling fan playing Beat Saber
+> teach server the ceiling fan incident — finn destroyed a fan playing beat saber
+> teach server "cursed halloween" costume event every October, hosted by alice
+> teach server the black cat world is the unofficial server hangout
+> teach server the great pineapple pizza war of the server
+> teach server bob always says he'll join and then falls asleep
+> teach bit general posting a pic in #general gets roasted about the hair physics
+> teach summary alice and bob were arguing about time zones; carol's avatar hair is still broken
+[media]
+carol +img: hair fixed?? be honest
+bob: it's worse
+[general]
+dave: hi, @Cardinal who runs the events here?
+> expect reply
+finn: @Cardinal what do you know about alice
+> expect reply
+bob: @Cardinal did you see carol's new pic in #media
+> expect reply
+alice +img: @Cardinal rate my new avatar
+> expect reply
+ember: @Cardinal 今日はなにする？
+> expect reply
+carol: @Cardinal remember the ceiling fan thing lol
+> expect reply
+bob: @Cardinal pineapple pizza, final answer
+> expect reply
+> checkpoint seeded

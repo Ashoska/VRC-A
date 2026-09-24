@@ -1,0 +1,19 @@
+# Gateway lifecycle. (1) A service restart (what an admin Stop→Start or config change does): the OLD
+# socket's close callback still runs scheduleReconnect() on the shared DiscordBotState, so the status
+# the admin tab shows can flip to RECONNECTING while the new connection is healthy.
+# (2) A server-side drop: the bot should RESUME and keep answering.
+@set ambient=0
+> sleep 2000
+> expect status CONNECTED
+alice: @Cardinal still with us?
+> expect reply
+> drop-gateway
+> sleep 5000
+> expect status CONNECTED
+bob: @Cardinal you back?
+> expect reply
+@set context=6
+> sleep 2000
+> expect status CONNECTED
+carol: @Cardinal hello after the restart
+> expect reply

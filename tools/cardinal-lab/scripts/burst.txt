@@ -1,0 +1,13 @@
+# Several people address the bot within a second or two — exercises the per-channel reply mutex,
+# the in-lock fresh context, the "already covered" fragment check and reply threading.
+@set ambient=0
+@gap 250
+[general]
+alice !nowait: @Cardinal quick question
+alice !nowait: @Cardinal what's your favourite vrchat world
+bob !nowait: @Cardinal also what's the best time zone
+carol !nowait: @Cardinal ignore them, rate my cat
+> sleep 200
+alice !nowait: @Cardinal and don't say the black cat
+> wait
+> checkpoint after-burst

@@ -183,6 +183,35 @@ android {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
         }
     }
+
+    // Cardinal Lab (tools/cardinal-lab/README.md): a JVM harness that runs the REAL Discord bot
+    // service against a fake Discord + a recording Workers-AI proxy. It only exists behind
+    // -PcardinalLab; normal `test` runs exclude it, and nothing here touches any APK.
+    testOptions {
+        unitTests {
+            includeAndroidResources = project.hasProperty('cardinalLab')
+            all { t ->
+                if (!project.hasProperty('cardinalLab')) {
+                    t.exclude '**/discordbot/lab/**'
+                } else {
+                    t.outputs.upToDateWhen { false }
+                    t.maxHeapSize = '2g'
+                    t.jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8', '-Dstderr.encoding=UTF-8'
+                    t.testLogging { showStandardStreams = true; events 'passed', 'failed', 'skipped' }
+                    t.systemProperty 'cardinal.lab', '1'
+                    t.systemProperty 'cardinal.lab.root', rootProject.projectDir.absolutePath
+                    // -Plab.<key>=<value> → System property cardinal.<key> in the harness JVM.
+                    project.properties.each { k, v ->
+                        if (k.startsWith('lab.')) t.systemProperty("cardinal.$k", v.toString())
+                    }
+                    // Secrets reach the harness only through the environment, never the command line.
+                    System.getenv().each { k, v ->
+                        if (k.startsWith('CF_') || k.startsWith('LAB_')) t.environment(k, v)
+                    }
+                }
+            }
+        }
+    }
 }
 
 aboutLibraries {
@@ -259,6 +288,9 @@ dependencies {
 
     // Tests
     testImplementation 'junit:junit:4.13.2'
+    // Cardinal Lab harness only (test classpath — never shipped in an APK).
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
     androidTestImplementation platform('androidx.compose:compose-bom:2024.01.00')

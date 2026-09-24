@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
  * a real User-Agent on the API.
  */
 object DiscordRest {
-    private const val API = "https://discord.com/api/v10"
+    private val API: String get() = BotEndpoints.discordApi
     private const val UA = "DiscordBot (https://github.com/ashoska/vrc-a, 1.0)"
     private const val MAX_CONTENT = 2000  // Discord's hard message-length limit
 

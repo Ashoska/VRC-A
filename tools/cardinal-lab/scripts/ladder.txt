@@ -1,0 +1,16 @@
+# The budget ladder. spent= pre-charges today's estimate (default budget 9000):
+# ≥80% TRIM (short replies, half context) · ≥92% CHEAP (replies on the 8B CHEAP_MODEL) ·
+# ≥99% REACT_ONLY · 100% SILENT.
+@set ambient=0 spent=7300
+[general]
+alice: @Cardinal what's the plan for tonight (TRIM rung)
+> expect reply
+@set spent=1000
+bob: @Cardinal you still there (CHEAP rung — replies on the 8B model)
+> expect reply
+@set spent=500
+carol: @Cardinal hello?? (REACT_ONLY rung)
+> expect react
+@set spent=100
+dave: @Cardinal anyone home (SILENT rung)
+> expect no-reply

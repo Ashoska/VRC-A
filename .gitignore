@@ -36,3 +36,10 @@ google-services.json
 .claude/*
 !.claude/settings.json
 !.claude/hooks/
+
+# Cardinal Lab run outputs (transcripts, prompts, memory dumps) — never committed
+lab-runs/
+
+# Python bytecode from the lab tools
+__pycache__/
+*.pyc

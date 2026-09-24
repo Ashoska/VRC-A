@@ -1,0 +1,21 @@
+# The observer (8B catch-up) — fires after 8 unreplied messages, at most once per 150 s per channel.
+# ambient=0 so nothing gets a reply; the pile-up itself triggers learning.
+@set ambient=0
+@gap 400
+[general]
+alice: ok so update on the apartment hunt
+alice: found a place near the lake, two bedrooms
+bob: nice, how much
+alice: too much lol but the view
+carol: views are worth it
+bob: are they though
+alice: i'm moving in december hopefully
+carol: need help moving? i have a car now
+alice: omg yes please carol
+bob: i'll supervise from australia
+finn: i'll supervise bob
+carol: finn you can carry the heavy stuff
+finn: i have noodle arms
+alice: noodle arms gang
+> wait
+> checkpoint after-pileup

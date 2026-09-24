@@ -1,0 +1,14 @@
+# Smoke: the bot boots, answers a mention, reacts to a trivial ping, answers a reply-to-bot,
+# honours "react to my message", and stays quiet on ambient chatter with ambient=0.
+@set ambient=0
+[general]
+alice: hey @Cardinal you alive?
+> expect reply
+bob: lol he's never alive
+> expect no-reply
+alice: @Cardinal lol
+> expect react
+bob ^bot: what's that supposed to mean
+> expect reply
+carol: @Cardinal react to my message with :kekw:
+> expect react

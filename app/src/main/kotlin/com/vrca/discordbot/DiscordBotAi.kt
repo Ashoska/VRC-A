@@ -92,9 +92,9 @@ object DiscordBotAi {
 
     private fun endpoint(cfg: DiscordBotStore.Config, model: String): String =
         if (cfg.cfGatewayId.isNotBlank())
-            "https://gateway.ai.cloudflare.com/v1/${cfg.cfAccountId}/${cfg.cfGatewayId}/workers-ai/$model"
+            "${BotEndpoints.aiGateway}/${cfg.cfAccountId}/${cfg.cfGatewayId}/workers-ai/$model"
         else
-            "https://api.cloudflare.com/client/v4/accounts/${cfg.cfAccountId}/ai/run/$model"
+            "${BotEndpoints.cfApi}/accounts/${cfg.cfAccountId}/ai/run/$model"
 
     /** Everything the reply prompt needs, assembled in the caller and passed as one bundle. */
     data class ReplyCtx(

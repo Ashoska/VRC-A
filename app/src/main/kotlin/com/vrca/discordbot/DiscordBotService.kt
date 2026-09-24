@@ -56,8 +56,6 @@ class DiscordBotService : Service() {
         private const val NOTIF_CHANNEL = "vrca_discord_bot"
         private const val NOTIF_ID = 1010
 
-        private const val GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
-
         // GUILDS(1) | GUILD_EMOJIS(1<<3) | GUILD_MESSAGES(1<<9) | GUILD_MESSAGE_REACTIONS(1<<10) |
         // DIRECT_MESSAGES(1<<12) | MESSAGE_CONTENT(1<<15) = 38409
         private const val INTENTS = 1 or 8 or 512 or 1024 or 4096 or 32768
@@ -198,7 +196,7 @@ class DiscordBotService : Service() {
     // ── Gateway connection ────────────────────────────────────────────────
 
     private fun openSocket(resume: Boolean) {
-        val base = if (resume && resumeUrl != null) "${resumeUrl!!.trimEnd('/')}/?v=10&encoding=json" else GATEWAY_URL
+        val base = if (resume && resumeUrl != null) "${resumeUrl!!.trimEnd('/')}/?v=10&encoding=json" else BotEndpoints.gatewayUrl
         val req = Request.Builder().url(base).build()
         ackPending = false
         webSocket = okClient.newWebSocket(req, object : WebSocketListener() {

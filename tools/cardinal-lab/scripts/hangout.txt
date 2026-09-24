@@ -1,0 +1,146 @@
+# A ~120-message evening in a VRChat community server: six regulars, three channels, ambient on
+# (production default 22%), addressed questions, reply chains, an image, a cross-channel reference,
+# a Japanese speaker, a "stop", recall questions, nicknames and a react request.
+# DRY: measures routing volume, prompt sizes and cost per message. LIVE: real behaviour end to end.
+@set ambient=22 cooldown=60 context=8
+@gap 900
+@channel general main hangout — anything goes
+@channel media pics, clips, screenshots
+@channel vrchat VRChat worlds, avatars, meetups
+[general]
+alice: evening gremlins
+bob: it's 2pm for me alice
+alice: evening where it matters then
+finn: bob lives in the future confirmed
+carol: finally done with work, brain is soup
+alice: same honestly
+bob: @Cardinal settle this, is it evening or not
+> expect reply
+alice ^bot: exactly thank you
+dave: hi everyone, new here! a friend sent me the invite
+alice: welcome dave!! make yourself at home
+finn: welcome to the asylum
+carol: hi dave :D
+dave: thanks! what do you all usually do here
+bob: argue about time zones apparently
+alice: mostly VRChat, some games, a lot of nonsense
+dave: @Cardinal are you a bot or a person lol
+> expect reply
+> expect not-contains (?i)\b(as an ai|language model|i'?m a bot)\b
+dave ^bot: fair enough
+carol: ok so my cat knocked my tablet off the desk again
+alice: MISO WOULD NEVER
+alice: ok miso would absolutely do that
+finn: cats are just gravity testers
+carol: mine tested the tablet and the coffee
+bob: rip coffee
+carol: @Cardinal what would you name a cat that only destroys expensive things
+> expect reply
+carol ^bot: LMAO
+alice: that's actually perfect
+bob: anyway did anyone see the new beat saber pack
+alice: yes!! i've been grinding it all day, my arms are dead
+bob: you play on expert+ right
+alice: expert+ on most, the new ones are brutal though
+finn: i tried once and hit my ceiling fan
+carol: finn nooo
+finn: finn yes. the fan lost
+dave: is beat saber hard to get into
+alice: nah start on normal and you'll be fine in a week
+bob: @Cardinal you ever play beat saber or are you all talk
+> expect reply
+ember: こんばんは！
+alice: ember!! hiii
+ember: みんな元気？
+carol: ember's back 🎉
+ember: @Cardinal 今日なにしてた？
+> expect reply
+ember ^bot: えー、いいな
+finn: i understood none of that but i'm happy for everyone
+bob: google translate says ember asked what cardinal did today
+ember: yes lol
+[media]
+carol +img: new avatar wip, still need to fix the hair physics
+finn: the hair is doing its own thing
+alice: omg it's so cute
+bob: the hair has more physics than my entire life
+[general]
+alice: did you guys see carol's avatar in #media
+finn: the hair is sentient
+dave: @Cardinal what do you think of carol's avatar in #media
+> expect reply
+carol: i'm gonna fix the hair tomorrow i swear
+bob: famous last words
+alice: carol you said that about the last one
+carol: and i DID fix it... eventually
+finn: define eventually
+carol: three weeks
+bob: lmaooo
+alice: @Cardinal lol
+> expect react
+finn: ok who's hopping on tonight
+alice: me! the usual world?
+bob: i'm in after dinner
+carol: maybe, depends if the hair fixes itself
+dave: what's the usual world
+alice: the black cat, it's like our unofficial hangout
+dave: i'll try to join!
+finn: bring snacks
+dave: in vr? how
+finn: spiritually
+bob: @Cardinal are you coming tonight
+> expect reply
+bob ^bot: you say that every time
+alice: cardinal is always there in spirit
+finn: cardinal is the black cat
+carol: canon
+dave: @Cardinal who is alice btw, she seems to run the place
+> expect reply
+alice: i do NOT run the place
+bob: she kinda does
+finn: she has the admin energy
+alice: slander
+ember: alice はリーダーだよ
+alice: ember not you too
+carol: @Cardinal react to my message with :catjam:
+> expect react
+finn: ok real question, pineapple on pizza
+bob: absolutely not
+alice: yes and i'll die on this hill
+carol: only with jalapeños
+dave: never tried it
+finn: @Cardinal pineapple on pizza, yes or no, pick one
+> expect reply
+alice ^bot: correct answer
+bob: this server is lost
+finn: ok cardinal stop agreeing with alice
+bob: @Cardinal stop
+> expect no-reply
+alice: lol he got told
+finn: ok ok back to vr, is the event still on saturday
+alice: yeah saturday 8pm est, costume theme
+carol: i'll have the new avatar done by then
+bob: sure you will
+carol: I WILL
+dave: what's the costume theme
+alice: "cursed halloween", anything spooky or cursed
+finn: my regular avatar is already cursed
+bob: true
+dave: @Cardinal any costume ideas for a cursed halloween event
+> expect reply
+dave ^bot: haha that's so good, i might actually do that
+alice: dave's gonna fit right in
+carol: welcome to the family dave
+finn: there's no escape now
+dave: lol ok
+alice: alright i'm gonna grab food brb
+bob: bring me some
+alice: no
+finn: brutal
+carol: @Cardinal what do you remember about me so far
+> expect reply
+carol ^bot: close enough haha
+bob: ok i'm off too, see you all tonight
+finn: later bob
+ember: またね！
+> wait
