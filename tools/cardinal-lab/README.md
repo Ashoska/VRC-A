@@ -89,8 +89,10 @@ alice +img: look at this          attach an image          (!wait / !nowait forc
 > teach self|style|mood|pinned <text>        seed the personality (through the real store APIs)
 > teach card|nick|prefer|rel|lang <name> <text>   seed a user card
 > teach server <text> · > teach bit <channel> <text> · > teach summary <text>
+> teach day -1 21 general moment|topic <text>     seed the day log (days back, hour, channel, kind)
 > expect reply | no-reply | react | contains <regex> | not-contains <regex>
-> expect card <name> contains|not-contains <regex> · server|self|summary contains <regex>
+> expect card <name> contains|not-contains <regex> · self contains|not-contains <regex> · server|summary contains <regex>
+> expect day -1 contains|not-contains <regex>       (that day's recap + notes)
 > expect status CONNECTED|RECONNECTING|FAILED|...
 ```
 
@@ -118,6 +120,9 @@ Addressed lines (mention or `^bot`) wait until the bot has decided and gone quie
 | `recall.txt` | **knowledge test**: a lived-in memory, then 10 memory questions each checked for the right fact (LIVE; count the ✓ to compare prompt changes) |
 | `personality-cap.txt` | regression: a 25th trait still enters once 24 exist (was: personality froze) |
 | `identity-filter.txt` | regression: short names/nicknames/relationship words don't delete unrelated card facts |
+| `days.txt` | day log: a seeded yesterday (gets an end-of-day recap) + a lived-through today with no replies, then "what happened yesterday / anything funny today / 3 days ago" (LIVE) |
+| `traits.txt` | personality: a bit the room gives Cardinal becomes a trait; odd seeded traits (married to Shrek, bird conspiracy, 💀) change replies without taking over; a trait the room pushes back on is dropped (LIVE) |
+| `corrections.txt` | people's facts change: a move, a disputed job, "stop calling me X" — and an unrelated fact must survive (LIVE) |
 | `lifecycle.txt` | service restart + server-side drop: stale-socket callbacks ignored, RESUME works |
 | `gateway-codes.txt` | server-initiated close resumes in ~1 s; a 4014 intents rejection stops with FAILED + reason |
 

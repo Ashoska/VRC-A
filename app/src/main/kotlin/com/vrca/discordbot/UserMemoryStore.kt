@@ -37,6 +37,7 @@ object UserMemoryStore {
         val lastSeenMs: Long = 0L,
         val interactions: Int = 0,
         val pinned: Boolean = false,
+        val avoid: List<String> = emptyList(),   // things they asked Cardinal to stop doing to them
     )
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -65,6 +66,7 @@ object UserMemoryStore {
             lastSeenMs = o.optLong("ls", 0L),
             interactions = o.optInt("ic", 0),
             pinned = o.optBoolean("p", false),
+            avoid = strList(o.optJSONArray("av")),
         )
     } catch (_: Exception) { null }
 
@@ -88,6 +90,7 @@ object UserMemoryStore {
             .put("ls", card.lastSeenMs)
             .put("ic", card.interactions)
             .put("p", card.pinned)
+            .put("av", JSONArray(card.avoid.takeLast(4)))
         prefs(ctx).edit().putString(keyOf(card.id), o.toString()).apply()
     }
 
@@ -150,6 +153,11 @@ object UserMemoryStore {
     // A relationship that says nothing ("member") would otherwise be kept and block a real one later.
     private val GENERIC_REL = Regex("(?i)^(a |an |the )?(regular |server |discord |normal )?(member|user|participant|person|chatter|someone|human|guy|people)s?\\.?$")
 
+    // Guesses aren't facts ("possibly a friend of Cardinal's", "is a member of the server").
+    private val SPECULATION = Regex("(?i)\\b(possibly|probably|maybe|perhaps|might be|seems to|likely|apparently)\\b|" +
+        "\\b(a )?member of (the|this) (server|discord|chat)\\b|" +
+        // How they play along with Cardinal is chat, not who they are (their relationship to him has its own slot).
+        "\\bcardinal\\b")
     private fun cleanFact(s: String): String? {
         val t = s.trim()
         if (NONE_VALUE.matches(t)) return null
@@ -159,6 +167,7 @@ object UserMemoryStore {
         if (META.containsMatchIn(t)) return null
         if (TRANSIENT.containsMatchIn(t)) return null
         if (GENERIC_FACT.containsMatchIn(t)) return null
+        if (SPECULATION.containsMatchIn(t)) return null
         if (t.contains("http://") || t.contains("https://")) return null
         return t
     }
@@ -221,15 +230,18 @@ object UserMemoryStore {
      * `facts` (array), `bit`, `nickname`/`nicknames`, `preferredName` (sets the address Cardinal
      * uses), `language`, `alsoSpeaks`, `sentiment`, `relationship`, `howToTreat`. All text runs the
      * poisoning guards. Facts are appended+deduped (unbounded); nicknames merged (self-name filtered).
+     * [correcting] = the learner was shown this card's stored facts because the chat had a correction
+     * or complaint in it: only then are `forget` / `notNickname` / `avoid` honoured and may the
+     * relationship be replaced (outside that mode it's filled once and kept).
      */
-    fun applyDelta(ctx: Context, id: String, name: String, delta: JSONObject) {
+    fun applyDelta(ctx: Context, id: String, name: String, delta: JSONObject, correcting: Boolean = false) {
         if (id.isBlank()) return
         val cur = load(ctx, id) ?: Card(id = id)
         val ownNames = setOf(name, cur.name).filter { it.isNotBlank() }.toSet()
 
         // Forget: drop facts the model says are no longer true (fuzzy match) — but never on a
         // PINNED (admin-protected) card. Then merge in new facts, collapsing near-duplicates.
-        val forget = strList(delta.optJSONArray("forget"))
+        val forget = if (correcting) strList(delta.optJSONArray("forget")) else emptyList()
         val kept = if (cur.pinned) cur.facts
             else cur.facts.filter { f -> forget.none { similar(f, it) } }
         val selfCollapsed = mergeFacts(emptyList(), kept)   // clean up existing near-dups too
@@ -245,11 +257,19 @@ object UserMemoryStore {
         val nick = value(delta.optString("nickname"))
         val nickArr = strList(delta.optJSONArray("nicknames"))
         val incomingNicks = (listOf(nick) + nickArr).mapNotNull { cleanNick(it, ownNames) }
+        // "Don't call me X": drop that name everywhere on the card and never re-learn it this pass.
+        val notNick = if (correcting) value(delta.optString("notNickname")).lowercase() else ""
         val mergedNicks = LinkedHashSet<String>().apply { addAll(cur.nicknames); addAll(incomingNicks) }.toList()
+            .filterNot { notNick.isNotBlank() && it.equals(notNick, true) }
 
         // A PREFERRED name is the one Cardinal should actually use to address them.
-        val preferred = cleanNick(value(delta.optString("preferredName")), ownNames)
-            ?: cur.preferredNick.ifBlank { "" }
+        val preferred = (cleanNick(value(delta.optString("preferredName")), ownNames)
+            ?: cur.preferredNick.ifBlank { "" }).takeUnless { notNick.isNotBlank() && it.equals(notNick, true) }.orEmpty()
+        val avoidNew = if (correcting) cleanFact(value(delta.optString("avoid")))?.take(100) else null
+        val avoid = (cur.avoid + listOfNotNull(avoidNew) +
+            listOfNotNull(notNick.takeIf { it.isNotBlank() }?.let { "calling them \"$it\"" }))
+            .fold(ArrayList<String>()) { acc, a -> if (acc.none { similar(it, a) || (notNick.isNotBlank() && norm(it).contains(notNick) && norm(a).contains(notNick)) }) acc.add(a); acc }
+            .takeLast(4)
 
         // One line in another language doesn't change what someone mainly speaks: a new language on a
         // card that already has one is recorded as "also speaks" instead of replacing it.
@@ -267,9 +287,9 @@ object UserMemoryStore {
         // Relationship / how-to-treat are filled once and then kept: the cheap learner re-describing
         // the chat's mood ("teasing and playful with Cardinal") used to overwrite a real relationship
         // ("server regular, basically runs events"). The admin can still edit them.
-        val relationship = cur.relationship.ifBlank {
-            value(delta.optString("relationship")).take(80).takeUnless { GENERIC_REL.matches(it) }.orEmpty()
-        }
+        val incomingRel = value(delta.optString("relationship")).take(80).takeUnless { GENERIC_REL.matches(it) }.orEmpty()
+        val relationship = if (correcting && incomingRel.isNotBlank() && !cur.pinned) incomingRel
+            else cur.relationship.ifBlank { incomingRel }
         // Drop facts that ONLY restate an identity field (name/nick/relationship/sentiment) — those live
         // in their own slots, so a fact like "Creator" when relationship=Creator is noise. A fact that
         // merely CONTAINS one of those words ("best friends with carol", "regular at the climbing gym",
@@ -291,7 +311,35 @@ object UserMemoryStore {
             relationship = relationship,
             howToTreat = cur.howToTreat.ifBlank { value(delta.optString("howToTreat")).take(120) },
             talkStyle = value(delta.optString("talkStyle")).take(80).ifBlank { cur.talkStyle },
+            avoid = avoid,
         ))
+    }
+
+    /**
+     * What's stored about these people, as (id, name, item) rows for the learner's numbered correction
+     * view: each fact, plus "goes by X" for each nickname. Only built when the chat contains a correction.
+     */
+    fun correctionItems(ctx: Context, ids: Collection<String>, maxPeople: Int = 6): List<Triple<String, String, String>> =
+        ids.distinct().mapNotNull { load(ctx, it) }.filter { !it.pinned }
+            .filter { it.facts.isNotEmpty() || it.nicknames.isNotEmpty() || it.preferredNick.isNotBlank() }
+            .take(maxPeople)
+            .flatMap { c ->
+                val nicks = (listOf(c.preferredNick) + c.nicknames).filter { it.isNotBlank() && !it.equals(c.name, true) }
+                    .distinctBy { it.lowercase() }
+                c.facts.takeLast(8).map { Triple(c.id, c.name, it) } + nicks.map { Triple(c.id, c.name, "goes by $it") }
+            }
+
+    /** The chat said this stored item is wrong / unwanted: drop the fact, or stop using the nickname. */
+    fun forgetItem(ctx: Context, id: String, item: String) {
+        val cur = load(ctx, id) ?: return
+        if (cur.pinned) return
+        if (item.startsWith("goes by ")) {
+            val nick = item.removePrefix("goes by ").trim()
+            save(ctx, cur.copy(
+                nicknames = cur.nicknames.filterNot { it.equals(nick, true) },
+                preferredNick = cur.preferredNick.takeUnless { it.equals(nick, true) }.orEmpty(),
+            ))
+        } else save(ctx, cur.copy(facts = cur.facts.filterNot { it == item || similar(it, item) }))
     }
 
     /** The name Cardinal should address this person by: their PREFERRED nick, else display name. */
@@ -319,6 +367,7 @@ object UserMemoryStore {
                 .append(if (card.alsoSpeaks.isNotEmpty()) " (+ ${card.alsoSpeaks.joinToString(", ")})" else "").append('\n')
         if (card.sentiment.isNotBlank()) sb.append("  vibe: ").append(card.sentiment).append('\n')
         if (card.howToTreat.isNotBlank()) sb.append("  with them: ").append(card.howToTreat).append('\n')
+        if (card.avoid.isNotEmpty()) sb.append("  asked you to stop: ").append(card.avoid.joinToString("; ")).append('\n')
         if (card.talkStyle.isNotBlank()) sb.append("  talk to them: ").append(card.talkStyle).append('\n')
         val factLimit = if (full) 12 else DiscordBotLimits.USER_FACTS_INJECT
         val facts = if (full) card.facts.takeLast(factLimit) else pickFacts(card.facts, keywords, factLimit)
@@ -375,6 +424,7 @@ object UserMemoryStore {
         if (card.relationship.isNotBlank()) sb.append(" — ").append(card.relationship.trim().trimEnd('.'))
         sb.append('.')
         if (card.howToTreat.isNotBlank()) sb.append(" With them: ").append(card.howToTreat.trim().trimEnd('.')).append('.')
+        if (card.avoid.isNotEmpty()) sb.append(" Quietly never do this with them again (don't mention it): ").append(card.avoid.joinToString("; ") { it.trim().trimEnd('.') }).append('.')
         if (card.talkStyle.isNotBlank()) sb.append(" How they talk: ").append(card.talkStyle.trim().trimEnd('.')).append('.')
         val vibe = cleanSentiment(card.sentiment)
         if (vibe.isNotBlank()) sb.append(" Vibe with you: ").append(vibe).append('.')

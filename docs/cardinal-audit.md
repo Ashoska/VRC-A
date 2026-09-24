@@ -6,6 +6,43 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 2 — day log, revisable memory, emergent traits (LIVE lab)
+
+**New behaviour**
+- **Day log** (`DayLogStore`): every learn pass (which reads every message, replied to or not) adds its
+  summary line + 0-2 funny/notable "moments" to that day's log, server-wide, keyed by the phone's date.
+  A finished day with ≥6 notes gets one cheap 8B recap (~5 neurons, once per day). A day question
+  ("what happened yesterday", "anything funny today", "what went on 3 days ago", "last weekend", "the 21st",
+  "what did I miss") adds that day's notes to the reply prompt; every other message gets nothing extra.
+- **Revisable memory**: only when a learn batch contains a correction/complaint cue does the learner see
+  a numbered list of what's stored (the speakers' facts + nicknames, Cardinal's traits) and return the
+  numbers that are wrong. Backed by free rules because the 8B misses these often: a stored fact whose key
+  word is negated within 3 words ("left toronto", "never been a chef") by the person or two others is
+  dropped; "stop calling me X" retires the nickname and records it as something to avoid; two or more
+  people complaining about a trait's subject tones the trait down (a new trait goes, an established one
+  loses 4 strength). A correction is only honoured if the humans actually mentioned the item.
+- **Emergent traits**: roles/bits the room gives Cardinal that he goes along with become traits; his known
+  traits are shown to the learner so it doesn't save reworded duplicates; emoji-aware duplicate matching.
+  The reply prompt adds "your quirks come out when they fit the moment, not in every message".
+- **Robustness**: one retry on transient 5xx/network errors (unbilled), tolerant JSON repair for a learner
+  answer missing its closing brackets, speculative "facts" (possibly/maybe/member of the server) and
+  facts about playing along with Cardinal are rejected, one-off events go to the day log instead of facts.
+
+**Results (LIVE)**
+
+| test | result |
+|---|---|
+| `days.txt` (6 checks) | 6/6 — today's untouched chat recorded; yesterday recapped; 3-days-ago answered |
+| `corrections.txt` (12 checks) | 12/12 — move, disputed job, nickname retired; unrelated fact survived |
+| `traits.txt` (12 checks) | 12/12 — pizza-critic bit adopted; Shrek/drones/💀 used; bird trait dropped after complaints |
+| `recall.txt` ×2 | 20/20 (unchanged) at 184/189 neurons (was 190/205) |
+| evening (seeded-memory + hangout, 127 msgs) | 22/22, **587.6 neurons** (round 1: 631.4; original: 1,090) |
+
+Evening breakdown: replies 26 × 19.4 = 504.6 (was 28 × 19.6); learning 8 passes = 80.7 (round 1: 77.1 —
+the richer learner first cost 126.9, then a compact template that stops the 8B writing every optional key
+empty cut its output from 337 to 181 tokens/pass); director 2.3. Reply prompt ≈ 582 tokens (568 before; +14
+for the "quirks when they fit" line). Normal replies carry no day log or stored-memory view.
+
 ## Results after the fixes
 
 Measured in the Cardinal Lab with real Workers AI calls (LIVE), same scripts before and after.

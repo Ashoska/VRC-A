@@ -1,0 +1,39 @@
+# Day log: "what happened yesterday / anything funny today?" — including messages Cardinal never replied to.
+# Yesterday is seeded (busy enough to get an end-of-day recap); today is lived through with ambient off,
+# so every moment below happens WITHOUT Cardinal replying, then gets asked about.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+@channel games gaming talk
+> teach day -1 14 general topic alice and bob argue about whether cereal is soup
+> teach day -1 16 general moment bob declared cereal a soup and got banned from the kitchen by his mom
+> teach day -1 18 games topic carol and finn grind ranked Valorant
+> teach day -1 19 games moment finn lost 12 ranked games in a row and blamed his cat
+> teach day -1 21 general topic everyone plans alice's Saturday VRChat karaoke event
+> teach day -1 23 general moment dave fell asleep on voice chat and snored for an hour
+> teach day -3 20 general moment ember baked a cake shaped like the Cardinal bird and dropped it
+> teach day -3 21 general topic ember shares photos of Osaka street food
+[general]
+alice: morning everyone
+bob: my toaster literally caught fire this morning lmao
+carol: WHAT
+bob: the smoke alarm went off and my neighbour called the fire department
+alice: bob you are a walking disaster
+finn: no way, did the firefighters actually come
+bob: yeah three of them, one asked if i was ok and i said "the bread isn't"
+carol: LMAOOO
+dave: bob that's the funniest thing i've heard all week
+alice: anyway who's joining karaoke saturday
+carol: me! i'm doing a japanese song
+finn: count me in, i'll sing badly
+> sleep 70000
+> wait
+> expect day 0 contains (?i)(toast|fire)
+> expect day -1 contains (?i)(cereal|snor|finn)
+ember: @Cardinal did anything funny happen today? i just got here
+> expect contains (?i)(toast|fire|bread)
+dave: @Cardinal what happened yesterday? i missed everything
+> expect contains (?i)(cereal|soup|snor|finn|valorant|karaoke)
+finn: @Cardinal what was the funniest thing yesterday
+> expect contains (?i)(cereal|soup|snor|12|cat)
+alice: @Cardinal what went on 3 days ago?
+> expect contains (?i)(cake|ember|osaka)

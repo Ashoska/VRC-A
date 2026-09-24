@@ -93,6 +93,18 @@ class DiscordBotService : Service() {
             "what do i do( again| for (a )?living| for work)?\\s*(lol|lmao|haha)?\\s*\\??\\s*$)")
         // "who runs the events here?" — a question about people with nobody named → search the cards.
         private val WHO_Q_RE = Regex("(?i)(^|\\s)(who|whose)\\b[^?]*\\?")
+        private val CALL_ME_RE = Regex("(?i)\\b(just call me|you can call me|call me|i go by|everyone calls me)\\s+([\\p{L}\\p{N}_]{2,32})")
+        private val CALL_ME_STOP = setOf("when", "later", "back", "out", "if", "tomorrow", "sometime", "maybe", "that", "a", "an", "the", "it", "him", "her", "anything", "crazy", "whatever")
+        private val CALL_ME_NOT_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|never|no more) call(?:ing)? me ([\\p{L}\\p{N}_]{2,32})")
+        // Someone telling Cardinal to cut something out.
+        private val COMPLAINT_RE = Regex("(?i)\\b(stop|drop it|enough|annoying|cringe|got old|getting old|quit|not funny|over it|tired of|shut up about|so done|give it a rest)\\b")
+        // A correction, a dispute or a complaint somewhere in a learn batch → correction mode.
+        private val CORRECTION_RE = Regex("(?i)\\b(not true|isn'?t true|that'?s (wrong|false|a lie|not true|cap|made up)|you'?re wrong|wrong about|" +
+            "no (he|she|they|i|you|we) (don'?t|doesn'?t|isn'?t|aren'?t|never|didn'?t|ain'?t|is not|are not)|" +
+            "(he|she|they|i) (doesn'?t|don'?t|isn'?t|aren'?t|never|no longer|stopped|quit|moved)|not anymore|no longer|anymore|used to|actually|" +
+            "stop (calling|saying|doing|with|being|the|that)|don'?t call me|quit (calling|it|that|the|with)|" +
+            "(hate|hated|don'?t like|dont like|can'?t stand) (it )?when|cringe|annoying|not funny|you'?re not|you aren'?t|" +
+            "divorc\\w*|lying|liar|made that up|never said|fake)\\b")
         private const val EMOJI_PREFS = "vrca_discord_emoji"
         // Explicit "react to my message with X" request → react, no reply.
         private val REACT_REQ_RE = Regex("(?i)^\\s*(can you |could you |please |pls |plz )?react\\b|react (to )?(this|that|my|the)\\b")
@@ -148,6 +160,8 @@ class DiscordBotService : Service() {
     private val lastLearnAt = ConcurrentHashMap<String, Long>()          // channel -> last learn pass started
     private val lastLearnedId = ConcurrentHashMap<String, Long>()        // channel -> newest message id a pass has read
     private val learnInFlight = ConcurrentHashMap.newKeySet<String>()    // channels with a pass running
+    @Volatile private var digestInFlight = false
+    private val digestTriedAt = ConcurrentHashMap<String, Long>()           // day -> last recap attempt
     private val learnLullJobs = ConcurrentHashMap<String, Job>()         // channel -> pending "went quiet" pass
     private val directorAt = ConcurrentHashMap<String, Long>()           // channel -> last director call
     private val ambientReactAt = ConcurrentHashMap<String, Long>()       // channel -> last unprompted reaction
@@ -572,6 +586,7 @@ class DiscordBotService : Service() {
         val asking: Boolean,           // any question (or a memory question)
         val windowFull: Boolean,       // the conversation goes back further than the transcript
         val refOutOfWindow: Boolean,   // they replied to a message older than the transcript
+        val dayAsk: DayQuestion.Ask? = null, // "what happened yesterday?" → that day's log
     )
 
     private suspend fun generateLocked(ctx: MsgCtx, rung: DiscordBotState.Rung) {
@@ -727,32 +742,151 @@ class DiscordBotService : Service() {
         if (turns.size < 3) { learnPending.merge(channelId, taken, Int::plus); return }
         val nameToId = HashMap<String, String>()
         recent.forEach { if (it.authorId != botId) nameToId[it.authorName.lowercase().trim()] = it.authorId }
-        val obs = DiscordBotAi.observe(cfg, turns, ConversationStore.summary(channelId))
+        // Someone corrected a fact, disputed one of Cardinal's traits, or complained → show the learner
+        // what's stored about the people involved so it can take the wrong bits back out.
+        val humanText = turns.filter { !it.isBot }.joinToString("\n") { it.text }
+        val items = if (CORRECTION_RE.containsMatchIn(humanText)) correctionItems(humanText, fresh) else emptyList()
+        val stored = items.mapIndexed { i, it -> "[${i + 1}] ${it.second}: ${it.third}" }.joinToString("\n")
+        val obs = DiscordBotAi.observe(cfg, turns, ConversationStore.summary(channelId), stored,
+            PersonalityStore.traitTexts(this, DiscordBotLimits.DIGEST_TRAITS_INJECT))
         if (obs == null) { learnPending.merge(channelId, taken, Int::plus); return }   // retried with the next batch
         lastLearnedId[channelId] = maxOf(after, fresh.maxOf { it.id.toLongOrNull() ?: 0L })
-        applyObservation(channelId, obs, nameToId, System.currentTimeMillis(), turns)
-        DiscordBotState.log("learned $channelId (${turns.size} msgs, ${obs.memDeltas.size} people)")
+        applyObservation(channelId, obs, nameToId, System.currentTimeMillis(), turns, correcting = items.isNotEmpty(), items = items)
+        DiscordBotState.log("learned $channelId (${turns.size} msgs, ${obs.memDeltas.size} people" +
+            (if (stored.isNotBlank()) ", checked corrections" else "") + ")")
+        maybeDigestDay()
     }
 
-    /** Persist one learn pass: summary, people, server culture, channel bit, self. */
+    /**
+     * Numbered stored items the learner may mark wrong: the facts/nicknames of the batch's speakers and
+     * anyone it names (id, name, item), then Cardinal's own traits (id = "").
+     */
+    private fun correctionItems(humanText: String, fresh: List<DiscordRest.HistMsg>): List<Triple<String, String, String>> {
+        val ids = LinkedHashSet<String>()
+        fresh.asReversed().forEach { if (it.authorId != botId) ids.add(it.authorId) }
+        val low = " " + humanText.lowercase().replace(Regex("[^\\p{L}\\p{N} ]"), " ").replace(Regex("\\s+"), " ") + " "
+        UserMemoryStore.nameEntries(this).forEach { nk ->
+            if (nk.key.length >= 3 && nk.id != botId && low.contains(" ${nk.key} ")) ids.add(nk.id)
+        }
+        return UserMemoryStore.correctionItems(this, ids) +
+            PersonalityStore.traitTexts(this, 12).map { Triple("", "Cardinal", it) }
+    }
+
+    /**
+     * Once a busy day is over, condense its log into a short recap (one cheap call per day). Runs after a
+     * learn pass, so it only ever happens while the bot is active and within budget.
+     */
+    private fun maybeDigestDay() {
+        if (digestInFlight || !::cfg.isInitialized || !cfg.isComplete) return
+        val rung = DiscordBotState.currentRung()
+        if (rung != DiscordBotState.Rung.FULL && rung != DiscordBotState.Rung.TRIM) return
+        val now = System.currentTimeMillis()
+        val day = DayLogStore.needsDigest(this, now) ?: return
+        val key = day.date.toString()
+        if (now - (digestTriedAt[key] ?: 0L) < 30 * 60_000L) return
+        digestTriedAt[key] = now
+        digestInFlight = true
+        scope.launch {
+            try {
+                val label = DayLogStore.label(day.date, DayLogStore.dateOf(now))
+                val recap = DiscordBotAi.digestDay(cfg, label, DayLogStore.digestInput(day))
+                if (recap != null) {
+                    DayLogStore.setDigest(this@DiscordBotService, day.date, recap)
+                    DiscordBotState.log("recapped ${day.date} (${day.entries.size} notes)")
+                }
+            } catch (_: Exception) { } finally { digestInFlight = false }
+        }
+    }
+
+    /** Persist one learn pass: summary, day log, people, server culture, channel bit, self. */
     private fun applyObservation(
         channelId: String, obs: DiscordBotAi.Observation, nameToId: Map<String, String>, now: Long,
-        turns: List<DiscordBotAi.Turn>,
+        turns: List<DiscordBotAi.Turn>, correcting: Boolean = false,
+        items: List<Triple<String, String, String>> = emptyList(),
     ) {
         val globalIndex = UserMemoryStore.nameIndex(this)
         if (obs.summary.isNotBlank()) ConversationStore.updateSummary(this, channelId, obs.summary, now)
+        // The day log: what's going on + funny/notable moments, only when the chat backs them up.
+        val chatWords = groundWords(turns.joinToString(" ") { it.name + " " + it.text })
+        val moments = (obs.moments + listOf(obs.serverEvent)).map { it.trim() }.filter { m ->
+            val w = groundWords(m); m.isNotBlank() && (w.isEmpty() || w.count { it in chatWords } * 2 >= w.size)
+        }.distinct()
+        DayLogStore.record(this, ChannelInfoStore.name(channelId) ?: channelId, now, obs.summary, moments)
         val dropped = ArrayList<String>()
         for (md in obs.memDeltas) {
             val id = resolveObserveAbout(md.about, nameToId, globalIndex)
             if (id != null && id != botId)
-                UserMemoryStore.applyDelta(this, id, md.about, groundDelta(md, id, turns, nameToId) { dropped.add(it) })
+                UserMemoryStore.applyDelta(this, id, md.about, groundDelta(md, id, turns, nameToId) { dropped.add(it) }, correcting)
         }
         if (dropped.isNotEmpty())
             DiscordBotState.log("learn: skipped ${dropped.size} unsupported fact(s), e.g. \"${dropped.first().take(60)}\"")
         if (obs.serverEvent.isNotBlank()) ServerMemoryStore.remember(this, obs.serverEvent, now)
         if (obs.channelBit.isNotBlank()) ChannelMemoryStore.remember(this, channelId, obs.channelBit, now)
-        if (obs.selfTrait.isNotBlank() || obs.selfMood.isNotBlank()) {
-            PersonalityStore.noteSelf(this, obs.selfTrait.ifBlank { null }, null, obs.selfMood.ifBlank { null })
+        // Stored items the chat said are wrong / unwanted: a person's fact or nickname is dropped; one of
+        // Cardinal's traits is toned down (gone if it was new). Never re-added in the same pass.
+        val disputed = ArrayList<String>()
+        // Only honoured when the humans in this batch actually talked about it (its words were said) —
+        // the small model sometimes marks every stored item "wrong" at once.
+        val humanLow = turns.filter { !it.isBot }.joinToString(" ") { it.text }.lowercase()
+        val humanWords = groundWords(humanLow)
+        for (n in obs.wrong.distinct()) {
+            val it = items.getOrNull(n - 1) ?: continue
+            val mentioned = if (it.third.startsWith("goes by ")) humanLow.contains(it.third.removePrefix("goes by ").lowercase())
+                else groundWords(it.third).any { w -> w in humanWords }
+            if (!mentioned) continue
+            if (it.first.isEmpty()) PersonalityStore.disputeTrait(this, it.third)?.let { t -> disputed.add(t) }
+            else UserMemoryStore.forgetItem(this, it.first, it.third)
+        }
+        // Free backstop for people's facts: a stored fact whose key word is negated right before it ("left
+        // toronto", "you're not a chef", "never been a chef") is dropped when the person themselves says so,
+        // or two different people do. Negation must be within 3 words, so "not a big fan of toronto" doesn't count.
+        if (correcting) {
+            val handled = obs.wrong.mapNotNull { items.getOrNull(it - 1) }.toSet()
+            for (item in items) {
+                if (item.first.isEmpty() || item in handled || item.third.startsWith("goes by ")) continue
+                val keys = Regex("[\\p{L}\\p{N}]+").findAll(item.third.lowercase()).map { it.value }
+                    .filter { it.length >= 4 && it !in GROUND_STOP && it !in NEGATION_NOISE }.toList()
+                if (keys.isEmpty()) continue
+                val sayers = turns.filter { t -> !t.isBot && keys.any { k ->
+                    Regex("\\b(not|never|no longer|isn'?t|aren'?t|wasn'?t|left|quit|stopped|ex|former|moved (out of|from|away from))\\b(\\W+[\\p{L}']+){0,3}?\\W+" +
+                        Regex.escape(k)).containsMatchIn(t.text.lowercase()) } }.map { it.name.lowercase().trim() }.toSet()
+                val bySubject = sayers.any { nameToId[it] == item.first }
+                if (bySubject || sayers.size >= 2) UserMemoryStore.forgetItem(this, item.first, item.third)
+            }
+        }
+        // "call me X" / "i go by X" from the person themselves → their preferred name (free, no model slot).
+        for (t in turns) {
+            if (t.isBot || CALL_ME_NOT_RE.containsMatchIn(t.text)) continue
+            val id = nameToId[t.name.lowercase().trim()] ?: continue
+            val m = CALL_ME_RE.find(t.text) ?: continue
+            val nick = m.groupValues[2]
+            if (nick.lowercase() !in CALL_ME_STOP) UserMemoryStore.applyDelta(this, id, t.name, JSONObject().put("preferredName", nick))
+        }
+        // "stop calling me X" / "don't call me X" from the person themselves → retire that name (free).
+        if (correcting) for (t in turns) {
+            if (t.isBot) continue
+            val id = nameToId[t.name.lowercase().trim()] ?: continue
+            val m = CALL_ME_NOT_RE.find(t.text) ?: continue
+            UserMemoryStore.applyDelta(this, id, t.name, JSONObject().put("notNickname", m.groupValues[2]), correcting = true)
+        }
+        // Free backstop: two or more different people complaining about something one of Cardinal's traits
+        // is about ("enough birds", "the bird thing got old") tones it down even if the model missed it.
+        if (correcting) {
+            val complaints = turns.filter { !it.isBot && COMPLAINT_RE.containsMatchIn(it.text) }
+            for (t in PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS)) {
+                if (disputed.any { PersonalityStore.isSameTrait(it, t) }) continue
+                val tw = groundWords(t)
+                val who = complaints.filter { c -> groundWords(c.text).any { it in tw } }.map { it.name.lowercase() }.toSet()
+                if (who.size >= 2) PersonalityStore.disputeTrait(this, t)?.let { disputed.add(it) }
+            }
+        }
+        if (obs.wrong.isNotEmpty() || disputed.isNotEmpty())
+            DiscordBotState.log("corrected ${obs.wrong.size} stored item(s)" + (if (disputed.isNotEmpty()) ", toned down \"${disputed.first().take(50)}\"" else ""))
+        val newTrait = obs.selfTrait.takeIf { t ->
+            t.isNotBlank() && disputed.none { PersonalityStore.isSameTrait(t, it) }
+        }
+        if (newTrait != null || obs.selfMood.isNotBlank()) {
+            PersonalityStore.noteSelf(this, newTrait, null, obs.selfMood.ifBlank { null })
             DiscordBotState.setMood(PersonalityStore.mood(this))
         }
     }
@@ -791,11 +925,24 @@ class DiscordBotService : Service() {
         }
         val chat = " " + humans.joinToString(" ") { it.text.lowercase() } + " "
         fun said(v: String) = v.isNotBlank() && chat.contains(v.lowercase().trim())
+        // "forget" only for things the chat actually talked about (the model sometimes "forgets" a fact
+        // just to reword it).
+        md.json.optJSONArray("forget")?.let { arr ->
+            val chatWords = groundWords(chat)
+            val kept = JSONArray()
+            for (i in 0 until arr.length()) {
+                val f = arr.optString(i).trim()
+                if (f.isNotBlank() && groundWords(f).any { it in chatWords }) kept.put(f)
+            }
+            out.put("forget", kept)
+        }
         if (!said(out.optString("nickname"))) out.remove("nickname")
         if (!said(out.optString("preferredName"))) out.remove("preferredName")
         return out
     }
 
+    // Words too general to anchor a "that's not true" match on.
+    private val NEGATION_NOISE = setOf("lives", "live", "works", "work", "plays", "play", "owns", "named", "professional", "their", "this")
     private val GROUND_STOP = setOf(
         "likes", "like", "loves", "love", "really", "always", "usually", "often", "they", "their", "them", "have",
         "been", "being", "with", "from", "into", "about", "some", "very", "much", "lots", "also", "still", "just",
@@ -896,7 +1043,8 @@ class DiscordBotService : Service() {
 
         return Built(turns, ids, nameToId, keywords, targetIsLatest = !newerExists, maxSeenId = maxSeenId,
             emphasizeIds = emphasize, namedIds = named, otherSpeakers = otherSpeakers, recall = isRecall,
-            asking = asking, windowFull = windowFull, refOutOfWindow = refOutOfWindow)
+            asking = asking, windowFull = windowFull, refOutOfWindow = refOutOfWindow,
+            dayAsk = DayQuestion.parse(ctx.userText, DayLogStore.dateOf(System.currentTimeMillis())))
     }
 
     /**
@@ -948,7 +1096,10 @@ class DiscordBotService : Service() {
             emojiHint = emojiHint(),
             langHint = detectLang(ctx.userText),
             namesRule = answering.hasNick || others.any { it.hasNick },
-            recall = built.recall,
+            recall = built.recall || built.dayAsk != null,
+            dayLog = built.dayAsk?.let {
+                DayLogStore.render(this, it.days, now, it.funny, DiscordBotLimits.DAY_BLOCK_MAX_CHARS)
+            }.orEmpty(),
             shortHint = short,
         )
     }

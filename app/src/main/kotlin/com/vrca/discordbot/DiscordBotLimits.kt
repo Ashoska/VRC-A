@@ -120,6 +120,22 @@ object DiscordBotLimits {
     /** A memory nobody has mentioned for this long ranks one strength point lower (per period). */
     const val MEMORY_FADE_MS = 14 * 24 * 3_600_000L
 
+    // ── Day log ("what happened yesterday?") ──────────────────────────────
+    /** Entries kept per day (moments are kept first; the oldest topic lines are thinned). */
+    const val DAY_ENTRIES_MAX = 80
+    /** A finished day with at least this many entries is condensed into a digest (one cheap call). */
+    const val DAY_DIGEST_MIN_ENTRIES = 6
+    const val DAY_DIGEST_MAX_CHARS = 700
+    const val DAY_DIGEST_MAX_TOKENS = 220
+    /** Raw entries are dropped (digest kept) once a day is this old. */
+    const val DAY_RAW_KEEP_DAYS = 14
+    /** Whole days are forgotten after this. */
+    const val DAY_KEEP_DAYS = 120
+    /** The day block in a reply prompt is capped at this. */
+    const val DAY_BLOCK_MAX_CHARS = 900
+    /** A dispute/complaint against one of Cardinal's traits knocks this much strength off it. */
+    const val TRAIT_DISPUTE_PENALTY = 4
+
     // ── Channel awareness (identity + per-channel running bits) ───────────
     /** Per-channel running bits kept (unbounded by design; a sane ceiling). */
     const val CHANNEL_MEMORY_STORE_MAX = 60

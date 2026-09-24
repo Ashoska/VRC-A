@@ -237,6 +237,14 @@ internal class LabDriver(
                 topics.forEach { sb.append("    archived: ").append(it.summary).append('\n') }
             }
         }
+        sb.append("\n== Day log ==\n")
+        val days = com.vrca.discordbot.DayLogStore.days(ctx)
+        if (days.isEmpty()) sb.append("(none)\n")
+        days.take(5).forEach { d ->
+            sb.append("  ").append(d.date).append(" (").append(d.entries.size).append(" notes)\n")
+            if (d.digest.isNotBlank()) sb.append(d.digest.prependIndent("    recap ")).append('\n')
+            d.entries.forEach { e -> sb.append("    ").append(if (e.moment) "★ " else "· ").append("#").append(e.channel).append(" ").append(e.text).append('\n') }
+        }
         return sb.toString().trimEnd()
     }
 

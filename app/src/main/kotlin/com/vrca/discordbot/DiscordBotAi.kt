@@ -86,6 +86,8 @@ object DiscordBotAi {
         val channelBit: String,   // a running joke/norm specific to THIS channel, or empty
         val selfTrait: String,
         val selfMood: String,
+        val moments: List<String> = emptyList(),  // funny/notable things that happened (→ the day log)
+        val wrong: List<Int> = emptyList(),      // numbers of stored items the chat says are wrong / unwanted
     )
 
     /**
@@ -125,12 +127,14 @@ object DiscordBotAi {
         val namesRule: Boolean,      // nicknames/aliases in play → one-name-at-a-time rule
         val recall: Boolean,         // they asked what Cardinal knows → answer-from-memory rule
         val shortHint: Boolean,
+        val dayLog: String = "",     // "what happened <day>?" → that day's log/recap
     )
 
     suspend fun reply(cfg: DiscordBotStore.Config, model: String, turns: List<Turn>, c: ReplyCtx): ReplyResult {
         val sys = buildString {
             append(CORE)
             if (c.selfDigest.isNotBlank()) append("\n\n[You] ").append(c.selfDigest)
+                .append(" Your quirks come out when they fit the moment, not in every message.")
             if (c.channelInfo.isNotBlank()) append("\n\n[Channel] ").append(c.channelInfo)
             if (c.serverCulture.isNotBlank()) append("\n\n[Server memories]\n").append(c.serverCulture)
             if (c.channelBits.isNotBlank()) append("\n\n[Running bit here, only if it fits] ").append(c.channelBits)
@@ -141,6 +145,7 @@ object DiscordBotAi {
             }
             if (c.othersBlock.isNotBlank()) append("\n\n[Others]\n").append(c.othersBlock)
             if (c.summary.isNotBlank()) append("\n\n[Earlier] ").append(c.summary)
+            if (c.dayLog.isNotBlank()) append("\n\n[What happened, from your notes — other people's doings unless it says Cardinal]\n").append(c.dayLog)
             if (c.namesRule) append("\n\n[Names] One name per person at a time; never give someone another person's nickname.")
             if (c.recall) append("\n\n[Memory question] Answer from what's above; if there's nothing, say so. Don't invent.")
             if (c.langHint.isNotBlank()) append("\n\n[Language] Reply in ").append(c.langHint).append(", native script.")
@@ -205,10 +210,35 @@ object DiscordBotAi {
         }
     }
 
+    /**
+     * The first JSON object in [text], tolerating what the small model gets wrong: prose around it and a
+     * missing tail (it sometimes stops before the final `}` / `]` or mid-string) — unbalanced brackets and
+     * an open string are closed. Null when there's no object at all.
+     */
+    internal fun jsonObjectIn(text: String): JSONObject? {
+        val start = text.indexOf('{'); if (start < 0) return null
+        val end = text.lastIndexOf('}')
+        if (end > start) try { return JSONObject(text.substring(start, end + 1)) } catch (_: Exception) { }
+        val sb = StringBuilder(); val stack = ArrayDeque<Char>()
+        var inStr = false; var esc = false
+        for (ch in text.substring(start)) {
+            sb.append(ch)
+            if (inStr) { if (esc) esc = false else if (ch == '\\') esc = true else if (ch == '"') inStr = false; continue }
+            when (ch) {
+                '"' -> inStr = true
+                '{' -> stack.addLast('}')
+                '[' -> stack.addLast(']')
+                '}', ']' -> { if (stack.isNotEmpty()) stack.removeLast(); if (stack.isEmpty()) break }
+            }
+        }
+        if (inStr) sb.append('"')
+        var fixed = sb.toString().trimEnd().trimEnd(',')
+        while (stack.isNotEmpty()) fixed += stack.removeLast()
+        return try { JSONObject(fixed) } catch (_: Exception) { null }
+    }
+
     private fun parsePlan(text: String): Plan? = try {
-        val s = text.indexOf('{'); val e = text.lastIndexOf('}')
-        if (s < 0 || e <= s) null
-        else JSONObject(text.substring(s, e + 1)).let { o ->
+        jsonObjectIn(text)?.let { o ->
             val act = when (o.optString("action").lowercase()) {
                 "reply" -> Act.REPLY; "react" -> Act.REACT; else -> Act.IGNORE
             }
@@ -221,26 +251,45 @@ object DiscordBotAi {
      * learn lasting facts about people (absent ones included), note server culture / a channel bit,
      * and nudge the self. One 8B call. Null on error (the batch is retried with the next one).
      */
-    suspend fun observe(cfg: DiscordBotStore.Config, turns: List<Turn>, prevSummary: String): Observation? {
+    suspend fun observe(
+        cfg: DiscordBotStore.Config, turns: List<Turn>, prevSummary: String, stored: String = "",
+        selfTraits: List<String> = emptyList(),
+    ): Observation? {
         val transcript = mergeTurns(turns).takeLast(DiscordBotLimits.LEARN_FETCH).joinToString("\n") {
             if (it.isBot) "Cardinal: ${it.text}" else "${it.name}: ${it.text}"
         }
+        // Correction mode: only when the batch contains a correction/complaint cue does the learner see
+        // what's stored (people's facts + Cardinal's traits), so it can remove what the chat says is
+        // wrong. The everyday pass stays lean.
+        val fix = stored.isNotBlank()
         val sys = buildString {
             append("You keep long-term MEMORY for Cardinal, a member of this Discord. Don't write a reply. ")
-            append("Read the chat and output only this JSON. Leave out any field you don't know (never write none/unknown):\n")
+            append("Read the chat and output only this JSON:\n")
             append("{\"summary\":\"<one short sentence, under 20 words: who is talking about what right now>\",")
-            append("\"people\":[{\"about\":\"<their name exactly as shown (not Cardinal)>\",\"facts\":[\"<lasting fact about who they are>\"],")
-            append("\"forget\":[\"<stored fact that's no longer true>\"],\"nickname\":\"<nickname others call them>\",")
-            append("\"preferredName\":\"<what they asked to be called>\",\"relationship\":\"<their role here, if not known yet>\",")
-            append("\"howToTreat\":\"<only if clear>\",\"language\":\"<if not English>\"}],")
-            append("\"event\":\"<a server-wide moment or inside joke worth remembering>\",")
-            append("\"channelBit\":\"<a running joke in THIS channel>\",")
-            append("\"self\":{\"trait\":\"<a lasting quirk Cardinal showed in ITS OWN messages here>\",\"mood\":\"<a word or two>\"}}\n")
+            append("\"moments\":[\"<a funny or notable thing that happened here, with who (0-2; skip ordinary chat)>\"],")
+            if (fix) append("\"wrong\":[<numbers of STORED items the chat says are untrue or out of date, or that people asked Cardinal to stop>],")
+            append("\"self\":{\"trait\":\"<a new lasting quirk, habit, opinion, role or bit of Cardinal's (shown in his own messages, or given to him by others and he went along with it; not a one-off event)>\",")
+            append("\"mood\":\"<a word or two>\"},")
+            append("\"people\":[{\"about\":\"<name exactly as shown (not Cardinal)>\",\"facts\":[\"<new lasting fact about who they are>\"]}]}\n")
+            append("Optional keys: add them ONLY when the chat clearly shows it, otherwise leave the key out entirely (no empty values). ")
+            append("Per person: nickname (what others call them), relationship (their role here), language (if not English)")
+            if (fix) append(", forget (a stored fact of theirs that's no longer true), notNickname (a name they said not to call them), avoid (something they asked Cardinal to stop doing to them)")
+            append(". Top level: event (an inside joke or legendary moment worth remembering for weeks), channelBit (a running joke in THIS channel). ")
+            append("summary and moments are required (moments may be []); leave out self.trait if there's nothing new.\n")
             append("Only list people you learned something NEW and lasting about. A fact must be said or clearly shown in THIS chat ")
             append("(a question someone asks or a joke isn't a fact about them): ")
             append("never guess, and never reuse wording from these instructions. Lasting means who someone is (hobbies, games, work, ")
-            append("where they're from, pets, tastes). Not lasting: what they just said or did, anything about using Cardinal or this app, ")
-            append("their name. Keep each person's info on that person. Never record hateful notes about groups or jokes about a real person's death or crimes.")
+            append("where they're from, pets, tastes). Not lasting: what they just said or did (a one-off event like a burnt toaster goes in moments, not facts), what they think of someone else, anything about using Cardinal or this app, ")
+            append("their name. Keep each person's info on that person; Cardinal's own quirks go only in self, never in people. ")
+            append("Never record hateful notes about groups or jokes about a real person's death or crimes.")
+            if (selfTraits.isNotEmpty() && !fix)
+                append("\nAlready known about Cardinal (don't repeat or reword these): ").append(selfTraits.joinToString("; "))
+            if (fix) {
+                append("\n\nSTORED MEMORY (numbered):\n").append(stored).append('\n')
+                append("If the chat says a stored item is untrue or out of date (the person themselves, or others clearly agreeing), or people ")
+                append("asked Cardinal to stop doing it, put its number in wrong, and add the correct fact if one was given. ")
+                append("Don't re-add stored items. Otherwise leave stored memory alone.")
+            }
         }
         val user = "PREVIOUS SUMMARY: ${prevSummary.ifBlank { "(none)" }}\n\nRECENT CHAT:\n$transcript"
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", user))
@@ -250,17 +299,41 @@ object DiscordBotAi {
         }
     }
 
+    /**
+     * End-of-day recap (cheap 8B, once per finished busy day): condenses the day log's summaries and
+     * moments into a few lines so "what happened yesterday?" reads well and stays small. Null on error.
+     */
+    suspend fun digestDay(cfg: DiscordBotStore.Config, dayLabel: String, entries: String): String? {
+        val sys = "Write a short recap of one day in a Discord server, for Cardinal's memory. 3 to 6 lines, each starting with \"- \". " +
+            "Funny and notable moments first, keep who did what by name, then the main topics. Stay close to the notes: don't add details, feelings or consequences that aren't listed. No intro."
+        val messages = JSONArray().put(obj("system", sys)).put(obj("user", "DAY: $dayLabel\n$entries"))
+        return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, DiscordBotLimits.DAY_DIGEST_MAX_TOKENS)) {
+            is Result.Ok -> r.text.lines().map { it.trim() }.filter { it.startsWith("-") || it.startsWith("•") || it.startsWith("*") }
+                .joinToString("\n") { "- " + it.trimStart('-', '•', '*', ' ') }.ifBlank { null }
+            is Result.Error -> { logIssue("Day recap", r.message); null }
+        }
+    }
+
     private fun parseObservation(text: String): Observation? = try {
-        val s = text.indexOf('{'); val e = text.lastIndexOf('}')
-        if (s < 0 || e <= s) null
-        else JSONObject(text.substring(s, e + 1)).let { o ->
+        jsonObjectIn(text)?.let { o ->
+            val people = peopleFrom(o.optJSONArray("people"))
+            val (selfEntries, others) = people.partition { it.about.equals("cardinal", true) }
+            // The small model sometimes files Cardinal's own quirks under people: salvage one as the trait.
+            val salvaged = selfEntries.firstOrNull()?.json?.let { j ->
+                (strList(j.optJSONArray("traits")) + strList(j.optJSONArray("facts")) + listOf(j.optString("trait")))
+                    .map { it.trim().replace(Regex("(?i)^(he'?s|he is|he|cardinal is|cardinal)\\s+"), "") }
+                    .firstOrNull { it.length in 3..80 }
+            }.orEmpty()
             Observation(
                 summary = o.optString("summary").trim().take(DiscordBotLimits.SUMMARY_MAX_CHARS),
-                memDeltas = peopleFrom(o.optJSONArray("people")),
+                memDeltas = others,
                 serverEvent = o.optString("event").trim(),
                 channelBit = o.optString("channelBit").trim(),
-                selfTrait = o.optJSONObject("self")?.optString("trait")?.trim().orEmpty(),
+                selfTrait = o.optJSONObject("self")?.optString("trait")?.trim().orEmpty().ifBlank { salvaged },
                 selfMood = o.optJSONObject("self")?.optString("mood")?.trim().orEmpty(),
+                moments = strList(o.optJSONArray("moments")),
+                wrong = o.optJSONArray("wrong")?.let { a -> (0 until a.length()).mapNotNull {
+                    a.opt(it)?.toString()?.let { v -> Regex("\\d+").find(v)?.value?.toIntOrNull() } } }.orEmpty(),
             )
         }
     } catch (_: Exception) { null }
@@ -285,7 +358,21 @@ object DiscordBotAi {
     private suspend fun call(
         cfg: DiscordBotStore.Config, model: String, messages: JSONArray, maxTokens: Int, temperature: Double? = null,
     ): Result = withContext(Dispatchers.IO) {
-        try {
+        // One quick retry on a transient failure (5xx / network): a failed call isn't billed, and without it
+        // a single upstream hiccup meant a message went unanswered.
+        val first = callOnce(cfg, model, messages, maxTokens, temperature)
+        if (first is Result.Error && TRANSIENT_ERR.containsMatchIn(first.message)) {
+            kotlinx.coroutines.delay(600)
+            callOnce(cfg, model, messages, maxTokens, temperature)
+        } else first
+    }
+
+    private val TRANSIENT_ERR = Regex("HTTP (500|502|503|504|520|522|524)\\b|IOException|SocketTimeout|timeout|reset", RegexOption.IGNORE_CASE)
+
+    private fun callOnce(
+        cfg: DiscordBotStore.Config, model: String, messages: JSONArray, maxTokens: Int, temperature: Double?,
+    ): Result {
+        return try {
             val payload = JSONObject().put("messages", messages).put("max_tokens", maxTokens)
             if (temperature != null) payload.put("temperature", temperature)
             val body = payload.toString().toRequestBody(JSON)
@@ -297,7 +384,7 @@ object DiscordBotAi {
             client.newCall(req).execute().use { resp ->
                 val raw = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful)
-                    return@withContext Result.Error("Workers AI HTTP ${resp.code}: ${extractError(raw) ?: raw.take(180)}")
+                    return Result.Error("Workers AI HTTP ${resp.code}: ${extractError(raw) ?: raw.take(180)}")
                 billingSink?.invoke(billedNeurons(raw, model, messages))
                 val text = extractResponse(raw)
                 if (text.isNullOrBlank()) Result.Error("Empty AI response") else Result.Ok(text.trim())

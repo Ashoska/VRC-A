@@ -1,0 +1,38 @@
+# Facts about people change: the person corrects one, others dispute one, someone asks not to be called
+# a nickname. Stored memory must follow — and must NOT change when nothing was actually corrected.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+> teach card alice lives in Toronto
+> teach card alice owns a black cat named Miso
+> teach nick alice shortstack
+> teach prefer alice shortstack
+> teach card bob is a professional chef
+> teach card bob plays Valorant
+> teach card carol avatar artist, makes her own avatars
+[general]
+alice: guess who moved! i actually live in vancouver now, left toronto last month
+bob: welcome to the west coast lol
+carol: lol bob you're not a chef, you work at a bank
+bob: yeah i've never been a chef, i'm a bank teller. idk who said chef
+dave: bob can't even boil pasta
+carol: actually this pizza is really good
+alice: @Cardinal hey
+> expect reply
+alice: @Cardinal stop calling me shortstack please, i hate that nickname
+> expect reply
+dave: ok shortstack is retired then
+> sleep 70000
+> wait
+> expect card alice not-contains (?i)toronto
+> expect card alice contains (?i)vancouver
+> expect card alice contains (?i)miso
+> expect card bob not-contains (?i)chef
+> expect card bob contains (?i)(bank|valorant)
+> expect card carol contains (?i)avatar
+> expect card alice not-contains (?i)(nickname: shortstack|goes by: [^\n]*shortstack)
+dave: @Cardinal where does alice live?
+> expect contains (?i)vancouver
+finn: @Cardinal what does bob do for work
+> expect contains (?i)bank
+alice: @Cardinal what's up with you today
+> expect not-contains (?i)shortstack

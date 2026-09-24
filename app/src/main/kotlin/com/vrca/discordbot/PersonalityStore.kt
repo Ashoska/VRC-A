@@ -141,9 +141,12 @@ object PersonalityStore {
     private val FILLER = setOf(
         "a", "an", "and", "the", "of", "very", "super", "really", "quite", "bit", "little", "kinda",
         "somewhat", "always", "often", "is", "being", "with", "to", "has", "have", "in", "at", "tone",
+        "uses", "use", "using", "puts", "put", "lot", "lots", "loves", "likes", "message", "messages",
     )
+    // Words plus emoji (a trait about "💀" is the same trait however it's worded around it).
     private fun words(s: String): List<String> =
-        Regex("[\\p{L}\\p{N}]+").findAll(s.lowercase()).map { it.value }.toList()
+        Regex("[\\p{L}\\p{N}]+|\\p{So}|[\\uD83C-\\uDBFF][\\uDC00-\\uDFFF]").findAll(s.lowercase()).map { it.value }.toList()
+    private fun isSymbol(w: String) = w.none { it.isLetterOrDigit() }
     private fun restatesCore(t: String): Boolean {
         val content = words(t).filter { it !in FILLER }
         return content.isEmpty() || content.all { it in CORE_WORDS }
@@ -154,8 +157,8 @@ object PersonalityStore {
         if (wa.isEmpty() || wb.isEmpty()) return false
         val ja = " " + wa.joinToString(" ") + " "; val jb = " " + wb.joinToString(" ") + " "
         if (ja == jb || ja.contains(jb) || jb.contains(ja)) return true
-        val ta = wa.filter { it.length >= 3 && it !in FILLER }.toSet()
-        val tb = wb.filter { it.length >= 3 && it !in FILLER }.toSet()
+        val ta = wa.filter { (it.length >= 3 || isSymbol(it)) && it !in FILLER }.toSet()
+        val tb = wb.filter { (it.length >= 3 || isSymbol(it)) && it !in FILLER }.toSet()
         if (ta.isEmpty() || tb.isEmpty()) return false
         return ta.count { it in tb }.toDouble() / (ta + tb).size >= 0.6
     }
@@ -232,6 +235,31 @@ object PersonalityStore {
         if (traits == cur.traits && newStyle == cur.style && newMood == cur.mood) return
         save(ctx, cur.copy(traits = traits, style = newStyle, mood = newMood))
     }
+
+    internal fun isSameTrait(a: String, b: String): Boolean = sameTrait(a, b)
+
+    /**
+     * People said one of Cardinal's traits is untrue, or asked him to drop it: it loses
+     * [DiscordBotLimits.TRAIT_DISPUTE_PENALTY] strength (a fresh bit is gone at once; a long-standing one
+     * is toned down and goes if the complaints continue — like a person taking the hint). Pinned
+     * (admin-protected) traits are left alone. Returns the trait text that was hit, or null.
+     */
+    fun disputeTrait(ctx: Context, text: String): String? {
+        val t = text.trim().trimEnd('.'); if (t.length < 3) return null
+        val cur = load(ctx)
+        val idx = cur.traits.indexOfFirst { !it.pinned && sameTrait(it.text, t) }
+        if (idx < 0) return null
+        val hit = cur.traits[idx]
+        val left = hit.strength - DiscordBotLimits.TRAIT_DISPUTE_PENALTY
+        val traits = if (left <= 0) cur.traits.filterIndexed { i, _ -> i != idx }
+            else cur.traits.mapIndexed { i, tr -> if (i == idx) tr.copy(strength = left) else tr }
+        save(ctx, cur.copy(traits = traits))
+        return hit.text
+    }
+
+    /** Current traits, strongest first (for the learner's correction view). */
+    fun traitTexts(ctx: Context, max: Int): List<String> =
+        load(ctx).traits.sortedByDescending { (if (it.pinned) 100 else 0) + it.strength }.take(max).map { it.text }
 
     /** Admin: pin/unpin a trait (pinned = protected from decay). */
     fun setTraitPinned(ctx: Context, traitText: String, pinned: Boolean) {

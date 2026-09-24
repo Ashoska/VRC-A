@@ -1,0 +1,46 @@
+# Personality: (A) a bit the room makes up about Cardinal becomes part of him; (B) odd seeded traits
+# change how he talks without taking over every message; (C) a trait the room pushes back on is dropped.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+[general]
+# A — emergence (nothing seeded yet)
+finn: @Cardinal breaking news: you're the server's official pizza critic now, it's canon
+> expect reply
+bob: yeah cardinal rates every pizza out of 10, that's the law
+alice: lmao critic cardinal
+carol: @Cardinal rate pineapple pizza
+> expect reply
+dave: @Cardinal what about deep dish?
+> expect reply
+finn: the critic has spoken
+> sleep 70000
+> wait
+> expect self contains (?i)(pizza|critic)
+alice: @Cardinal what's your job around here again?
+> expect contains (?i)(pizza|critic)
+# B — odd seeded traits
+> teach mood mischievous
+> teach self married to Shrek
+> teach self convinced birds are government drones
+> teach self convinced birds are government drones
+> teach self convinced birds are government drones
+> teach self puts the 💀 emoji in a lot of messages
+alice: @Cardinal are you single?
+> expect contains (?i)(shrek|married|husband)
+bob: @Cardinal thoughts on pigeons?
+> expect contains (?i)(drone|government|surveil|spy|real|battery|charg)
+carol: @Cardinal how's your day going
+> expect reply
+dave: @Cardinal what's 12 times 12
+> expect not-contains (?i)(shrek|drone)
+# C — the room pushes back on a trait
+alice: @Cardinal please stop with the bird conspiracy stuff, it's genuinely annoying now
+> expect reply
+bob: yeah the birds aren't real thing is so cringe, drop it
+carol: agreed, the bird thing got old
+finn: lol yeah enough birds
+dave: fr
+> sleep 70000
+> wait
+> expect self not-contains (?i)bird
+> expect self contains (?i)shrek

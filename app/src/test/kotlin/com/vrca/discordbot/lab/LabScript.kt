@@ -174,6 +174,12 @@ internal class LabScript(private val d: LabDriver) {
                 com.vrca.discordbot.ChannelMemoryStore.remember(ctx, d.discord.channel(ch).id, text, now)
             }
             "summary" -> ConversationStore.updateSummary(ctx, d.discord.channel(d.currentChannel).id, rest, now)
+            // > teach day -1 21 general moment|topic <text>   (days back, hour, channel, kind, text)
+            "day" -> {
+                val p = rest.split(Regex("\\s+"), limit = 5)
+                val date = com.vrca.discordbot.DayLogStore.dateOf(now).plusDays(p[0].toLong())
+                com.vrca.discordbot.DayLogStore.seed(ctx, date, p[1].toInt(), p[2], p.getOrElse(4) { "" }, p[3] == "moment")
+            }
             else -> { out.append("?? unknown teach: $spec\n"); return }
         }
         d.rec.event("teach", JSONObject().put("what", what).put("text", rest))
@@ -207,8 +213,22 @@ internal class LabScript(private val d: LabDriver) {
                 re(spec.removePrefix("server").trim().removePrefix("contains").trim()).containsMatchIn(all) to all.take(200)
             }
             "self" -> {
-                val s = PersonalityStore.snapshot(d.ctx)
-                re(spec.removePrefix("self").trim().removePrefix("contains").trim()).containsMatchIn(s) to s.replace('\n', ' ').take(200)
+                val s = PersonalityStore.load(d.ctx).traits.joinToString(" | ") { "${it.text} (${it.strength})" }
+                val body = spec.removePrefix("self").trim()
+                val neg = body.startsWith("not-contains")
+                val hit = re(body.removePrefix("not-contains").removePrefix("contains").trim()).containsMatchIn(s)
+                (if (neg) !hit else hit) to s.take(300)
+            }
+            "day" -> {
+                // > expect day -1 contains <regex>   (checks that day's digest + entries)
+                val back = parts.getOrElse(1) { "0" }.toLong()
+                val date = com.vrca.discordbot.DayLogStore.dateOf(System.currentTimeMillis()).plusDays(back)
+                val day = com.vrca.discordbot.DayLogStore.load(d.ctx, date)
+                val all = ((day?.digest ?: "") + " || " + day?.entries.orEmpty().joinToString(" | ") { it.text })
+                val body = spec.substringAfter(parts.getOrElse(1) { "0" }).trim()
+                val neg = body.startsWith("not-contains")
+                val hit = re(body.removePrefix("not-contains").removePrefix("contains").trim()).containsMatchIn(all)
+                (if (neg) !hit else hit) to all.take(300)
             }
             "status" -> {
                 Thread.sleep(3000)   // let late socket callbacks land
