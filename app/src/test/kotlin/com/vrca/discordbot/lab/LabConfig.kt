@@ -69,7 +69,7 @@ internal class LabConfig(
                 scripts = scripts,
                 interactive = prop("interactive", if (scripts.isEmpty()) "1" else "0") == "1",
                 live = live,
-                cfAccount = env("CF_ACCOUNT_ID", "CLOUDFLARE_ACCOUNT_ID"),
+                cfAccount = env("CF_ACCOUNT_ID", "CLOUDFLARE_ACCOUNT_ID").ifBlank { prop("account") },
                 cfToken = env("CF_API_TOKEN", "CF_AI_TOKEN", "CLOUDFLARE_API_TOKEN"),
                 cfGateway = env("CF_GATEWAY_ID"),
                 aigToken = env("CF_AIG_TOKEN"),

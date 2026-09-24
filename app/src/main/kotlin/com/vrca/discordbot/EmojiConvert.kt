@@ -35,12 +35,69 @@ object EmojiConvert {
     fun customNames(): List<String> = custom.keys.sorted()
     fun clear() = custom.clear()
 
+    // ── Usage ranking: the hint lists the emojis THIS server actually uses most ──
+    /** lowercased custom name → times seen in members' messages/reactions. */
+    private val usage = ConcurrentHashMap<String, Int>()
+    @Volatile private var usageChanges = 0
+    private val RAW_CUSTOM_RE = Regex("<(a?):([a-zA-Z0-9_]{2,32}):(\\d+)>")
+
+    /** Count the custom emojis a member used in a message (Discord sends them as `<:name:id>`). */
+    fun noteUsage(rawContent: String) {
+        if (!rawContent.contains("<")) return
+        RAW_CUSTOM_RE.findAll(rawContent).forEach { m -> bump(m.groupValues[2]) }
+    }
+
+    /** Count a member's reaction with a custom emoji. */
+    fun noteReaction(name: String) { if (name.isNotBlank()) bump(name) }
+
+    private fun bump(name: String) {
+        val k = name.lowercase()
+        if (!custom.containsKey(k)) return
+        usage.merge(k, 1, Int::plus)
+        usageChanges++
+    }
+
+    /** The [n] custom emojis to offer the model: most-used first, then alphabetical. */
+    fun topNames(n: Int): List<String> =
+        custom.keys.sortedWith(compareByDescending<String> { usage[it] ?: 0 }.thenBy { it }).take(n)
+
+    /** Serialised usage counts when enough changed to be worth persisting (else null). */
+    fun usageSnapshotIfDirty(minChanges: Int): String? {
+        if (usageChanges < minChanges) return null
+        usageChanges = 0
+        return org.json.JSONObject(usage as Map<*, *>).toString()
+    }
+
+    fun restoreUsage(json: String?) {
+        if (json.isNullOrBlank()) return
+        try {
+            val o = org.json.JSONObject(json)
+            o.keys().forEach { k -> usage[k] = maxOf(usage[k] ?: 0, o.optInt(k, 0)) }
+        } catch (_: Exception) { }
+    }
+
+    /** `<:name:id>` → `:name:` for text shown to the model: fewer tokens, and it never sees (or
+     *  copies back a mangled) id — [convert] turns `:name:` into the right id on the way out. */
+    fun normalizeForPrompt(text: String): String =
+        if (!text.contains("<")) text else RAW_CUSTOM_RE.replace(text) { m -> ":${m.groupValues[2]}:" }
+
     private val SHORTCODE_RE = Regex(":([a-zA-Z0-9_+-]{1,40}):")
+    private val FULLWIDTH_SHORTCODE_RE = Regex("[:：]([a-zA-Z0-9_+-]{1,40})[:：]")
 
     /** Rewrite every `:name:` in [text] to a renderable form (custom id, else unicode, else leave). */
     fun convert(text: String): String {
-        if (text.isBlank() || !text.contains(':')) return text
-        return SHORTCODE_RE.replace(text) { m ->
+        if (text.isBlank()) return text
+        var t = text
+        // Raw `<:name:id>` the model typed: re-derive the id from the name (a copied id can be wrong,
+        // which renders a DIFFERENT emoji); unknown names fall back to the `:name:` text.
+        if (t.contains("<")) t = RAW_CUSTOM_RE.replace(t) { m -> ":${m.groupValues[2]}:" }
+        // Full-width colons (common when writing Japanese) around a known emoji name.
+        if (t.contains('：')) t = FULLWIDTH_SHORTCODE_RE.replace(t) { m ->
+            val n = m.groupValues[1].lowercase()
+            if (custom.containsKey(n) || STANDARD.containsKey(n)) ":${m.groupValues[1]}:" else m.value
+        }
+        if (!t.contains(':')) return t
+        return SHORTCODE_RE.replace(t) { m ->
             val name = m.groupValues[1].lowercase()
             custom[name]?.let { return@replace if (it.animated) "<a:${m.groupValues[1]}:${it.id}>" else "<:${m.groupValues[1]}:${it.id}>" }
             STANDARD[name]?.let { return@replace it }

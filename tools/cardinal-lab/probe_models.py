@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Cheap LIVE checks against Workers AI (stdlib only; needs CF_ACCOUNT_ID + CF_API_TOKEN).
+"""Cheap LIVE checks against Workers AI (stdlib only; needs CF_ACCOUNT_ID, plus CF_API_TOKEN unless the
+cloud environment injects the Cloudflare credential for api.cloudflare.com).
 
   probe_models.py ping [MODEL ...]
       One tiny call per model (~1 neuron each): is it alive, how fast, what it costs.
@@ -14,10 +15,12 @@ import argparse, json, os, sys, time, urllib.error, urllib.request
 
 PRICES = {  # neurons per 1M tokens (in, out)
     "@cf/meta/llama-3.3-70b-instruct-fp8-fast": (26668, 204805),
-    "@cf/meta/llama-3.1-8b-instruct": (25608, 75147),
-    "@cf/meta/llama-3.1-8b-instruct-fp8": (13778, 26128),
+    # The plain/-fast/-fp8-fast 8B ids are all served by @cf/meta/llama-3.1-8b-fast-v2 now.
+    "@cf/meta/llama-3.1-8b-instruct": (4119, 34868),
+    "@cf/meta/llama-3.1-8b-fast-v2": (4119, 34868),
+    "@cf/meta/llama-3.1-8b-instruct-fast": (4119, 34868),
     "@cf/meta/llama-3.1-8b-instruct-fp8-fast": (4119, 34868),
-    "@cf/meta/llama-3.1-8b-instruct-fast": (None, None),
+    "@cf/meta/llama-3.1-8b-instruct-fp8": (13778, 26128),
     "@cf/meta/llama-3.2-3b-instruct": (4625, 30475),
     "@cf/meta/llama-4-scout-17b-16e-instruct": (24545, 77273),
     "@cf/mistralai/mistral-small-3.1-24b-instruct": (31876, 50488),
@@ -29,9 +32,8 @@ PRICES = {  # neurons per 1M tokens (in, out)
 }
 DEFAULT_PING = [
     "@cf/meta/llama-3.3-70b-instruct-fp8-fast",   # REPLY_MODEL
-    "@cf/meta/llama-3.1-8b-instruct",             # CHEAP_MODEL (deprecated 2026-05-30?)
+    "@cf/meta/llama-3.1-8b-instruct",             # CHEAP_MODEL (aliased to llama-3.1-8b-fast-v2)
     "@cf/meta/llama-3.1-8b-instruct-fp8",
-    "@cf/meta/llama-3.1-8b-instruct-fp8-fast",
     "@cf/meta/llama-3.2-3b-instruct",
     "@cf/ibm-granite/granite-4.0-h-micro",
     "@cf/google/gemma-4-26b-a4b-it",
@@ -46,8 +48,10 @@ TOKEN = (os.environ.get("CF_API_TOKEN") or os.environ.get("CF_AI_TOKEN") or "").
 
 def run(model, body):
     url = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/ai/run/{model}"
-    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
-                                 headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if TOKEN:  # otherwise the environment's credential proxy adds it
+        headers["Authorization"] = f"Bearer {TOKEN}"
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers=headers)
     t0 = time.time()
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
@@ -72,13 +76,18 @@ def run(model, body):
         err = json.dumps(raw.get("errors") if isinstance(raw, dict) else raw)[:240]
     tin, tout = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
     p = PRICES.get(model, (None, None))
-    n = (tin * p[0] + tout * p[1]) / 1e6 if p[0] else None
-    return {"model": model, "code": code, "ms": ms, "in": tin, "out": tout, "neurons": n, "text": text or "", "error": err}
+    n = usage.get("neurons")  # exact, when Workers AI reports it
+    if n is None:
+        n = (tin * p[0] + tout * p[1]) / 1e6 if p[0] else None
+    served = res.get("model", "") if isinstance(res, dict) else ""
+    return {"model": model, "served": served, "code": code, "ms": ms, "in": tin, "out": tout, "neurons": n,
+            "text": text or "", "error": err}
 
 
 def fmt(r):
     n = "%.2fn" % r["neurons"] if r["neurons"] is not None else "?n"
-    head = f"{r['model'].split('/')[-1]:34} {r['code']} {r['ms']:6}ms in={r['in']:5} out={r['out']:4} {n}"
+    served = f" [{r['served'].split('/')[-1]}]" if r.get("served") and r["served"] != r["model"] else ""
+    head = f"{r['model'].split('/')[-1]:34} {r['code']} {r['ms']:6}ms in={r['in']:5} out={r['out']:4} {n}{served}"
     return head + (f"  ERROR {r['error']}" if r["error"] else "")
 
 
@@ -94,19 +103,23 @@ def cmd_replay(a):
     calls = [json.loads(l) for l in open(a.calls, encoding="utf-8")]
     calls = [c for c in calls if c.get("kind") == a.kind][: a.n]
     models = [m.strip() for m in a.models.split(",") if m.strip()]
-    lines = []
+    lines, records = [], []
     for c in calls:
         req = c["request"]
         last = [m for m in req.get("messages", []) if m.get("role") == "user"][-1:]
         lines.append(f"\n=== call #{c['n']} ({c['kind']}) — last user turn: {last[0]['content'][:160] if last else ''!r}")
         for m in models:
             r = run(m, req)
+            r["call"] = c["n"]
+            records.append(r)
             lines.append(fmt(r))
             lines.append("    " + (r["text"] or "").strip().replace("\n", "\n    ")[:600])
     text = "\n".join(lines) + "\n"
     print(text)
-    if a.out:
-        open(a.out, "w", encoding="utf-8").write(text)
+    if a.out:  # full answers (untruncated) as JSONL, for checking JSON validity / content
+        with open(a.out, "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
 def main():
@@ -116,8 +129,8 @@ def main():
     rp = sub.add_parser("replay"); rp.add_argument("calls"); rp.add_argument("--models", required=True)
     rp.add_argument("--kind", default="reply"); rp.add_argument("--n", type=int, default=5); rp.add_argument("--out")
     a = p.parse_args()
-    if not (ACCOUNT and TOKEN):
-        sys.exit("Set CF_ACCOUNT_ID and CF_API_TOKEN (Workers AI) in the environment.")
+    if not ACCOUNT:
+        sys.exit("Set CF_ACCOUNT_ID (and CF_API_TOKEN unless the environment injects the Cloudflare credential).")
     {"ping": cmd_ping, "replay": cmd_replay}[a.cmd](a)
 
 

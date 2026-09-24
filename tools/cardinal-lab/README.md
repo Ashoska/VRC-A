@@ -112,13 +112,14 @@ Addressed lines (mention or `^bot`) wait until the bot has decided and gone quie
 | `smoke.txt` | boot, mention reply, trivial-ping react, reply-to-bot, react request |
 | `hangout.txt` | ~140 lines, 6 people, 3 channels, ambient on, Japanese, image, cross-channel, stop, recall |
 | `seeded-memory.txt` | a lived-in memory (personality, cards, culture, channel bit, summary) → full prompts |
-| `pileup.txt` | the 8B observer firing on unreplied chatter |
+| `pileup.txt` | learning coverage: every message learned in batches, the tail when the room goes quiet |
 | `burst.txt` | several people addressing the bot within a second (mutex / covered / threading) |
 | `ladder.txt` | the budget ladder: TRIM → CHEAP (8B) → REACT_ONLY → SILENT |
-| `personality-cap.txt` | repro: the 25th trait never enters (personality freezes at 24) |
-| `identity-filter.txt` | repro: short names/nicknames/relationship words silently delete unrelated card facts |
-| `lifecycle.txt` | service restart + server-side drop: stale-socket callbacks vs RESUME |
-| `gateway-codes.txt` | server-initiated close (deaf until a missed heartbeat) + a 4014 intents rejection loop |
+| `recall.txt` | **knowledge test**: a lived-in memory, then 10 memory questions each checked for the right fact (LIVE; count the ✓ to compare prompt changes) |
+| `personality-cap.txt` | regression: a 25th trait still enters once 24 exist (was: personality froze) |
+| `identity-filter.txt` | regression: short names/nicknames/relationship words don't delete unrelated card facts |
+| `lifecycle.txt` | service restart + server-side drop: stale-socket callbacks ignored, RESUME works |
+| `gateway-codes.txt` | server-initiated close resumes in ~1 s; a 4014 intents rejection stops with FAILED + reason |
 
 ## Production observability
 

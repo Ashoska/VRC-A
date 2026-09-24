@@ -21,6 +21,8 @@ internal object Pricing {
         "@cf/meta/llama-3.1-70b-instruct-fp8-fast" to Rate(26668.0, 204805.0),
         "@cf/meta/llama-3.1-8b-instruct" to Rate(25608.0, 75147.0),
         "@cf/meta/llama-3.1-8b-instruct-fp8" to Rate(13778.0, 26128.0),
+        "@cf/meta/llama-3.1-8b-fast-v2" to Rate(4119.0, 34868.0),        // what the 8B ids below are served by now
+        "@cf/meta/llama-3.1-8b-instruct-fast" to Rate(4119.0, 34868.0),
         "@cf/meta/llama-3.1-8b-instruct-fp8-fast" to Rate(4119.0, 34868.0),
         "@cf/meta/llama-3.1-8b-instruct-awq" to Rate(11161.0, 24215.0),
         "@cf/meta/llama-3.2-1b-instruct" to Rate(2457.0, 18252.0),
@@ -91,6 +93,8 @@ internal class AiCall(
     @Volatile var estimated: Boolean = false
     @Volatile var neurons: Double = 0.0
     @Volatile var error: String? = null
+    /** The model Cloudflare actually ran (it aliases retired ids, e.g. llama-3.1-8b-instruct → llama-3.1-8b-fast-v2). */
+    @Volatile var backendModel: String = ""
 
     val latencyMs: Long get() = if (endMs > 0) endMs - startMs else -1
 
@@ -100,6 +104,7 @@ internal class AiCall(
 
     fun toJson(full: Boolean = true): JSONObject = JSONObject()
         .put("n", n).put("kind", kind).put("model", askedModel).put("served", servedModel)
+        .put("backend", backendModel)
         .put("source", source).put("startMs", startMs).put("latencyMs", latencyMs).put("status", status)
         .put("promptTokens", promptTokens).put("completionTokens", completionTokens)
         .put("cachedTokens", cachedTokens).put("estimated", estimated)

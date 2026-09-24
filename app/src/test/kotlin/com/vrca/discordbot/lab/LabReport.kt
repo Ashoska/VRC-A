@@ -13,7 +13,7 @@ internal class LabReport(private val d: LabDriver) {
 
     private val metaRe = Regex("(?i)\\b(as an ai|language model|i'?m (an? )?(ai|bot|assistant)\\b|my (instructions|prompt|programming)|breaking character|system prompt|my role)")
     private val leakRe = Regex("%%MEM%%|^\\s*[\\[{]|\"action\"\\s*:|\\breact:\\s|\\[(Replying to|Names|Language|Emojis|Who you are)|^\\s*cardinal\\s*:", RegexOption.IGNORE_CASE)
-    private val shortcodeRe = Regex(":[a-z0-9_]{2,32}:")
+    private val shortcodeRe = Regex(":[a-z0-9_]{2,32}:(?!\\d)")   // `<:name:id>` is rendered, not flagged
     private fun script(s: String): String = when {
         s.any { it in '぀'..'ヿ' } -> "ja"
         s.any { it in '가'..'힣' } -> "ko"
@@ -159,14 +159,14 @@ internal class LabReport(private val d: LabDriver) {
 
     /** Split a reply system prompt into its labelled sections. */
     fun sections(sys: String): List<Pair<String, String>> {
-        val parts = sys.split(Regex("\\n\\n(?=\\[|Keep it to one short line|Reply with ONLY)"))
+        val parts = sys.split(Regex("\\n\\n(?=\\[|Keep it to one short line|Reply with)"))
         return parts.mapIndexed { i, p ->
             val name = when {
-                i == 0 -> "anchor + seed persona"
+                i == 0 -> "fixed core (identity + voice rules)"
                 p.startsWith("[People here you know") -> "[People here you know] (cards)"
                 p.startsWith("[") -> p.substring(0, p.indexOf(']').coerceAtLeast(1) + 1)
                 p.startsWith("Keep it") -> "short hint"
-                p.startsWith("Reply with ONLY") -> "output rule"
+                p.startsWith("Reply with") -> "output rule"
                 else -> "other"
             }
             name to p

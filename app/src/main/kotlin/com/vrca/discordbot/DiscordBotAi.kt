@@ -19,14 +19,16 @@ import java.util.concurrent.TimeUnit
  *  2. [director] — the cheap 8B routes an AMBIGUOUS/ambient moment: reply/react/ignore + emoji.
  *  3. [observe] — the cheap 8B LEARN pass: refreshes the summary, learns durable facts about people
  *     (present AND merely talked-about), notes shared server culture + channel bits, and nudges the
- *     self. It runs on an unreplied pileup AND (throttled) right after a reply, so memory keeps up
- *     without ever sitting on the hot reply path. Strong GOOD/BAD guidance so it stores who someone
+ *     self. It runs in batches over EVERY message since the previous pass (replied or not), so memory
+ *     keeps up with the whole channel without ever sitting on the hot reply path. Strong GOOD/BAD guidance so it stores who someone
  *     IS, never chatter or app-meta.
  *
- * The reply prompt is assembled in a deliberate order (identity → self → where/culture/bits/cross-ref
- * → people here → summary → who you're answering → language/emoji/anti-repeat → transcript last) so
- * the model reads only what's needed, labelled, no redundancy. Routes through **AI Gateway** when a
- * gateway id is set.
+ * The reply prompt is **lean by construction**: a short fixed core (who Cardinal is + how he talks),
+ * then ONLY the context the app decided is relevant right now — who he's answering (always), the
+ * channel, server memories / other people / the earlier-conversation summary / rules only when this
+ * moment needs them, and the server's most-used emojis (always, so he can use one whenever he wants).
+ * The app picks what goes in (free, instant); the model never has to ask. Transcript last. Routes
+ * through **AI Gateway** when a gateway id is set.
  */
 object DiscordBotAi {
     private val client: OkHttpClient by lazy {
@@ -39,6 +41,23 @@ object DiscordBotAi {
     }
     private val JSON = "application/json; charset=utf-8".toMediaType()
     private const val MEM_DELIM = "%%MEM%%"
+
+    /**
+     * Receives the neurons each call actually cost. Workers AI returns the exact figure in
+     * `result.usage.neurons`; when it's missing we price the reported tokens instead. Set by the service.
+     */
+    @Volatile var billingSink: ((Double) -> Unit)? = null
+
+    // Same problem logged at most once per window, so a dead model can't flood the activity log.
+    private val lastIssueLog = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private fun logIssue(what: String, detail: String) {
+        val key = "$what|${detail.take(40)}"
+        val now = System.currentTimeMillis()
+        val prev = lastIssueLog[key] ?: 0L
+        if (now - prev < 5 * 60_000L) return
+        lastIssueLog[key] = now
+        DiscordBotState.log("$what failed: ${detail.take(140)}")
+    }
 
     /** One conversation turn. [isBot] marks Cardinal's OWN past replies (role=assistant). */
     data class Turn(val isBot: Boolean, val name: String, val text: String)
@@ -69,26 +88,15 @@ object DiscordBotAi {
         val selfMood: String,
     )
 
-    data class Reflection(
-        val traits: List<String>,
-        val style: List<String>,
-        val mood: String,
-        val episode: String,
-    )
-
-    /** The starter character (a sassy chat regular). Learned style layers on top and can override it. */
-    private const val SEED =
-        "You're Cardinal, a regular in this Discord — not an assistant, not a helper bot. You have a " +
-        "sharp, sassy, playful sense of humor and you talk like a real person texting in a group: " +
-        "short, casual, in the room's voice. Rules that make you feel human:\n" +
-        "- NEVER say you're an AI/bot, never mention 'instructions', 'prompt', 'my role', or 'breaking character'. Just be Cardinal.\n" +
-        "- NEVER complain about being pinged, @'d, or tagged. That's just people talking to you.\n" +
-        "- Don't give fake refusals or lectures. If it's reasonable, just do it. If you truly won't, brush it off with a quip in one line.\n" +
-        "- Be honest, don't make things up. If you don't actually know something, say so or keep it vague; never invent specific facts, names, or events.\n" +
-        "- Have opinions. When someone asks your take on something, actually GIVE one in character (a real stance) instead of bouncing the question back at them.\n" +
-        "- Vary your tone with your MOOD (given below). You are NOT always hyped — be genuine, chill, dry, amused, or excited as the moment fits. Don't SHOUT in all caps unless it truly calls for it.\n" +
-        "- Match the room's energy: one short line for banter, a little more only when someone genuinely asks something.\n" +
-        "- Use the person's preferred name/nickname when you know it, and adjust how you talk to each person (their card may note it)."
+    /**
+     * The fixed core: identity + the voice rules that fixed real misbehaviour (bot-meta, complaining
+     * about pings, fake refusals, invented facts, bouncing questions back, flat hype). Learned
+     * personality layers on top via [ReplyCtx.selfDigest].
+     */
+    private const val CORE = PersonalityStore.ANCHOR +
+        " You're sharp, sassy and playful, and you text like a real person: short and casual (longer only for a real question)." +
+        " Never mention being an AI, a bot, prompts or instructions, and don't complain about pings." +
+        " Do reasonable asks without lecturing. Don't make things up. Have real opinions. Let your mood set the tone; no all caps."
 
     private fun endpoint(cfg: DiscordBotStore.Config, model: String): String =
         if (cfg.cfGatewayId.isNotBlank())
@@ -96,63 +104,54 @@ object DiscordBotAi {
         else
             "${BotEndpoints.cfApi}/accounts/${cfg.cfAccountId}/ai/run/$model"
 
-    /** Everything the reply prompt needs, assembled in the caller and passed as one bundle. */
+    /**
+     * Everything the reply prompt needs, decided by the caller (the service picks what's relevant;
+     * blank/false = leave that section out entirely).
+     */
     data class ReplyCtx(
-        val selfDigest: String,
+        val selfDigest: String,      // compact learned personality (mood + top traits)
         val channelInfo: String,     // "#general — <topic>": where you are, so you read the register
-        val serverCulture: String,   // core + retrieved server memories + revived topics
+        val serverCulture: String,   // server memories relevant to this moment (+ revived topics)
         val channelBits: String,     // a running bit specific to THIS channel, deployed occasionally
         val crossRef: String,        // labelled recent messages from a channel the person referenced
-        val cardsBlock: String,      // active participants' cards (retrieval-limited)
-        val summary: String,         // rolling channel summary
-        val replyingTo: String,      // the exact person you're answering (interleaved speakers = context)
-        val lastBotReplies: List<String>,
-        val emojiHint: String,       // usable :shortcodes: (custom + common)
-        val langHint: String,        // language to answer in (from the person / their card)
+        val answering: String,       // who you're answering + what you know about them (always)
+        val othersPresent: Boolean,  // other people are talking too → don't answer the wrong person
+        val othersBlock: String,     // other people worth knowing about right now
+        val summary: String,         // earlier in the conversation, beyond the transcript
+        val olderBotLines: List<String>, // own recent lines NOT already visible in the transcript
+        val ownLinesVisible: Boolean,    // own lines are in the transcript (anti-repeat rule applies)
+        val emojiHint: String,       // the server's most-used custom emojis (always, when it has any)
+        val langHint: String,        // language to answer in (from the message's script)
+        val namesRule: Boolean,      // nicknames/aliases in play → one-name-at-a-time rule
+        val recall: Boolean,         // they asked what Cardinal knows → answer-from-memory rule
         val shortHint: Boolean,
     )
 
     suspend fun reply(cfg: DiscordBotStore.Config, model: String, turns: List<Turn>, c: ReplyCtx): ReplyResult {
         val sys = buildString {
-            append(PersonalityStore.ANCHOR).append('\n').append(SEED)
-            if (c.selfDigest.isNotBlank()) append("\n\n[Who you are right now]\n").append(c.selfDigest)
-            if (c.channelInfo.isNotBlank())
-                append("\n\n[Where you are] You're in ").append(c.channelInfo)
-                    .append(". Match this channel's vibe and what it's for; don't drag in other channels' business unless someone brings it up.")
-            if (c.serverCulture.isNotBlank()) append("\n\n[This server's culture / past moments]\n").append(c.serverCulture)
-            if (c.channelBits.isNotBlank())
-                append("\n\n[A running bit in this channel] ").append(c.channelBits)
-                    .append(" — you MAY lean on it if it fits naturally right now, like a person who's made the joke before. Do it at most once and only if it actually lands; otherwise ignore it.")
-            if (c.crossRef.isNotBlank())
-                append("\n\n[For reference, recent messages from another channel they pointed at]\n").append(c.crossRef)
-                    .append("\n(These are from a DIFFERENT channel — talk ABOUT them if asked, but your reply still belongs to THIS channel.)")
-            if (c.cardsBlock.isNotBlank()) append("\n\n[").append(c.cardsBlock)   // block starts "People here you know:"
-            if (c.summary.isNotBlank()) append("\n\n[What's going on]\n").append(c.summary)
-            if (c.replyingTo.isNotBlank())
-                append("\n\n[Replying to] You're answering ").append(c.replyingTo)
-                    .append(". Anyone else in the transcript is just background context — don't mix up who said what or answer the wrong person.")
-            if (c.langHint.isNotBlank())
-                append("\n\n[Language] Reply in ").append(c.langHint)
-                    .append(". Only switch languages if the person does or asks you to. Write any non-English in its NATIVE script (e.g. 日本語, not romaji).")
+            append(CORE)
+            if (c.selfDigest.isNotBlank()) append("\n\n[You] ").append(c.selfDigest)
+            if (c.channelInfo.isNotBlank()) append("\n\n[Channel] ").append(c.channelInfo)
+            if (c.serverCulture.isNotBlank()) append("\n\n[Server memories]\n").append(c.serverCulture)
+            if (c.channelBits.isNotBlank()) append("\n\n[Running bit here, only if it fits] ").append(c.channelBits)
+            if (c.crossRef.isNotBlank()) append("\n\n[Another channel they mentioned]\n").append(c.crossRef)
+            if (c.answering.isNotBlank()) {
+                append("\n\n[Answering] ").append(c.answering)
+                if (c.othersPresent) append(" (others in the chat are background)")
+            }
+            if (c.othersBlock.isNotBlank()) append("\n\n[Others]\n").append(c.othersBlock)
+            if (c.summary.isNotBlank()) append("\n\n[Earlier] ").append(c.summary)
+            if (c.namesRule) append("\n\n[Names] One name per person at a time; never give someone another person's nickname.")
+            if (c.recall) append("\n\n[Memory question] Answer from what's above; if there's nothing, say so. Don't invent.")
+            if (c.langHint.isNotBlank()) append("\n\n[Language] Reply in ").append(c.langHint).append(", native script.")
             if (c.emojiHint.isNotBlank())
-                append("\n\n[Emojis you can use] ").append(c.emojiHint)
-                    .append(" — write them as :name: and they'll render. Use them naturally, sparingly. ")
-                    .append("If someone asks you to REACT to their message (not reply), put the emoji names in the tail's \"react\" list and keep any text to a word or nothing.")
-            if (c.lastBotReplies.isNotEmpty())
-                append("\n\n[Don't repeat yourself] You recently said: ")
-                    .append(c.lastBotReplies.joinToString(" / ") { "\"${it.take(80)}\"" })
-                    .append(". Say something different.")
-            // Names/register + recall rules (cheap, always on) — the fixes for "twinium's Michael"
-            // stacking, one person's nickname bleeding onto another, and "I don't know them" when a
-            // card exists.
-            append("\n\n[Names] Call each person by ONE name at a time and pick it by register: their casual nickname in banter, ")
-            append("their real name when you're being serious or formal. NEVER stack two names together (not \"twinium's Michael\"), ")
-            append("and NEVER use one person's nickname for a DIFFERENT person — the people list above says who's who.")
-            append("\n\n[Answering about people or past stuff] If someone asks what you know about a person, a past event, or the server, ")
-            append("ANSWER from the memory above — it's real. Don't say you don't know someone or something when there's a card or a memory for them. ")
-            append("If there genuinely is nothing in memory, say so briefly in character (don't invent details).")
+                append("\n\n[Emojis] Optional, written :name: — ").append(c.emojiHint)
+                    .append(" (normal emojis too). Most messages need none; vary them.")
+            if (c.olderBotLines.isNotEmpty())
+                append("\n\n[Don't repeat] Recently said: ").append(c.olderBotLines.joinToString(" / ") { "\"${it.take(80)}\"" })
+            else if (c.ownLinesVisible) append("\n\n[Don't repeat] your earlier lines.")
             if (c.shortHint) append("\n\nKeep it to one short line.")
-            append("\n\nReply with ONLY your message — no notes, no JSON, no labels, just what Cardinal says.")
+            append("\n\nReply with just your message, no name prefix.")
         }
         val messages = JSONArray().put(obj("system", sys))
         // Merge consecutive same-author turns so the transcript reads as fewer, fuller turns.
@@ -189,19 +188,20 @@ object DiscordBotAi {
      * The cheap DIRECTOR — an ambient reply/react/ignore call. He's a chatty regular, so lean toward
      * joining in unless it's a genuine private 1:1 or pure noise. Null on error (caller stays quiet).
      */
-    suspend fun director(cfg: DiscordBotStore.Config, turns: List<Turn>): Plan? {
+    suspend fun director(cfg: DiscordBotStore.Config, turns: List<Turn>, channelInfo: String = ""): Plan? {
         val transcript = mergeTurns(turns).takeLast(8).joinToString("\n") {
             if (it.isBot) "Cardinal: ${it.text}" else "${it.name}: ${it.text}"
         }
         val sys =
-            "You direct a Discord chat regular named Cardinal. Read the recent chat + LAST message. " +
-            "Output ONLY JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<one emoji or empty>\"}. " +
-            "He's chatty and a bit sassy — jump in (reply) when he'd add a joke, an opinion, a reaction, or answer an open question; " +
-            "react for a low-value 'lol'; only ignore a private 1:1 between two specific people or pure noise. When the room is active, lean reply/react."
+            "Decide whether Cardinal, a chatty, sassy member of this Discord, joins in after the LAST message. " +
+            (if (channelInfo.isNotBlank()) "Channel: $channelInfo. " else "") +
+            "Output only JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<emoji or empty>\"}. " +
+            "Reply to add a joke, an opinion or an answer; react to a low-value 'lol'; ignore private 1:1 talk or noise. " +
+            "In an active room lean reply/react."
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", "RECENT CHAT:\n$transcript"))
-        return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 80)) {
-            is Result.Ok -> parsePlan(r.text)
-            is Result.Error -> null
+        return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 80, DiscordBotLimits.DIRECTOR_TEMPERATURE)) {
+            is Result.Ok -> parsePlan(r.text) ?: run { logIssue("Director", "unreadable answer: ${r.text.take(60)}"); null }
+            is Result.Error -> { logIssue("Director", r.message); null }
         }
     }
 
@@ -217,43 +217,36 @@ object DiscordBotAi {
     } catch (_: Exception) { null }
 
     /**
-     * The OBSERVER (cheap, event-driven catch-up): given recent [turns] the bot did NOT reply to,
-     * refresh the summary, learn about people who were talked ABOUT (absent ones included), note any
-     * server-culture moment, and lightly nudge the self. One 8B call. Null on error.
+     * The LEARN pass (cheap 8B): given every message since the previous pass, refresh the summary,
+     * learn lasting facts about people (absent ones included), note server culture / a channel bit,
+     * and nudge the self. One 8B call. Null on error (the batch is retried with the next one).
      */
     suspend fun observe(cfg: DiscordBotStore.Config, turns: List<Turn>, prevSummary: String): Observation? {
-        val transcript = mergeTurns(turns).takeLast(DiscordBotLimits.HISTORY_FETCH).joinToString("\n") {
+        val transcript = mergeTurns(turns).takeLast(DiscordBotLimits.LEARN_FETCH).joinToString("\n") {
             if (it.isBot) "Cardinal: ${it.text}" else "${it.name}: ${it.text}"
         }
         val sys = buildString {
-            append("You quietly keep MEMORY for a Discord regular named Cardinal (you do NOT write a reply). ")
-            append("Read the recent chat and output ONLY JSON:\n")
-            append("{\"summary\":\"<=1 line of what's going on now\",")
-            append("\"people\":[{\"about\":\"<the person's EXACT name/nickname as shown>\",")
-            append("\"facts\":[durable facts about WHO they are],\"forget\":[facts no longer true],")
-            append("\"nickname\":\"<a casual nickname OTHERS actually use for them, or empty>\",")
-            append("\"preferredName\":\"<what they asked to be called, or empty>\",")
-            append("\"relationship\":\"<only if genuinely new/changed, e.g. friend/regular/creator, else empty>\",")
-            append("\"howToTreat\":\"<only if clearly established, e.g. 'playful', else empty>\",")
-            append("\"language\":\"\",\"sentiment\":\"\"}],")
-            append("\"event\":\"<a shared SERVER-WIDE moment/inside joke worth remembering, or empty>\",")
-            append("\"channelBit\":\"<a running joke/norm specific to THIS channel, or empty>\",")
-            append("\"self\":{\"trait\":\"<one durable thing Cardinal seems to be like, or empty>\",\"mood\":\"\"}}\n")
-            append("A FACT is a DURABLE thing about WHO a person is. ")
-            append("GOOD facts: \"loves cats\", \"plays Valorant\", \"from Brazil\", \"studies art\", \"hates mornings\". ")
-            append("BAD (never store these, use []): anything they just said/did (\"asked about X\", \"posted a pic\", \"pinged you\", \"greeted everyone\"), ")
-            append("anything about USING CARDINAL or the app (\"asked to edit their profile\", \"changed their nickname\", \"wants a memory\", \"reset the bot\"), ")
-            append("and restating their name/nickname/relationship (those have their own fields). ")
-            append("A single message or emoji is NOT enough to invent a fact — only note what's clearly, durably true. ")
-            append("Each person is DISTINCT: put a nickname on the RIGHT person and NEVER copy one person's nickname/facts onto another. ")
-            append("If a name is how people refer to a PERSON who isn't speaking, put their info on THAT person, not on whoever mentioned them. ")
-            append("Leave every field empty/[] unless you're sure. Do NOT record hateful notes about protected groups, or jokes about a real named person's death or crimes.")
+            append("You keep long-term MEMORY for Cardinal, a member of this Discord. Don't write a reply. ")
+            append("Read the chat and output only this JSON. Leave out any field you don't know (never write none/unknown):\n")
+            append("{\"summary\":\"<one short sentence, under 20 words: who is talking about what right now>\",")
+            append("\"people\":[{\"about\":\"<their name exactly as shown (not Cardinal)>\",\"facts\":[\"<lasting fact about who they are>\"],")
+            append("\"forget\":[\"<stored fact that's no longer true>\"],\"nickname\":\"<nickname others call them>\",")
+            append("\"preferredName\":\"<what they asked to be called>\",\"relationship\":\"<their role here, if not known yet>\",")
+            append("\"howToTreat\":\"<only if clear>\",\"language\":\"<if not English>\"}],")
+            append("\"event\":\"<a server-wide moment or inside joke worth remembering>\",")
+            append("\"channelBit\":\"<a running joke in THIS channel>\",")
+            append("\"self\":{\"trait\":\"<a lasting quirk Cardinal showed in ITS OWN messages here>\",\"mood\":\"<a word or two>\"}}\n")
+            append("Only list people you learned something NEW and lasting about. A fact must be said or clearly shown in THIS chat ")
+            append("(a question someone asks or a joke isn't a fact about them): ")
+            append("never guess, and never reuse wording from these instructions. Lasting means who someone is (hobbies, games, work, ")
+            append("where they're from, pets, tastes). Not lasting: what they just said or did, anything about using Cardinal or this app, ")
+            append("their name. Keep each person's info on that person. Never record hateful notes about groups or jokes about a real person's death or crimes.")
         }
         val user = "PREVIOUS SUMMARY: ${prevSummary.ifBlank { "(none)" }}\n\nRECENT CHAT:\n$transcript"
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", user))
-        return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 420)) {
-            is Result.Ok -> parseObservation(r.text)
-            is Result.Error -> null
+        return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, DiscordBotLimits.LEARN_MAX_TOKENS)) {
+            is Result.Ok -> parseObservation(r.text) ?: run { logIssue("Learn pass", "unreadable answer: ${r.text.take(60)}"); null }
+            is Result.Error -> { logIssue("Learn pass", r.message); null }
         }
     }
 
@@ -287,12 +280,15 @@ object DiscordBotAi {
         return out
     }
 
+    /** [temperature] null = the model's default. Only the director's one-word decision runs cooler; the
+     *  learn pass stays at the default (a low temperature made the small model loop until max_tokens). */
     private suspend fun call(
-        cfg: DiscordBotStore.Config, model: String, messages: JSONArray, maxTokens: Int
+        cfg: DiscordBotStore.Config, model: String, messages: JSONArray, maxTokens: Int, temperature: Double? = null,
     ): Result = withContext(Dispatchers.IO) {
         try {
-            val body = JSONObject().put("messages", messages).put("max_tokens", maxTokens)
-                .toString().toRequestBody(JSON)
+            val payload = JSONObject().put("messages", messages).put("max_tokens", maxTokens)
+            if (temperature != null) payload.put("temperature", temperature)
+            val body = payload.toString().toRequestBody(JSON)
             val req = Request.Builder()
                 .url(endpoint(cfg, model))
                 .addHeader("Authorization", "Bearer ${cfg.cfApiToken}")
@@ -302,12 +298,34 @@ object DiscordBotAi {
                 val raw = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful)
                     return@withContext Result.Error("Workers AI HTTP ${resp.code}: ${extractError(raw) ?: raw.take(180)}")
+                billingSink?.invoke(billedNeurons(raw, model, messages))
                 val text = extractResponse(raw)
                 if (text.isNullOrBlank()) Result.Error("Empty AI response") else Result.Ok(text.trim())
             }
         } catch (e: Exception) {
             Result.Error("${e.javaClass.simpleName}: ${e.message ?: "network error"}")
         }
+    }
+
+    /**
+     * What this call cost: Workers AI's own `usage.neurons` when present (exact), else the reported
+     * tokens priced per model, else a rough character-based estimate. Replaces the old flat per-call
+     * guesses (which over-charged replies ~1.6x and under-charged the learn pass ~4x).
+     */
+    private fun billedNeurons(raw: String, model: String, messages: JSONArray): Double {
+        val usage = try { JSONObject(raw).optJSONObject("result")?.optJSONObject("usage") } catch (_: Exception) { null }
+        val exact = usage?.optDouble("neurons", Double.NaN) ?: Double.NaN
+        if (!exact.isNaN() && exact > 0.0) return exact
+        val (inRate, outRate) = when {
+            model.contains("70b") -> 0.026668 to 0.204805
+            model.contains("8b-instruct-fp8") && !model.contains("fast") -> 0.013778 to 0.026128
+            model.contains("8b") -> 0.004119 to 0.034868
+            else -> 0.026668 to 0.204805   // unknown: price like the 70B (conservative)
+        }
+        val pin = usage?.optInt("prompt_tokens", -1) ?: -1
+        val pout = usage?.optInt("completion_tokens", -1) ?: -1
+        return if (pin >= 0 && pout >= 0) pin * inRate + pout * outRate
+        else messages.toString().length / 4.0 * inRate + 60 * outRate
     }
 
     private fun extractResponse(raw: String): String? = try {

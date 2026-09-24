@@ -1,13 +1,11 @@
-# (1) Server-initiated close: the bot's listener has no onClosing, so it doesn't complete the close
-#     handshake or reconnect until a heartbeat goes un-ACKed (~41-82 s deaf at Discord's 41.25 s
-#     interval). Real Discord replays missed events on RESUME, so messages arrive late, not lost.
-# (2) Non-recoverable close codes (4004 auth failed, 4013/4014 invalid/disallowed intents — e.g.
-#     MESSAGE CONTENT not enabled in the dev portal) are retried forever with backoff; the code only
-#     reaches onClosed after the client's own close, where it's ignored, so the admin only ever sees
-#     "Reconnecting…", never the reason.
+# (1) Server-initiated close: the bot must answer the close and RESUME right away (before the fix it
+#     sat deaf ~50 s until a heartbeat went un-ACKed). Real Discord replays missed events on RESUME.
+# (2) Non-recoverable close codes (4004 bad token, 4013/4014 intents — e.g. MESSAGE CONTENT not
+#     enabled in the dev portal) must stop with FAILED and a plain reason (before the fix they were
+#     retried forever showing only "Reconnecting…"). The admin then fixes the portal and presses
+#     Start — simulated here by a config restart.
 #
-# The first drop runs on the original 41.25 s session (realistic deafness). Sessions opened after
-# that get a 4 s heartbeat so the close-code retry loop is visible within a minute.
+# Sessions opened after the first drop get a 4 s heartbeat so any retry loop would show within a minute.
 @set ambient=0
 > gateway-heartbeat 4000
 > drop-gateway 4000
@@ -17,12 +15,13 @@ alice: @Cardinal you there?
 > log
 > gateway-reject 4014
 > drop-gateway 4014
-> sleep 60000
+> sleep 20000
 > gateway-stats
 > log
 > expect status FAILED
 > gateway-accept
-> sleep 20000
+@set ambient=0
+> sleep 3000
 > gateway-stats
 > log
 bob: @Cardinal back?

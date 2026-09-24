@@ -86,9 +86,10 @@ internal class AiProxy(private val cfg: LabConfig, private val rec: LabRecorder)
     private fun classify(req: JSONObject): String {
         val sys = req.optJSONArray("messages")?.optJSONObject(0)?.optString("content").orEmpty()
         return when {
-            sys.startsWith("You direct a Discord chat regular") -> "director"
-            sys.startsWith("You quietly keep MEMORY") -> "observe"
-            sys.contains("Reply with ONLY your message") -> "reply"
+            // By shape, so rewording a prompt doesn't break the lab (old and new wordings both work).
+            sys.contains("\"action\":\"reply|react|ignore\"") -> "director"
+            sys.contains("\"people\":[") -> "observe"
+            sys.contains("Reply with") && sys.startsWith("You're Cardinal") -> "reply"
             else -> "other"
         }
     }
@@ -106,9 +107,11 @@ internal class AiProxy(private val cfg: LabConfig, private val rec: LabRecorder)
             "https://gateway.ai.cloudflare.com/v1/${cfg.cfAccount}/${cfg.cfGateway}/workers-ai/${call.servedModel}"
         else "https://api.cloudflare.com/client/v4/accounts/${cfg.cfAccount}/ai/run/${call.servedModel}"
         val rb = Request.Builder().url(url)
-            .header("Authorization", "Bearer ${cfg.cfToken}")
             .header("Content-Type", "application/json")
             .post(bodyText.toRequestBody(jsonType))
+        // No token in the environment = the cloud environment's credential proxy injects it for
+        // api.cloudflare.com (the secret never enters this process).
+        if (cfg.cfToken.isNotBlank()) rb.header("Authorization", "Bearer ${cfg.cfToken}")
         if (cfg.cfGateway.isNotBlank()) {
             rb.header("cf-aig-metadata", JSONObject().put("lab", "cardinal").put("run", cfg.runName)
                 .put("kind", call.kind).put("asked", call.askedModel.substringAfterLast('/')).toString())
@@ -129,7 +132,12 @@ internal class AiProxy(private val cfg: LabConfig, private val rec: LabRecorder)
                     call.promptTokens = TokenEstimate.ofMessages(call.request.optJSONArray("messages"))
                     call.completionTokens = TokenEstimate.of(extractText(raw))
                 }
-                call.neurons = Pricing.neurons(call.servedModel, call.promptTokens, call.completionTokens, call.cachedTokens)
+                // Workers AI reports the exact neurons it billed; the price table is only a fallback.
+                val billed = usage?.optDouble("neurons", Double.NaN) ?: Double.NaN
+                call.neurons = if (!billed.isNaN() && billed > 0.0) billed
+                    else Pricing.neurons(call.servedModel, call.promptTokens, call.completionTokens, call.cachedTokens)
+                runCatching { JSONObject(raw).optJSONObject("result")?.optString("model") }.getOrNull()
+                    ?.takeIf { it.isNotBlank() }?.let { call.backendModel = it }
                 synchronized(this) { liveNeurons += call.neurons }
                 if (!resp.isSuccessful) call.error = "HTTP ${resp.code}: ${raw.take(200)}"
                 resp.code to raw
@@ -147,7 +155,8 @@ internal class AiProxy(private val cfg: LabConfig, private val rec: LabRecorder)
         val sys = call.systemPrompt
         val text = when (call.kind) {
             "reply" -> {
-                val who = Regex("\\[Replying to] You're answering (.+?)\\.").find(sys)?.groupValues?.get(1) ?: "them"
+                val who = (Regex("\\[Replying to] You're answering (.+?)\\.").find(sys)
+                    ?: Regex("\\[(?:You're answering|Answering)] ([^\\s(.—]+)").find(sys))?.groupValues?.get(1) ?: "them"
                 "dry reply ${dryReplySeq.incrementAndGet()} to $who"
             }
             "director" -> when (cfg.dryDirector) {

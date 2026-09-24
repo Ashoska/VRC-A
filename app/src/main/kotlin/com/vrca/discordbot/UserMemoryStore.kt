@@ -124,12 +124,41 @@ object UserMemoryStore {
         "asked (it|cardinal|the bot)|wants? (you|cardinal) to|told (you|cardinal|it) to|" +
         "no message|with no message|pinged|prompt|instructions?)\\b"
     )
+    // Plans and states tied to right now ("going to bed tonight", "is sick today") stop being true in
+    // a day or two — they're not who someone is, and a stored fact never expires.
+    private val TRANSIENT = Regex(
+        "(?i)\\b(today|tonight|tomorrow|yesterday|this (morning|afternoon|evening|week|weekend)|right now|" +
+        "at the moment|later today|next few (hours|days))\\b"
+    )
+    // Filler "facts" that describe a chat mood, not the person ("has a sense of humor about it").
+    private val GENERIC_FACT = Regex(
+        "(?i)^(has an? (good |great |dark |dry |weird )?sense of humou?r|seems (to|like)|is (funny|nice|cool|friendly|chill|hilarious|sarcastic)\\b)"
+    )
+    /** "alice plays X" → "plays X", "alice's cat …" → "their cat …" (the card already says who). */
+    private fun stripOwnName(fact: String, names: Collection<String>): String {
+        val t = fact.trim()
+        val low = t.lowercase()
+        for (n in names.map { it.lowercase().trim() }.filter { it.length >= 2 }.sortedByDescending { it.length }) {
+            if (low.startsWith("$n's ") || low.startsWith("$n’s ")) return "their " + t.substring(n.length + 3)
+            if (low.startsWith("$n ")) return t.substring(n.length + 1).trim()
+        }
+        return t
+    }
+    // The cheap model sometimes fills a field it knows nothing about with "none" / "n/a" / "unknown".
+    private val NONE_VALUE = Regex("(?i)^(none|n/?a|null|nil|unknown|not (specified|mentioned|sure|clear|known)|nothing|no|-+|\\?+|same|unchanged)\\.?$")
+    private fun value(s: String?): String = s?.trim()?.takeUnless { NONE_VALUE.matches(it) }.orEmpty()
+    // A relationship that says nothing ("member") would otherwise be kept and block a real one later.
+    private val GENERIC_REL = Regex("(?i)^(a |an |the )?(regular |server |discord |normal )?(member|user|participant|person|chatter|someone|human|guy|people)s?\\.?$")
+
     private fun cleanFact(s: String): String? {
         val t = s.trim()
+        if (NONE_VALUE.matches(t)) return null
         if (t.length < 2 || t.length > 200) return null
         if (POISON.containsMatchIn(t)) return null
         if (EPHEMERAL.containsMatchIn(t)) return null
         if (META.containsMatchIn(t)) return null
+        if (TRANSIENT.containsMatchIn(t)) return null
+        if (GENERIC_FACT.containsMatchIn(t)) return null
         if (t.contains("http://") || t.contains("https://")) return null
         return t
     }
@@ -144,18 +173,37 @@ object UserMemoryStore {
     // ── near-duplicate fact handling (merge, don't pile up paraphrases) ──
     private fun norm(s: String): String =
         Regex("[^\\p{L}\\p{N} ]").replace(s.lowercase(), " ").replace(Regex("\\s+"), " ").trim()
-    private fun toks(s: String): Set<String> = norm(s).split(' ').filter { it.length >= 3 }.toSet()
-    /** Two facts are "the same fact" if one contains the other, or their words heavily overlap. */
+    private val FACT_FILLER = setOf("has", "have", "the", "and", "with", "named", "called", "their", "they", "them",
+        "are", "was", "were", "who", "that", "this", "for", "from", "its", "into", "about", "owns", "own", "pet")
+    private fun toks(s: String): Set<String> = norm(s).split(' ').filter { it.length >= 3 && it !in FACT_FILLER }.toSet()
+    /** Two facts are "the same fact" if one contains the other AS WHOLE WORDS, or their words heavily
+     *  overlap. (Raw substring containment made "ali" match "Australia" and "al" match "Valorant".) */
     private fun similar(a: String, b: String): Boolean {
         val na = norm(a); val nb = norm(b)
         if (na.isBlank() || nb.isBlank()) return false
-        if (na == nb || na.contains(nb) || nb.contains(na)) return true
+        if (na == nb || " $na ".contains(" $nb ") || " $nb ".contains(" $na ")) return true
         val ta = toks(a); val tb = toks(b)
         if (ta.isEmpty() || tb.isEmpty()) return false
         val inter = ta.count { it in tb }
         val union = (ta + tb).size
-        return union > 0 && inter.toDouble() / union >= 0.6
+        return union > 0 && inter.toDouble() / union >= 0.5
     }
+    // Words that carry no information of their own when a fact just restates a name/relationship
+    // ("goes by ali", "is the server creator", "a friend").
+    private val IDENTITY_FILLER = setOf(
+        "is", "a", "an", "the", "they", "their", "he", "she", "his", "her", "them", "are", "was",
+        "goes", "go", "by", "called", "call", "name", "named", "nickname", "known", "as", "aka",
+        "also", "server", "here", "of", "our", "this", "my", "to", "be",
+    )
+    private fun contentWords(s: String): List<String> = norm(s).split(' ').filter { it.isNotBlank() && it !in IDENTITY_FILLER }
+
+    /** True when [fact] says nothing beyond [value] (same words once filler is removed). */
+    private fun restatesIdentity(fact: String, value: String): Boolean {
+        val f = contentWords(fact); val v = contentWords(value)
+        if (f.isEmpty() || v.isEmpty()) return norm(fact) == norm(value)
+        return f.toSet() == v.toSet()
+    }
+
     /** Merge [incoming] into [existing]: a near-duplicate REPLACES with the more informative (longer)
      *  version instead of adding a second; genuinely new facts are appended. */
     private fun mergeFacts(existing: List<String>, incoming: List<String>): List<String> {
@@ -185,7 +233,8 @@ object UserMemoryStore {
         val kept = if (cur.pinned) cur.facts
             else cur.facts.filter { f -> forget.none { similar(f, it) } }
         val selfCollapsed = mergeFacts(emptyList(), kept)   // clean up existing near-dups too
-        val newFacts = strList(delta.optJSONArray("facts")).mapNotNull { cleanFact(it) }
+        val allNames = ownNames + cur.nicknames + listOf(cur.preferredNick)
+        val newFacts = strList(delta.optJSONArray("facts")).map { stripOwnName(it, allNames) }.mapNotNull { cleanFact(it) }
         val mergedFacts = mergeFacts(selfCollapsed, newFacts)
 
         val bit = cleanFact(delta.optString("bit"))
@@ -193,26 +242,42 @@ object UserMemoryStore {
             LinkedHashSet<String>().apply { addAll(cur.bits); add(bit) }.toList().takeLast(8)
         else cur.bits
 
-        val nick = delta.optString("nickname").trim()
+        val nick = value(delta.optString("nickname"))
         val nickArr = strList(delta.optJSONArray("nicknames"))
         val incomingNicks = (listOf(nick) + nickArr).mapNotNull { cleanNick(it, ownNames) }
         val mergedNicks = LinkedHashSet<String>().apply { addAll(cur.nicknames); addAll(incomingNicks) }.toList()
 
         // A PREFERRED name is the one Cardinal should actually use to address them.
-        val preferred = cleanNick(delta.optString("preferredName"), ownNames)
+        val preferred = cleanNick(value(delta.optString("preferredName")), ownNames)
             ?: cur.preferredNick.ifBlank { "" }
 
+        // One line in another language doesn't change what someone mainly speaks: a new language on a
+        // card that already has one is recorded as "also speaks" instead of replacing it.
+        // English is the default (never shown), so the learner saying "English" adds nothing.
+        val incomingLang = value(delta.optString("language")).take(24)
+            .takeUnless { it.equals("english", true) || it.equals("en", true) }.orEmpty()
+        val keepMainLang = cur.language.isNotBlank() && incomingLang.isNotBlank() && !incomingLang.equals(cur.language, true)
         val also = LinkedHashSet<String>().apply {
-            addAll(cur.alsoSpeaks); addAll(strList(delta.optJSONArray("alsoSpeaks")))
-        }.map { it.trim() }.filter { it.isNotBlank() && it.length <= 24 }
+            addAll(cur.alsoSpeaks); addAll(strList(delta.optJSONArray("alsoSpeaks")).map { value(it) })
+            if (keepMainLang) add(incomingLang)
+        }.map { it.trim() }.filter { it.isNotBlank() && it.length <= 24 && !it.equals(cur.language, true) &&
+            !it.equals("english", true) }
+            .distinctBy { it.lowercase() }
 
-        val relationship = delta.optString("relationship").trim().take(80).ifBlank { cur.relationship }
-        // Drop facts that just restate identity fields (name/nick/relationship/sentiment/how-to-treat)
-        // — those live in their own slots, so a fact like "Creator" when relationship=Creator is noise.
+        // Relationship / how-to-treat are filled once and then kept: the cheap learner re-describing
+        // the chat's mood ("teasing and playful with Cardinal") used to overwrite a real relationship
+        // ("server regular, basically runs events"). The admin can still edit them.
+        val relationship = cur.relationship.ifBlank {
+            value(delta.optString("relationship")).take(80).takeUnless { GENERIC_REL.matches(it) }.orEmpty()
+        }
+        // Drop facts that ONLY restate an identity field (name/nick/relationship/sentiment) — those live
+        // in their own slots, so a fact like "Creator" when relationship=Creator is noise. A fact that
+        // merely CONTAINS one of those words ("best friends with carol", "regular at the climbing gym",
+        // "lives in Australia" for nickname "ali") is real information and is kept.
         val identity = (listOf(relationship, cur.name, name, preferred, cur.sentiment,
-            delta.optString("sentiment").trim()) + mergedNicks)
+            value(delta.optString("sentiment"))) + mergedNicks)
             .map { it.trim() }.filter { it.isNotBlank() }
-        val cleanedFacts = mergedFacts.filterNot { f -> identity.any { similar(f, it) } }
+        val cleanedFacts = mergedFacts.filterNot { f -> identity.any { restatesIdentity(f, it) } }
 
         save(ctx, cur.copy(
             name = cur.name.ifBlank { name.take(60) },   // NEVER let a nickname overwrite the real name
@@ -220,12 +285,12 @@ object UserMemoryStore {
             bits = mergedBits,
             nicknames = mergedNicks,
             preferredNick = preferred,
-            language = delta.optString("language").trim().take(24).ifBlank { cur.language },
+            language = if (keepMainLang) cur.language else incomingLang.ifBlank { cur.language },
             alsoSpeaks = also,
-            sentiment = delta.optString("sentiment").trim().take(60).ifBlank { cur.sentiment },
+            sentiment = value(delta.optString("sentiment")).take(60).ifBlank { cur.sentiment },
             relationship = relationship,
-            howToTreat = delta.optString("howToTreat").trim().take(120).ifBlank { cur.howToTreat },
-            talkStyle = delta.optString("talkStyle").trim().take(80).ifBlank { cur.talkStyle },
+            howToTreat = cur.howToTreat.ifBlank { value(delta.optString("howToTreat")).take(120) },
+            talkStyle = value(delta.optString("talkStyle")).take(80).ifBlank { cur.talkStyle },
         ))
     }
 
@@ -261,6 +326,111 @@ object UserMemoryStore {
         if (card.bits.isNotEmpty()) sb.append("  bit: ").append(card.bits.last()).append('\n')
         val out = sb.toString().trim()
         return if (out == real) "" else out.take(DiscordBotLimits.USER_CARD_MAX_CHARS)
+    }
+
+    // ── Lean prompt rendering (the app decides what's relevant) ──────────────
+
+    /** A rendered person line + whether it carries a nickname/alias (→ the one-name rule applies). */
+    data class PromptLine(val text: String, val hasNick: Boolean)
+
+    private fun stemmedWords(s: String): Set<String> =
+        Regex("[\\p{L}\\p{N}]+").findAll(s.lowercase()).map { discordStem(it.value) }.filter { it.length >= 3 }.toSet()
+
+    /** Facts sharing a (stemmed) word with [keywords], best first. */
+    private fun relevantFacts(facts: List<String>, keywords: Set<String>): List<String> {
+        if (facts.isEmpty() || keywords.isEmpty()) return emptyList()
+        val want = keywords.map { discordStem(it) }.toSet()
+        return facts.map { f -> f to stemmedWords(f).count { it in want } }
+            .filter { it.second > 0 }.sortedByDescending { it.second }.map { it.first }
+    }
+
+    /** "real name (goes by nick; also: a, b)" — the name header shared by both renderers. */
+    private fun nameHeader(card: Card, fallbackName: String): Pair<String, Boolean> {
+        val real = card.name.ifBlank { fallbackName.ifBlank { card.preferredNick.ifBlank { "them" } } }
+        val casual = card.preferredNick.takeIf { it.isNotBlank() && !it.equals(real, true) }
+        val aliases = card.nicknames.filter { !it.equals(real, true) && !it.equals(casual ?: "", true) }.take(2)
+        val sb = StringBuilder(real)
+        if (casual != null || aliases.isNotEmpty()) {
+            sb.append(" (")
+            if (casual != null) sb.append("goes by ").append(casual)
+            if (aliases.isNotEmpty()) { if (casual != null) sb.append("; "); sb.append("also: ").append(aliases.joinToString(", ")) }
+            sb.append(")")
+        }
+        return sb.toString() to (casual != null || aliases.isNotEmpty())
+    }
+
+    private fun cleanSentiment(s: String): String = s.replace(Regex("\\s*\\(reacted[^)]*\\)"), "").trim()
+
+    /**
+     * The person Cardinal is answering — ALWAYS included so it knows who it's talking to: name /
+     * nickname, relationship, how to treat them, their language (non-English only), and what it
+     * knows that's relevant now. When nothing matches the conversation it still gets their top
+     * couple of facts (a regular knows a few things about the people they talk to). [recall] = they
+     * asked what Cardinal knows about them → their whole card.
+     */
+    fun answeringLine(ctx: Context, id: String, fallbackName: String, keywords: Set<String>, recall: Boolean): PromptLine {
+        val card = load(ctx, id) ?: return PromptLine(fallbackName, false)
+        val (header, hasNick) = nameHeader(card, fallbackName)
+        val sb = StringBuilder(header)
+        if (card.relationship.isNotBlank()) sb.append(" — ").append(card.relationship.trim().trimEnd('.'))
+        sb.append('.')
+        if (card.howToTreat.isNotBlank()) sb.append(" With them: ").append(card.howToTreat.trim().trimEnd('.')).append('.')
+        if (card.talkStyle.isNotBlank()) sb.append(" How they talk: ").append(card.talkStyle.trim().trimEnd('.')).append('.')
+        val vibe = cleanSentiment(card.sentiment)
+        if (vibe.isNotBlank()) sb.append(" Vibe with you: ").append(vibe).append('.')
+        val lang = card.language.trim()
+        if (lang.isNotBlank() && !lang.equals("english", true) && !lang.equals("en", true))
+            sb.append(" Speaks ").append(lang).append('.')
+        val facts = if (recall) card.facts.takeLast(12)
+            else (relevantFacts(card.facts, keywords).take(DiscordBotLimits.USER_FACTS_INJECT))
+                .ifEmpty { card.facts.take(DiscordBotLimits.ANSWERING_FALLBACK_FACTS) }
+        if (facts.isNotEmpty()) sb.append(" About them: ").append(facts.joinToString("; ") { it.trim().trimEnd('.') }).append('.')
+        if (card.bits.isNotEmpty() && (recall || relevantFacts(card.bits, keywords).isNotEmpty()))
+            sb.append(" Running bit with them: ").append(card.bits.last()).append('.')
+        return PromptLine(sb.toString(), hasNick)
+    }
+
+    /**
+     * Someone else in the conversation (or named in it). A person the message NAMES always comes with
+     * what Cardinal knows (relevant facts first, then their others, up to [namedLimit]) — they're the
+     * topic. Someone merely talking nearby is included only when there's something worth knowing
+     * right now: a nickname (so "ali" resolves to the right person) or facts relevant to the
+     * conversation. [full] = they were asked about → their whole card. Null = leave them out.
+     */
+    fun otherLine(
+        ctx: Context, id: String, fallbackName: String, keywords: Set<String>, full: Boolean, namedLimit: Int = 0,
+    ): PromptLine? {
+        val card = load(ctx, id) ?: return null
+        val (header, hasNick) = nameHeader(card, fallbackName)
+        val relevant = relevantFacts(card.facts, keywords)
+        val facts = when {
+            full -> card.facts.takeLast(12)
+            namedLimit > 0 -> (relevant + card.facts).distinct().take(namedLimit)
+            else -> relevant.take(2)
+        }
+        val rel = card.relationship.trim().trimEnd('.')
+        if (!full && !hasNick && facts.isEmpty() && (namedLimit == 0 || rel.isBlank())) return null
+        val sb = StringBuilder("- ").append(header)
+        if (rel.isNotBlank() && (full || namedLimit > 0 || facts.isNotEmpty() || hasNick)) sb.append(" — ").append(rel)
+        if (facts.isNotEmpty()) sb.append(": ").append(facts.joinToString("; ") { it.trim().trimEnd('.') })
+        return PromptLine(sb.toString(), hasNick)
+    }
+
+    /**
+     * "Who …?" questions with nobody named ("who runs the events here?"): the cards whose facts or
+     * relationship best match the question's words, best first. Free, local, bounded.
+     */
+    fun searchCards(ctx: Context, keywords: Set<String>, exclude: Set<String>, max: Int): List<String> {
+        val want = keywords.map { discordStem(it) }.toSet(); if (want.isEmpty()) return emptyList()
+        return list(ctx).asSequence()
+            .filter { it.id !in exclude }
+            .map { c ->
+                val words = stemmedWords(c.facts.joinToString(" ") + " " + c.relationship + " " + c.bits.joinToString(" "))
+                c.id to words.count { it in want }
+            }
+            .filter { it.second > 0 }
+            .sortedByDescending { it.second }
+            .take(max).map { it.first }.toList()
     }
 
     /** Keyword-relevance pick with a recency-ish fallback so a card with no match still says something. */
@@ -300,6 +470,25 @@ object UserMemoryStore {
      * Build a name/nickname → id index across every known card, so a reply tail that refers to a
      * person by a NICKNAME still lands their facts on the right card. Names lowercased+trimmed.
      */
+    /** One name a person goes by: [isRealName] = their display name (vs a nickname/preferred name). */
+    data class NameKey(val key: String, val id: String, val isRealName: Boolean)
+
+    /** Every known name + nickname, lowercased — for spotting who a message is talking about. */
+    fun nameEntries(ctx: Context): List<NameKey> {
+        val seen = HashSet<String>()
+        val out = ArrayList<NameKey>()
+        list(ctx).forEach { c ->
+            fun put(s: String, real: Boolean) {
+                val k = s.lowercase().trim()
+                if (k.isNotBlank() && seen.add(k)) out.add(NameKey(k, c.id, real))
+            }
+            if (c.name.isNotBlank()) put(c.name, true)
+            if (c.preferredNick.isNotBlank()) put(c.preferredNick, false)
+            c.nicknames.forEach { put(it, false) }
+        }
+        return out
+    }
+
     fun nameIndex(ctx: Context): Map<String, String> {
         val out = HashMap<String, String>()
         list(ctx).forEach { c ->

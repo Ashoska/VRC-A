@@ -17,17 +17,31 @@ object DiscordBotLimits {
     // ── Context assembly (clarity + bounded prompt) ───────────────────────
     /** Raw transcript turns fed alongside the rolling summary. */
     const val CONTEXT_RAW_TURNS = 8
-    /** Messages pulled for a cold-start / observer catch-up summary. */
-    const val HISTORY_FETCH = 30
     const val MAX_MSG_CHARS = 240
     /** Normal reply cap; short banter uses the smaller cap (adaptive length). */
     const val REPLY_MAX_TOKENS = 220
     const val SHORT_REPLY_MAX_TOKENS = 90
     const val SUMMARY_MAX_CHARS = 500
+    /** Learn-pass answer cap (it lists only people with something new, so this is rarely reached). */
+    const val LEARN_MAX_TOKENS = 480
+    /** The director's reply/react/ignore call runs cooler for a steadier decision. (Not the learn pass:
+     *  at 0.2 the small model looped until max_tokens; invented facts are caught by grounding instead.) */
+    const val DIRECTOR_TEMPERATURE = 0.2
     /** Top-N relevant facts injected per active user card (pinned always included). */
     const val USER_FACTS_INJECT = 4
-    /** Strongest server memories always folded into the digest. */
-    const val CORE_MEMORIES_INJECT = 2
+    /** Facts about the person being answered when nothing in the conversation matches their card. */
+    const val ANSWERING_FALLBACK_FACTS = 2
+    /** Recent turns whose words decide what's "relevant now" (memories, facts) — also gives continuity:
+     *  something pulled in stays while its words are still in the recent messages. */
+    const val RELEVANCE_WINDOW_TURNS = 6
+    /** Distinct words kept from that window (newest message first). */
+    const val RELEVANCE_KEYWORDS_MAX = 32
+    /** Other people's lines in one prompt (named/asked-about people first). */
+    const val OTHER_PEOPLE_MAX = 3
+    /** Cards found by searching everyone's facts for a "who …?" question with nobody named. */
+    const val RECALL_SEARCH_MAX = 2
+    /** Custom server emojis offered in the prompt (most-used first). */
+    const val EMOJI_HINT_MAX = 12
     /** Revived topics / relevant server memories injected for a given message. */
     const val TOPIC_RETRIEVE_MAX = 2
     const val EVENT_RETRIEVE_MAX = 3
@@ -52,39 +66,59 @@ object DiscordBotLimits {
     const val DEFAULT_AMBIENT_PCT = 22
     const val DEFAULT_AMBIENT_COOLDOWN_SEC = 60
     const val SELF_RECENT_QUIET_MS = 15_000L
+    /** After asking the director about a channel, don't ask again for this long (it's asked on a
+     *  random share of messages; without a gap a busy room paid for a call every few messages). */
+    const val DIRECTOR_MIN_GAP_MS = 20_000L
+    /** An unprompted (ambient) emoji reaction at most this often per channel. */
+    const val AMBIENT_REACT_COOLDOWN_MS = 90_000L
     /** When told to stop, back off in that channel for this long. */
     const val BACKOFF_MS = 120_000L
 
-    // ── Observer (event-driven memory/summary catch-up when it stays silent) ─
-    // Fires only after this many unreplied messages pile up, and at most this often — kept
-    // conservative so the cheap catch-up costs little in a busy channel.
-    const val OBSERVER_MIN_NEW_MSGS = 8
-    const val OBSERVER_MIN_INTERVAL_MS = 150_000L
+    // ── Learning (the cheap 8B pass that writes memory/summary/culture/self) ─────
+    // Every message counts toward the next pass (replied or not, Cardinal's own included), and a
+    // pass reads EVERYTHING since the last one (up to LEARN_FETCH) — so nothing said in a busy
+    // channel slips past the learner. Kept batched so each 8B call covers many messages.
+    /** A pass runs once this many messages are unlearned (and LEARN_MIN_INTERVAL_MS has passed). */
+    const val LEARN_TRIGGER_MSGS = 10
+    const val LEARN_MIN_INTERVAL_MS = 120_000L
+    /** A very busy channel learns sooner, so messages never fall out of the LEARN_FETCH window. */
+    const val LEARN_FORCE_MSGS = 30
+    const val LEARN_FORCE_MIN_GAP_MS = 30_000L
+    /** When a channel goes quiet this long with a few unlearned messages, learn the tail too. */
+    const val LEARN_LULL_MS = 45_000L
+    const val LEARN_LULL_MIN_MSGS = 3
+    const val LEARN_LULL_MIN_GAP_MS = 60_000L
+    /** Messages a learn pass reads (only the ones it hasn't seen are kept). */
+    const val LEARN_FETCH = 50
     /** Quiet gap that ends the active conversation segment → archived as a topic. */
     const val CONVO_GAP_MS = 12 * 60 * 1000L
 
     // ── Neuron budget + degradation ladder ────────────────────────────────
     const val DAILY_NEURON_BUDGET = 9_000L
-    /** Realistic per-call estimates (fp8-fast 70B ~tens of neurons; 8B ~single digits).
-     *  Used only as a FALLBACK; the real number comes from the Cloudflare usage sync. */
-    const val EST_NEURONS_REPLY = 60L
-    const val EST_NEURONS_CHEAP = 8L
     const val LADDER_FULL_FRAC = 0.80
     const val LADDER_TRIM_FRAC = 0.92
     const val LADDER_CHEAP_FRAC = 0.99
     const val USAGE_SYNC_INTERVAL_MS = 3 * 60 * 1000L
 
     // ── Self (personality) ────────────────────────────────────────────────
-    /** Weighted traits kept in the store (the reply tail + observer nudge these). */
+    /** Weighted traits kept in the store (the learn pass adds/reinforces them). */
     const val MAX_TRAITS = 24
     /** Memorable personal episodes Cardinal keeps (server EVENTS live in ServerMemoryStore). */
     const val MAX_EPISODES = 6
+    /** A trait not shown again within this window loses 1 strength (dropped at 0). */
+    const val TRAIT_DECAY_INTERVAL_MS = 3 * 24 * 3_600_000L
+    /** The mood line changes at most this often, so the tone doesn't swing reply to reply. */
+    const val MOOD_MIN_INTERVAL_MS = 20 * 60_000L
 
     // ── Conversation / topic archive ──────────────────────────────────────
     /** Archived dormant-conversation topics kept per channel (revivable hours later). */
     const val TOPIC_STORE_MAX = 60
     /** Shared server event-memories kept (unbounded by design; a sane FIFO ceiling). */
     const val SERVER_MEMORY_STORE_MAX = 400
+    /** A server memory / channel bit is strengthened by chat mentioning it at most this often. */
+    const val MEMORY_REINFORCE_COOLDOWN_MS = 3_600_000L
+    /** A memory nobody has mentioned for this long ranks one strength point lower (per period). */
+    const val MEMORY_FADE_MS = 14 * 24 * 3_600_000L
 
     // ── Channel awareness (identity + per-channel running bits) ───────────
     /** Per-channel running bits kept (unbounded by design; a sane ceiling). */

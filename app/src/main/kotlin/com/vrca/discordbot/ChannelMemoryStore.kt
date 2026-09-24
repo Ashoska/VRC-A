@@ -66,7 +66,9 @@ object ChannelMemoryStore {
         val kw = keywordsOf(t)
         val list = load(ctx, channelId).toMutableList()
         val hit = list.indexOfFirst { b ->
-            b.text.equals(t, true) || kw.isNotEmpty() && b.keywords.count { it in kw } >= 3
+            // Same memory if the texts match, or the new one's words (up to 3 of them) are all already there
+            // — so a short restatement ("cursed Halloween") reinforces the full memory instead of duplicating it.
+            b.text.equals(t, true) || kw.size >= 2 && b.keywords.count { it in kw } >= minOf(3, kw.size)
         }
         if (hit >= 0) {
             val b = list[hit]
@@ -81,15 +83,17 @@ object ChannelMemoryStore {
         save(ctx, channelId, trimmed)
     }
 
-    /** Reinforce any bit the incoming [text] references (recognising the running joke). */
+    /** Reinforce any bit the incoming [text] references (recognising the running joke) — at most once
+     *  per [DiscordBotLimits.MEMORY_REINFORCE_COOLDOWN_MS]. */
     @Synchronized
     fun reinforceReferenced(ctx: Context, channelId: String, text: String, nowMs: Long) {
         val want = keywordsOf(text).toSet(); if (want.isEmpty()) return
         val list = load(ctx, channelId)
         var changed = false
         val out = list.map { b ->
-            if (b.keywords.count { it in want } >= 2) { changed = true; b.copy(strength = (b.strength + 1).coerceAtMost(20), lastMs = nowMs) }
-            else b
+            if (nowMs - b.lastMs >= DiscordBotLimits.MEMORY_REINFORCE_COOLDOWN_MS && b.keywords.count { it in want } >= 2) {
+                changed = true; b.copy(strength = (b.strength + 1).coerceAtMost(20), lastMs = nowMs)
+            } else b
         }
         if (changed) save(ctx, channelId, out)
     }
@@ -118,8 +122,9 @@ object ChannelMemoryStore {
         return chosen.text
     }
 
+    // Two shared words, not one: a single common word ("pic", "new") made a bit eligible constantly.
     private fun matches(bitKw: List<String>, want: Set<String>): Boolean =
-        want.isNotEmpty() && bitKw.count { it in want } >= 1
+        want.isNotEmpty() && bitKw.count { it in want } >= 2
 
     /** A cue matches loosely (stem overlap) so "image" hits a bit about "images". */
     private fun matchesCue(bitKw: List<String>, cues: Set<String>): Boolean {
@@ -129,7 +134,11 @@ object ChannelMemoryStore {
 
     private val STOP = setOf(
         "the","a","an","and","or","but","to","of","in","on","for","with","is","are","was","were",
-        "be","this","that","it","its","you","your","they","we","just","like","lol","cardinal","here"
+        "be","this","that","it","its","you","your","they","we","just","like","lol","cardinal","here",
+        "new","see","saw","did","got","get","one","all","can","now","how","who","what","when","why",
+        "has","had","have","not","out","too","yes","yep","nah","omg","bro","who's","what's","there",
+        "about","from","some","really","very","much","more","been","into","them","their","then","than",
+        "our","off","any","way","also","dont","cant","thats","youre","lmao","haha","yeah","okay"
     )
     private fun keywordsOf(s: String): List<String> =
         Regex("[\\p{L}\\p{N}]+").findAll(s.lowercase())

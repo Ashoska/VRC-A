@@ -7,23 +7,27 @@ import org.json.JSONObject
 /**
  * Cheap conversation understanding without re-reading 100 messages every turn.
  *
- *  - A per-channel **rolling summary** (in-memory) is the live "what's going on" line the reply
- *    tail keeps re-writing, so the bot always has the gist for pennies.
- *  - When a channel goes quiet for [DiscordBotLimits.CONVO_GAP_MS] the active summary is sealed
- *    into a persisted **topic archive** (keyword-indexed). If someone answers a dormant message
- *    hours later, [reviveFor] pulls the matching topic back so the convo can pick up where it left
- *    off — the "revive a dead conversation" feature.
+ *  - A per-channel **rolling summary** is the live "what's going on" line each learn pass rewrites,
+ *    so the bot always has the gist for pennies. It's saved, so a restart doesn't lose it.
+ *  - The first message after the channel was quiet for [DiscordBotLimits.CONVO_GAP_MS] starts a new
+ *    conversation: the old summary is sealed into a persisted **topic archive** (keyword-indexed)
+ *    and the live one starts fresh. If someone brings the old topic up hours later, [reviveFor]
+ *    pulls it back so the convo can pick up where it left off.
  *
  * Stores are unbounded by design (text is tiny); only per-prompt INJECTION is retrieval-limited.
- * Plain SharedPreferences (`vrca_discord_convo`), one JSON array of topics per `t_<channelId>` key.
+ * Plain SharedPreferences (`vrca_discord_convo`): one JSON array of topics per `t_<channelId>` key,
+ * the live summary per `live_<channelId>`.
  */
 object ConversationStore {
     private const val PREFS = "vrca_discord_convo"
     private const val KEY_PREFIX = "t_"
+    private const val LIVE_PREFIX = "live_"
 
     /** In-memory live summary per channel + the wall-clock of the last message folded into it. */
     private val liveSummary = HashMap<String, String>()
     private val lastMsgAt = HashMap<String, Long>()
+    private val summaryAt = HashMap<String, Long>()   // when the live summary was last written
+    private val lastPersistAt = HashMap<String, Long>()
 
     data class Topic(val summary: String, val closedMs: Long, val keywords: List<String>)
 
@@ -34,36 +38,69 @@ object ConversationStore {
     @Synchronized
     fun summary(channelId: String): String = liveSummary[channelId].orEmpty()
 
-    /**
-     * Fold a fresh model-written summary into the channel. If the channel had been quiet past the
-     * gap, the OLD summary is first archived as a revivable topic, then the new one becomes live.
-     */
+    /** The live summary only if it was written within [maxAgeMs] — an hours-old summary describes a
+     *  PREVIOUS conversation and would mislead the reply (blank otherwise). */
+    @Synchronized
+    fun freshSummary(channelId: String, nowMs: Long, maxAgeMs: Long): String {
+        val s = liveSummary[channelId].orEmpty(); if (s.isBlank()) return ""
+        return if (nowMs - (summaryAt[channelId] ?: 0L) <= maxAgeMs) s else ""
+    }
+
+    /** Load the saved live summaries (call once when the bot starts). Never overwrites newer state. */
+    @Synchronized
+    fun restore(ctx: Context) {
+        for ((k, v) in prefs(ctx).all) {
+            if (!k.startsWith(LIVE_PREFIX) || v !is String) continue
+            val ch = k.removePrefix(LIVE_PREFIX)
+            if (!liveSummary[ch].isNullOrBlank()) continue
+            try {
+                val o = JSONObject(v)
+                val sum = o.optString("s").trim(); if (sum.isBlank()) continue
+                liveSummary[ch] = sum
+                summaryAt[ch] = o.optLong("at", 0L)
+                lastMsgAt[ch] = o.optLong("last", o.optLong("at", 0L))
+            } catch (_: Exception) { }
+        }
+    }
+
+    private fun persistLive(ctx: Context, channelId: String) {
+        val sum = liveSummary[channelId]
+        val e = prefs(ctx).edit()
+        if (sum.isNullOrBlank()) e.remove(LIVE_PREFIX + channelId)
+        else e.putString(LIVE_PREFIX + channelId, JSONObject().put("s", sum)
+            .put("at", summaryAt[channelId] ?: 0L).put("last", lastMsgAt[channelId] ?: 0L).toString())
+        e.apply()
+        lastPersistAt[channelId] = System.currentTimeMillis()
+    }
+
+    /** A learn pass wrote a fresh summary of what's going on now. */
     @Synchronized
     fun updateSummary(ctx: Context, channelId: String, newSummary: String, nowMs: Long) {
         val s = newSummary.trim().take(DiscordBotLimits.SUMMARY_MAX_CHARS)
-        if (s.isBlank()) { lastMsgAt[channelId] = nowMs; return }
-        val prev = liveSummary[channelId]
-        val quietFor = nowMs - (lastMsgAt[channelId] ?: nowMs)
-        if (!prev.isNullOrBlank() && quietFor >= DiscordBotLimits.CONVO_GAP_MS && prev != s) {
-            archive(ctx, channelId, prev, nowMs)
-        }
+        if (s.isBlank()) return
         liveSummary[channelId] = s
-        lastMsgAt[channelId] = nowMs
+        summaryAt[channelId] = nowMs
+        if (lastMsgAt[channelId] == null) lastMsgAt[channelId] = nowMs
+        persistLive(ctx, channelId)
     }
 
-    /** Mark activity (used to detect the quiet gap even when no summary was produced). */
+    /**
+     * A message arrived. If the channel had been quiet for [DiscordBotLimits.CONVO_GAP_MS], this starts a
+     * new conversation: the old summary is archived as a revivable topic first, then the live one clears.
+     */
     @Synchronized
-    fun touch(channelId: String, nowMs: Long) { lastMsgAt[channelId] = nowMs }
-
-    /** Seal the current live summary into the archive (e.g. on the observer noticing a lull). */
-    @Synchronized
-    fun sealIfDormant(ctx: Context, channelId: String, nowMs: Long) {
-        val prev = liveSummary[channelId] ?: return
-        val quietFor = nowMs - (lastMsgAt[channelId] ?: nowMs)
-        if (prev.isNotBlank() && quietFor >= DiscordBotLimits.CONVO_GAP_MS) {
-            archive(ctx, channelId, prev, nowMs)
-            liveSummary.remove(channelId)
+    fun touch(ctx: Context, channelId: String, nowMs: Long) {
+        val prevAt = lastMsgAt[channelId]
+        val prev = liveSummary[channelId]
+        lastMsgAt[channelId] = nowMs
+        if (!prev.isNullOrBlank() && prevAt != null && nowMs - prevAt >= DiscordBotLimits.CONVO_GAP_MS) {
+            archive(ctx, channelId, prev, prevAt)
+            liveSummary.remove(channelId); summaryAt.remove(channelId)
+            persistLive(ctx, channelId)
+            return
         }
+        // Keep the saved "last message" time roughly current so a restart still sees the gap.
+        if (!prev.isNullOrBlank() && nowMs - (lastPersistAt[channelId] ?: 0L) >= 60_000L) persistLive(ctx, channelId)
     }
 
     private fun archive(ctx: Context, channelId: String, summary: String, nowMs: Long) {
@@ -131,5 +168,8 @@ object ConversationStore {
 
     // ── admin ──
     fun topicsFor(ctx: Context, ch: String): List<Topic> = load(ctx, ch)
-    fun clear(ctx: Context) { prefs(ctx).edit().clear().apply(); synchronized(this) { liveSummary.clear(); lastMsgAt.clear() } }
+    fun clear(ctx: Context) {
+        prefs(ctx).edit().clear().apply()
+        synchronized(this) { liveSummary.clear(); lastMsgAt.clear(); summaryAt.clear(); lastPersistAt.clear() }
+    }
 }

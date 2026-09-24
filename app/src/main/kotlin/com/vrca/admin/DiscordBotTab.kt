@@ -358,7 +358,7 @@ private fun UsersSection() {
                         // Quick, scannable meta chips.
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             if (card.relationship.isNotBlank()) MemChip(card.relationship)
-                            MemChip("${card.interactions} chats")
+                            MemChip("replied ${card.interactions}×")
                             val seen = com.vrca.discordbot.discordRelTime(card.lastSeenMs, System.currentTimeMillis())
                             if (seen.isNotBlank()) MemChip("seen $seen")
                         }

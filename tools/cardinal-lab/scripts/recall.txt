@@ -1,0 +1,49 @@
+# Knowledge test: does Cardinal answer from what it knows? A lived-in memory, then memory questions
+# with an automatic check for the right fact after each (LIVE only — DRY replies are synthetic).
+# Used for before/after comparisons of prompt changes: same questions, same memory, count the ✓.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+> teach mood chill
+> teach self roasts people affectionately
+> teach self loves cats more than people
+> teach self night owl
+> teach card alice owns a black cat named Miso
+> teach card alice from Toronto, Canada
+> teach card alice plays Beat Saber on Expert+
+> teach card alice hosts the Saturday VRChat events
+> teach nick alice ali
+> teach rel alice server regular, basically runs events
+> teach card bob plays Valorant
+> teach card bob lives in Australia
+> teach card bob works night shifts at a bakery
+> teach card carol avatar artist, makes her own avatars
+> teach card carol her cat destroys expensive things
+> teach card carol learning Japanese
+> teach card ember lives in Osaka
+> teach card finn meme lord of the server
+> teach server the ceiling fan incident — finn destroyed a fan playing Beat Saber
+> teach server cursed halloween costume event every October, hosted by alice
+[general]
+alice: evening all
+bob: back from the bakery, dead tired
+carol: my cat knocked my tablet off the desk again
+dave: hi, @Cardinal who runs the events here?
+> expect contains (?i)\b(alice|ali)\b
+finn: @Cardinal what do you know about bob
+> expect contains (?i)(valorant|australia|bakery|night)
+dave: @Cardinal who has a cat around here?
+> expect contains (?i)\b(alice|ali|carol)\b
+finn: @Cardinal what's alice's cat called again
+> expect contains (?i)miso
+dave: @Cardinal where does ember live?
+> expect contains (?i)osaka
+bob: @Cardinal remember the ceiling fan thing?
+> expect contains (?i)(finn|beat saber)
+dave: @Cardinal who's learning japanese here?
+> expect contains (?i)\bcarol\b
+alice: @Cardinal what do you remember about me
+> expect contains (?i)(miso|toronto|beat saber|event)
+dave: @Cardinal what game does bob play
+> expect contains (?i)valorant
+carol: @Cardinal what do i do again lol
+> expect contains (?i)avatar

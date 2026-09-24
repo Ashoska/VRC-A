@@ -52,7 +52,8 @@ def get(path, params=None):
     url = f"{API}/accounts/{ACCOUNT}/ai-gateway/gateways/{GATEWAY}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
+    headers = {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}  # else the environment injects it
+    req = urllib.request.Request(url, headers=headers)
     for attempt in range(4):
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
@@ -212,8 +213,9 @@ def main():
     d = sub.add_parser("digest"); d.add_argument("--since", default="24h"); d.add_argument("--limit", type=int, default=60)
     d.add_argument("--out"); d.add_argument("--lab", action="store_true")
     a = p.parse_args()
-    if not (ACCOUNT and GATEWAY and TOKEN):
-        sys.exit("Set CF_ACCOUNT_ID, CF_GATEWAY_ID and CF_AIG_READ_TOKEN (AI Gateway: Read) in the environment.")
+    if not (ACCOUNT and GATEWAY):
+        sys.exit("Set CF_ACCOUNT_ID and CF_GATEWAY_ID (plus CF_AIG_READ_TOKEN unless the environment injects a "
+                 "Cloudflare credential with AI Gateway: Read).")
     {"list": cmd_list, "show": cmd_show, "digest": cmd_digest}[a.cmd](a)
 
 

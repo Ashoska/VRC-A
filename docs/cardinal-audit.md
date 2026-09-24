@@ -1,12 +1,87 @@
 # Cardinal audit — speed, cost, naturalness, memory (2026-09-24)
 
-Investigation only: **no bot behaviour was changed.** The one production edit is `BotEndpoints`
-(the four base URLs as vars) so the new **Cardinal Lab** harness can point the real bot at fakes.
-Every finding below marked 🧪 was reproduced by running the real bot code in the lab
-(`tools/cardinal-lab/`, script named in brackets); 📖 = from reading the code; ❓ = needs a LIVE
-run (real model calls) to confirm.
+The findings below were first recorded as an investigation (no behaviour change); **every one has
+since been fixed** — see [Results after the fixes](#results-after-the-fixes) for what changed and the
+measured before/after. The original findings are kept unchanged underneath for reference. Evidence
+markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
+named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
-## TL;DR — fix these first
+## Results after the fixes
+
+Measured in the Cardinal Lab with real Workers AI calls (LIVE), same scripts before and after.
+"Before" = commit `cf1bda9` (start of this work); "after" = the shipped code.
+
+**Knowledge** — `recall.txt`: a lived-in memory (people, nicknames, server moments) then 10 memory
+questions ("who runs the events here?", "what's alice's cat called again", "where does ember live?",
+"what do i do again lol", …), each checked for the right fact. Two runs each (model answers vary):
+
+| | before | after |
+|---|---:|---:|
+| correct answers | 6/10 + 8/10 = **14/20** | 10/10 + 10/10 = **20/20** |
+| neurons per run (10 replies + learning) | 395.2 / 370.3 | 189.7 / 204.5 (**−49%**) |
+| neurons per reply | 37.1 | 18.5 |
+| reply prompt | ~1,190 tokens | ~510 tokens |
+| reply latency p50 | 1.72 s / 0.96 s | 0.92 s / 1.20 s |
+
+Before, the misses were confident wrong answers ("alice doesn't have a cat", "finn is learning
+Japanese", "bob doesn't have time for games"). After, every answer used the stored fact.
+
+**A full evening** — `seeded-memory.txt` + `hangout.txt`: 127 human messages across three channels,
+29 addressed, ambient on at the production default, a Japanese speaker, a "stop", a react request:
+
+| | before | after | change |
+|---|---:|---:|---:|
+| **total neurons** | **1,090.1** | **631.4** | **−42%** |
+| replies (70B) | 28 × 37.5 = 1,051.4 | 28 × 19.6 = 548.8 | −48% per reply |
+| learning (8B) | 3 passes = 33.9, read ~18 messages | 8 passes = 77.1, read all 191 lines | +43 neurons, ~10× coverage |
+| director (8B) | 3 × 1.6 = 4.8 | 3 × 1.8 = 5.5 | same |
+| reply prompt | 1,241 tokens | 568 tokens | −54% |
+| reply latency p50 / p95 | 1.12 s / 4.51 s | 0.86 s / 1.81 s | faster |
+| neurons per 1,000 messages (this mix) | 8,583 | 4,972 | −42% |
+| scripted checks | 22/22 | 22/22 | |
+
+Learning costs a little more because it now reads every message (and Cardinal's own replies) instead
+of the last few before each reply; the reply savings are ~12× larger than that increase.
+
+### What was fixed
+
+| # | Finding | Fix | Verified |
+|---|---|---|---|
+| 1 | "Deprecated" 8B `CHEAP_MODEL` | **Correction:** the id still works — Cloudflare serves it as `llama-3.1-8b-fast-v2` (4,119 / 34,868 neurons per M, cheaper input than before). Kept. Director / learn failures now show in the activity log (deduplicated), and a learn batch that fails is retried with the next one. | LIVE: `result.model`, every run |
+| 2 | Identity filter deleted real facts | Compares whole words minus filler ("goes by ali") instead of substrings. | `identity-filter.txt` 6/6 |
+| 3 | Personality froze at 24 traits; digest cut mid-trait | A new trait always gets a slot (replaces the oldest never-established one); traits not shown for 3 days lose strength and fade out; reworded duplicates merge; "traits" that just restate the core ("sassy", "witty and playful") or an assistant persona are dropped; mood changes at most every 20 min; the digest is built from whole items, most-recent first among equals. | `personality-cap.txt` ✓, temporary unit checks |
+| 4 | Learning saw ~9 messages per 150 s | Every message counts (replied or not, Cardinal's own included). A pass runs after 10 new messages (≥2 min apart), after 30 in a very busy channel (≥30 s apart), or when the channel goes quiet (45 s) — and reads **everything since the last pass** (up to 50). Only on the FULL/TRIM budget rungs. | `pileup.txt` 14/14 messages, hangout 191/191 lines |
+| 5 | Gateway: deaf after server close, 4014 retried forever, stale-socket callbacks | `onClosing` answers the close and resumes immediately; fatal codes (4004, 4010–4014) stop with FAILED and a plain reason ("turn on MESSAGE CONTENT INTENT…"); callbacks from an old socket are ignored. | `gateway-codes.txt`: ~50 s deaf → 1.1 s; 4014 → FAILED with reason; `lifecycle.txt` ✓ |
+| 6 | Reply prompt ~65% boilerplate | Short fixed core (identity + the voice rules) + only what this moment needs: who it's answering (always), the channel, the server's most-used emojis (always, so Cardinal can use one when it wants), and — only when relevant — people named or talking, server memories, the earlier summary, the names / memory-question rules. People named in a message always come with what Cardinal knows about them. | prompt 1,241 → 568 tokens, knowledge 14/20 → 20/20 |
+| 7 | Budget estimates wrong both ways | Every call is charged from Workers AI's own `usage.neurons` (exact); the old flat estimates are gone. | report "neurons" = billed |
+| 8 | Fake "just now" recency; core memories in every reply; topic archive never written; summary lost on restart | Age shows when a moment happened (first seen), not when last mentioned; no always-on core memories (retrieved only when the conversation touches them); mentions strengthen a memory at most hourly and unmentioned ones slowly rank lower; the first message after a 12-min lull archives the previous conversation (revivable later); the live summary is saved. | temporary unit checks |
+
+Also fixed from the detailed sections below: "stop" only triggers on a real stop request aimed at
+Cardinal ("don't stop" / "stop by the event" no longer mute it for 2 min) and leaves a trace; a react
+request records one trace, not two; the director is asked at most every 20 s per channel and reacts
+unprompted at most every 90 s, and it knows which channel it's in; typing dots fire immediately
+(not after the history fetch) and a referenced channel is fetched in parallel; a reply to an older
+message is marked inline ("(replying to bob: "…")") instead of inserted as a new turn; the bot's own
+@mention is stripped consistently; most-used emojis instead of alphabetical; learned names like
+"@alice" / "Alice (ali)" resolve; short or everyday nicknames ("ali", "boss") only pull a card in
+when the message clearly points at a person; reactions no longer overwrite a learned vibe; channel
+bits need two shared words to surface; a second language is recorded as "also speaks" instead of
+replacing the main one.
+
+**Learning quality guards** (found while testing the fixes — the cheap learner invented facts like
+"from Brazil" / "game developer" and wrote "none" into fields): learned facts must mostly use words
+actually said by or about that person in the batch (no extra model call); nicknames must appear in
+the chat; "none"/"unknown" values count as empty; relationship and how-to-treat are filled once and
+then kept (a learned mood no longer overwrites "server regular, basically runs events"); generic
+relationships ("member") and chat-mood filler ("has a sense of humor…") aren't stored; facts tied to
+today/tonight aren't stored; "alice plays X" is stored as "plays X" so duplicates merge. A low
+temperature for the learner was tried and **reverted** — it made the 8B loop until its token limit.
+Remaining limit: the 8B still occasionally mixes up who said what ("bob likes pineapple pizza" after
+bob *asked* about it); those facts are grounded in real words, so they pass.
+
+## Original findings (before the fixes)
+
+### TL;DR — fix these first
 
 | # | Finding | Impact | Evidence |
 |---|---|---|---|
@@ -196,7 +271,7 @@ most hourly, or a small fixed set).
 
 ---
 
-## Recommendations (nothing below has been implemented)
+## Recommendations (as written before the fixes — see "What was fixed" above for what shipped)
 
 In priority order; each can be checked in the lab before shipping.
 
@@ -240,16 +315,14 @@ In priority order; each can be checked in the lab before shipping.
   (reply/director/learn) would make the logs filterable (app change; the lab already does this).
 - Caching and fallback routing: not useful here (unique chat turns; no-fallback is a product rule).
 
-## What still needs LIVE runs
+## LIVE runs
 
-1. Is the 8B alive? (`probe_models.py ping`)
-2. Real reply quality/length/latency with a lived-in memory (`lab.sh run seeded-memory.txt --live`).
-3. What the learner actually stores from a real conversation (`lab.sh run hangout.txt --live`, then
-   read the final memory in the report).
-4. Model A/B for replies and for the learner (`replay` + `--remap`).
-5. What production is doing right now (`aig_logs.py digest --since 24h`, needs a gateway id).
+Done (results above): the 8B is alive (served as `llama-3.1-8b-fast-v2`); reply quality, length,
+latency and cost with a lived-in memory; what the learner stores from a real conversation; the
+knowledge A/B. Still open: **what production is doing right now** — set a gateway id in the bot's
+Config tab, then `aig_logs.py digest --since 24h` (needs an AI Gateway Read token); and a reply-model
+A/B (`probe_models.py replay` + `--remap reply=…`) if an even cheaper reply model is wanted.
 
-Needed in the cloud environment settings (never in chat or the repo): `CF_ACCOUNT_ID`,
-`CF_API_TOKEN` (Workers AI), optional `CF_GATEWAY_ID`, `CF_AIG_READ_TOKEN` (AI Gateway Read).
-The lab shares the account's 10k/day free neurons with production — use `--cap`, or a separate
-free account for the lab.
+LIVE lab runs need `CF_ACCOUNT_ID` at runtime (and a Workers AI token, which the cloud environment's
+credential proxy injects); nothing is committed. The lab shares the account's 10k free neurons/day
+with the live bot — use `--cap`.

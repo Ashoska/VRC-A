@@ -42,8 +42,10 @@ class CardinalLabTest {
     fun lab() {
         Assume.assumeTrue("Cardinal Lab only runs with -PcardinalLab", System.getProperty("cardinal.lab") == "1")
         val cfg = LabConfig.load()
-        if (cfg.live && (cfg.cfAccount.isBlank() || cfg.cfToken.isBlank()))
-            error("LIVE mode needs CF_ACCOUNT_ID + CF_API_TOKEN in the environment (see tools/cardinal-lab/README.md)")
+        if (cfg.live && cfg.cfAccount.isBlank())
+            error("LIVE mode needs the Cloudflare account id: CF_ACCOUNT_ID in the environment or --set account=<id>")
+        if (cfg.live && cfg.cfToken.isBlank())
+            println("[lab] no CF_API_TOKEN — relying on the environment's injected Cloudflare credential")
         FakeAndroidKeyStore.install()
         val ctx = RuntimeEnvironment.getApplication()
         val rec = LabRecorder(cfg)
