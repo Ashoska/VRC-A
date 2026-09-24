@@ -28,7 +28,7 @@ alice: @Cardinal what's your job around here again?
 alice: @Cardinal are you single?
 > expect contains (?i)(shrek|married|husband)
 bob: @Cardinal thoughts on pigeons?
-> expect contains (?i)(drone|government|surveil|spy|real|battery|charg)
+> expect contains (?i)(drone|government|surveil|spy|real|battery|charg|camera)
 carol: @Cardinal how's your day going
 > expect reply
 dave: @Cardinal what's 12 times 12

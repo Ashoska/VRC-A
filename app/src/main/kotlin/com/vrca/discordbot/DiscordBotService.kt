@@ -40,7 +40,7 @@ import kotlin.random.Random
  * event-driven routing, and a real Cloudflare neuron budget.
  *
  * Per message: a FREE heuristic decides ignore / react / reply / consider-ambient. An addressed
- * message goes straight to the 70B [DiscordBotAi.reply], whose prompt carries only what this moment
+ * message goes straight to the reply model [DiscordBotAi.reply], whose prompt carries only what this moment
  * needs (who it's answering, the channel, and — when relevant — people named or talking, server
  * memories, the earlier-conversation summary). An ambient moment pays one cheap 8B
  * [DiscordBotAi.director] (at most every [DiscordBotLimits.DIRECTOR_MIN_GAP_MS] per channel). Memory is
@@ -668,7 +668,7 @@ class DiscordBotService : Service() {
                         learnPending.merge(ctx.channelId, 1, Int::plus)   // its own line is part of what gets learned
                     } else {
                         DiscordBotState.log("Send failed: ${out.error}")
-                        trace(ctx, "reply", "70B", "send-fail", out.error)
+                        trace(ctx, "reply", model.substringAfterLast('/').substringBefore("-instruct").take(24), "send-fail", out.error)
                     }
                 }
                 UserMemoryStore.touch(this, ctx.authorId, ctx.authorName)
@@ -681,7 +681,7 @@ class DiscordBotService : Service() {
             }
             is DiscordBotAi.ReplyResult.Error -> {
                 DiscordBotState.log("AI error: ${res.message}")
-                trace(ctx, "reply", "70B", "error", res.message)
+                trace(ctx, "reply", model.substringAfterLast('/').substringBefore("-instruct").take(24), "error", res.message)
             }
         }
     }
@@ -779,6 +779,22 @@ class DiscordBotService : Service() {
             PersonalityStore.traitTexts(this, 12).map { Triple("", "Cardinal", it) }
     }
 
+    private val mergeAt = ConcurrentHashMap<String, Long>()
+    private fun maybeMergeFacts(id: String) {
+        val now = System.currentTimeMillis()
+        if (now - (mergeAt[id] ?: 0L) < DiscordBotLimits.FACT_MERGE_COOLDOWN_MS) return
+        mergeAt[id] = now
+        scope.launch {
+            try {
+                val card = UserMemoryStore.load(this@DiscordBotService, id) ?: return@launch
+                val (topic, pile) = UserMemoryStore.crowdedTopic(card) ?: return@launch
+                val merged = DiscordBotAi.mergeFacts(cfg, card.name, topic, pile) ?: return@launch
+                if (UserMemoryStore.replaceFacts(this@DiscordBotService, id, pile, merged))
+                    DiscordBotState.log("merged ${card.name}'s \"$topic\" facts: ${pile.size} → ${merged.size}")
+            } catch (_: Exception) { }
+        }
+    }
+
     /**
      * Once a busy day is over, condense its log into a short recap (one cheap call per day). Runs after a
      * learn pass, so it only ever happens while the bot is active and within budget.
@@ -825,6 +841,13 @@ class DiscordBotService : Service() {
             val id = resolveObserveAbout(md.about, nameToId, globalIndex)
             if (id != null && id != botId)
                 UserMemoryStore.applyDelta(this, id, md.about, groundDelta(md, id, turns, nameToId) { dropped.add(it) }, correcting)
+        }
+        // A card whose one topic piled up paraphrases gets a cheap merge pass (rare, per-card cooldown).
+        for (md in obs.memDeltas) {
+            val id = resolveObserveAbout(md.about, nameToId, globalIndex) ?: continue
+            if (id == botId) continue
+            val card = UserMemoryStore.load(this, id) ?: continue
+            if (UserMemoryStore.crowdedTopic(card) != null) maybeMergeFacts(id)
         }
         if (dropped.isNotEmpty())
             DiscordBotState.log("learn: skipped ${dropped.size} unsupported fact(s), e.g. \"${dropped.first().take(60)}\"")
@@ -1317,8 +1340,38 @@ class DiscordBotService : Service() {
             else -> ""
         }
         if (byScript.isNotBlank()) return byScript
-        return ""   // Latin script → let Cardinal match naturally (English or the person's language)
+        return latinLang(text)
     }
+
+    /**
+     * Latin-script languages share an alphabet with English, so they're told apart by their own letters and
+     * common little words. Needs two signals and more of them than English words, so an English line with
+     * one borrowed word ("que sera") stays English.
+     */
+    private fun latinLang(text: String): String {
+        val low = text.lowercase()
+        val words = Regex("[\\p{L}']+").findAll(low).map { it.value }.toList()
+        if (words.size < 2) return ""
+        val english = words.count { it in EN_WORDS }
+        var best = ""; var bestScore = 0
+        for ((lang, cues) in LATIN_CUES) {
+            val score = words.count { it in cues.words } + (if (low.any { it in cues.chars }) 2 else 0)
+            if (score > bestScore) { best = lang; bestScore = score }
+        }
+        return if (bestScore >= 2 && bestScore > english) best else ""
+    }
+
+    private class LangCues(val words: Set<String>, val chars: String)
+    private val EN_WORDS = setOf("the", "and", "you", "is", "are", "what", "do", "i", "it", "to", "of", "a", "my", "your", "that", "this", "in", "on", "for", "with", "was", "have", "how", "why")
+    private val LATIN_CUES = linkedMapOf(
+        "Spanish (español)" to LangCues(setOf("qué", "que", "los", "las", "el", "es", "muy", "pero", "por", "para", "cómo", "como", "tú", "yo", "está", "estás", "hola", "gracias", "opinas", "tienes", "una", "del", "y", "sí", "también"), "¿¡ñ"),
+        "Portuguese (português)" to LangCues(setOf("você", "voce", "não", "nao", "é", "os", "as", "uma", "muito", "obrigado", "obrigada", "tudo", "bem", "está", "isso", "com", "para", "que", "eu", "tá"), "ãõç"),
+        "French (français)" to LangCues(setOf("je", "tu", "est", "les", "des", "une", "pas", "c'est", "quoi", "pourquoi", "bonjour", "salut", "merci", "avec", "très", "vous", "nous", "mais", "et", "le", "la"), "àâçéèêëîïôûœ"),
+        "German (Deutsch)" to LangCues(setOf("ich", "du", "ist", "und", "nicht", "das", "der", "die", "was", "wie", "danke", "hallo", "bist", "mit", "ein", "eine", "auch", "sehr"), "äöüß"),
+        "Italian (italiano)" to LangCues(setOf("che", "non", "sono", "come", "ciao", "grazie", "perché", "molto", "il", "gli", "della", "una", "anche", "cosa", "sei"), "àèìòù"),
+        "Dutch (Nederlands)" to LangCues(setOf("ik", "je", "het", "een", "niet", "wat", "hoe", "dank", "hallo", "jij", "zijn", "met", "ook", "maar", "dat"), ""),
+        "Polish (polski)" to LangCues(setOf("jest", "nie", "się", "jak", "co", "czy", "dzięki", "cześć", "ty", "ja", "to", "tak"), "ąęłńśźż"),
+    )
 
     /**
      * The server's most-used custom emojis, plus any whose name matches what's being talked about

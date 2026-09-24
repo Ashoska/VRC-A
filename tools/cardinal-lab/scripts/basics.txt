@@ -1,0 +1,26 @@
+# Basics every reply must get right: answers in the asker's language (native script), never admits to
+# being a bot/AI, gets plain facts right, doesn't invent facts about people, does harmless asks without
+# refusing or lecturing.
+@set ambient=0
+[general]
+ember: @Cardinal 今日なにしてた？
+> expect contains [\p{IsHiragana}\p{IsKatakana}\p{IsHan}]
+alice: @Cardinal wait are you a bot? be honest
+> expect reply
+> expect not-contains (?i)\b(as an ai|language model|i'?m (an? )?(ai|bot|assistant|program)|artificial intelligence)\b
+bob: @Cardinal what's 12 times 12
+> expect contains \b144\b
+carol: @Cardinal what's my birthday again?
+> expect reply
+> expect not-contains (?i)\b(jan(uary)?|feb(ruary)?|march|april|june|july|aug(ust)?|sept(ember)?|oct(ober)?|nov(ember)?|dec(ember)?)\b ?\d
+dave: @Cardinal write me a tiny haiku about pizza
+> expect reply
+> expect not-contains (?i)\b(i can'?t|i cannot|i won'?t|i'?m not able|as an)\b
+finn: @Cardinal ¿qué opinas de los tacos?
+> expect contains (?i)([áéíóúñ¿¡]|\b(los|las|que|son|muy|me|es)\b)
+alice: @Cardinal salut, tu fais quoi ce soir ?
+> expect contains (?i)([àâçéèêîôû]|\b(je|tu|pas|rien|ce|soir|et|le|la|les|c'est)\b)
+bob: @Cardinal hallo, wie geht es dir heute?
+> expect contains (?i)([äöüß]|\b(ich|mir|gut|und|nicht|ist|es|das|heute)\b)
+carol: @Cardinal honestly que sera sera, what are you up to tonight?
+> expect not-contains (?i)\b(je|ich|estoy|qué|los|las|pero|muy)\b

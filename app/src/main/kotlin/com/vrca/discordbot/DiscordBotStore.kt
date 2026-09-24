@@ -26,6 +26,8 @@ object DiscordBotStore {
     private const val KEY_CF_GATEWAY = "cf_gateway_id"
     private const val KEY_ANALYTICS = "cf_analytics_token"
     private const val KEY_MODEL = "cf_model"
+    /** Set once the install has been moved off the old 70B default (so a deliberate 70B pick sticks). */
+    private const val KEY_MODEL_DEFAULT_V2 = "cf_model_default_v2"
     private const val KEY_AMBIENT_PCT = "ambient_percent"
     private const val KEY_AMBIENT_COOLDOWN = "ambient_cooldown_sec"
     private const val KEY_CONTEXT_TURNS = "context_turns"
@@ -94,6 +96,11 @@ object DiscordBotStore {
 
     fun load(context: Context): Config {
         val p = prefs(context)
+        if (p != null && !p.getBoolean(KEY_MODEL_DEFAULT_V2, false)) {
+            val e = p.edit().putBoolean(KEY_MODEL_DEFAULT_V2, true)
+            if (p.getString(KEY_MODEL, "").orEmpty().trim() == DiscordBotLimits.LEGACY_REPLY_MODEL) e.putString(KEY_MODEL, DEFAULT_MODEL)
+            e.apply()
+        }
         return Config(
             botToken = p?.getString(KEY_BOT_TOKEN, "").orEmpty().trim(),
             cfAccountId = p?.getString(KEY_CF_ACCOUNT, "").orEmpty().trim(),

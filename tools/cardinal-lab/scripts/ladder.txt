@@ -8,7 +8,7 @@ alice: @Cardinal what's the plan for tonight (TRIM rung)
 @set spent=1000
 bob: @Cardinal you still there (CHEAP rung — replies on the 8B model)
 > expect reply
-@set spent=500
+@set spent=650
 carol: @Cardinal hello?? (REACT_ONLY rung)
 > expect react
 @set spent=100

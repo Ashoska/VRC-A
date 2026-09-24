@@ -30,7 +30,7 @@ finn: count me in, i'll sing badly
 > expect day 0 contains (?i)(toast|fire)
 > expect day -1 contains (?i)(cereal|snor|finn)
 ember: @Cardinal did anything funny happen today? i just got here
-> expect contains (?i)(toast|fire|bread)
+> expect contains (?i)(toast|fire|bread|burn)
 dave: @Cardinal what happened yesterday? i missed everything
 > expect contains (?i)(cereal|soup|snor|finn|valorant|karaoke)
 finn: @Cardinal what was the funniest thing yesterday

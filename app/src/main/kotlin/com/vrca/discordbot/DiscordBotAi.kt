@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit
 /**
  * Cloudflare **Workers AI** layer for Cardinal. Three roles, cheapest-first:
  *
- *  1. [reply] — the strong 70B writes ONLY the message text. It carries NO bookkeeping tail (that
+ *  1. [reply] — the reply model writes ONLY the message text. It carries NO bookkeeping tail (that
  *     halved the per-reply cost AND fixed the junk-memory bugs the rushed inline tail produced) —
  *     all memory/summary/self/culture writing is done by the cheap 8B [observe] LEARN pass instead.
  *  2. [director] — the cheap 8B routes an AMBIGUOUS/ambient moment: reply/react/ignore + emoji.
@@ -71,7 +71,7 @@ object DiscordBotAi {
     }
 
     sealed class ReplyResult {
-        /** The 70B reply is now JUST the message text — no memory/summary/self tail (see [observe]). */
+        /** The reply is now JUST the message text — no memory/summary/self tail (see [observe]). */
         data class Ok(val text: String) : ReplyResult()
         data class Error(val message: String) : ReplyResult()
     }
@@ -135,7 +135,7 @@ object DiscordBotAi {
         val sys = buildString {
             append(CORE)
             if (c.selfDigest.isNotBlank()) append("\n\n[You] ").append(c.selfDigest)
-                .append(" Your quirks come out when they fit the moment, not in every message, and can evolve if the room steers them somewhere fun.")
+                .append(" Your quirks come out when they fit the moment, not in every message, and can evolve if the room steers them somewhere fun. Asked about yourself, name the real ones above.")
             if (c.channelInfo.isNotBlank()) append("\n\n[Channel] ").append(c.channelInfo)
             // Who he's talking to first, then background knowledge, then rules.
             if (c.answering.isNotBlank()) {
@@ -221,9 +221,13 @@ object DiscordBotAi {
         val start = text.indexOf('{'); if (start < 0) return null
         val end = text.lastIndexOf('}')
         if (end > start) try { return JSONObject(text.substring(start, end + 1)) } catch (_: Exception) { }
-        val cleaned = escapeStrayQuotes(text.substring(start))
-        if (cleaned != text.substring(start)) jsonObjectIn(cleaned)?.let { return it }
-        return closeUnbalanced(text.substring(start))
+        val raw = text.substring(start)
+        val cleaned = escapeStrayQuotes(raw)
+        if (cleaned != raw) {
+            val e2 = cleaned.lastIndexOf('}')
+            if (e2 > 0) try { return JSONObject(cleaned.substring(0, e2 + 1)) } catch (_: Exception) { }
+        }
+        return closeUnbalanced(cleaned) ?: closeUnbalanced(raw)
     }
 
     /**
@@ -252,24 +256,66 @@ object DiscordBotAi {
         return sb.toString()
     }
 
+    /**
+     * Structural repair for the small model's usual slips: a missing closer at the end (cut off), a key
+     * written inside an array (`[{..},"event":""}` — the array was never closed), or a closer of the wrong
+     * kind. Tracks strings and brackets; closes what's open in the right order.
+     */
     private fun closeUnbalanced(text: String): JSONObject? {
-        val start = 0
         val sb = StringBuilder(); val stack = ArrayDeque<Char>()
         var inStr = false; var esc = false
-        for (ch in text.substring(start)) {
-            sb.append(ch)
-            if (inStr) { if (esc) esc = false else if (ch == '\\') esc = true else if (ch == '"') inStr = false; continue }
-            when (ch) {
-                '"' -> inStr = true
-                '{' -> stack.addLast('}')
-                '[' -> stack.addLast(']')
-                '}', ']' -> { if (stack.isNotEmpty()) stack.removeLast(); if (stack.isEmpty()) break }
+        var i = 0
+        while (i < text.length) {
+            val ch = text[i]
+            if (inStr) {
+                sb.append(ch)
+                if (esc) esc = false else if (ch == '\\') esc = true else if (ch == '"') inStr = false
+                i++; continue
             }
+            when (ch) {
+                '"' -> {
+                    // A string followed by ':' is a key — keys never live in an array, so close the array.
+                    if (stack.lastOrNull() == ']' && isKeyAt(text, i)) {
+                        var k = sb.length
+                        while (k > 0 && sb[k - 1].isWhitespace()) k--
+                        val hadComma = k > 0 && sb[k - 1] == ','
+                        if (hadComma) sb.setLength(k - 1)
+                        sb.append(']'); stack.removeLast()
+                        if (hadComma) sb.append(',')
+                    }
+                    sb.append(ch); inStr = true
+                }
+                '{' -> { sb.append(ch); stack.addLast('}') }
+                '[' -> { sb.append(ch); stack.addLast(']') }
+                '}', ']' -> {
+                    // Close anything left open inside before this closer (a wrong-kind closer).
+                    while (stack.isNotEmpty() && stack.last() != ch) { trimComma(sb); sb.append(stack.removeLast()) }
+                    trimComma(sb); sb.append(ch)
+                    if (stack.isNotEmpty()) stack.removeLast()
+                    if (stack.isEmpty()) break
+                }
+                else -> sb.append(ch)
+            }
+            i++
         }
         if (inStr) sb.append('"')
-        var fixed = sb.toString().trimEnd().trimEnd(',')
-        while (stack.isNotEmpty()) fixed += stack.removeLast()
-        return try { JSONObject(fixed) } catch (_: Exception) { null }
+        trimComma(sb)
+        while (stack.isNotEmpty()) { trimComma(sb); sb.append(stack.removeLast()) }
+        return try { JSONObject(sb.toString()) } catch (_: Exception) { null }
+    }
+
+    private fun isKeyAt(t: String, quoteAt: Int): Boolean {
+        var j = quoteAt + 1; var e = false
+        while (j < t.length) { val c = t[j]; if (e) e = false else if (c == '\\') e = true else if (c == '"') break; j++ }
+        j++
+        while (j < t.length && t[j].isWhitespace()) j++
+        return j < t.length && t[j] == ':'
+    }
+
+    private fun trimComma(sb: StringBuilder) {
+        var k = sb.length
+        while (k > 0 && sb[k - 1].isWhitespace()) k--
+        if (k > 0 && sb[k - 1] == ',') sb.setLength(k - 1)
     }
 
     private fun parsePlan(text: String): Plan? = try {
@@ -336,6 +382,25 @@ object DiscordBotAi {
         return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, DiscordBotLimits.LEARN_MAX_TOKENS)) {
             is Result.Ok -> parseObservation(r.text) ?: run { logIssue("Learn pass", "unreadable answer: ${r.text.take(60)}"); null }
             is Result.Error -> { logIssue("Learn pass", r.message); null }
+        }
+    }
+
+    /**
+     * Merge a paraphrase pile (the facts on one card that share a topic, e.g. six "AI" facts) into 1-2 notes
+     * (cheap 8B, only the pile is sent). Null on error; the caller rejects anything invented or not shorter.
+     */
+    suspend fun mergeFacts(cfg: DiscordBotStore.Config, name: String, topic: String, facts: List<String>): List<String>? {
+        val sys = "These notes about $name all say similar things about \"$topic\". Rewrite them as 1 or 2 short notes " +
+            "that keep every specific detail and drop the repeats. Use only words from the notes. Output only a JSON array of strings."
+        val messages = JSONArray().put(obj("system", sys)).put(obj("user", facts.joinToString("\n") { "- $it" }))
+        return when (val r = call(cfg, DiscordBotLimits.MERGE_MODEL, messages, 120)) {
+            is Result.Ok -> try {
+                val s = r.text.indexOf('['); val e = r.text.lastIndexOf(']')
+                if (s < 0 || e <= s) null else JSONArray(r.text.substring(s, e + 1)).let { a ->
+                    (0 until a.length()).mapNotNull { a.optString(it).trim().ifBlank { null } }
+                }
+            } catch (_: Exception) { null }
+            is Result.Error -> { logIssue("Fact merge", r.message); null }
         }
     }
 
@@ -462,6 +527,7 @@ object DiscordBotAi {
         if (!exact.isNaN() && exact > 0.0) return exact
         val (inRate, outRate) = when {
             model.contains("70b") -> 0.026668 to 0.204805
+            model.contains("gemma-4") -> 0.009091 to 0.027273
             model.contains("8b-instruct-fp8") && !model.contains("fast") -> 0.013778 to 0.026128
             model.contains("8b") -> 0.004119 to 0.034868
             else -> 0.026668 to 0.204805   // unknown: price like the 70B (conservative)

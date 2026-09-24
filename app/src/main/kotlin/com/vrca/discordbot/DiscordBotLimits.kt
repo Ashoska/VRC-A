@@ -11,8 +11,15 @@ package com.vrca.discordbot
 object DiscordBotLimits {
 
     // ── Models ────────────────────────────────────────────────────────────
-    const val REPLY_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    /** Replies. Gemma 4 26B (MoE, 4B active): matched the 70B on the memory, day, correction and route lab tests at ~40% of the cost and ~2x the
+     *  speed. Its "thinking" is switched off per call (see DiscordBotAi.THINKING_KWARG_MODELS). */
+    const val REPLY_MODEL = "@cf/google/gemma-4-26b-a4b-it"
+    /** The previous default. Installs still on it are moved to [REPLY_MODEL] once (DiscordBotStore). */
+    const val LEGACY_REPLY_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    /** Learner + director: the small model is still the cheapest per learn pass (long input, short output). */
     const val CHEAP_MODEL = "@cf/meta/llama-3.1-8b-instruct"
+    /** Paraphrase-pile merge: the 8B only picks a subset; Gemma actually combines, at the same ~2.4 neurons. */
+    const val MERGE_MODEL = "@cf/google/gemma-4-26b-a4b-it"
 
     // ── Context assembly (clarity + bounded prompt) ───────────────────────
     /** Raw transcript turns fed alongside the rolling summary. */
@@ -134,6 +141,10 @@ object DiscordBotLimits {
     const val DAY_KEEP_DAYS = 120
     /** The day block in a reply prompt is capped at this. */
     const val DAY_BLOCK_MAX_CHARS = 900
+    /** A card topic with more facts than this ("AI" ×7) gets one cheap merge pass for paraphrases. */
+    const val FACTS_PER_TOPIC = 3
+    /** A card is merged at most this often. */
+    const val FACT_MERGE_COOLDOWN_MS = 6 * 3_600_000L
     /** A dispute/complaint against one of Cardinal's traits knocks this much strength off it. */
     const val TRAIT_DISPUTE_PENALTY = 4
 

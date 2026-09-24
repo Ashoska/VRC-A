@@ -330,6 +330,51 @@ object UserMemoryStore {
                 c.facts.takeLast(8).map { Triple(c.id, c.name, it) } + nicks.map { Triple(c.id, c.name, "goes by $it") }
             }
 
+    // ── Paraphrase piles ("studies AI", "can create custom AI engines", "can train AI models"…) ──
+    // Word-overlap dedup can't see these (they share one short topic word), so a card whose single topic
+    // collects more than [DiscordBotLimits.FACTS_PER_TOPIC] facts is sent for a cheap merge pass.
+    private val TOPIC_GENERIC = setOf(
+        "studies", "study", "create", "creates", "creating", "make", "makes", "making", "test", "tests", "testing",
+        "train", "trains", "training", "tweak", "tweaks", "use", "uses", "using", "work", "works", "working",
+        "custom", "project", "projects", "likes", "loves", "enjoys", "plays", "playing", "really", "about",
+        "their", "they", "them", "have", "has", "with", "from", "into", "that", "this", "very", "good", "great",
+        "able", "can", "could", "own", "owns", "named", "called", "also", "always", "often", "lot", "lots",
+        // The whole server is about these, so sharing them doesn't make two facts the same subject.
+        "vrchat", "discord", "server", "friends", "friend", "games", "gaming",
+    )
+    /** A fact's topic words: longer non-generic words, plus short ALL-CAPS ones (AI, VR, PC). */
+    private fun topicKeys(fact: String): Set<String> =
+        Regex("[\\p{L}\\p{N}]+").findAll(fact).map { it.value }.filter { w ->
+            (w.length >= 5 && w.lowercase() !in TOPIC_GENERIC) || (w.length in 2..3 && w.all { it.isUpperCase() || it.isDigit() } && w.any { it.isLetter() })
+        }.map { discordStem(it.lowercase()) }.toSet()
+
+    /** The topic word shared by too many of this card's facts (a paraphrase pile) and those facts, or null. */
+    fun crowdedTopic(card: Card): Pair<String, List<String>>? {
+        val counts = HashMap<String, Int>()
+        card.facts.forEach { f -> topicKeys(f).forEach { counts.merge(it, 1, Int::plus) } }
+        val key = counts.filter { it.value > DiscordBotLimits.FACTS_PER_TOPIC }.maxByOrNull { it.value }?.key ?: return null
+        return key to card.facts.filter { key in topicKeys(it) }
+    }
+
+    /**
+     * Swap a paraphrase pile for its merged version — only if the merge is shorter and built from words that
+     * were already in the pile (nothing invented). Every other fact is left exactly as it was. Pinned cards
+     * are never touched.
+     */
+    fun replaceFacts(ctx: Context, id: String, pile: List<String>, merged: List<String>): Boolean {
+        val cur = load(ctx, id) ?: return false
+        if (cur.pinned || merged.isEmpty() || merged.size >= pile.size) return false
+        val have = pile.flatMap { toks(it) }.toSet()
+        val clean = merged.mapNotNull { cleanFact(stripOwnName(it, listOf(cur.name))) }
+            .filter { f -> toks(f).let { w -> w.isNotEmpty() && w.count { it in have } * 3 >= w.size * 2 } }
+            .distinct()
+        if (clean.isEmpty() || clean.size >= pile.size) return false
+        val pileSet = pile.toSet()
+        val kept = cur.facts.filter { it !in pileSet }
+        save(ctx, cur.copy(facts = kept + clean))
+        return true
+    }
+
     /** "alice: from Toronto; owns a cat named Miso" per person — so the learner only adds what's new. */
     fun knownFactsLine(ctx: Context, ids: Collection<String>, perPerson: Int = 6): String =
         ids.distinct().mapNotNull { load(ctx, it) }.filter { it.facts.isNotEmpty() && it.name.isNotBlank() }
