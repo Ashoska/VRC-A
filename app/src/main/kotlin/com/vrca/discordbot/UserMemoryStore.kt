@@ -131,13 +131,14 @@ object UserMemoryStore {
     // a day or two — they're not who someone is, and a stored fact never expires.
     private val TRANSIENT = Regex(
         "(?i)\\b(today|tonight|tomorrow|yesterday|this (morning|afternoon|evening|week|weekend)|right now|" +
-        "at the moment|later today|next few (hours|days)|rn|atm|recently|lately|in a (bit|while)|for now|" +
+        "at the moment|later today|next few (hours|days)|rn|atm|recently|lately|in a (bit|while)|for a bit|been (so |really |super )?busy|for now|" +
+        "(hasn'?t|haven'?t|has not|have not) been (on|online|around|active|playing)|" +
         "last night|earlier|next (week|weekend|month)|this (month|year)|(on|this|next|last|by|until|till|for) (mon|tues|wednes|thurs|fri|satur|sun)day(?!s)|" +
         "homework|is being|are being|being (fixed|repaired|redone|renovated|replaced|built|painted|cleaned))\\b"
     )
     // "is not a chef" / "no longer lives in toronto" — what someone ISN'T is a correction, not a fact about them
     // (the old fact is dropped by the correction rules instead).
-    private val NEGATED_FACT = Regex("(?i)^(is|was|are)\\s+(not|no longer)\\b|^(isn'?t|wasn'?t|aren'?t|not|no longer)\\b|^(doesn'?t|does not) (live|work)\\b|^(left|quit|stopped|moved (out of|away from|from))\\b")
+    private val NEGATED_FACT = Regex("(?i)^(is|was|are)\\s+(not|no longer)\\b|^(isn'?t|wasn'?t|aren'?t|not|no longer)\\b|^(hasn'?t|haven'?t|has not|have not) been\\b|^(doesn'?t|does not) (live|work)\\b|^(left|quit|stopped|moved (out of|away from|from))\\b")
     // Filler "facts" that describe a chat mood, not the person ("has a sense of humor about it").
     private val GENERIC_FACT = Regex(
         "(?i)^(has an? (good |great |dark |dry |weird )?sense of humou?r|seems (to|like)|is (funny|nice|cool|friendly|chill|hilarious|sarcastic)\\b)"
