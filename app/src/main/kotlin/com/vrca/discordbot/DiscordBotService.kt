@@ -1518,7 +1518,7 @@ class DiscordBotService : Service() {
             emojiHint = emojiHint(built.keywords),
             // An English line right after other languages drifts into them ("que sera sera, what are you up to?"
             // got Spanish): say English explicitly then.
-            langHint = detectLang(ctx.userText).ifBlank {
+            langHint = askedLang(ctx.userText).ifBlank { detectLang(ctx.userText) }.ifBlank {
                 val low = Regex("[\\p{L}']+").findAll(ctx.userText.lowercase()).map { it.value }.toList()
                 if (low.count { it in EN_WORDS } >= 2 && turns.takeLast(8).any { detectLang(it.text).isNotBlank() }) "English" else ""
             },
@@ -1820,6 +1820,24 @@ class DiscordBotService : Service() {
      * common little words. Needs two signals and more of them than English words, so an English line with
      * one borrowed word ("que sera") stays English.
      */
+    /** "can you answer in spanish?" / "say it in japanese" / "en español": they asked for a language, so use it. */
+    private fun askedLang(text: String): String {
+        val low = text.lowercase()
+        val m = ASKED_LANG_RE.find(low) ?: return ""
+        val want = m.groupValues[1].ifBlank { m.groupValues[2] }
+        return ASKED_LANG_NAMES[want] ?: want.replaceFirstChar { it.uppercase() }
+    }
+
+    private val ASKED_LANG_RE = Regex(
+        "\\b(?:answer|reply|respond|say|talk|speak|write|text|tell|translate)\\b[^.!?\\n]{0,30}?\\b(?:in|into) " +
+            "(spanish|español|espanol|french|français|german|deutsch|italian|portuguese|dutch|polish|russian|japanese|korean|chinese|mandarin|arabic|hindi|turkish|swedish|greek|hebrew|thai|vietnamese|indonesian|tagalog)\\b" +
+            "|\\ben (español|espanol|français|francais)\\b"
+    )
+    private val ASKED_LANG_NAMES = mapOf(
+        "español" to "Spanish", "espanol" to "Spanish", "français" to "French", "francais" to "French",
+        "deutsch" to "German", "mandarin" to "Chinese",
+    )
+
     private fun latinLang(text: String): String {
         val low = text.lowercase()
         val words = Regex("[\\p{L}']+").findAll(low).map { it.value }.toList()
