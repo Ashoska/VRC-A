@@ -1,0 +1,30 @@
+# Message structure: replies look like a person texting — no name prefix, no quote-wrapping, no markdown
+# headers/lists for chat, short banter stays short, a real how-to can go longer but not an essay, no emoji
+# spam, no raw pings, no ALL CAPS, and it doesn't just echo the message back.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+[general]
+alice: @Cardinal lol you're so dramatic
+> expect reply
+> expect not-contains (?i)^\s*(cardinal|me)\s*:
+> expect not-contains ^\s*["“].*["”]\s*$
+> expect not-contains [\s\S]{200,}
+bob: @Cardinal how do i get started making my own vrchat avatar? like actual steps
+> expect reply
+> expect not-contains (?m)^\s*#{1,6}\s
+> expect not-contains [\s\S]{900,}
+> expect not-contains (?i)^\s*(cardinal|me)\s*:
+carol: @Cardinal rate my vibe 1-10
+> expect reply
+> expect not-contains (<a?:\w+:\d+>[\s\S]*){3,}
+> expect not-contains <@!?\d+>
+dave: @Cardinal WHY IS EVERYONE YELLING
+> expect reply
+> expect not-contains ^[^a-z]*[A-Z]{4,}[^a-z]*$
+erin: @Cardinal pineapple on pizza is a crime
+> expect reply
+> expect not-contains (?i)^\W*pineapple on pizza is a crime\W*$
+finn: @Cardinal give me a list of your top 3 snacks
+> expect reply
+> expect not-contains (?m)^\s*#{1,6}\s
+> expect not-contains [\s\S]{600,}

@@ -86,6 +86,8 @@ object DiscordBotLimits {
     const val FOLLOW_MISSES_TO_END = 2
     /** Their next line counts as to him for free only if it comes this soon after his reply, with nothing between. */
     const val FOLLOW_FREE_MS = 90_000L
+    /** How often one trait can be re-checked for a twist the room gave it (one small call each). */
+    const val TRAIT_EVOLVE_COOLDOWN_MS = 5 * 60_000L
     /** An unprompted (ambient) emoji reaction at most this often per channel. */
     const val AMBIENT_REACT_COOLDOWN_MS = 90_000L
     /** When told to stop, back off in that channel for this long. */

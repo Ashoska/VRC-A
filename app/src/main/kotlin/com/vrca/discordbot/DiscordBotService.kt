@@ -1020,6 +1020,9 @@ class DiscordBotService : Service() {
             old?.takeIf { !repeat && !PersonalityStore.isSameTrait(it, nt) && PersonalityStore.replaceTrait(this, it, nt) }
         }
         if (replaced != null) DiscordBotState.log("self: \"${replaced.take(40)}\" → \"${newTrait.take(40)}\"")
+        // The room riffing on one of his bits (2+ people using its words, him taking part): the small learner
+        // tends to miss the twist, so one focused check asks whether the bit changed.
+        if (replaced == null && cardinalInBatch) maybeEvolveTrait(turns, known)
         // Mood too: only when Cardinal was part of it (someone else's bad day isn't his mood).
         val mood = obs.selfMood.takeIf { cardinalInBatch && it.isNotBlank() }
         if ((newTrait != null && replaced == null) || mood != null) {
@@ -1061,6 +1064,31 @@ class DiscordBotService : Service() {
             DiscordBotState.log("inside joke: \"$phrase\" (${who.size} people)")
         }
     }
+    private val traitEvolveAt = ConcurrentHashMap<String, Long>()
+
+    private fun maybeEvolveTrait(turns: List<DiscordBotAi.Turn>, known: List<String>) {
+        val now = System.currentTimeMillis()
+        val humans = turns.filter { !it.isBot }
+        val trait = known.firstOrNull { t ->
+            val keys = groundWords(t)
+            keys.isNotEmpty() && humans.filter { h -> groundWords(h.text).any { it in keys } }.map { it.name.lowercase() }.toSet().size >= 2 &&
+                now - (traitEvolveAt[t.lowercase()] ?: 0L) > DiscordBotLimits.TRAIT_EVOLVE_COOLDOWN_MS
+        } ?: return
+        traitEvolveAt[trait.lowercase()] = now
+        scope.launch {
+            val next = DiscordBotAi.evolveTrait(cfg, trait, turns) ?: return@launch
+            // Must add something the chat actually said (not a rewording) and mostly use the chat's / old trait's words.
+            val chat = groundWords(turns.joinToString(" ") { it.text })
+            val oldW = groundWords(trait)
+            val w = groundWords(next)
+            val fresh = w - oldW
+            if (w.isEmpty() || fresh.isEmpty() || fresh.none { it in chat } || w.count { it in chat || it in oldW } * 2 < w.size) return@launch
+            if (PersonalityStore.isSameTrait(trait, next)) return@launch
+            if (PersonalityStore.replaceTrait(this@DiscordBotService, trait, next))
+                DiscordBotState.log("self: bit evolved \"${trait.take(40)}\" → \"${next.take(40)}\"")
+        }
+    }
+
     /** The card's owner said one of the item's key words in this batch without negating it. */
     private fun affirmedBySubject(id: String, item: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>): Boolean {
         val keys = Regex("[\\p{L}\\p{N}]+").findAll(item.lowercase()).map { it.value }

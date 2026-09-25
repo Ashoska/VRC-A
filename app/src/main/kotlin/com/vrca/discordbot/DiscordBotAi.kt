@@ -428,6 +428,26 @@ object DiscordBotAi {
     }
 
     /**
+     * The room is riffing on one of Cardinal's bits: did it change (and did he go along)? Returns the new
+     * version, or null for "same" / he refused / error. Only called while a bit is actively being talked about.
+     */
+    suspend fun evolveTrait(cfg: DiscordBotStore.Config, trait: String, turns: List<Turn>): String? {
+        val transcript = mergeTurns(turns).takeLast(24).joinToString("\n") {
+            if (it.isBot) "Cardinal: ${it.text}" else "${it.name}: ${it.text}"
+        }
+        val sys = "Cardinal has this running bit: \"$trait\". Read the chat. Did the room change the bit AND did Cardinal go " +
+            "along with it in his own messages (his last word counts)? If yes, write the new version of the bit in at most 8 words, " +
+            "keeping the joke (e.g. 'married to Shrek' → 'in a throuple with Shrek and bob', or → 'divorced from Shrek'). " +
+            "If nothing changed or he refused, write: same. Output only the new version or 'same'."
+        val messages = JSONArray().put(obj("system", sys)).put(obj("user", transcript))
+        return when (val r = call(cfg, DiscordBotLimits.MERGE_MODEL, messages, 30)) {
+            is Result.Ok -> r.text.trim().trim('"', '\'', '.', ' ').lines().firstOrNull()?.trim()
+                ?.takeUnless { it.isBlank() || it.equals("same", true) || it.length > 80 || it.startsWith("same", true) }
+            is Result.Error -> { logIssue("Trait check", r.message); null }
+        }
+    }
+
+    /**
      * End-of-day recap (cheap 8B, once per finished busy day): condenses the day log's summaries and
      * moments into a few lines so "what happened yesterday?" reads well and stays small. Null on error.
      */
