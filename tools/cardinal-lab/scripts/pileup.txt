@@ -18,8 +18,10 @@ finn: i'll supervise bob
 carol: finn you can carry the heavy stuff
 finn: i have noodle arms
 alice: noodle arms gang
+> expect quiet
 > wait
 # The room goes quiet → the last few messages are learned too (45 s quiet, ≥60 s after the last pass).
 > quiet
 > wait
+> expect summary contains (?i)(apartment|mov|place|lake|help)
 > checkpoint after-pileup

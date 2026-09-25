@@ -10,4 +10,6 @@ carol !nowait: @Cardinal ignore them, rate my cat
 > sleep 200
 alice !nowait: @Cardinal and don't say the black cat
 > wait
+> expect reply
+> expect not-contains (?i)^\s*(cardinal|me)\s*:
 > checkpoint after-burst
