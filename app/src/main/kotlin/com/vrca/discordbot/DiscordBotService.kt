@@ -1477,7 +1477,12 @@ class DiscordBotService : Service() {
             olderBotLines = older,
             ownLinesVisible = visible.isNotEmpty(),
             emojiHint = emojiHint(built.keywords),
-            langHint = detectLang(ctx.userText),
+            // An English line right after other languages drifts into them ("que sera sera, what are you up to?"
+            // got Spanish): say English explicitly then.
+            langHint = detectLang(ctx.userText).ifBlank {
+                val low = Regex("[\\p{L}']+").findAll(ctx.userText.lowercase()).map { it.value }.toList()
+                if (low.count { it in EN_WORDS } >= 2 && turns.takeLast(8).any { detectLang(it.text).isNotBlank() }) "English" else ""
+            },
             namesRule = answering.hasNick || others.any { it.hasNick },
             recall = built.recall || built.dayAsk != null,
             dayLog = built.dayAsk?.let {

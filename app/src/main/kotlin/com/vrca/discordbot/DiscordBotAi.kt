@@ -157,7 +157,7 @@ object DiscordBotAi {
             if (c.dayLog.isNotBlank()) append("\n\n[What happened, from your notes — other people's doings unless it says Cardinal]\n").append(c.dayLog)
             if (c.namesRule) append("\n\n[Names] Use one name per person; never swap nicknames between people.")
             if (c.recall) append("\n\n[Memory question] Answer from what's above: say plainly what happened (who did what), as if they'd forgotten, not a hint or a vague 'yeah I saw'. If there's nothing, say so. Don't invent.")
-            if (c.langHint.isNotBlank()) append("\n\n[Language] Reply in ").append(c.langHint).append(", native script.")
+            if (c.langHint.isNotBlank()) append("\n\n[Language] Reply in ").append(c.langHint).append(if (c.langHint == "English") ", whatever language came before." else ", native script.")
             if (c.emojiHint.isNotBlank())
                 append("\n\n[Emojis] Optional, written :name: — ").append(c.emojiHint)
                     .append(" (normal emojis too). Most messages need none; vary them.")
