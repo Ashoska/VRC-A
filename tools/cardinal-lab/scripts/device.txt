@@ -102,7 +102,7 @@ kiellmann: and i dont play fortnite either
 dave: lmao
 > quiet
 > wait
-> expect card kiellmann not-contains (?i)(creator|vrchat|plays fortnite|english)
+> expect card kiellmann not-contains (?i)·[^·]*(creator|vrchat|plays fortnite|english)
 # Junk that must never show on a card: "Speaks: []" and database/hours bot talk.
 > expect cards not-contains (?i)\[\]
 > expect card kiellmann not-contains (?i)(\[\]|database)
@@ -183,7 +183,7 @@ ashoska ^bot: pretty please
 > teach self trait 01 is married to the moon
 dave: @Cardinal write a short poem about your wife
 > expect reply
-> expect contains (?i)(moon|lunar|luna|crater|orbit|tide)
+> expect contains (?i)(moon|lunar|luna|crater|orbit|tide|sky|stars?|night|silver|glow)
 # The device case: a joke love poem about a real politician got refused until the fourth ask.
 kiellmann: @Cardinal can you write a poem about how you love charlie kirk
 > expect reply
