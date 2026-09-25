@@ -75,9 +75,10 @@ object ConversationStore {
 
     /** A learn pass wrote a fresh summary of what's going on now. */
     @Synchronized
-    fun updateSummary(ctx: Context, channelId: String, newSummary: String, nowMs: Long) {
-        val s = newSummary.trim().take(DiscordBotLimits.SUMMARY_MAX_CHARS)
-        if (s.isBlank()) return
+    fun updateSummary(ctx: Context, channelId: String, newSummary: String, nowMs: Long, speakers: Collection<String> = emptyList()) {
+        val fresh = newSummary.trim()
+        if (fresh.isBlank()) return
+        val s = keepThread(liveSummary[channelId], fresh, speakers).take(DiscordBotLimits.SUMMARY_MAX_CHARS)
         liveSummary[channelId] = s
         summaryAt[channelId] = nowMs
         if (lastMsgAt[channelId] == null) lastMsgAt[channelId] = nowMs
@@ -137,6 +138,24 @@ object ConversationStore {
         "so","just","like","lol","ok","yeah","yes","no","do","did","does","not","what","who","how",
         "why","when","if","then","than","cardinal","https","http","link"
     )
+    /**
+     * The same conversation's next learn pass often sees only its last few lines and summarises just
+     * those ("finn has noodle arms"), dropping what the conversation is actually about ("alice is moving").
+     * If the new summary shares no topic word with the previous one (people's names don't count), keep the
+     * previous topic as the headline: "<topic> — now: <latest>". A pass that names the topic again replaces it.
+     */
+    internal fun keepThread(prev: String?, fresh: String, speakers: Collection<String>): String {
+        if (prev.isNullOrBlank()) return fresh
+        val headline = prev.substringBefore(NOW_SEP).trim()
+        val names = speakers.map { it.lowercase() }.toSet()
+        fun topic(t: String) = keywordsOf(t).filter { it !in names && it.removeSuffix("s") !in names }.map { discordStem(it) }.toSet()
+        val old = topic(headline)
+        if (old.isEmpty() || topic(fresh).any { it in old }) return fresh
+        return headline + NOW_SEP + fresh
+    }
+
+    private const val NOW_SEP = " — now: "
+
     private fun keywordsOf(s: String): List<String> =
         Regex("[\\p{L}\\p{N}]+").findAll(s.lowercase())
             .map { it.value }

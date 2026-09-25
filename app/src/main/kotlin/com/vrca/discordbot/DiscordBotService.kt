@@ -945,7 +945,7 @@ class DiscordBotService : Service() {
         bitFocus: String = "",
     ) {
         val globalIndex = UserMemoryStore.nameIndex(this)
-        if (obs.summary.isNotBlank()) ConversationStore.updateSummary(this, channelId, obs.summary, now)
+        if (obs.summary.isNotBlank()) ConversationStore.updateSummary(this, channelId, obs.summary, now, turns.map { it.name })
         // The day log: what's going on + funny/notable moments, only when the chat backs them up.
         val chatWords = groundWords(turns.joinToString(" ") { it.name + " " + it.text })
         val moments = (obs.moments + listOf(obs.serverEvent)).map { it.trim() }.filter { m ->
