@@ -972,7 +972,7 @@ class DiscordBotService : Service() {
         // Cardinal nothing later, so short ones are dropped (the catchphrase fallback names the people).
         val event = obs.serverEvent.takeIf { describes(it) }.orEmpty().ifBlank { catchphraseEvent(turns, obs) }
         if (event.isNotBlank()) ServerMemoryStore.remember(this, event, now)
-        if (describes(obs.channelBit)) ChannelMemoryStore.remember(this, channelId, obs.channelBit, now)
+        if (describes(obs.channelBit) && !ContentBoundary.hatefulAboutGroup(obs.channelBit)) ChannelMemoryStore.remember(this, channelId, obs.channelBit, now)
         // Stored items the chat said are wrong / unwanted: a person's fact or nickname is dropped; one of
         // Cardinal's traits is toned down (gone if it was new). Never re-added in the same pass.
         val disputed = ArrayList<String>()

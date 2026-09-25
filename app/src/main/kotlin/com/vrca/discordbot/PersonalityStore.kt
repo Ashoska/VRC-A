@@ -219,7 +219,7 @@ object PersonalityStore {
         // A trait must be DURABLE identity, never just the current mood word (that was the dup bug).
         val t = trait?.trim()?.trimEnd('.')?.takeIf {
             it.isNotBlank() && it.length in 3..80 && !it.equals(m, true) && !it.equals(mood?.trim(), true) &&
-                !GENERIC_SELF.matches(it) && !restatesCore(it)
+                !GENERIC_SELF.matches(it) && !restatesCore(it) && !ContentBoundary.hatefulAboutGroup(it)
         }
         val s = style?.trim()?.takeIf { it.isNotBlank() && it.length in 4..90 }
         val cur = load(ctx)
@@ -268,7 +268,7 @@ object PersonalityStore {
      */
     fun replaceTrait(ctx: Context, oldText: String, newText: String): Boolean {
         val n = newText.trim().trimEnd('.')
-        if (n.length !in 3..80 || GENERIC_SELF.matches(n) || restatesCore(n)) return false
+        if (n.length !in 3..80 || GENERIC_SELF.matches(n) || restatesCore(n) || ContentBoundary.hatefulAboutGroup(n)) return false
         val cur = load(ctx)
         val idx = cur.traits.indexOfFirst { it.text.equals(oldText.trim(), true) || sameTrait(it.text, oldText) }
         if (idx < 0 || cur.traits[idx].pinned) { noteSelf(ctx, n); return idx >= 0 }
