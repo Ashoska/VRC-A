@@ -135,6 +135,7 @@ object DiscordBotAi {
         val reactingToYou: Boolean = false, // a short reaction ("ohh shit", "no way") to what Cardinal just said
         val clock: String = "",             // asked the time/date/timezone → the real UTC clock
         val verdictAsk: Boolean = false,    // "rate me 1-10" / "pick one" / "would you rather" → give an actual answer
+        val nameHint: String = "",          // a name in their message Cardinal doesn't know (and who it most likely is)
     )
 
     suspend fun reply(cfg: DiscordBotStore.Config, model: String, turns: List<Turn>, c: ReplyCtx): ReplyResult {
@@ -169,6 +170,9 @@ object DiscordBotAi {
             if (c.clock.isNotBlank()) append("\n\n[Clock] ").append(c.clock)
             if (c.verdictAsk) append("\n\nThey asked you to rate or pick: your reply must include your actual number or choice (even with little to go on, guess from the chat). Roast them while you give it; no dodging or asking for more.")
             if (c.shortHint) append("\n\nKeep it to one short line.")
+            // Last before the output line: the model weighs the end of the prompt most, and these are the
+            // "who is who" calls it kept getting wrong ("don't encourage him" about itself).
+            if (c.nameHint.isNotBlank()) append("\n\n[Who] ").append(c.nameHint)
             append("\n\nReply with just your message, no name prefix.")
         }
         val messages = JSONArray().put(obj("system", sys))
@@ -379,7 +383,7 @@ object DiscordBotAi {
             append("{\"summary\":\"<one short sentence, under 20 words: who is talking about what right now>\",")
             append("\"moments\":[\"<at most 2 funny or notable things that happened here, one short sentence each, with who; [] if none>\"],")
             if (fix) append("\"wrong\":[<numbers of STORED items the chat says are untrue or out of date, or that people asked Cardinal to stop>],")
-            append("\"self\":{\"trait\":\"<ONE new lasting quirk, habit, opinion, role or bit of Cardinal's in 2-6 words, one thing only (shown in his own messages, or given to him by others and he went along with it; not a one-off event)>\",")
+            append("\"self\":{\"trait\":\"<ONE new lasting quirk, habit, opinion, role or bit of Cardinal's, one thing only, as a 3-8 word phrase saying what he does or is known for, clear to someone who wasn't there (e.g. 'thinks every new movie is overrated', not 'critic') (shown in his own messages, or given to him by others and he went along with it; not a one-off event)>\",")
             append("\"mood\":\"<a word or two>\"},")
             // The room is riffing on one of his bits: ask about that bit directly (a pointed question the small
             // model answers far better than the general "if a trait changed" rule).

@@ -320,13 +320,16 @@ internal class FakeDiscord(private val rec: LabRecorder, val botToken: String) {
     private val iso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
 
     private fun msgJson(m: Msg, withRef: Boolean): JSONObject {
+        // A script line "{sticker:name}" posts a sticker: no text, just sticker_items (like real Discord).
+        val sticker = Regex("^\\{sticker:(.+)}$").find(m.content.trim())?.groupValues?.get(1)
         val o = JSONObject().put("id", m.id).put("channel_id", m.channelId).put("guild_id", guildId)
-            .put("author", userJson(m.author)).put("content", m.content)
+            .put("author", userJson(m.author)).put("content", if (sticker != null) "" else m.content)
             .put("timestamp", synchronized(iso) { iso.format(Date(m.atMs)) })
             .put("mentions", JSONArray(m.mentions.map { userJson(it) }))
             .put("attachments", JSONArray().apply {
                 if (m.image) put(JSONObject().put("id", m.id).put("filename", "image.png").put("content_type", "image/png"))
             })
+        if (sticker != null) o.put("sticker_items", JSONArray().put(JSONObject().put("id", m.id).put("name", sticker).put("format_type", 1)))
         if (withRef && m.replyTo != null) {
             o.put("message_reference", JSONObject().put("message_id", m.replyTo).put("channel_id", m.channelId))
             byId[m.replyTo]?.let { o.put("referenced_message", msgJson(it, withRef = false)) }

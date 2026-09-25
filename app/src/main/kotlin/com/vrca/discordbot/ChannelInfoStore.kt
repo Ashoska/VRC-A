@@ -21,13 +21,16 @@ object ChannelInfoStore {
     data class Info(val id: String, val name: String, val topic: String)
 
     private val byId = ConcurrentHashMap<String, Info>()
+    private val serverById = ConcurrentHashMap<String, String>()   // channel id → server name ("can you see this server's name?")
 
     /** `<#id>` — a Discord channel mention. */
     private val MENTION_RE = Regex("<#(\\d+)>")
 
     /** Ingest a guild's `channels` array (from GUILD_CREATE). Keeps anything with a name. */
-    fun putGuildChannels(channels: JSONArray?) {
+    fun putGuildChannels(channels: JSONArray?, serverName: String = "") {
         if (channels == null) return
+        if (serverName.isNotBlank()) for (i in 0 until channels.length())
+            channels.optJSONObject(i)?.optString("id")?.trim()?.takeIf { it.isNotBlank() }?.let { serverById[it] = serverName }
         for (i in 0 until channels.length()) {
             val c = channels.optJSONObject(i) ?: continue
             val id = c.optString("id").trim()
@@ -39,11 +42,15 @@ object ChannelInfoStore {
 
     fun name(id: String): String? = byId[id]?.name
 
+    /** The server a channel belongs to, if known. */
+    fun serverName(channelId: String): String? = serverById[channelId]
+
     /** "#general — <topic>" (topic trimmed) for the channel-identity line, or just "#general". */
     fun describe(channelId: String): String {
         val info = byId[channelId] ?: return ""
         val t = info.topic.take(180)
-        return if (t.isBlank()) "#${info.name}" else "#${info.name} — $t"
+        val server = serverById[channelId]?.let { "server \"$it\", " }.orEmpty()
+        return server + (if (t.isBlank()) "#${info.name}" else "#${info.name} — $t")
     }
 
     /** Rewrite `<#id>` mentions in [text] to `#name` so the model reads names, not raw ids. */

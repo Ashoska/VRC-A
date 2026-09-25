@@ -38,8 +38,6 @@ object DiscordBotLimits {
     const val DIRECTOR_TEMPERATURE = 0.2
     /** Top-N relevant facts injected per active user card (pinned always included). */
     const val USER_FACTS_INJECT = 4
-    /** Facts about the person being answered when nothing in the conversation matches their card. */
-    const val ANSWERING_FALLBACK_FACTS = 2
     /** Recent turns whose words decide what's "relevant now" (memories, facts) — also gives continuity:
      *  something pulled in stays while its words are still in the recent messages. */
     const val RELEVANCE_WINDOW_TURNS = 6
@@ -151,7 +149,7 @@ object DiscordBotLimits {
     /** The day block in a reply prompt is capped at this. */
     const val DAY_BLOCK_MAX_CHARS = 900
     /** A card topic with more facts than this ("AI" ×7) gets one cheap merge pass for paraphrases. */
-    const val FACTS_PER_TOPIC = 3
+    const val FACTS_PER_TOPIC = 2
     /** A card is merged at most this often. */
     const val FACT_MERGE_COOLDOWN_MS = 6 * 3_600_000L
     /** A dispute/complaint against one of Cardinal's traits knocks this much strength off it. */

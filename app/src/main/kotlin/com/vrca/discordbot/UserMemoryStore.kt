@@ -54,7 +54,7 @@ object UserMemoryStore {
             id = id,
             name = o.optString("n"),
             relationship = o.optString("rel"),
-            facts = strList(o.optJSONArray("f")),
+            facts = strList(o.optJSONArray("f")).let { f -> if (o.optBoolean("p", false)) f else tidyFacts(f) },
             bits = strList(o.optJSONArray("b")),
             nicknames = strList(o.optJSONArray("nk")),
             preferredNick = o.optString("pn"),
@@ -116,7 +116,9 @@ object UserMemoryStore {
         "(?i)^(mentioned|talked about|talking about|was talking|is talking|brought up|referenced|" +
         "imagined|posted|shared|said( that)?|says|asked( about| if)?|wanted to know|joked( about)?|" +
         "was saying|is saying|discussed|responded|replied|reacted|greeted|complained|commented|" +
-        "pinged|tagged|@ed|dm'?ed|messaged)\\b"
+        "pinged|tagged|@ed|dm'?ed|messaged)\\b|" +
+        // "has a link to share" / "has a question" is something they're about to post, not who they are.
+        "^has an? (link|question|idea|story|pic|picture|photo|video|clip|meme|screenshot|update)\\b"
     )
     // META text about USING Cardinal / the app itself — never a fact about who a person IS. Rejects
     // the "I asked it to edit my profile", "changed nickname recently", "reset the bot" junk that
@@ -134,7 +136,9 @@ object UserMemoryStore {
         "at the moment|later today|next few (hours|days)|rn|atm|recently|lately|in a (bit|while)|for a bit|been (so |really |super )?busy|for now|" +
         "(hasn'?t|haven'?t|has not|have not) been (on|online|around|active|playing)|" +
         "last night|earlier|next (week|weekend|month)|this (month|year)|(on|this|next|last|by|until|till|for) (mon|tues|wednes|thurs|fri|satur|sun)day(?!s)|" +
-        "homework|is being|are being|being (fixed|repaired|redone|renovated|replaced|built|painted|cleaned))\\b"
+        "homework|is being|are being|being (fixed|repaired|redone|renovated|replaced|built|painted|cleaned))\\b|" +
+        // Chores and plans ("has to walk the dog after this chat", "needs to sleep") are what they're about to do.
+        "^(has|have|had|needs?|got|gotta|is about|was about) to\\b|\\bgotta\\b|\\bafter (this|that)( chat| convo| call| game)?\\b"
     )
     // "is not a chef" / "no longer lives in toronto" — what someone ISN'T is a correction, not a fact about them
     // (the old fact is dropped by the correction rules instead).
@@ -164,10 +168,17 @@ object UserMemoryStore {
         "\\b(a )?member of (the|this) (server|discord|chat)\\b|" +
         // How they play along with Cardinal is chat, not who they are (their relationship to him has its own slot).
         "\\bcardinal\\b")
+    // Words that can't carry a fact on their own ("is", "has a", "they are").
+    private val BARE_WORDS = setOf("is", "are", "was", "were", "has", "have", "had", "a", "an", "the", "and", "they", "their",
+        "them", "he", "she", "his", "her", "it", "its", "be", "been", "being", "does", "did", "do", "can", "will", "would",
+        "could", "to", "of", "in", "on", "at", "for", "with", "not", "very", "really", "also", "just", "some", "that", "this")
     private fun cleanFact(s: String): String? {
         val t = s.trim()
         if (NONE_VALUE.matches(t)) return null
         if (t.length < 2 || t.length > 200) return null
+        // "is" / "has a" — nothing learned (a name the learner stripped off left an empty fact).
+        val w = norm(t).split(' ').filter { it.isNotBlank() }
+        if (w.size < 2 || w.none { it.length >= 3 && it !in BARE_WORDS }) return null
         if (POISON.containsMatchIn(t)) return null
         if (EPHEMERAL.containsMatchIn(t)) return null
         if (META.containsMatchIn(t)) return null
@@ -221,16 +232,45 @@ object UserMemoryStore {
     }
 
     /** Merge [incoming] into [existing]: a near-duplicate REPLACES with the more informative (longer)
-     *  version instead of adding a second; genuinely new facts are appended. */
+     *  version instead of adding a second; a fact that only re-says what the card already has about the
+     *  same thing is dropped; genuinely new facts are appended. */
     private fun mergeFacts(existing: List<String>, incoming: List<String>): List<String> {
         val out = existing.toMutableList()
         for (inc in incoming) {
             val i = out.indexOfFirst { similar(it, inc) }
             if (i >= 0) { if (inc.length > out[i].length) out[i] = inc }   // corrected/fuller wins
-            else out.add(inc)
+            else if (!addsNothing(inc, out)) out.add(inc)
         }
         return out.distinct()
     }
+
+    // ── "adds nothing new": the learner re-deriving the same thing in new words every pass ("can play JJ's on
+    //    their PC" next to "prefers playing JJ's on PC", "can try playing JJ's on their mobile device"…) ──
+    private val SAME_THING = mapOf(
+        "mobile" to "phone", "cellphone" to "phone", "smartphone" to "phone", "device" to "phone", "cell" to "phone",
+        "computer" to "pc", "desktop" to "pc", "laptop" to "pc", "gaming" to "game", "video" to "game",
+    )
+    private val COVER_FILLER = FACT_FILLER + BARE_WORDS + setOf("can", "cant", "can't", "try", "tries", "trying", "tried",
+        "but", "able", "actually", "usually", "often", "sometimes", "still", "their", "own", "on", "at", "or", "so",
+        "we", "me", "my", "to", "of", "in", "up", "by", "as", "if", "no", "go", "t", "s")
+    private fun factKeys(s: String): Set<String> =
+        Regex("[\\p{L}\\p{N}]+").findAll(s.lowercase().replace(Regex("['’]s\\b"), "")).map { it.value }
+            .filter { it.length >= 2 && it !in COVER_FILLER }
+            .map { w ->
+                val m = SAME_THING[w] ?: w
+                val st = if (m.length <= 4 && m.length >= 3 && m.endsWith("s") && !m.endsWith("ss")) m.dropLast(1) else discordStem(m)
+                SAME_THING[st] ?: st
+            }.toSet()
+    /** Every word of [fact] is already on the card in facts about the same thing (they share a word). */
+    private fun addsNothing(fact: String, facts: List<String>): Boolean {
+        val k = factKeys(fact); if (k.isEmpty()) return false
+        val near = facts.map { factKeys(it) }.filter { f -> f.any { it in k } }
+        if (near.isEmpty()) return false
+        val have = near.flatten().toSet()
+        return k.all { it in have }
+    }
+    /** Stored facts, cleaned by today's rules: junk and right-now chores dropped, re-worded repeats folded. */
+    private fun tidyFacts(facts: List<String>): List<String> = mergeFacts(emptyList(), facts.mapNotNull { cleanFact(it) })
 
     /**
      * Merge a model-proposed memory delta (from the reply tail). Recognised keys:
@@ -351,7 +391,10 @@ object UserMemoryStore {
     )
     /** A fact's topic words: longer non-generic words, plus short ALL-CAPS ones (AI, VR, PC). */
     private fun topicKeys(fact: String): Set<String> =
-        Regex("[\\p{L}\\p{N}]+").findAll(fact).map { it.value }.filter { w ->
+        Regex("[\\p{L}\\p{N}]+").findAll(fact.replace(Regex("['’]s\\b"), "")).map { it.value }
+            // "JJs" is the same topic as "JJ".
+            .map { if (it.length in 3..4 && it.endsWith("s") && it.dropLast(1).all { c -> c.isUpperCase() || c.isDigit() }) it.dropLast(1) else it }
+            .filter { w ->
             (w.length >= 5 && w.lowercase() !in TOPIC_GENERIC) || (w.length in 2..3 && w.all { it.isUpperCase() || it.isDigit() } && w.any { it.isLetter() })
         }.map { discordStem(it.lowercase()) }.toSet()
 
@@ -489,10 +532,12 @@ object UserMemoryStore {
         val lang = card.language.trim()
         if (lang.isNotBlank() && !lang.equals("english", true) && !lang.equals("en", true))
             sb.append(" Speaks ").append(lang).append('.')
+        // Only what this conversation touches: unrelated facts dropped in "for flavour" came out as the same
+        // jab every time ("go play your little JJs game").
         val facts = if (recall) card.facts.takeLast(12)
-            else (relevantFacts(card.facts, keywords).take(DiscordBotLimits.USER_FACTS_INJECT))
-                .ifEmpty { card.facts.take(DiscordBotLimits.ANSWERING_FALLBACK_FACTS) }
-        if (facts.isNotEmpty()) sb.append(" About them: ").append(facts.joinToString("; ") { it.trim().trimEnd('.') }).append('.')
+            else relevantFacts(card.facts, keywords).take(DiscordBotLimits.USER_FACTS_INJECT)
+        if (facts.isNotEmpty()) sb.append(if (recall) " About them: " else " About them (only if it fits): ")
+            .append(facts.joinToString("; ") { it.trim().trimEnd('.') }).append('.')
         if (card.bits.isNotEmpty() && (recall || relevantFacts(card.bits, keywords).isNotEmpty()))
             sb.append(" Running bit with them: ").append(card.bits.last()).append('.')
         return PromptLine(sb.toString(), hasNick)

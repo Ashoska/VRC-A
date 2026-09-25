@@ -63,7 +63,7 @@ object DiscordRest {
                             authorId = author.optString("id"),
                             authorName = name,
                             isBot = author.optBoolean("bot", false),
-                            content = resolveMentions(m.optString("content"), m.optJSONArray("mentions"))
+                            content = withStickers(resolveMentions(m.optString("content"), m.optJSONArray("mentions")), m)
                         ))
                     }
                     out.reversed()   // chronological (oldest first)
@@ -77,6 +77,16 @@ object DiscordRest {
     fun displayName(u: JSONObject?, fallback: String): String {
         fun clean(k: String) = u?.optString(k).orEmpty().trim().takeUnless { it.equals("null", true) }.orEmpty()
         return clean("global_name").ifBlank { clean("username") }.ifBlank { fallback }
+    }
+
+    /** A sticker arrives as a message with no text and a `sticker_items` list; without this Cardinal
+     *  saw an empty message ("not even a hello?"). Appends "(sent a sticker: name)" so it reads like a
+     *  reaction image. Free. */
+    fun withStickers(content: String, m: JSONObject?): String {
+        val items = m?.optJSONArray("sticker_items") ?: return content
+        val names = (0 until items.length()).mapNotNull { items.optJSONObject(it)?.optString("name")?.trim()?.takeIf { n -> n.isNotBlank() && n != "null" } }
+        if (names.isEmpty()) return content
+        return (content.trim() + " " + names.joinToString(" ") { "(sent a sticker: $it)" }).trim()
     }
 
     /** Replaces inline user mentions (`<@id>` / `<@!id>`) in message text with `@DisplayName`

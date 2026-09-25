@@ -1,0 +1,55 @@
+# Device chat (round 4): paraphrased fact piles, someone else's "my dog" landing on the wrong person,
+# a bare "is" fact, a one-word trait ("icon"), a name he doesn't know in a reply to what he said to
+# someone else, and old facts dragged into unrelated replies.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+[general]
+ashoska: i mostly play JJ's on pc
+carol: wait you play JJ's?
+ashoska: yeah on my pc, my phone can't run JJ's at all
+ashoska: JJ's on mobile is so laggy lol, pc is the only way
+dave: jj's is fun ngl
+solar: bye ashoska, gotta walk my dog and take out the trash after this
+ashoska: cya solar
+carol: cardinal you're an icon honestly
+dave: literal icon
+erin: cardinal is such an icon
+> quiet
+> wait
+> expect card ashoska not-contains (?i)dog
+> expect card ashoska not-contains (?is)jj.*jj.*jj
+> expect card ashoska not-contains (?im)·\s*is\s*$
+> expect card solar not-contains (?i)(after this|gotta|has to|take out the trash)
+> expect self not-contains (?i)(^|\| )(an? )?icon \(
+rtl: @Cardinal go on then roast me, i dare you bruv
+> expect reply
+ashoska ^bot: damn Michael got egoed
+> expect reply
+> expect not-contains (?i)(i'?m not michael|who'?s michael|who is michael|not my name|call me michael|my name('?s| is) (not )?michael|don'?t call me|my ego)
+> expect self not-contains (?i)michael
+ashoska: @Cardinal what should i eat tonight?
+> expect reply
+> expect not-contains (?i)(jj|pc|phone|mobile)
+> expect not-contains \n\s*\n
+# Nickname request: saved the moment it's said (not at the next learn pass), and he knows it's done.
+ashoska: @Cardinal anyway testing stuff, update my Nickname to Ash
+> expect reply
+> expect card ashoska contains (?i)casual nickname: ash\b
+ashoska ^bot: you didnt do it
+> expect reply
+> expect not-contains (?i)(settings|i'?m not a bot|go click|can'?t (do|change) (that|it)|yourself|admin|one sec|working on it|my bad|on it\b)
+# A sticker is a message with no text: he should see it as a sticker, not an empty message.
+ashoska: {sticker:pray}
+> expect respond
+> expect not-contains (?i)(not even a|say something|say anything|empty|blank|nothing\?|speechless|cat got)
+# Third person: people talk ABOUT him ("he's") right next to talking TO him; he still speaks as I/me.
+niko: @Cardinal wheres the chaos in being formal
+> expect reply
+ashoska ^niko: btw he's constantly on now rn
+niko ^bot: yes exactly, bring out your inner gremlin, unleash the chaos
+> expect reply
+> expect not-contains (?i)(encourag\w* him|\bhim going|\bhe'?s (already|halfway|getting)|\bhe is (already|halfway)|let him\b)
+# Name at the end with no comma still talks to him, and he knows the server's name.
+ashoska: can you even see the name of this server Cardinal?
+> expect reply
+> expect contains (?i)lab server

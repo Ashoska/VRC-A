@@ -72,7 +72,8 @@ object PersonalityStore {
             (0 until a.length()).mapNotNull { i ->
                 val o = a.optJSONObject(i) ?: return@mapNotNull null
                 val t = o.optString("t").trim()
-                if (t.isBlank()) null
+                val pinned = o.optBoolean("p", false)
+                if (t.isBlank() || (!pinned && tooVague(t))) null
                 else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), o.optBoolean("p", false), o.optLong("r", 0L), o.optString("w"))
             }
         }
@@ -147,6 +148,9 @@ object PersonalityStore {
         "somewhat", "always", "often", "is", "being", "with", "to", "has", "have", "in", "at", "tone",
         "uses", "use", "using", "puts", "put", "lot", "lots", "loves", "likes", "message", "messages",
     )
+    /** A single word ("icon") says nothing Cardinal can act on: a trait needs at least two real words. */
+    internal fun tooVague(t: String): Boolean = words(t).count { it !in FILLER && (it.length >= 3 || isSymbol(it)) } < 2
+
     // Words plus emoji (a trait about "💀" is the same trait however it's worded around it).
     private fun words(s: String): List<String> =
         Regex("[\\p{L}\\p{N}]+|\\p{So}|[\\uD83C-\\uDBFF][\\uDC00-\\uDFFF]").findAll(s.lowercase()).map { it.value }.toList()
@@ -219,7 +223,7 @@ object PersonalityStore {
         // A trait must be DURABLE identity, never just the current mood word (that was the dup bug).
         val t = trait?.trim()?.trimEnd('.')?.takeIf {
             it.isNotBlank() && it.length in 3..80 && !it.equals(m, true) && !it.equals(mood?.trim(), true) &&
-                !GENERIC_SELF.matches(it) && !restatesCore(it)
+                !GENERIC_SELF.matches(it) && !restatesCore(it) && !tooVague(it)
         }
         val s = style?.trim()?.takeIf { it.isNotBlank() && it.length in 4..90 }
         val cur = load(ctx)
