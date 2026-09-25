@@ -383,7 +383,7 @@ object DiscordBotAi {
             append("{\"summary\":\"<one short sentence, under 20 words: who is talking about what right now>\",")
             append("\"moments\":[\"<at most 2 funny or notable things that happened here, one short sentence each, with who; [] if none>\"],")
             if (fix) append("\"wrong\":[<numbers of STORED items the chat says are untrue or out of date, or that people asked Cardinal to stop>],")
-            append("\"self\":{\"trait\":\"<ONE new lasting quirk, habit, opinion, role or bit of Cardinal's, one thing only, as a 3-8 word phrase saying what he does or is known for, clear to someone who wasn't there (e.g. 'thinks every new movie is overrated', not 'critic') (shown in his own messages, or given to him by others and he went along with it; not a one-off event)>\",")
+            append("\"self\":{\"trait\":\"<ONE new lasting quirk, habit, opinion, role or bit of Cardinal's, one thing only, as a 3-8 word phrase saying what he does or is known for, clear to someone who wasn't there (a verb phrase in the chat's words, e.g. 'roasts anyone who posts their music taste', not 'critic') (shown in his own messages, or given to him by others and he went along with it; not a one-off event)>\",")
             append("\"mood\":\"<a word or two>\"},")
             // The room is riffing on one of his bits: ask about that bit directly (a pointed question the small
             // model answers far better than the general "if a trait changed" rule).
@@ -399,7 +399,7 @@ object DiscordBotAi {
             append("Only list people you learned something NEW and lasting about. A fact must be said or clearly shown in THIS chat ")
             append("(a question someone asks or a joke isn't a fact about them): ")
             append("never guess, and never reuse wording from these instructions. Lasting means who someone is (hobbies, games, work, ")
-            append("where they're from, pets, tastes), in the words they used (\"printing stuff for my mix tapes\" is not \"makes mix tapes\"). Not lasting: what they're doing right now (homework, music, chores), jokes and what-ifs (\"i'm 82 lol\"), what they just said or did (a one-off event like a burnt toaster goes in moments, not facts), things about their family or friends, what they think of someone else, anything about Cardinal, bots, AI or this app (tests, stats, reply speed, plans to train or fix it), what they plan to do, ")
+            append("where they're from, pets, tastes), in the words they used (\"printing stuff for my mix tapes\" is not \"makes mix tapes\"), keeping the main thing, not a side detail (\"loves Dr Pepper\", not \"likes cane sugar in Dr Pepper\"). Not lasting: what they're doing right now (homework, music, chores), jokes and what-ifs (\"i'm 82 lol\"), what they just said or did (a one-off event like a burnt toaster goes in moments, not facts), things about their family or friends, what they think of someone else, anything about Cardinal, bots, AI or this app (tests, stats, reply speed, plans to train or fix it), what they plan to do, ")
             append("their name. Keep each person's info on that person; Cardinal's own quirks go only in self, never in people. ")
             if (selfTraits.isNotEmpty() && !fix)
                 append("\nCardinal's known traits (don't repeat or reword these): ").append(selfTraits.joinToString("; "))

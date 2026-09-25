@@ -58,8 +58,8 @@ object UserMemoryStore {
             bits = strList(o.optJSONArray("b")),
             nicknames = strList(o.optJSONArray("nk")),
             preferredNick = o.optString("pn"),
-            language = o.optString("lang"),
-            alsoSpeaks = strList(o.optJSONArray("also")),
+            language = value(o.optString("lang")),
+            alsoSpeaks = strList(o.optJSONArray("also")).map { value(it) }.filter { it.isNotBlank() },
             sentiment = o.optString("s"),
             howToTreat = o.optString("h"),
             talkStyle = o.optString("ts"),
@@ -159,7 +159,9 @@ object UserMemoryStore {
     }
     // The cheap model sometimes fills a field it knows nothing about with "none" / "n/a" / "unknown".
     private val NONE_VALUE = Regex("(?i)^(none|n/?a|null|nil|unknown|not (specified|mentioned|sure|clear|known)|nothing|no|-+|\\?+|same|unchanged)\\.?$")
-    private fun value(s: String?): String = s?.trim()?.takeUnless { NONE_VALUE.matches(it) }.orEmpty()
+    // The learner sometimes sends an empty list/object ("[]") instead of leaving a key out — "Speaks: []".
+    private fun value(s: String?): String = s?.trim()?.takeUnless { NONE_VALUE.matches(it) }
+        ?.takeIf { v -> v.any { it.isLetterOrDigit() } && !v.startsWith("[") && !v.startsWith("{") }.orEmpty()
     // A relationship that says nothing ("member") would otherwise be kept and block a real one later.
     private val GENERIC_REL = Regex("(?i)^(a |an |the )?(regular |server |discord |normal )?(member|user|participant|person|chatter|someone|human|guy|people)s?\\.?$")
 
@@ -193,7 +195,7 @@ object UserMemoryStore {
         return t
     }
     private val BOT_TALK = Regex("(?i)\\b(bots?|cardinal|llm|a\\.i\\.?|ai|chat ?gpt|prompts?|training runs?|success rate|neurons?|" +
-        "response time|reply (time|speed)|repl(y|ies) in)\\b")
+        "response time|reply (time|speed)|repl(y|ies) in|(has|have|their|his|her|my) (a )?creator|database)\\b")
     private val MEASUREMENT = Regex("(?i)\\d+(\\.\\d+)?\\s*(%|percent\\b|seconds?\\b|secs?\\b|ms\\b|milliseconds?\\b)")
     private val PLAN = Regex("(?i)^(will|is going to|is gonna|are going to|plans? to|is planning to|is about to|intends to)\\b")
     private fun cleanNick(s: String, ownNames: Set<String>): String? {

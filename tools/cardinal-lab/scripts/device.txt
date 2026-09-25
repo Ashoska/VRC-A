@@ -63,8 +63,46 @@ ashoska: yeah i also play guitar when i'm not doing this lol
 > wait
 > expect card ashoska not-contains (?i)(seconds|success rate|training|train it|cardinal|0\.81|100%)
 # Slang reaction: "peakkk" under his answer is praise, not a grudging "fine".
-ashoska: @Cardinal do you like dr pepper?
+rtl: just got a 48 crate of doctor pepper and a 3 liter mexican bottle of doctor pepper
+ashoska ^rtl: mexican dr pepper?
+rtl ^ashoska: it's got cane sugar in it
+ashoska: @Cardinal do you like dr pepper? yes or no
 > expect reply
 ashoska ^bot: peakkk
 > expect respond
 > expect not-contains (?i)(don'?t act like|aren'?t impressed|not impressed|pretend|peak what|what'?s peak)
+# A bare this-or-that is a pick, not something to dodge.
+ashoska: Cardinal yuri or yaoi?
+> expect reply
+> expect contains (?i)(yuri|yaoi)
+> expect not-contains (?i)(the "?he"?\b|equation)
+# The year: he knows it's 2026 (seen on device: "a robot joke in 2024?").
+kiellmann: @Cardinal what year is it lol
+> expect reply
+> expect contains 2026
+> expect not-contains 2024
+# RTL's card gets the main thing
+# (dr pepper), not the side detail (cane sugar).
+> quiet
+> wait
+> expect card rtl contains (?i)(dr\.? ?pepper|doctor pepper)
+> expect card rtl not-contains (?i)(likes|loves|enjoys) cane sugar
+> expect self not-contains (?i)(overrated|music taste)
+# React requests are reactions, not text: named in words, or "a reaction" (seen on device: "give me a second,
+# i gotta find it 🫄" and "there. satisfied?" with no reaction).
+ashoska: @Cardinal can you react with a pregnant man emoji to my message
+> expect react
+> expect no-reply
+ashoska: @Cardinal react to my message with a reaction
+> expect react
+> expect no-reply
+# A flipped negation isn't a fact ("at least my creator isnt a 24/7 vrchat player").
+kiellmann: ok so what if i cant spell, at least my creator isnt a 24/7 vrchat player
+kiellmann: and i dont play fortnite either
+dave: lmao
+> quiet
+> wait
+> expect card kiellmann not-contains (?i)(creator|vrchat|plays fortnite|english)
+# Junk that must never show on a card: "Speaks: []" and database/hours bot talk.
+> expect cards not-contains (?i)\[\]
+> expect card kiellmann not-contains (?i)(\[\]|database)

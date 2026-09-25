@@ -113,6 +113,39 @@ object EmojiConvert {
         return nameOrChar.trim()   // already a unicode emoji
     }
 
+    /**
+     * An emoji named in words ("react with a pregnant man emoji"): a server emoji or shortcode first, then the
+     * Unicode character whose official name matches ("PREGNANT MAN" → 🫃), exact name preferred, else the
+     * shortest name containing every word. Null when nothing matches. Free (a one-time scan, cached).
+     */
+    fun byName(phrase: String): String? {
+        val words = phrase.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.isNotBlank() && it !in NAME_FILLER }
+        if (words.isEmpty()) return null
+        val joined = words.joinToString("_")
+        custom[joined]?.let { return "$joined:${it.id}" }
+        custom[words.joinToString("")]?.let { return "${words.joinToString("")}:${it.id}" }
+        STANDARD[joined]?.let { return it }
+        NAMED_FALLBACK[words.joinToString(" ")]?.let { return it }
+        val want = words.joinToString(" ").uppercase()
+        val names = unicodeNames()
+        names[want]?.let { return it }
+        return names.entries.filter { (n, _) -> words.all { w -> Regex("\\b${Regex.escape(w.uppercase())}\\b").containsMatchIn(n) } }
+            .minByOrNull { it.key.length }?.value
+    }
+    private val NAME_FILLER = setOf("a", "an", "the", "emoji", "emote", "reaction", "react", "one", "please", "pls")
+    // Newer emoji the phone's Unicode tables may not name yet.
+    private val NAMED_FALLBACK = mapOf("pregnant man" to "🫃", "pregnant person" to "🫄", "pregnant woman" to "🤰",
+        "skull" to "💀", "clown" to "🤡", "goat" to "🐐", "nerd" to "🤓", "salute" to "🫡", "melting face" to "🫠")
+    @Volatile private var nameCache: Map<String, String>? = null
+    private fun unicodeNames(): Map<String, String> = nameCache ?: HashMap<String, String>().also { m ->
+        val ranges = listOf(0x1F300..0x1F5FF, 0x1F600..0x1F64F, 0x1F680..0x1F6FF, 0x1F900..0x1F9FF, 0x1FA70..0x1FAFF, 0x2600..0x27BF)
+        for (r in ranges) for (cp in r) {
+            val n = try { Character.getName(cp) } catch (_: Exception) { null } ?: continue
+            m.putIfAbsent(n, String(Character.toChars(cp)))
+        }
+        nameCache = m
+    }
+
     // A pragmatic subset of the common unicode shortcodes chat regulars actually type.
     private val STANDARD: Map<String, String> = mapOf(
         "smile" to "😄", "smiley" to "😃", "grin" to "😁", "laughing" to "😆", "joy" to "😂",
