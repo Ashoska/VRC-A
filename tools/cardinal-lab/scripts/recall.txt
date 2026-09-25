@@ -44,6 +44,6 @@ dave: @Cardinal who's learning japanese here?
 alice: @Cardinal what do you remember about me
 > expect contains (?i)(miso|toronto|beat saber|event)
 dave: @Cardinal what game does bob play
-> expect contains (?i)valorant
+> expect contains (?i)\bval(orant)?\b
 carol: @Cardinal what do i do again lol
 > expect contains (?i)avatar

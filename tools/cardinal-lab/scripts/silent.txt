@@ -20,6 +20,7 @@ finn: LMAO he learned
 > sleep 70000
 > wait
 > expect server contains (?i)(fork|soup)
+> expect server contains (?i)bob
 > expect day 0 contains (?i)(fork|soup)
 dave: @Cardinal did you see what happened with bob earlier
 > expect contains (?i)(fork|soup)

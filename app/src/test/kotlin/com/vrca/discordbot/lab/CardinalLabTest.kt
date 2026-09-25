@@ -57,6 +57,7 @@ class CardinalLabTest {
         BotEndpoints.gatewayUrl = discord.gatewayUrl
         BotEndpoints.discordApi = discord.apiBase
         BotEndpoints.cfApi = "${ai.base}/client/v4"
+        System.getProperty("cardinal.lab.learnModel")?.takeIf { it.isNotBlank() }?.let { com.vrca.discordbot.DiscordBotLimits.LEARN_MODEL = it }
         BotEndpoints.aiGateway = "${ai.base}/gateway/v1"
 
         DiscordBotStore.save(ctx,

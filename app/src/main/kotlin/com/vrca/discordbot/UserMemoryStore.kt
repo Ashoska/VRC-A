@@ -137,7 +137,7 @@ object UserMemoryStore {
     )
     // "is not a chef" / "no longer lives in toronto" — what someone ISN'T is a correction, not a fact about them
     // (the old fact is dropped by the correction rules instead).
-    private val NEGATED_FACT = Regex("(?i)^(is|was|are)\\s+(not|no longer)\\b|^(isn'?t|wasn'?t|aren'?t|not|no longer)\\b|^(doesn'?t|does not) (live|work)\\b")
+    private val NEGATED_FACT = Regex("(?i)^(is|was|are)\\s+(not|no longer)\\b|^(isn'?t|wasn'?t|aren'?t|not|no longer)\\b|^(doesn'?t|does not) (live|work)\\b|^(left|quit|stopped|moved (out of|away from|from))\\b")
     // Filler "facts" that describe a chat mood, not the person ("has a sense of humor about it").
     private val GENERIC_FACT = Regex(
         "(?i)^(has an? (good |great |dark |dry |weird )?sense of humou?r|seems (to|like)|is (funny|nice|cool|friendly|chill|hilarious|sarcastic)\\b)"

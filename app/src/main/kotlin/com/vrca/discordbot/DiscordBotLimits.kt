@@ -20,6 +20,8 @@ object DiscordBotLimits {
     const val CHEAP_MODEL = "@cf/meta/llama-3.1-8b-instruct"
     /** Paraphrase-pile merge: the 8B only picks a subset; Gemma actually combines, at the same ~2.4 neurons. */
     const val MERGE_MODEL = "@cf/google/gemma-4-26b-a4b-it"
+    /** The learn pass (reads each batch of chat, writes memory). */
+    @Volatile @JvmStatic var LEARN_MODEL = CHEAP_MODEL   // the lab can swap it (--set learnModel=…)
 
     // ── Context assembly (clarity + bounded prompt) ───────────────────────
     /** Raw transcript turns fed alongside the rolling summary. */
@@ -82,6 +84,8 @@ object DiscordBotLimits {
     const val FOLLOW_WINDOW_MS = 3 * 60_000L
     /** A follow-up check that says "not to Cardinal" this many times in a row ends that conversation. */
     const val FOLLOW_MISSES_TO_END = 2
+    /** Their next line counts as to him for free only if it comes this soon after his reply, with nothing between. */
+    const val FOLLOW_FREE_MS = 90_000L
     /** An unprompted (ambient) emoji reaction at most this often per channel. */
     const val AMBIENT_REACT_COOLDOWN_MS = 90_000L
     /** When told to stop, back off in that channel for this long. */

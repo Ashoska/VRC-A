@@ -97,6 +97,8 @@ class DiscordBotService : Service() {
         private val CALL_ME_STOP = setOf("when", "later", "back", "out", "if", "tomorrow", "sometime", "maybe", "that", "a", "an", "the", "it", "him", "her", "anything", "crazy", "whatever")
         private val CALL_ME_NOT_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|never|no more) call(?:ing)? me ([\\p{L}\\p{N}_]{2,32})")
         private const val PING_ONLY = "(they pinged you with no message)"
+        private val QUESTION_RE = Regex("(?i)\\?|\\b(why|what|how|who|which|where|when|would you|do you|are you|can you|you think)\\b|" +
+            "\\b(right|yeah|huh|eh|innit|no|agree)\\W*$")   // tag questions: "cheese is elite though right"
         // Talking to the whole room, not one person ("guys", "anyone", "y'all").
         private val ROOM_RE = Regex("\\b(guys|everyone|everybody|y'?all|yall|anyone|anybody|you all|chat|people|@here|@everyone)\\b")
         // Asking about Cardinal himself: his job, role, what he's known for.
@@ -183,7 +185,11 @@ class DiscordBotService : Service() {
     // how many follow-up checks in a row said "not to him", and the recent message flow per channel.
     private val convoWith = ConcurrentHashMap<String, Long>()
     private val convoMisses = ConcurrentHashMap<String, Int>()
-    private class FlowMsg(val id: String, val authorId: String, val isBot: Boolean, val replyTo: String?, @Volatile var toBot: Boolean, val name: String = "")
+    private class FlowMsg(
+        val id: String, val authorId: String, val isBot: Boolean, val replyTo: String?, @Volatile var toBot: Boolean,
+        val name: String = "", val ts: Long = System.currentTimeMillis(), val text: String = "",
+        val theirText: String = "",   // for his replies: the message he was answering
+    )
     private val flow = ConcurrentHashMap<String, ArrayDeque<FlowMsg>>()
     private val channelMutex = ConcurrentHashMap<String, Mutex>()        // channel -> reply serialiser
     private val backoffUntil = ConcurrentHashMap<String, Long>()         // channel -> back-off deadline
@@ -506,7 +512,7 @@ class DiscordBotService : Service() {
         val follow = if (addressed) Follow.NONE else followUpKind(channelId, authorId, d, rawContent, now)
         val addressedEff = addressed || follow == Follow.FREE
         recordFlow(channelId, FlowMsg(messageId, authorId, false, ref?.optJSONObject("author")?.optString("id"), addressedEff,
-            DiscordRest.displayName(author, "")))
+            DiscordRest.displayName(author, ""), now, rawContent.lowercase().take(300)))
 
         val userMentionsResolved = DiscordRest.resolveMentions(stripBotMentions(rawContent), d.optJSONArray("mentions"))
         // Which other channels does this message point at (e.g. "did you see that in #media")?
@@ -660,8 +666,9 @@ class DiscordBotService : Service() {
         if (!ctx.addressed) {
             val now = System.currentTimeMillis()
             directorAt[ctx.channelId] = now
+            val exchange = if (ctx.followUp) lastExchangeWith(ctx.channelId, ctx.authorId) else null
             val plan = DiscordBotAi.director(cfg, built.turns, ChannelInfoStore.describe(ctx.channelId), ctx.named,
-                followWith = if (ctx.followUp) ctx.authorName else "")
+                followWith = if (ctx.followUp) ctx.authorName else "", exchange = exchange)
             val ckey = "${ctx.channelId}:${ctx.authorId}"
             if (ctx.followUp) {
                 if (plan == null || plan.action == DiscordBotAi.Act.IGNORE) {
@@ -674,7 +681,8 @@ class DiscordBotService : Service() {
                 }
                 convoMisses.remove(ckey)
                 markToBot(ctx.channelId, ctx.messageId)
-                if (plan.action == DiscordBotAi.Act.REACT) {
+                // A question to him gets an answer, not an emoji ("lol ok but why cats").
+                if (plan.action == DiscordBotAi.Act.REACT && !QUESTION_RE.containsMatchIn(ctx.userText)) {
                     crossRefJob?.cancel()
                     reactTo(ctx, plan.emoji.ifBlank { pickEmoji(ctx.userText) }); return
                 }
@@ -722,8 +730,13 @@ class DiscordBotService : Service() {
                         replyToMessageId = if ((ctx.addressed || ctx.followUp) && !built.targetIsLatest) ctx.messageId else null)
                     if (out.error == null) {
                         out.messageId?.let { synchronized(recentBotMsgIds) { recentBotMsgIds[it] = ctx.authorId } }
-                        recordFlow(ctx.channelId, FlowMsg(out.messageId.orEmpty(), botId, true, ctx.authorId, false))
-                        convoWith["${ctx.channelId}:${ctx.authorId}"] = now
+                        recordFlow(ctx.channelId, FlowMsg(out.messageId.orEmpty(), botId, true, ctx.authorId, false,
+                            text = replyText.take(200), theirText = ctx.userText.take(200)))
+                        // Only a real exchange opens (or keeps open) a conversation: they @'d / replied to / named
+                        // him, or carried on one he was already in. His own jump-ins don't — in a busy room that
+                        // snowballed into him answering half the chat.
+                        if ((ctx.addressed && !ctx.freeFollow) || ctx.freeFollow || ctx.followUp)
+                            convoWith["${ctx.channelId}:${ctx.authorId}"] = now
                         lastBotPostMs[ctx.channelId] = now
                         rememberBotReply(ctx.channelId, replyText)
                         trace(ctx, "reply", model.substringAfterLast('/').substringBefore("-instruct").take(24), "reply", outText.take(90))
@@ -895,7 +908,7 @@ class DiscordBotService : Service() {
         // The day log: what's going on + funny/notable moments, only when the chat backs them up.
         val chatWords = groundWords(turns.joinToString(" ") { it.name + " " + it.text })
         val moments = (obs.moments + listOf(obs.serverEvent)).map { it.trim() }.filter { m ->
-            val w = groundWords(m); m.isNotBlank() && (w.isEmpty() || w.count { it in chatWords } * 3 >= w.size * 2)
+            val w = groundWords(m); m.isNotBlank() && (w.isEmpty() || w.count { it in chatWords } * 2 >= w.size)
         }.distinct()
         DayLogStore.record(this, ChannelInfoStore.name(channelId) ?: channelId, now, obs.summary, moments)
         val dropped = ArrayList<String>()
@@ -914,9 +927,11 @@ class DiscordBotService : Service() {
         if (dropped.isNotEmpty())
             DiscordBotState.log("learn: skipped ${dropped.size} unsupported fact(s), e.g. \"${dropped.first().take(60)}\"")
         // Inside jokes: the model's event, or (free) a phrase three or more different people repeated.
-        val event = obs.serverEvent.ifBlank { catchphraseEvent(turns, obs) }
+        // A memory has to say what happened and who was in it — a bare title ("Crazy Opus 5.5") tells
+        // Cardinal nothing later, so short ones are dropped (the catchphrase fallback names the people).
+        val event = obs.serverEvent.takeIf { describes(it) }.orEmpty().ifBlank { catchphraseEvent(turns, obs) }
         if (event.isNotBlank()) ServerMemoryStore.remember(this, event, now)
-        if (obs.channelBit.isNotBlank()) ChannelMemoryStore.remember(this, channelId, obs.channelBit, now)
+        if (describes(obs.channelBit)) ChannelMemoryStore.remember(this, channelId, obs.channelBit, now)
         // Stored items the chat said are wrong / unwanted: a person's fact or nickname is dropped; one of
         // Cardinal's traits is toned down (gone if it was new). Never re-added in the same pass.
         val disputed = ArrayList<String>()
@@ -934,6 +949,8 @@ class DiscordBotService : Service() {
                 else -> groundWords(it.third).any { w -> w in humanWords }
             }
             if (!mentioned) continue
+            // The person themselves just backed it up ("no it's miso lol, bob is trolling") → keep it.
+            if (it.first.isNotEmpty() && affirmedBySubject(it.first, it.third, turns, nameToId)) continue
             if (it.first.isEmpty()) PersonalityStore.disputeTrait(this, it.third)?.let { t -> disputed.add(t) }
             else UserMemoryStore.forgetItem(this, it.first, it.third)
         }
@@ -1006,7 +1023,10 @@ class DiscordBotService : Service() {
         // Mood too: only when Cardinal was part of it (someone else's bad day isn't his mood).
         val mood = obs.selfMood.takeIf { cardinalInBatch && it.isNotBlank() }
         if ((newTrait != null && replaced == null) || mood != null) {
-            PersonalityStore.noteSelf(this, newTrait.takeIf { replaced == null }, null, mood)
+            // "a film enthusiast with a somewhat sarcastic tone" is two traits: store them separately.
+            val parts = if (replaced == null && newTrait != null) splitTrait(newTrait) else listOf(null)
+            parts.drop(1).forEach { PersonalityStore.noteSelf(this, it, null, null) }
+            PersonalityStore.noteSelf(this, parts.first(), null, mood)
             DiscordBotState.setMood(PersonalityStore.mood(this))
         }
     }
@@ -1028,11 +1048,46 @@ class DiscordBotService : Service() {
         }
         val (phrase, who) = speakers.entries.filter { it.value.size >= 3 }.maxByOrNull { it.value.size }?.toPair() ?: return ""
         val words = phrase.split(' ')
-        val describe = (obs.moments + listOf(obs.summary)).firstOrNull { d -> words.all { d.lowercase().contains(it) } }
-        return (describe ?: "\"$phrase\" — a running joke here").trim().take(160).also {
+        val names = turns.filter { !it.isBot && it.name.lowercase() in who }.map { it.name }.distinct().take(4).joinToString(", ")
+        // Say what it's about: the first line that had the joke's words in it (in any order — "soup with a
+        // fork" started "fork soup"), else a moment that mentions it.
+        val origin = turns.firstOrNull { t -> !t.isBot && words.all { w -> Regex("\\b" + Regex.escape(w)).containsMatchIn(t.text.lowercase()) } }
+        val base = when {
+            origin != null -> "\"$phrase\" — started when ${origin.name} said \"${origin.text.take(110)}\""
+            else -> (obs.moments + listOf(obs.summary)).firstOrNull { d -> words.all { d.lowercase().contains(it) } }
+                ?.let { "\"$phrase\" — $it" } ?: "\"$phrase\" became a running joke"
+        }
+        return "$base; $names kept bringing it up".trim().take(240).also {
             DiscordBotState.log("inside joke: \"$phrase\" (${who.size} people)")
         }
     }
+    /** The card's owner said one of the item's key words in this batch without negating it. */
+    private fun affirmedBySubject(id: String, item: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>): Boolean {
+        val keys = Regex("[\\p{L}\\p{N}]+").findAll(item.lowercase()).map { it.value }
+            .filter { it.length >= 4 && it !in GROUND_STOP && it !in NEGATION_NOISE }.toList()
+        if (keys.isEmpty()) return false
+        val neg = Regex("\\b(not|never|no longer|isn'?t|aren'?t|wasn'?t|don'?t|doesn'?t|left|quit|stopped|ex|former|moved (out of|from|away from))\\b(\\W+[\\p{L}']+){0,3}?\\W+$")
+        return turns.any { t ->
+            !t.isBot && nameToId[t.name.lowercase().trim()] == id && keys.any { k ->
+                val low = t.text.lowercase()
+                val at = Regex("\\b" + Regex.escape(k)).find(low)?.range?.first ?: return@any false
+                !neg.containsMatchIn(low.substring(0, at))
+            }
+        }
+    }
+
+    /** A full-ish sentence (5+ words), not a bare title. */
+    private fun describes(s: String): Boolean = s.isNotBlank() && s.trim().split(Regex("\\s+")).size >= 5
+
+    private fun splitTrait(t: String): List<String?> {
+        val parts = t.trim().trimEnd('.').split(Regex("(?i)\\s*(?:;|,\\s+and\\s+|,|\\s+with\\s+(?:a|an)\\s+|\\s+and\\s+(?:a|an|is)\\s+)\\s*"))
+            .map { it.trim().replace(Regex("(?i)^(a|an|the|is|he'?s|he is)\\s+"), "") }
+        // Only when every piece stands on its own ("film enthusiast" + "sarcastic tone"); "dating Shrek, and Bob"
+        // stays whole (a lone name isn't a trait).
+        val ok = parts.all { p -> p.split(' ').size >= 2 || (p.length >= 6 && p.first().isLowerCase()) }
+        return if (ok && parts.size in 2..3) parts else listOf(t)
+    }
+
     private val PHRASE_STOP = setOf("the", "and", "you", "your", "that", "this", "what", "just", "like", "lol", "lmao",
         "was", "are", "for", "with", "have", "not", "but", "its", "it's", "i'm", "can", "all", "get", "got", "yeah",
         "who", "how", "why", "now", "his", "her", "him", "she", "they", "them", "one", "out", "too", "any", "cardinal")
@@ -1336,6 +1391,13 @@ class DiscordBotService : Service() {
 
     private enum class Follow { NONE, FREE, CHECK }
 
+    /** Their last message to Cardinal and his reply to it (what a follow-up would be continuing). */
+    private fun lastExchangeWith(channelId: String, authorId: String): Pair<String, String>? {
+        val q = flow[channelId] ?: return null
+        val m = synchronized(q) { q.lastOrNull { it.isBot && it.replyTo == authorId } } ?: return null
+        return m.theirText to m.text
+    }
+
     private fun recordFlow(channelId: String, m: FlowMsg) {
         val q = flow.getOrPut(channelId) { ArrayDeque() }
         synchronized(q) { q.addLast(m); while (q.size > 24) q.removeFirst() }
@@ -1356,6 +1418,13 @@ class DiscordBotService : Service() {
         val key = "$channelId:$authorId"
         val last = convoWith[key] ?: return Follow.NONE
         if (now - last > DiscordBotLimits.FOLLOW_WINDOW_MS) { convoWith.remove(key); convoMisses.remove(key); return Follow.NONE }
+        val kind = followUpKindInner(channelId, authorId, d, raw, now)
+        // They turned to talk with someone else → that conversation with Cardinal is over (they'll @ him again).
+        if (kind == Follow.NONE) { convoWith.remove(key); convoMisses.remove(key) }
+        return kind
+    }
+
+    private fun followUpKindInner(channelId: String, authorId: String, d: JSONObject, raw: String, now: Long): Follow {
         val refAuthor = d.optJSONObject("referenced_message")?.optJSONObject("author")?.optString("id")
         if (refAuthor != null && refAuthor != botId) return Follow.NONE
         val mentions = d.optJSONArray("mentions") ?: JSONArray()
@@ -1373,11 +1442,24 @@ class DiscordBotService : Service() {
             listOf(n, n.substringBefore(' ')) + UserMemoryStore.load(this, m.authorId)?.let { c -> c.nicknames + c.preferredNick }.orEmpty()
         }.map { it.lowercase().trim() }.filter { it.length >= 3 && it !in COMMON_NICK_WORDS }.toSet()
         if (others.any { low.contains(" $it ") }) return Follow.NONE
+        // The line right before theirs was someone else talking TO them ("hana are you making avatars now?"):
+        // they're answering that person.
+        val prev = snap.lastOrNull()
+        if (prev != null && !prev.isBot && prev.authorId != authorId) {
+            if (prev.replyTo == authorId) return Follow.NONE
+            val me = DiscordRest.displayName(d.optJSONObject("author"), "").lowercase().trim()
+            val myNames = (listOf(me, me.substringBefore(' ')) + UserMemoryStore.load(this, authorId)?.let { c -> c.nicknames + c.preferredNick }.orEmpty())
+                .map { it.lowercase().trim() }.filter { it.length >= 3 }
+            val prevLow = " " + prev.text.replace(Regex("[^\\p{L}\\p{N} ]"), " ").replace(Regex("\\s+"), " ") + " "
+            if (myNames.any { prevLow.contains(" $it ") } || prev.text.contains("<@$authorId>") || prev.text.contains("<@!$authorId>")) return Follow.NONE
+        }
         val idx = snap.indexOfLast { it.isBot && it.replyTo == authorId }
         if (idx < 0) return Follow.CHECK
+        // Free only when they answer him straight away: nothing but their own lines since his reply to them.
         val since = snap.subList(idx + 1, snap.size)
-        val quiet = since.all { it.isBot || it.toBot }
-        return if (quiet && !ROOM_RE.containsMatchIn(raw.lowercase())) Follow.FREE else Follow.CHECK
+        val straight = since.all { it.authorId == authorId && it.toBot } &&
+            now - snap[idx].ts <= DiscordBotLimits.FOLLOW_FREE_MS
+        return if (straight && !ROOM_RE.containsMatchIn(raw.lowercase())) Follow.FREE else Follow.CHECK
     }
 
     private fun normLine(s: String): String = EmojiConvert.normalizeForPrompt(s).lowercase().replace(Regex("\\s+"), " ").trim().take(80)

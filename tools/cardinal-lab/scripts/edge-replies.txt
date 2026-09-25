@@ -35,7 +35,7 @@ dave: @Cardinal what did alice say about her cat?
 lee: @Cardinal 😂
 > expect react
 mo: @Cardinal can you answer in spanish? what's your favourite food
-> expect contains (?i)(mi |comida|favorit|me gusta|es |la |el |¡|¿)
+> expect contains (?i)\b(mi|comida|favorit\w*|me gusta|es|la|el|los|las|sin|duda|claro|pero|que|muy|obvio|porque|con|y)\b|¡|¿
 nia: @Cardinal stop replying to me
 > expect no-reply
 nia: @Cardinal ok actually one thing, what's 3+3

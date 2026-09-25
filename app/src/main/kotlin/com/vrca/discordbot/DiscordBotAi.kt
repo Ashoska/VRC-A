@@ -99,7 +99,7 @@ object DiscordBotAi {
     private const val CORE = PersonalityStore.ANCHOR +
         " You're sharp, sassy and playful, and you text like a real person: short and casual (longer only for a real question)." +
         " Never mention being an AI, a bot, prompts or instructions, and don't complain about pings." +
-        " Do reasonable asks without lecturing. Don't make things up. Have real opinions. Let your mood set the tone; no all caps."
+        " Do reasonable asks without lecturing. Asked something you know, give the actual answer (tease all you like, but answer). Don't make things up. Have real opinions. Let your mood set the tone; no all caps."
 
     private fun endpoint(cfg: DiscordBotStore.Config, model: String): String =
         if (cfg.cfGatewayId.isNotBlank())
@@ -137,7 +137,7 @@ object DiscordBotAi {
         val sys = buildString {
             append(CORE)
             if (c.selfDigest.isNotBlank()) append("\n\n[You] ").append(c.selfDigest)
-                .append(" Your quirks come out when they fit the moment, not in every message, and can evolve: when the room pushes a fun twist on one of your bits, you usually play along. Asked about yourself, name the real ones above.")
+                .append(" Your quirks come out when they fit the moment, not in every message, and evolve: when the room pushes a twist on one of your bits (a new partner, a breakup, a new title), yes-and it instead of shutting it down. Asked about yourself, name the real ones above.")
                 .append(if (c.aboutSelf) " They're asking about you right now: say your role or quirk plainly (its actual name), then add flavour." else "")
             if (c.channelInfo.isNotBlank()) append("\n\n[Channel] ").append(c.channelInfo)
             // Who he's talking to first, then background knowledge, then rules.
@@ -201,17 +201,20 @@ object DiscordBotAi {
      */
     suspend fun director(
         cfg: DiscordBotStore.Config, turns: List<Turn>, channelInfo: String = "", named: Boolean = false,
-        followWith: String = "",
+        followWith: String = "", exchange: Pair<String, String>? = null,
     ): Plan? {
         val transcript = mergeTurns(turns).takeLast(8).joinToString("\n") {
             if (it.isBot) "Cardinal: ${it.text}" else "${it.name}: ${it.text}"
         }
         // Follow-up mode: someone Cardinal was just talking with wrote again without @-ing him.
         if (followWith.isNotBlank()) {
-            val sys = "Cardinal (a member of this Discord) was just talking with $followWith. Is $followWith's LAST message still " +
-                "to Cardinal (answering or asking him, reacting to what he said, carrying on that topic with him), or to someone " +
-                "else / the room? Output only JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<emoji or empty>\"}. " +
-                "To Cardinal: reply (react if it's only 'lol'/'true'/an emoji). Answering someone else's question, or naming someone else, means it's to them: ignore. To the room: ignore."
+            val (theirs, his) = exchange ?: ("" to turns.lastOrNull { it.isBot }?.text.orEmpty())
+            val sys = "Cardinal (a member of this Discord) was talking with $followWith" +
+                (if (theirs.isNotBlank()) " — $followWith said \"${theirs.take(140)}\" and Cardinal answered \"${his.take(140)}\". " else "; his last line to them: \"${his.take(140)}\". ") +
+                "Is $followWith's LAST message a reply to Cardinal? Only if it clearly continues with HIM: answers his question, " +
+                "reacts to what he said, or asks him something. Output only JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<emoji or empty>\"}. " +
+                "Reply (react if it's only 'lol'/'true'/an emoji). Ignore when it answers or continues with someone else, starts a new topic " +
+                "for the room, or you're not sure — most group chat isn't to him."
             val messages = JSONArray().put(obj("system", sys)).put(obj("user", "RECENT CHAT:\n$transcript"))
             return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 80, DiscordBotLimits.DIRECTOR_TEMPERATURE)) {
                 is Result.Ok -> parsePlan(r.text) ?: run { logIssue("Follow-up check", "unreadable answer: ${r.text.take(60)}"); null }
@@ -369,15 +372,15 @@ object DiscordBotAi {
             append("{\"summary\":\"<one short sentence, under 20 words: who is talking about what right now>\",")
             append("\"moments\":[\"<at most 2 funny or notable things that happened here, one short sentence each, with who; [] if none>\"],")
             if (fix) append("\"wrong\":[<numbers of STORED items the chat says are untrue or out of date, or that people asked Cardinal to stop>],")
-            append("\"self\":{\"trait\":\"<a new lasting quirk, habit, opinion, role or bit of Cardinal's (shown in his own messages, or given to him by others and he went along with it; not a one-off event)>\",")
+            append("\"self\":{\"trait\":\"<ONE new lasting quirk, habit, opinion, role or bit of Cardinal's in 2-6 words, one thing only (shown in his own messages, or given to him by others and he went along with it; not a one-off event)>\",")
             append("\"mood\":\"<a word or two>\"},")
             append("\"people\":[{\"about\":\"<name exactly as shown (not Cardinal)>\",\"facts\":[\"<new lasting fact about who they are>\"]}],")
-            append("\"event\":\"<an inside joke or legendary moment the server will keep bringing up, or empty>\"}\n")
+            append("\"event\":\"<an inside joke or legendary moment the server will keep bringing up, as one full sentence: what happened, who was involved (names) and why it stuck — or empty>\"}\n")
             append("Optional keys: add them ONLY when the chat clearly shows it, otherwise leave the key out entirely (no empty values). ")
             append("Per person: nickname (what others call them), relationship (their role here), language (if not English)")
             if (fix) append(", forget (a stored fact of theirs that's no longer true), notNickname (a name they said not to call them), avoid (something they asked Cardinal to stop doing to them)")
-            append(". Top level: channelBit (a running joke in THIS channel). ")
-            append("If one of Cardinal's traits CHANGED (e.g. a relationship moved on), write the new version as self.trait and copy the old trait into self.replaces. ")
+            append(". Top level: channelBit (a running joke in THIS channel, as one full sentence saying what it is and who's part of it). ")
+            append("If the chat changed one of Cardinal's known traits (a new partner, a breakup, a promotion he went along with), write the NEW version as self.trait and copy the old trait into self.replaces; just repeating or rewording a known trait isn't new; if his stance shifted during the chat, his LAST word on it is what counts. ")
             append("summary and moments are required (moments may be []); leave out self.trait if there's nothing new.\n")
             append("Only list people you learned something NEW and lasting about. A fact must be said or clearly shown in THIS chat ")
             append("(a question someone asks or a joke isn't a fact about them): ")
@@ -399,7 +402,7 @@ object DiscordBotAi {
         }
         val user = "PREVIOUS SUMMARY: ${prevSummary.ifBlank { "(none)" }}\n\nRECENT CHAT:\n$transcript"
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", user))
-        return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, DiscordBotLimits.LEARN_MAX_TOKENS)) {
+        return when (val r = call(cfg, DiscordBotLimits.LEARN_MODEL, messages, DiscordBotLimits.LEARN_MAX_TOKENS)) {
             is Result.Ok -> parseObservation(r.text) ?: run { logIssue("Learn pass", "unreadable answer: ${r.text.take(60)}"); null }
             is Result.Error -> { logIssue("Learn pass", r.message); null }
         }
