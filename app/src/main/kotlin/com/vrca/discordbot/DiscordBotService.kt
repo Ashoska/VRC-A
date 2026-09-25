@@ -1727,7 +1727,8 @@ class DiscordBotService : Service() {
         val named = ArrayList<String>()
         val selfRecall = SELF_RECALL_RE.containsMatchIn(ctx.userText)
         val isRecall = selfRecall || RECALL_RE.containsMatchIn(ctx.userText) || WHO_Q_RE.containsMatchIn(ctx.userText)
-        val asking = isRecall || ctx.userText.contains('?')
+        // "what does bob do for work" is a question too, no "?" needed (it got 2 facts and missed "is a bank teller").
+        val asking = isRecall || ctx.userText.contains('?') || QUESTION_RE.containsMatchIn(ctx.userText)
         val nameKeys = UserMemoryStore.nameEntries(this)
         if (nameKeys.isNotEmpty()) {
             val lower = ctx.userText.lowercase()
