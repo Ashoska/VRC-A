@@ -397,7 +397,6 @@ object DiscordBotAi {
             append("never guess, and never reuse wording from these instructions. Lasting means who someone is (hobbies, games, work, ")
             append("where they're from, pets, tastes), in the words they used (\"printing stuff for my mix tapes\" is not \"makes mix tapes\"). Not lasting: what they're doing right now (homework, music, chores), jokes and what-ifs (\"i'm 82 lol\"), what they just said or did (a one-off event like a burnt toaster goes in moments, not facts), things about their family or friends, what they think of someone else, anything about using Cardinal or this app, ")
             append("their name. Keep each person's info on that person; Cardinal's own quirks go only in self, never in people. ")
-            append("Never record hateful notes about groups or jokes about a real person's death or crimes.")
             if (selfTraits.isNotEmpty() && !fix)
                 append("\nCardinal's known traits (don't repeat or reword these): ").append(selfTraits.joinToString("; "))
             if (knownPeople.isNotBlank() && !fix)
