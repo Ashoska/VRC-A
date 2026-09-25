@@ -44,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -79,7 +80,7 @@ import java.util.Locale
 @Composable
 internal fun DiscordBotTab() {
     var sub by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Dashboard", "Personality", "Users", "Server", "Traces", "Cost", "Controls", "Config")
+    val tabs = listOf("Dashboard", "Personality", "Users", "Server", "Days", "Traces", "Cost", "Controls", "Config")
 
     LazyColumn(
         Modifier.fillMaxWidth().padding(12.dp),
@@ -101,9 +102,10 @@ internal fun DiscordBotTab() {
                 1 -> PersonalitySection()
                 2 -> UsersSection()
                 3 -> ServerSection()
-                4 -> TracesSection()
-                5 -> CostSection()
-                6 -> ControlsSection()
+                4 -> DaysSection()
+                5 -> TracesSection()
+                6 -> CostSection()
+                7 -> ControlsSection()
                 else -> ConfigSection()
             }
         }
@@ -286,6 +288,65 @@ private fun ServerSection() {
                     TextButtonSmall("Delete") { com.vrca.discordbot.ChannelMemoryStore.delete(ctx, channelId, b.text); tick++ }
                 }
             }
+        }
+    }
+}
+
+// ── Day log (what happened each day) ────────────────────────────────────────
+@Composable
+private fun DaysSection() {
+    val ctx = LocalContext.current
+    var tick by remember { mutableIntStateOf(0) }
+    val days = remember(tick) { com.vrca.discordbot.DayLogStore.days(ctx) }
+    val today = com.vrca.discordbot.DayLogStore.dateOf(System.currentTimeMillis())
+    val open = remember { mutableStateMapOf<String, Boolean>() }
+    var confirmClear by remember { mutableStateOf(false) }
+    val timeFmt = remember { java.time.format.DateTimeFormatter.ofPattern("HH:mm").withZone(java.time.ZoneOffset.UTC) }
+
+    AdminSectionCard(
+        title = "Day log (${days.size})",
+        icon = Icons.Filled.History,
+        tone = AdminTone.Info,
+        trailing = { IconButton(onClick = { tick++ }) { Icon(Icons.Filled.Refresh, "Refresh") } }
+    ) {
+        Muted("What happened each day (UTC), from every learn pass — including chat Cardinal never replied to. " +
+            "★ = a funny/notable moment. A busy finished day gets a short recap. Used only when someone asks " +
+            "\"what happened yesterday / today / on Monday\".")
+        if (days.isEmpty()) Muted("Nothing logged yet.")
+        days.forEachIndexed { i, day ->
+            val k = day.date.toString()
+            val expanded = open[k] ?: (i < 2)
+            Column(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(com.vrca.discordbot.DayLogStore.label(day.date, today), style = MaterialTheme.typography.labelLarge)
+                        Muted("${day.entries.count { it.moment }} moments · ${day.entries.count { !it.moment }} notes" +
+                            if (day.digest.isNotBlank()) " · recapped" else "")
+                    }
+                    TextButtonSmall(if (expanded) "Hide" else "Show") { open[k] = !expanded }
+                    TextButtonSmall("Delete") { com.vrca.discordbot.DayLogStore.delete(ctx, day.date); tick++ }
+                }
+                if (expanded) {
+                    if (day.digest.isNotBlank()) {
+                        Label("Recap")
+                        Text(day.digest, style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (day.entries.isNotEmpty()) Label("Notes")
+                    day.entries.sortedBy { it.atMs }.forEach { e ->
+                        Text(
+                            (if (e.moment) "★ " else "· ") + "${timeFmt.format(java.time.Instant.ofEpochMilli(e.atMs))} #${e.channel.removePrefix("#")} — ${e.text}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (e.moment) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+        if (days.isNotEmpty()) {
+            if (confirmClear) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { com.vrca.discordbot.DayLogStore.clear(ctx); confirmClear = false; tick++ }) { Text("Yes, clear all") }
+                TextButtonSmall("Cancel") { confirmClear = false }
+            } else TextButtonSmall("Clear day log") { confirmClear = true }
         }
     }
 }

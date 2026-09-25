@@ -183,6 +183,7 @@ object DayLogStore {
             .sortedDescending().mapNotNull { load(ctx, it) }
 
     fun clear(ctx: Context) { prefs(ctx).edit().clear().apply() }
+    fun delete(ctx: Context, d: LocalDate) { prefs(ctx).edit().remove(key(d)).apply() }
 
     /** Lab/admin seeding: add an entry on a specific [date] at [hour]. */
     fun seed(ctx: Context, date: LocalDate, hour: Int, channel: String, text: String, moment: Boolean) {
