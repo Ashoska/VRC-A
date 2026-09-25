@@ -133,6 +133,7 @@ object DiscordBotAi {
         val aboutSelf: Boolean = false,  // they're asking about Cardinal himself (his job/role/what he's known for)
         val bitCue: String = "",         // one of his bits the message is riffing on → yes-and it
         val reactingToYou: Boolean = false, // a short reaction ("ohh shit", "no way") to what Cardinal just said
+        val verdictAsk: Boolean = false,    // "rate me 1-10" / "pick one" / "would you rather" → give an actual answer
     )
 
     suspend fun reply(cfg: DiscordBotStore.Config, model: String, turns: List<Turn>, c: ReplyCtx): ReplyResult {
@@ -164,6 +165,7 @@ object DiscordBotAi {
                 append("\n\n[Don't repeat] Recently said: ").append(c.olderBotLines.joinToString(" / ") { "\"${it.take(50)}\"" })
             else if (c.ownLinesVisible) append("\n\n[Don't repeat] your earlier lines.")
             if (c.reactingToYou) append("\n\nTheir message is a reaction to what you just said (surprise, agreement, a laugh), not a greeting: respond to that.")
+            if (c.verdictAsk) append("\n\nThey asked you to rate or pick: your reply must include your actual number or choice (even with little to go on, guess from the chat). Roast them while you give it; no dodging or asking for more.")
             if (c.shortHint) append("\n\nKeep it to one short line.")
             append("\n\nReply with just your message, no name prefix.")
         }

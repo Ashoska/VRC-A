@@ -102,6 +102,8 @@ class DiscordBotService : Service() {
         // Talking to the whole room, not one person ("guys", "anyone", "y'all").
         private val ROOM_RE = Regex("\\b(guys|everyone|everybody|y'?all|yall|anyone|anybody|you all|chat|people|@here|@everyone)\\b")
         // Asking about Cardinal himself: his job, role, what he's known for.
+        /** Asking for a rating or a pick — the model likes to dodge these ("hard pass"), which reads as a refusal. */
+        private val VERDICT_ASK_RE = Regex("(?i)(\\brate\\b|\\brank\\b|\\b(1|one) ?(-|–|to) ?10\\b|out of (10|ten)|on a scale|\\bpick (one|between)|\\bchoose (one|between)|would (you|u) rather|smash or pass|which (one )?(is|would you|do you)|\\bwho wins\\b|\\b(better|worse)[,:]? .{1,30}\\bor\\b)")
         private val SELF_ASK_RE = Regex("(?i)\\b(your (job|role|title|thing|deal|purpose|vibe|personality|gimmick)|(are|r) (you|u) known for|who (are|r) (you|u)\\b|about yourself|what (are|r) (you|u) (like|about)|what do (you|u) do (here|around here))")
         private val NOW_RE = Regex("\\b(rn|atm|right now|at the moment|as we speak|tonight|this (morning|afternoon|evening)|for now)\\b")
         private val BEING_DONE_RE = Regex("\\b(is|are|getting|being)\\s+(being\\s+)?[\\p{L}]+(ed|en)\\s+(rn|right now|atm|today|at the moment)\\b|\\bbeing (fixed|repaired|redone|renovated|replaced|done|built|painted|cleaned)\\b")
@@ -204,6 +206,7 @@ class DiscordBotService : Service() {
     private val ambientReactAt = ConcurrentHashMap<String, Long>()       // channel -> last unprompted reaction
     private val activityWindow = ConcurrentHashMap<String, ArrayDeque<Long>>() // channel -> recent msg times
     private val recentBotReplies = ConcurrentHashMap<String, ArrayDeque<String>>() // channel -> last replies
+    private val recentEmojiUse = ConcurrentHashMap<String, ArrayDeque<Boolean>>() // channel -> did each of his last replies use an emoji
     private val lastCoveredId = ConcurrentHashMap<String, Long>()        // channel -> max message id a reply has already seen/answered
     private val routeJobs = ConcurrentHashMap.newKeySet<Job>()           // in-flight route coroutines (cancelled on teardown)
     // Our recent message ids (reaction-learning): id -> the user we replied to.
@@ -1436,6 +1439,7 @@ class DiscordBotService : Service() {
             }.orEmpty(),
             shortHint = short,
             aboutSelf = SELF_ASK_RE.containsMatchIn(ctx.userText),
+            verdictAsk = VERDICT_ASK_RE.containsMatchIn(ctx.userText),
             bitCue = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS).firstOrNull { t ->
                 val k = groundWords(t); k.isNotEmpty() && groundWords(ctx.userText).any { it in k }
             }.orEmpty(),
@@ -1645,9 +1649,10 @@ class DiscordBotService : Service() {
     private fun tameEmoji(channelId: String, text: String): String {
         val m = TRAILING_EMOJI_RE.find(text) ?: return text
         val recent = recentBotReplies[channelId]?.let { synchronized(it) { it.toList() } }.orEmpty().takeLast(3)
-        val used = recent.count { SHORTCODE_RE.containsMatchIn(it) || UNICODE_EMOJI_RE.containsMatchIn(it) }
+        val usedRecently = recentEmojiUse[channelId]?.let { synchronized(it) { it.toList() } }.orEmpty()
+            .takeLast(2).any { it }
         val same = recent.any { it.contains(m.value.trim()) }
-        if (used < 2 && !same) return text
+        if (!usedRecently && !same) return text
         val cut = text.substring(0, m.range.first).trimEnd()
         return cut.ifBlank { text }
     }
@@ -1657,6 +1662,12 @@ class DiscordBotService : Service() {
         synchronized(dq) {
             dq.addLast(text.take(DiscordBotLimits.MAX_MSG_CHARS))
             while (dq.size > DiscordBotLimits.ANTI_REPEAT_REPLIES) dq.removeFirst()
+        }
+        // Emoji use is kept as a flag: the stored text is truncated, which hid a long reply's closing emoji.
+        val used = recentEmojiUse.getOrPut(channelId) { ArrayDeque() }
+        synchronized(used) {
+            used.addLast(SHORTCODE_RE.containsMatchIn(text) || UNICODE_EMOJI_RE.containsMatchIn(text))
+            while (used.size > 4) used.removeFirst()
         }
     }
 

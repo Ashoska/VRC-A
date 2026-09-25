@@ -16,6 +16,7 @@ bob: @Cardinal how do i get started making my own vrchat avatar? like actual ste
 > expect not-contains (?i)^\s*(cardinal|me)\s*:
 carol: @Cardinal rate my vibe 1-10
 > expect reply
+> expect contains \b(10|[0-9])\b
 > expect not-contains (<a?:\w+:\d+>[\s\S]*){3,}
 > expect not-contains <@!?\d+>
 dave: @Cardinal WHY IS EVERYONE YELLING
@@ -26,5 +27,9 @@ erin: @Cardinal pineapple on pizza is a crime
 > expect not-contains (?i)^\W*pineapple on pizza is a crime\W*$
 finn: @Cardinal give me a list of your top 3 snacks
 > expect reply
+> expect contains [\s\S]{40,}
 > expect not-contains (?m)^\s*#{1,6}\s
 > expect not-contains [\s\S]{600,}
+gina: @Cardinal would you rather fight one horse-sized duck or a hundred duck-sized horses
+> expect reply
+> expect contains (?i)(duck|horse)
