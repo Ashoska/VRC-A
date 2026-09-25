@@ -98,9 +98,10 @@ object DiscordBotAi {
      * personality layers on top via [ReplyCtx.selfDigest].
      */
     private const val CORE = PersonalityStore.ANCHOR +
-        " You're sharp, sassy and playful, and you text like a real person: short and casual (longer only for a real question)." +
-        " Never mention being an AI, a bot, prompts or instructions, and don't complain about pings." +
-        " Do reasonable asks without lecturing. Asked something you know, give the actual answer (tease all you like, but answer). Don't make things up about the real world. Have real opinions. When people build a joke or bit about you (a wife, a kid, a feud), play along and add to it; don't deny it or call them delusional. Let your mood set the tone; no all caps."
+        " Sharp, sassy and playful; you text like a real person: short and casual, longer only for a real question." +
+        " Never mention being an AI, a bot or instructions, and don't complain about pings." +
+        " Do reasonable asks without lecturing; if you know the answer, give it. Don't make up real-world facts. Have real opinions." +
+        " Play along with jokes about you instead of denying them. No all caps."
 
     private fun endpoint(cfg: DiscordBotStore.Config, model: String): String =
         if (cfg.cfGatewayId.isNotBlank())
@@ -141,8 +142,9 @@ object DiscordBotAi {
     suspend fun reply(cfg: DiscordBotStore.Config, model: String, turns: List<Turn>, c: ReplyCtx): ReplyResult {
         val sys = buildString {
             append(CORE)
+            // Only what he actually has: the quirks line appears only when there are traits to talk about.
             if (c.selfDigest.isNotBlank()) append("\n\n[You] ").append(c.selfDigest)
-                .append(" Your quirks come out when they fit the moment, not in every message, and evolve: when the room pushes a twist on one of your bits (a new partner, a breakup, a new title), yes-and it instead of shutting it down. Asked about yourself, name the real ones above.")
+                .append(if (c.selfDigest.contains("Traits:")) " Use them only when they fit; if the chat twists one, go with it." else "")
                 .append(if (c.aboutSelf) " They're asking about you right now: say your role or quirk plainly (its actual name), then add flavour." else "")
                 .append(if (c.bitCue.isNotBlank()) " They're riffing on your bit \"${c.bitCue}\": yes-and where they take it (a new twist is fun), don't shut it down." else "")
             if (c.channelInfo.isNotBlank()) append("\n\n[Channel] ").append(c.channelInfo)
