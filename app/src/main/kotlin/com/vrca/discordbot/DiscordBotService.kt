@@ -104,6 +104,9 @@ class DiscordBotService : Service() {
         // Asking about Cardinal himself: his job, role, what he's known for.
         /** Asking for a rating or a pick — the model likes to dodge these ("hard pass"), which reads as a refusal. */
         private val VERDICT_ASK_RE = Regex("(?i)(\\brate\\b|\\brank\\b|\\b(1|one) ?(-|–|to) ?10\\b|out of (10|ten)|on a scale|\\bpick (one|between)|\\bchoose (one|between)|would (you|u) rather|smash or pass|which (one )?(is|would you|do you)|\\bwho wins\\b|\\b(better|worse)[,:]? .{1,30}\\bor\\b)")
+        /** "you're the (server's) (official) X now" / "cardinal is our resident X" → X (1-3 words). */
+        private val TITLE_RE = Regex("(?i)\\b(?:you'?re|you are|ur|u r|cardinal(?:'s| is))\\s+(?:now\\s+)?(?:(?:the|our|this|a)\\s+)(?:(?:server|chat|group)'?s\\s+)?(?:(?:official|new|resident|designated|certified|local)\\s+)?(\\p{L}+(?:\\s+\\p{L}+){0,2}?)(?=\\s+(?:now|here|forever|lol|lmao|fr|officially)\\b|\\s*[,.!?]|\\s*$)")
+        private val TITLE_NOT = setOf("so", "kinda", "really", "too", "very", "such", "not", "being", "gonna", "going", "just", "worst", "best", "same", "only", "one", "reason", "problem", "bot", "ai")
         private val SELF_ASK_RE = Regex("(?i)\\b(your (job|role|title|thing|deal|purpose|vibe|personality|gimmick)|(are|r) (you|u) known for|who (are|r) (you|u)\\b|about yourself|what (are|r) (you|u) (like|about)|what do (you|u) do (here|around here))")
         private val NOW_RE = Regex("\\b(rn|atm|right now|at the moment|as we speak|tonight|this (morning|afternoon|evening)|for now)\\b")
         private val BEING_DONE_RE = Regex("\\b(is|are|getting|being)\\s+(being\\s+)?[\\p{L}]+(ed|en)\\s+(rn|right now|atm|today|at the moment)\\b|\\bbeing (fixed|repaired|redone|renovated|replaced|done|built|painted|cleaned)\\b")
@@ -1023,12 +1026,22 @@ class DiscordBotService : Service() {
         val batchWords = groundWords(turns.joinToString(" ") { it.text })
         // While the room riffs on one of his bits, a "new" trait about the same subject is that bit's update.
         val bitVariant = bitFocus.isNotBlank() && obs.selfTrait.isNotBlank() && groundWords(obs.selfTrait).any { it in groundWords(bitFocus) }
-        val newTrait = obs.selfTrait.takeIf { !bitVariant }?.takeIf { t ->
+        val roomGiven = if (!bitVariant && cardinalInBatch) roomTitle(turns) else null
+        val learnedTrait = obs.selfTrait.takeIf { !bitVariant }?.takeIf { t ->
             // Named in the chat's words: "discerning gourmet" for "official pizza critic" is the small model's gloss.
             val tw = groundWords(t)
             cardinalInBatch && t.isNotBlank() && disputed.none { PersonalityStore.isSameTrait(t, it) } &&
                 (tw.isEmpty() || tw.count { it in batchWords } * 2 >= tw.size) &&
                 t.trim(':', ' ').lowercase() !in emojiNames   // "clueless" from :clueless: isn't a personality
+        }
+        // The room handed him a title ("you're the server's official pizza critic now") and others picked it up:
+        // that's the trait, in their words — the 8B often renames it ("pizza connoisseur") or glosses it past
+        // the check above. Free.
+        val titled = roomGiven?.takeIf { t -> known.none { PersonalityStore.isSameTrait(it, t) } && disputed.none { PersonalityStore.isSameTrait(t, it) } }
+        val newTrait = when {
+            titled == null -> learnedTrait
+            learnedTrait == null || groundWords(learnedTrait).any { it in groundWords(titled) } -> titled
+            else -> { PersonalityStore.noteSelf(this, titled, null, null); learnedTrait }   // two different things
         }
         // A trait that evolved replaces the one it came from (the learner names the old one in self.replaces).
         val replaced = newTrait?.let { nt ->
@@ -1059,6 +1072,26 @@ class DiscordBotService : Service() {
             PersonalityStore.noteSelf(this, parts.first(), null, mood)
             DiscordBotState.setMood(PersonalityStore.mood(this))
         }
+    }
+
+    /**
+     * A title the room gave Cardinal ("you're the server's official pizza critic now", "cardinal is our
+     * resident bird expert") whose key word at least two different people used in this batch.
+     */
+    private fun roomTitle(turns: List<DiscordBotAi.Turn>): String? {
+        val humans = turns.filter { !it.isBot }
+        for (t in humans) {
+            val m = TITLE_RE.find(t.text) ?: continue
+            val title = m.groupValues[1].trim().lowercase()
+            val words = title.split(Regex("\\s+"))
+            if (words.first() in TITLE_NOT || words.size > 3 || title.length < 4) continue
+            val head = discordStem(words.last())
+            if (head.length < 3) continue
+            val users = humans.filter { h -> Regex("[\\p{L}]+").findAll(h.text.lowercase()).any { discordStem(it.value) == head } }
+                .map { it.name.lowercase() }.toSet()
+            if (users.size >= 2) return title
+        }
+        return null
     }
 
     /**
@@ -1107,6 +1140,9 @@ class DiscordBotService : Service() {
             .filter { it.length >= 3 && it !in BIT_FILLER }.map { discordStem(it) }.toSet()
         val oldW = toks(old + " " + PersonalityStore.wasOf(this, old))
         val chat = toks(turns.joinToString(" ") { it.text })
+        // The twist has to come from the room: words only Cardinal used ("center of this swamp drama") are his
+        // own riff, and a bit named that way stops saying what it is.
+        val room = toks(turns.filter { !it.isBot }.joinToString(" ") { it.text })
         // The bit slot answered about THIS bit ("single era" after a breakup needn't repeat "Shrek"); a general
         // trait only counts as this bit's update when it keeps the bit's subject.
         fun ok(next: String, needSubject: Boolean): Boolean {
@@ -1114,7 +1150,7 @@ class DiscordBotService : Service() {
             return next.split(Regex("\\s+")).size <= 10 && w.isNotEmpty() &&
                 !next.equals(old, true) && fresh.isNotEmpty() &&            // a change…
                 (!needSubject || w.any { it in oldW }) &&                    // …of this bit…
-                fresh.any { it in chat } && w.count { it in chat || it in oldW } * 2 >= w.size &&   // …in the chat's words
+                fresh.any { it in room } && w.count { it in chat || it in oldW } * 2 >= w.size &&   // …in the chat's words
                 !BIT_COMMENTARY.containsMatchIn(next)                         // not "the group loves the idea"
         }
         // The shortest valid version reads best as a trait ("divorced from Shrek").

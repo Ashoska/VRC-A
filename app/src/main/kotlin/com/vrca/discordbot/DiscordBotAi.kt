@@ -381,7 +381,7 @@ object DiscordBotAi {
             append("\"mood\":\"<a word or two>\"},")
             // The room is riffing on one of his bits: ask about that bit directly (a pointed question the small
             // model answers far better than the general "if a trait changed" rule).
-            if (bitFocus.isNotBlank()) append("\"bit\":\"<how Cardinal's bit '$bitFocus' stands after this chat, NOW — his current status, not the history — in at most 6 words, using the chat's own words for what changed (the new people or status they gave him) and keeping the bit's subject — only if the room changed it AND Cardinal went along in his own messages (his last word counts); else same>\",")
+            if (bitFocus.isNotBlank()) append("\"bit\":\"<how Cardinal's bit '$bitFocus' stands after this chat, NOW — his current status, not the history — in at most 6 words, using the words the others used for what changed (name the new people or status they gave him, e.g. who he's with now) and keeping the bit's subject — only if the room changed it AND Cardinal went along in his own messages (his last word counts); else same>\",")
             append("\"people\":[{\"about\":\"<name exactly as shown (not Cardinal)>\",\"facts\":[\"<new lasting fact about who they are>\"]}],")
             append("\"event\":\"<an inside joke or legendary moment the server will keep bringing up, as one full sentence: what happened, who was involved (names) and why it stuck — or empty>\"}\n")
             append("Optional keys: add them ONLY when the chat clearly shows it, otherwise leave the key out entirely (no empty values). ")
