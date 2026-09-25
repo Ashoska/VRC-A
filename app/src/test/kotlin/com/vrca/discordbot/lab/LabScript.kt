@@ -202,6 +202,13 @@ internal class LabScript(private val d: LabDriver) {
         val (pass, detail) = when (parts[0]) {
             "reply" -> (replies.isNotEmpty()) to (replies.lastOrNull() ?: "no reply")
             "no-reply" -> (replies.isEmpty()) to (replies.lastOrNull() ?: "silent")
+            // "threaded <name>" = his last reply quote-replies <name>'s message; "plain" = no quote.
+            "threaded", "plain" -> {
+                val last = evs.lastOrNull { it.type == "bot_send" }
+                val to = last?.data?.takeUnless { it.isNull("replyToAuthor") }?.optString("replyToAuthor")
+                val ok = last != null && if (parts[0] == "plain") to == null else (to != null && (parts.size < 2 || to.equals(parts[1], true)))
+                ok to (last?.let { "↩ ${to ?: "plain"}: ${it.data.optString("text").take(60)}" } ?: "no reply")
+            }
             "respond" -> (replies.isNotEmpty() || reacts.isNotEmpty()) to (replies.lastOrNull() ?: reacts.joinToString { it.data.optString("emoji") }.ifBlank { "nothing" })
             "quiet" -> (replies.isEmpty() && reacts.isEmpty()) to (replies.lastOrNull() ?: reacts.joinToString { it.data.optString("emoji") }.ifBlank { "nothing" })
             "cards" -> {

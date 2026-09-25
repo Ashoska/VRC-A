@@ -38,6 +38,8 @@ object UserMemoryStore {
         val interactions: Int = 0,
         val pinned: Boolean = false,
         val avoid: List<String> = emptyList(),   // things they asked Cardinal to stop doing to them
+        // Only ever set from the person's OWN words ("my pronouns are she/they"); nobody else can change them.
+        val pronouns: String = "",
     )
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -67,6 +69,7 @@ object UserMemoryStore {
             interactions = o.optInt("ic", 0),
             pinned = o.optBoolean("p", false),
             avoid = strList(o.optJSONArray("av")),
+            pronouns = o.optString("pro"),
         )
     } catch (_: Exception) { null }
 
@@ -91,6 +94,7 @@ object UserMemoryStore {
             .put("ic", card.interactions)
             .put("p", card.pinned)
             .put("av", JSONArray(card.avoid.takeLast(4)))
+            .put("pro", card.pronouns)
         prefs(ctx).edit().putString(keyOf(card.id), o.toString()).apply()
     }
 
@@ -118,7 +122,15 @@ object UserMemoryStore {
         "was saying|is saying|discussed|responded|replied|reacted|greeted|complained|commented|" +
         "pinged|tagged|@ed|dm'?ed|messaged)\\b|" +
         // "has a link to share" / "has a question" is something they're about to post, not who they are.
-        "^has an? (link|question|idea|story|pic|picture|photo|video|clip|meme|screenshot|update)\\b"
+        "^has an? (\\S+ ){0,3}(link|question|idea|story|pic|picture|photo|video|clip|meme|screenshot|update)s?\\b|" +
+        // A question they asked isn't who they are ("has a mini polycule question").
+        "\\bquestions?\\b|" +
+        // How they type in chat, not who they are: "speaks gibberish (e.g. …)", "loves sharing links" (it was GIF links),
+        // "losing his train of thought".
+        "\\b(gibberish|nonsense|train of thought|typos?|links?|urls?|gifs?|stickers?|emojis?|emotes?)\\b|" +
+        "\\b(shar|post|send|spam|drop)\\w* (\\S+ )?(memes?|pics?|images?|videos?|clips?|screenshots?)\\b|" +
+        // Trivia they know isn't a fact about them ("knows the name of the serpent god of the sea").
+        "^knows (the|that|what|how|about|who|where|when|why|a lot about|a bit about)\\b"
     )
     // META text about USING Cardinal / the app itself — never a fact about who a person IS. Rejects
     // the "I asked it to edit my profile", "changed nickname recently", "reset the bot" junk that
@@ -169,7 +181,7 @@ object UserMemoryStore {
     private val GENERIC_REL = Regex("(?i)^(a |an |the )?(regular |server |discord |normal )?(member|user|participant|person|chatter|someone|human|guy|people)s?\\.?$")
 
     // Guesses aren't facts ("possibly a friend of Cardinal's", "is a member of the server").
-    private val SPECULATION = Regex("(?i)\\b(possibly|probably|maybe|perhaps|might be|seems to|likely|apparently|implied|implies|inferred|suggests?|judging by|based on)\\b|" +
+    private val SPECULATION = Regex("(?i)\\b(possibly|probably|maybe|perhaps|might be|seems to|seem to|appears? to|comes? across|likely|apparently|implied|implies|inferred|suggests?|judging by|based on)\\b|" +
         "\\b(a )?member of (the|this) (server|discord|chat)\\b|" +
         // How they play along with Cardinal is chat, not who they are (their relationship to him has its own slot).
         "\\bcardinal\\b")
@@ -178,7 +190,8 @@ object UserMemoryStore {
         "them", "he", "she", "his", "her", "it", "its", "be", "been", "being", "does", "did", "do", "can", "will", "would",
         "could", "to", "of", "in", "on", "at", "for", "with", "not", "very", "really", "also", "just", "some", "that", "this")
     private fun cleanFact(s: String): String? {
-        val t = s.trim()
+        // "uses Buddhist-inspired phrases ("May the wind bless your travels.")": the gist is enough, no quoted examples.
+        val t = EXAMPLE_PAREN.replace(s, "").replace(Regex("\\s+"), " ").trim().trimEnd(',', ';', ':').trim()
         if (NONE_VALUE.matches(t)) return null
         if (t.length < 2 || t.length > 200) return null
         // "is" / "has a" — nothing learned (a name the learner stripped off left an empty fact).
@@ -192,11 +205,15 @@ object UserMemoryStore {
         if (NEGATED_FACT.containsMatchIn(t)) return null
         if (SPECULATION.containsMatchIn(t)) return null
         if (t.contains("http://") || t.contains("https://")) return null
+        // Pronouns live in their own slot, set only by the person themselves.
+        if (PRONOUN_FACT.containsMatchIn(t)) return null
         // Chat ABOUT Cardinal / the bot / a test isn't who they are ("can make a server reply in 0.81 seconds",
         // "has a 100% success rate"), and a plan isn't a fact ("will train the server … until it's approved").
         if (BOT_TALK.containsMatchIn(t) || MEASUREMENT.containsMatchIn(t) || PLAN.containsMatchIn(t)) return null
         return t
     }
+    private val PRONOUN_FACT = Regex("(?i)\\bpronouns?\\b|\\b(he|she|they|it|xe|ze|fae|ey)\\s*/\\s*(him|her|hers|them|their|it|its|xem|xir|zir|hir|faer|em|he|she|they)\\b")
+    private val EXAMPLE_PAREN = Regex("(?i)\\s*\\((?:e\\.?\\s?g\\.?|eg|ex\\.?|i\\.?\\s?e\\.?|like|such as|for example|\"|')[^)]*\\)?")
     private val BOT_TALK = Regex("(?i)\\b(bots?|cardinal|llm|a\\.i\\.?|ai|chat ?gpt|prompts?|training runs?|success rate|neurons?|" +
         "response time|reply (time|speed)|repl(y|ies) in|(has|have|their|his|her|my) (a )?creator|database)\\b")
     private val MEASUREMENT = Regex("(?i)\\d+(\\.\\d+)?\\s*(%|percent\\b|seconds?\\b|secs?\\b|ms\\b|milliseconds?\\b)")
@@ -353,13 +370,13 @@ object UserMemoryStore {
             addAll(cur.alsoSpeaks); addAll(strList(delta.optJSONArray("alsoSpeaks")).map { value(it) })
             if (keepMainLang) add(incomingLang)
         }.map { it.trim() }.filter { it.isNotBlank() && it.length <= 24 && !it.equals(cur.language, true) &&
-            !it.equals("english", true) }
+            (!it.equals("english", true) || cur.alsoSpeaks.any { a -> a.equals("english", true) }) }
             .distinctBy { it.lowercase() }
 
         // Relationship / how-to-treat are filled once and then kept: the cheap learner re-describing
         // the chat's mood ("teasing and playful with Cardinal") used to overwrite a real relationship
         // ("server regular, basically runs events"). The admin can still edit them.
-        val incomingRel = value(delta.optString("relationship")).take(80).takeUnless { GENERIC_REL.matches(it) }.orEmpty()
+        val incomingRel = value(delta.optString("relationship")).take(80).takeUnless { GENERIC_REL.matches(it) || BOT_TALK.containsMatchIn(it) }.orEmpty()   // "tester of Cardinal's skills"
         val relationship = if (correcting && incomingRel.isNotBlank() && !cur.pinned) incomingRel
             else cur.relationship.ifBlank { incomingRel }
         // Drop facts that ONLY restate an identity field (name/nick/relationship/sentiment) — those live
@@ -485,6 +502,7 @@ object UserMemoryStore {
         if (casual != null) sb.append("  [casual nickname: ").append(casual).append("]")
         val otherNicks = card.nicknames.filter { !it.equals(real, true) && !it.equals(casual ?: "", true) }
         if (otherNicks.isNotEmpty()) sb.append(" (also goes by: ").append(otherNicks.take(3).joinToString(", ")).append(")")
+        if (card.pronouns.isNotBlank()) sb.append(" (pronouns ").append(card.pronouns).append(")")
         if (card.relationship.isNotBlank()) sb.append(" — ").append(card.relationship)
         sb.append('\n')
         if (card.language.isNotBlank())
@@ -524,12 +542,12 @@ object UserMemoryStore {
         val casual = card.preferredNick.takeIf { it.isNotBlank() && !it.equals(real, true) }
         val aliases = card.nicknames.filter { !it.equals(real, true) && !it.equals(casual ?: "", true) }.take(2)
         val sb = StringBuilder(real)
-        if (casual != null || aliases.isNotEmpty()) {
-            sb.append(" (")
-            if (casual != null) sb.append("goes by ").append(casual)
-            if (aliases.isNotEmpty()) { if (casual != null) sb.append("; "); sb.append("also: ").append(aliases.joinToString(", ")) }
-            sb.append(")")
-        }
+        val parts = listOfNotNull(
+            card.pronouns.takeIf { it.isNotBlank() }?.let { "pronouns $it" },
+            casual?.let { "goes by $it" },
+            aliases.takeIf { it.isNotEmpty() }?.let { "also: " + it.joinToString(", ") },
+        )
+        if (parts.isNotEmpty()) sb.append(" (").append(parts.joinToString("; ")).append(")")
         return sb.toString() to (casual != null || aliases.isNotEmpty())
     }
 
@@ -553,9 +571,11 @@ object UserMemoryStore {
         if (card.talkStyle.isNotBlank()) sb.append(" How they talk: ").append(card.talkStyle.trim().trimEnd('.')).append('.')
         val vibe = cleanSentiment(card.sentiment)
         if (vibe.isNotBlank()) sb.append(" Vibe with you: ").append(vibe).append('.')
-        val lang = card.language.trim()
-        if (lang.isNotBlank() && !lang.equals("english", true) && !lang.equals("en", true))
-            sb.append(" Speaks ").append(lang).append('.')
+        // English speakers get English (the [Language] line covers them writing in something else); someone who
+        // doesn't speak English at all gets their language.
+        val langs = spokenLanguages(card)
+        if (langs.isNotEmpty() && langs.none { it.equals("english", true) })
+            sb.append(" Speaks ").append(langs.joinToString(", ")).append(" (not English).")
         // Only what this conversation touches: unrelated facts dropped in "for flavour" came out as the same
         // jab every time ("go play your little JJs game").
         val facts = if (recall) card.facts.takeLast(12)
@@ -730,4 +750,28 @@ object UserMemoryStore {
             language = language.trim().ifBlank { cur.language },
         ))
     }
+
+    /** Every language they've been seen writing (main first). */
+    fun spokenLanguages(card: Card): List<String> =
+        (listOf(card.language) + card.alsoSpeaks).map { it.trim() }.filter { it.isNotBlank() }.distinctBy { it.lowercase() }
+
+    /** A language seen in their own message (free detection, English included). */
+    fun noteLanguage(ctx: Context, id: String, name: String, lang: String): Boolean {
+        val l = lang.trim().take(24)
+        if (id.isBlank() || l.isBlank()) return true
+        val cur = load(ctx, id) ?: Card(id = id, name = name.take(60))
+        if (spokenLanguages(cur).any { it.equals(l, true) }) return true
+        save(ctx, if (cur.language.isBlank()) cur.copy(language = l) else cur.copy(alsoSpeaks = cur.alsoSpeaks + l))
+        return true
+    }
+
+    /** Set from the person's own message only ("my pronouns are she/her"); "" clears them. */
+    fun setPronouns(ctx: Context, id: String, name: String, pronouns: String) {
+        if (id.isBlank()) return
+        val cur = load(ctx, id) ?: Card(id = id, name = name.take(60))
+        if (cur.pronouns == pronouns) return
+        save(ctx, cur.copy(pronouns = pronouns.take(40), name = cur.name.ifBlank { name.take(60) }))
+    }
+
+    fun pronounsOf(ctx: Context, id: String): String = load(ctx, id)?.pronouns.orEmpty()
 }

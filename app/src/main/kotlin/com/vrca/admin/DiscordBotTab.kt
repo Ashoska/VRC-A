@@ -426,6 +426,7 @@ private fun UsersSection() {
                         if (card.language.isNotBlank())
                             KV("Speaks", card.language + (if (card.alsoSpeaks.isNotEmpty()) " (+ ${card.alsoSpeaks.joinToString(", ")})" else ""))
                         else if (card.alsoSpeaks.isNotEmpty()) KV("Speaks", card.alsoSpeaks.joinToString(", "))
+                        if (card.pronouns.isNotBlank()) KV("Pronouns", card.pronouns)
                         if (card.preferredNick.isNotBlank()) KV("Calls them", card.preferredNick)
                         if (card.howToTreat.isNotBlank()) KV("With them", card.howToTreat)
                         if (card.talkStyle.isNotBlank()) KV("Talks to them", card.talkStyle)

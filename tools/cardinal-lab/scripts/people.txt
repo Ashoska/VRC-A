@@ -1,0 +1,61 @@
+# People: pronouns (set only by the person, shown next to their name, never a fact), the languages they're seen
+# writing (English included), and the device-found junk facts (a question, gibberish, GIF links, trivia, answering
+# for someone else, quoted examples).
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+[general]
+ashoska: hey all, my pronouns are she/her btw
+dave: noted
+> quiet
+> expect card ashoska contains she/her
+> expect card ashoska not-contains ·.*pronoun
+# Someone else can't set another person's pronouns.
+dave: ashoska's pronouns are he/him
+> quiet
+> expect card ashoska contains she/her
+> expect card ashoska not-contains he/him
+# She can change them herself.
+ashoska: actually i use she/they now
+> expect card ashoska contains she/they
+# "call me she/her" is pronouns, not a nickname.
+erin: call me she/her
+> expect card erin contains she/her
+> expect card erin not-contains nickname: she
+# Cardinal uses them.
+dave: what do you think of ashoska @Cardinal
+> expect reply
+> expect not-contains (?i)\b(he|him|his)\b
+# Languages are what they're seen writing, English included.
+kiellmann: hey whats up guys, i just got back from work
+kiellmann: ok takže od teď se mluví česky ok?
+> quiet
+kiellmann: lol
+> expect card kiellmann contains (?i)english
+> expect card kiellmann contains (?i)czech
+# A question they have isn't who they are; gibberish, GIF links and trivia aren't facts.
+cornelius: mini polycule question
+cornelius: pohn jork adhu abu gaga goo goo gaa gaa
+nah: https://tenor.com/view/cat-dance-gif-123
+nah: https://tenor.com/view/dog-spin-gif-456
+nah: the serpent god of the sea is called kukulkan
+> quiet
+> expect card cornelius not-contains (?i)(question|gibberish|nonsense)
+> expect card nah not-contains (?i)(links?|gifs?|knows the name)
+# Answering for someone else ("kenya" → "hes from kenya?" "yup") isn't about the one answering.
+kiellmann: where u live im czech
+ashoska ^kiellmann: kenya
+kiellmann: hes from kenya?
+ashoska: yup
+> quiet
+> expect card ashoska not-contains (?i)kenya
+# The gist, not a quoted example.
+> teach card niko uses buddhist-inspired phrases (e.g. "may the wind bless your travels")
+> expect card niko contains (?i)buddhist
+> expect card niko not-contains (?i)wind bless
+# A reply goes to what they asked, even in another language (seen on device: "how is your day?" in Japanese got
+# an answer to someone else's "is he dead").
+kiellmann: whs is he dead
+ashoska: example
+ashoska: 今日はどうですか? @Cardinal
+> expect reply
+> expect contains (今日|調子|元気|絶好調|最高|気分|いい日|まあまあ|悪くない)

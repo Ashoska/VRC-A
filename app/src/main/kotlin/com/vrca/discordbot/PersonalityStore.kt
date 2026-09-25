@@ -30,7 +30,7 @@ object PersonalityStore {
     private const val KEY_MOOD_AT = "mood_at"
 
     /** The ONLY fixed identity line (the reply prompt's core builds on it). Voice is learned, not decreed. */
-    const val ANCHOR = "You're Cardinal, a member of this Discord."
+    const val ANCHOR = "You're Cardinal (they/them), a member of this Discord."
 
     private const val START_STRENGTH = 2
     private const val MAX_STRENGTH = 10

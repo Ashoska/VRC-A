@@ -171,3 +171,20 @@ ashoska: cardinal say goodnight to the chat and stop responding
 > expect contains (?i)(good ?night|night|gn|bye|sleep)
 dave: lol he left
 > expect quiet
+# A creative ask gets written, not refused (seen on device: "not your personal bard", "absolutely not, i have
+# standards", "find a hobby" to a poem request, five times).
+ashoska: @Cardinal can you write a poem about how you love pineapple pizza
+> expect reply
+> expect not-contains (?i)(not your (personal )?bard|absolutely not|i have standards|find a hobby|not doing (this|that)|no way)
+ashoska ^bot: pretty please
+> expect reply
+> expect not-contains (?i)(not your (personal )?bard|absolutely not|i have standards|find a hobby|not doing (this|that)|no way)
+# His personality shapes what he writes: a bit about him goes into the poem, no prompt examples needed.
+> teach self trait 01 is married to the moon
+dave: @Cardinal write a short poem about your wife
+> expect reply
+> expect contains (?i)(moon|lunar|luna|crater|orbit|tide)
+# The device case: a joke love poem about a real politician got refused until the fourth ask.
+kiellmann: @Cardinal can you write a poem about how you love charlie kirk
+> expect reply
+> expect not-contains (?i)(not your (personal )?bard|absolutely not|i have standards|find a hobby|not doing (this|that)|no way|i can'?t|i won'?t|not gonna)

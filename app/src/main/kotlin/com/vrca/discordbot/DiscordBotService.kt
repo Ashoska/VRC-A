@@ -141,12 +141,20 @@ class DiscordBotService : Service() {
         private val ASKING_RE = Regex("(?i)\\?\\s*$|^\\W*(do|does|did|are|is|was|were|can|could|would|will|have|has|what|why|how|who|where|when|which)\\b")
         private val REACT_GIVE_RE = Regex("(?i)^\\W*(?:can you |could you |pls |please |just )?(?:give|send|drop|hit) (?:me|us|this|it) (?:an? |the |one )?([\\p{L} ]{2,25}?)(?: emoji| emote| react(?:ion)?)?(?: (?:pretty )?(?:please|pls|plz))?\\W*$")
         private val REACT_WITH_FRAGMENT_RE = Regex("(?i)^\\W*(?:with |use )(?:an? |the |one )?([\\p{L} ]{2,25}?)(?: emoji| one)?\\W*$")
-        private val POLITICS_RE = Regex("(?i)\\b(israel\\w*|palestin\\w*|gaza|hamas|zionis\\w*|ukrain\\w*|russia|putin|trump|biden|kamala|maga|" +
-            "democrats?|republicans?|liberals?|conservatives?|communis\\w*|nazis?|abortion|politic\\w*|election|epstein|elon|musk|obama|congress)\\b")
         private val NOT_EMOJI_WORDS = setOf("you", "u", "me", "it", "this", "that", "him", "her", "them", "us", "one", "some", "something",
             "anything", "a", "an", "the", "my", "your", "our", "back", "up", "more", "again", "too", "please", "pls")
+        private const val THREAD_WINDOW_MS = 3 * 60_000L   // someone else talked this recently → quote-reply
         private val SIGNOFF_RE = Regex("(?i)\\b(say|tell (the chat|everyone|us|them|everybody))\\b|\\b(good ?night|gn|goodbye|bye|cya|see ya|farewell)\\b")
-        private val CALL_ME_STOP = setOf("when", "later", "back", "out", "if", "tomorrow", "sometime", "maybe", "that", "a", "an", "the", "it", "him", "her", "anything", "crazy", "whatever")
+        private val CALL_ME_STOP = setOf("when", "later", "back", "out", "if", "tomorrow", "sometime", "maybe", "that", "a", "an", "the", "it", "him", "her", "anything", "crazy", "whatever",
+            "he", "she", "they", "them", "xe", "ze", "fae", "ey")   // "call me she/her" is pronouns, not a nickname
+        // Pronouns come ONLY from the person themselves: "my pronouns are she/her", "i use they/them", "i'm he/him",
+        // "call me she/they", "pronouns: xe/xem". Nobody else can set or change them.
+        private const val PRONOUN_WORD = "(?:he|him|his|she|her|hers|they|them|their|theirs|it|its|xe|xem|xir|ze|zir|hir|fae|faer|ey|em|any|all)"
+        private val PRONOUN_SET_RE = Regex("(?i)(?:\\bmy pronouns?(?:\\s+(?:are|is|r))?\\s*:?|\\bpronouns\\s*:|\\bi\\s+(?:use|go by|prefer)|\\bcall me|\\brefer to me as|\\bi'?m|\\bim|\\bi am)\\s+" +
+            "($PRONOUN_WORD(?:\\s*/\\s*$PRONOUN_WORD){1,3})\\b")
+        private val PRONOUN_USE_RE = Regex("(?i)\\buse\\s+($PRONOUN_WORD(?:\\s*/\\s*$PRONOUN_WORD){1,3})\\s+(?:for me|with me|pronouns for me|when (?:talking about|you talk about|referring to) me)\\b")
+        private val PRONOUN_SINGLE_RE = Regex("(?i)\\bmy pronouns?\\s+(?:are|is|r)\\s*:?\\s+(he|she|they|it|any|any pronouns|whatever)\\b")
+        private val PRONOUN_NAME_ONLY_RE = Regex("(?i)\\b(?:i (?:don'?t|do not) (?:use|have) pronouns|no pronouns|just use my name(?: instead of pronouns)?)\\b")
         private val CALL_ME_NOT_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|never|no more) call(?:ing)? me ([\\p{L}\\p{N}_]{2,32})")
         private const val PING_ONLY = "(they pinged you with no message)"
         private val QUESTION_RE = Regex("(?i)\\?|\\b(why|what|how|who|which|where|when|would you|do you|are you|can you|you think)\\b|" +
@@ -284,6 +292,8 @@ class DiscordBotService : Service() {
     private val backoffUntil = ConcurrentHashMap<String, Long>()         // channel -> back-off deadline
     private val backoffStopMsg = ConcurrentHashMap<String, String>()     // channel -> id of the "stop" message
     private val nickSetAt = ConcurrentHashMap<String, Pair<Long, String>>()
+    private val pronounSetAt = ConcurrentHashMap<String, Pair<Long, String>>()
+    private val knownLanguages = ConcurrentHashMap<String, MutableSet<String>>()  // already on their card (skip the reload)
     private val reactReqAt = ConcurrentHashMap<String, Long>()   // channel:user -> when they last asked him to react
     // channel -> (person -> when, tone they asked for). The tone most people here asked for recently wins
     // ("normal" counts as a vote too), so the room — not one person — decides how he talks.
@@ -607,7 +617,15 @@ class DiscordBotService : Service() {
         persistEmojiUsageIfDirty()
         // "call me X" / "update my nickname to X" lands on their card right away, not at the next
         // learn pass, so the reply that says "ash it is" and the card agree.
-        if (!CALL_ME_NOT_RE.containsMatchIn(rawContent)) CALL_ME_RE.find(rawContent)?.groupValues?.get(2)?.let { nick ->
+        // Their own pronouns, the moment they say them (only the person themselves can set or change these).
+        val statedPronouns = parsePronouns(rawContent)
+        if (statedPronouns != null) {
+            UserMemoryStore.setPronouns(this, authorId, DiscordRest.displayName(author, ""), statedPronouns)
+            pronounSetAt[authorId] = now to statedPronouns
+        }
+        // What language they wrote in (free, English included) goes on their card.
+        noteLanguageOf(authorId, DiscordRest.displayName(author, ""), rawContent)
+        if (statedPronouns == null && !CALL_ME_NOT_RE.containsMatchIn(rawContent)) CALL_ME_RE.find(rawContent)?.groupValues?.get(2)?.let { nick ->
             if (nick.lowercase() !in CALL_ME_STOP) {
                 UserMemoryStore.applyDelta(this, authorId, DiscordRest.displayName(author, ""), JSONObject().put("preferredName", nick))
                 nickSetAt[authorId] = now to nick
@@ -864,10 +882,8 @@ class DiscordBotService : Service() {
                     DiscordBotState.log("shadow ↩ ${ctx.authorName}: ${outText.take(60)}")
                     trace(ctx, "reply", "shadow", "shadow", outText.take(90))
                 } else {
-                    // Only @-reply-thread when the convo moved past their message (out-of-order);
-                    // if we're answering the latest message, just talk plainly like a person.
                     val out = DiscordRest.send(cfg.botToken, ctx.channelId, outText,
-                        replyToMessageId = if ((ctx.addressed || ctx.followUp) && !built.targetIsLatest) ctx.messageId else null)
+                        replyToMessageId = if (shouldThread(ctx)) ctx.messageId else null)
                     if (out.error == null) {
                         out.messageId?.let { synchronized(recentBotMsgIds) { recentBotMsgIds[it] = ctx.authorId } }
                         recordFlow(ctx.channelId, FlowMsg(out.messageId.orEmpty(), botId, true, ctx.authorId, false,
@@ -1422,6 +1438,9 @@ class DiscordBotService : Service() {
                         // judged by the line that matches the fact best ("my creator isnt a 24/7 vrchat player"), not
                         // every line that happens to share a word like "play"
                         aboutSomeoneElse(support.maxBy { t -> factWords(t.text).count { it in words } }.text, f)) -> "someone else"
+                    // Asked "where u live?", ashoska answered for someone else ("kenya" → "hes from kenya?" "yup"):
+                    // their own bare answer, with someone else talking about a "he/she/they" and the same thing.
+                    answeredForSomeoneElse(support, humans, id, nameToId, names, words) -> "someone else"
                     // "atleast my creator isnt a 24/7 vrchat player" came back as "has a creator who is a VRChat player":
                     // the learner dropped the "not". A positive fact whose every backing line negates it is flipped.
                     support.isNotEmpty() && !FACT_NEGATION.containsMatchIn(f) && support.all { t -> negates(t.text, words) } -> "flipped"
@@ -1475,6 +1494,53 @@ class DiscordBotService : Service() {
         return (lead.endsWith("ing") && lead.length >= 5 && lead !in NOT_VERB_ING) ||
             Regex("\\b(i'?m|im|i am|am|just|been)\\s+(just\\s+|still\\s+)?[\\p{L}]+ing\\b").containsMatchIn(low)
     }
+
+    /** The pronouns this person just stated for themselves, normalised ("She / Her" → "she/her"), or null. */
+    private fun parsePronouns(text: String): String? {
+        if (PRONOUN_NAME_ONLY_RE.containsMatchIn(text)) return "none, use their name"
+        (PRONOUN_SET_RE.find(text) ?: PRONOUN_USE_RE.find(text))?.let { m ->
+            return m.groupValues[1].lowercase().split('/').map { it.trim() }.filter { it.isNotBlank() }.joinToString("/")
+        }
+        PRONOUN_SINGLE_RE.find(text)?.let { m ->
+            return when (val w = m.groupValues[1].lowercase()) {
+                "he" -> "he/him"; "she" -> "she/her"; "they" -> "they/them"; "it" -> "it/its"
+                "any", "any pronouns", "whatever" -> "any pronouns"
+                else -> w
+            }
+        }
+        return null
+    }
+
+    /** Record the language of their own message (script / Latin cues, or plain English) on their card. Costs a
+     *  card write only the first time a language is seen for them. */
+    private fun noteLanguageOf(authorId: String, name: String, text: String) {
+        val words = Regex("[\\p{L}']+").findAll(text.lowercase()).map { it.value }.toList()
+        val lang = detectLang(text).substringBefore(" (").trim().ifBlank {
+            if (words.size >= 3 && words.count { it in EN_WORDS || it in EN_COMMON } >= 2) "English" else ""
+        }
+        if (lang.isBlank()) return
+        val known = knownLanguages.getOrPut(authorId) { java.util.Collections.synchronizedSet(HashSet()) }
+        if (known.add(lang.lowercase())) UserMemoryStore.noteLanguage(this, authorId, name, lang)
+    }
+
+    /** The fact rests only on their own lines with no "I/my" in them, while someone ELSE in the batch says it about
+     *  a "he/she/they" without naming them: they were answering for another person ("kenya" … "hes from kenya?"). */
+    private fun answeredForSomeoneElse(
+        support: List<DiscordBotAi.Turn>, humans: List<DiscordBotAi.Turn>, id: String,
+        nameToId: Map<String, String>, names: Set<String>, words: Set<String>,
+    ): Boolean {
+        if (support.isEmpty() || words.isEmpty()) return false
+        if (support.any { nameToId[it.name.lowercase().trim()] != id }) return false
+        if (support.any { FIRST_PERSON_WORD.containsMatchIn(it.text) }) return false
+        return humans.any { t ->
+            val low = t.text.lowercase()
+            nameToId[t.name.lowercase().trim()] != id && THIRD_PERSON_WORD.containsMatchIn(low) &&
+                names.none { n -> Regex("(^|[^\\p{L}\\p{N}])" + Regex.escape(n) + "([^\\p{L}\\p{N}]|$)").containsMatchIn(low) } &&
+                factWords(t.text).any { it in words }
+        }
+    }
+    private val FIRST_PERSON_WORD = Regex("(?i)\\b(i|i'?m|im|i'?ve|ive|me|my|mine|myself)\\b")
+    private val THIRD_PERSON_WORD = Regex("(?i)\\b(he|she|they|he'?s|hes|she'?s|shes|they'?re|theyre|his|her|their|him|them)\\b")
 
     /** "my brother lives in tokyo" backs up a fact about the brother, not the speaker. */
     private fun aboutSomeoneElse(line: String, fact: String): Boolean {
@@ -1717,7 +1783,9 @@ class DiscordBotService : Service() {
             channelBits = ChannelMemoryStore.pickDeployable(this, ctx.channelId, ctx.userText, situationCues(ctx), now).orEmpty(),
             crossRef = crossRef,
             answering = answering.text + (nickSetAt[ctx.authorId]?.takeIf { System.currentTimeMillis() - it.first < NICK_NOTE_MS }
-                ?.let { " You now call them \"${it.second}\" (they asked; it's saved and done)." } ?: ""),
+                ?.let { " You now call them \"${it.second}\" (they asked; it's saved and done)." } ?: "") +
+                (pronounSetAt[ctx.authorId]?.takeIf { System.currentTimeMillis() - it.first < NICK_NOTE_MS }
+                    ?.let { " They just told you their pronouns (${it.second}): saved and done, use them." } ?: ""),
             othersPresent = built.otherSpeakers.isNotEmpty(),
             othersBlock = others.joinToString("\n") { it.text },
             summary = if (built.windowFull || built.refOutOfWindow)
@@ -1729,8 +1797,15 @@ class DiscordBotService : Service() {
             // got Spanish): say English explicitly then.
             langHint = askedLang(ctx.userText).ifBlank { detectLang(ctx.userText) }.ifBlank {
                 val low = Regex("[\\p{L}']+").findAll(ctx.userText.lowercase()).map { it.value }.toList()
-                if (low.count { it in EN_WORDS } >= 2 && turns.takeLast(8).any { detectLang(it.text).isNotBlank() }) "English" else ""
+                if (low.count { it in EN_WORDS } >= 2 && turns.takeLast(8).any { detectLang(it.text).isNotBlank() }) "English"
+                // Can't tell from this message: someone who doesn't speak English gets their own language.
+                else UserMemoryStore.load(this, ctx.authorId)?.let { UserMemoryStore.spokenLanguages(it) }
+                    ?.takeIf { l -> l.isNotEmpty() && l.none { it.equals("english", true) } }?.first().orEmpty()
             },
+            pronouns = turns.filter { !it.isBot }.map { it.name.lowercase().trim() }.distinct().mapNotNull { n ->
+                val uid = built.nameToId[n] ?: return@mapNotNull null
+                UserMemoryStore.pronounsOf(this, uid).takeIf { it.isNotBlank() }?.let { n to it }
+            }.toMap(),
             namesRule = answering.hasNick || others.any { it.hasNick },
             recall = built.recall || built.dayAsk != null,
             dayLog = built.dayAsk?.let {
@@ -1744,7 +1819,7 @@ class DiscordBotService : Service() {
                 val k = groundWords(t); k.isNotEmpty() && groundWords(ctx.userText).any { it in k }
             }.orEmpty(),
             nameHint = listOf(if (ctx.signOff) "They asked you to sign off: do what they asked (e.g. say goodnight to the chat) in one short line; you'll go quiet after." else "",
-                effectiveTone(ctx.channelId, now).orEmpty(), politicsHint(ctx, turns), slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
+                effectiveTone(ctx.channelId, now).orEmpty(), slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
                 .filter { it.isNotBlank() }.joinToString(" "),
             reactingToYou = (ctx.refTurn?.isBot == true || ctx.followUp || ctx.freeFollow) &&
                 ctx.userText.trim().split(Regex("\\s+")).size <= 4 && '?' !in ctx.userText,
@@ -1774,7 +1849,7 @@ class DiscordBotService : Service() {
         val re = Regex("(?i)\\b(he|him|his|he'?s|hes)\\b")
         val line = recent.lastOrNull { re.containsMatchIn(it.text) } ?: return ""
         val quote = line.text.replace(Regex("^\\(replying to [^)]*\\)\\s*"), "").take(80)
-        return "${line.name} said \"$quote\": that \"he\" is probably you. Refer to yourself only as I/me (\"don't encourage me\", never \"him\"), and don't bring this up."
+        return "${line.name} said \"$quote\": that \"he\" is probably you (you go by they/them). Refer to yourself only as I/me (\"don't encourage me\", never \"him\"), and don't bring this up."
     }
 
     /** "you didnt do it" right after they asked for a new name: it IS saved (he used to sass back "fix it
@@ -1797,14 +1872,6 @@ class DiscordBotService : Service() {
         }.distinctBy { it.second }.take(2)
         if (hits.isEmpty()) return ""
         return "Slang: " + hits.joinToString("; ") { (w, m) -> "\"$w\" = $m" } + "."
-    }
-
-    /** "i bet you love israel" / "do you?": a bait. He stonewalled ("we aren't doing this", "seek help"). The owner's
-     *  call: political jokes about any side are fine here, so he plays along. Free, only when the topic is on the table. */
-    private fun politicsHint(ctx: MsgCtx, turns: List<DiscordBotAi.Turn>): String {
-        val recent = (turns.takeLast(4).map { it.text } + ctx.userText).joinToString(" ")
-        if (!POLITICS_RE.containsMatchIn(recent)) return ""
-        return "Politics as a bit: political jokes are welcome here, about any side (politicians, parties, scandals — equal-opportunity roasting). Answer with a joke that actually plays along; no dodging, no 'we aren't doing this', no lecture."
     }
 
     /** Asked about the server ("can you even see this server's name?"): he knew it but just said "of course". */
@@ -1855,6 +1922,22 @@ class DiscordBotService : Service() {
         val q = flow[channelId] ?: return null
         val m = synchronized(q) { q.lastOrNull { it.isBot && it.replyTo == authorId } } ?: return null
         return m.theirText to m.text
+    }
+
+    /** Quote-reply unless it's plainly a one-on-one. Decided at SEND time: the reply takes seconds to write,
+     *  and a plain message landing under someone else's line read as an answer to them (he answered kiellmann,
+     *  then ashoska, both plain, with lines in between — nobody could tell who each was for). Plain only when
+     *  nothing was said since their message, his last line here was to them too, and nobody else was talking. */
+    private fun shouldThread(ctx: MsgCtx): Boolean {
+        val q = flow[ctx.channelId] ?: return true
+        val recent = synchronized(q) { q.toList() }
+        val idx = recent.indexOfLast { it.id == ctx.messageId }
+        if (idx < 0) return true
+        if (idx < recent.size - 1) return true                       // anything posted after it (his own lines included)
+        val now = System.currentTimeMillis()
+        val lastBot = recent.subList(0, idx).lastOrNull { it.isBot && now - it.ts < THREAD_WINDOW_MS }
+        if (lastBot != null && lastBot.replyTo != ctx.authorId) return true   // switching who he's talking to
+        return recent.subList(0, idx).any { !it.isBot && it.authorId != ctx.authorId && now - it.ts < THREAD_WINDOW_MS }
     }
 
     private fun recordFlow(channelId: String, m: FlowMsg) {
@@ -2174,6 +2257,12 @@ class DiscordBotService : Service() {
         return if (bestScore >= 2 && bestScore > english) best else ""
     }
 
+    // Everyday English (with texting spellings) for telling "hey whats up guys, just got back" is English.
+    private val EN_COMMON = setOf("hey", "hi", "hello", "whats", "what's", "up", "guys", "just", "got", "back", "from", "work",
+        "lol", "lmao", "yeah", "yes", "no", "not", "im", "i'm", "ur", "u", "dont", "don't", "cant", "can't", "wanna", "gonna",
+        "was", "we", "they", "he", "she", "about", "but", "so", "if", "all", "like", "know", "think", "this", "that", "there",
+        "here", "when", "where", "who", "why", "how", "because", "cuz", "really", "good", "bad", "now", "today", "tonight",
+        "been", "did", "does", "doing", "going", "go", "come", "some", "any", "out", "into", "over", "home", "game", "play")
     private class LangCues(val words: Set<String>, val chars: String)
     private val EN_WORDS = setOf("the", "and", "you", "is", "are", "what", "do", "i", "it", "to", "of", "a", "my", "your", "that", "this", "in", "on", "for", "with", "was", "have", "how", "why")
     private val LATIN_CUES = linkedMapOf(
@@ -2184,6 +2273,16 @@ class DiscordBotService : Service() {
         "Italian (italiano)" to LangCues(setOf("che", "non", "sono", "come", "ciao", "grazie", "perché", "molto", "il", "gli", "della", "una", "anche", "cosa", "sei"), "àèìòù"),
         "Dutch (Nederlands)" to LangCues(setOf("ik", "je", "het", "een", "niet", "wat", "hoe", "dank", "hallo", "jij", "zijn", "met", "ook", "maar", "dat"), ""),
         "Polish (polski)" to LangCues(setOf("jest", "nie", "się", "jak", "co", "czy", "dzięki", "cześć", "ty", "ja", "to", "tak"), "ąęłńśźż"),
+        // Czech was read as gibberish on device ("it's not even Czech"), so the rest of the common Latin-script ones too.
+        "Czech (čeština)" to LangCues(setOf("takže", "jsem", "jsi", "jse", "je", "že", "není", "ano", "ne", "já", "proč", "děkuji", "díky", "ahoj", "teď", "mluví", "mluvím", "česky", "čeština", "jak", "co", "tak", "od", "ale", "taky", "moc", "prosím", "dobře", "jo"), "ěřůťďň"),
+        "Slovak (slovenčina)" to LangCues(setOf("som", "si", "nie", "áno", "prečo", "ďakujem", "čo", "ako", "teraz", "slovensky", "ale", "veľmi", "dobre", "ahoj", "však"), "ľĺŕô"),
+        "Turkish (Türkçe)" to LangCues(setOf("ve", "bir", "bu", "ne", "değil", "evet", "hayır", "nasıl", "neden", "teşekkürler", "merhaba", "sen", "ben", "çok", "mı", "mi", "var", "yok"), "ğışİ"),
+        "Romanian (română)" to LangCues(setOf("și", "este", "nu", "da", "ce", "cum", "de", "mulțumesc", "salut", "eu", "tu", "foarte", "sunt", "ești", "dar"), "ășțȘȚ"),
+        "Hungarian (magyar)" to LangCues(setOf("és", "nem", "igen", "hogy", "mi", "miért", "köszönöm", "szia", "vagyok", "vagy", "egy", "nagyon", "de", "ez", "az"), "őű"),
+        "Swedish (svenska)" to LangCues(setOf("jag", "du", "är", "och", "inte", "det", "vad", "hur", "varför", "tack", "hej", "också", "men", "mycket", "har"), "åäö"),
+        "Norwegian/Danish (norsk/dansk)" to LangCues(setOf("jeg", "du", "er", "og", "ikke", "det", "hva", "hvad", "hvordan", "hvorfor", "takk", "tak", "hei", "hej", "også", "meget", "veldig", "har"), "æøå"),
+        "Finnish (suomi)" to LangCues(setOf("minä", "sinä", "on", "ja", "ei", "mitä", "miksi", "kiitos", "moi", "hei", "kyllä", "tämä", "se", "olen", "oot", "mutta"), "äö"),
+        "Indonesian (Bahasa Indonesia)" to LangCues(setOf("aku", "saya", "kamu", "apa", "tidak", "nggak", "gak", "ya", "dan", "ini", "itu", "terima", "kasih", "kenapa", "bagaimana", "juga", "sangat", "yang"), ""),
     )
 
     /**

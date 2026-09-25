@@ -1,0 +1,28 @@
+# Who is he answering? One-on-one he talks plainly; once anyone else is in the mix he quote-replies, so a
+# line can't be read as an answer to whoever spoke last (seen on device: two plain replies, to kiellmann
+# then to ashoska, with other lines in between — nobody could tell who each was for).
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+[general]
+alice: @Cardinal what's the best pizza topping
+> expect reply
+> expect plain
+alice ^bot: ok but pineapple though?
+> expect reply
+> expect plain
+# someone else asks him → quote-reply bob
+bob: @Cardinal what's your favourite movie
+> expect reply
+> expect threaded bob
+# back to alice → quote-reply her, he's switching who he's talking to
+alice ^bot: pineapple is elite and you know it
+> expect reply
+> expect threaded alice
+# a new person while he was just talking to alice → quote-reply carol
+carol: @Cardinal is cereal a soup
+> expect reply
+> expect threaded carol
+# Czech is Czech, not gibberish (seen on device: "it's not even Czech, it's just gibberish").
+erin: @Cardinal ok takže od teď se mluví česky ok?
+> expect reply
+> expect not-contains (?i)(gibberish|not (even )?czech|made up|making up)

@@ -99,7 +99,9 @@ object DiscordBotAi {
      */
     // Rules only, no personality: how he talks (sass, length, caps…) comes from his learned traits and mood.
     private const val CORE = PersonalityStore.ANCHOR +
-        " You chat here like anyone else. Do reasonable asks without lecturing; if you know the answer, give it." +
+        " You chat here like anyone else. Go along with what people ask for fun (write something, pick, rate, roleplay," +
+        " jokes about anyone, politicians of any side included) in your own voice, quirks and mood; no lecturing." +
+        " If they keep pushing after you dodged, do it. If you know the answer, give it." +
         " Don't make up real-world facts. Have real opinions. Play along with jokes about you instead of denying them." +
         " Don't complain about pings."
 
@@ -137,6 +139,7 @@ object DiscordBotAi {
         val clock: String = "",             // asked the time/date/timezone → the real UTC clock
         val verdictAsk: Boolean = false,    // "rate me 1-10" / "pick one" / "would you rather" → give an actual answer
         val nameHint: String = "",          // a name in their message Cardinal doesn't know (and who it most likely is)
+        val pronouns: Map<String, String> = emptyMap(), // lowercased speaker name → the pronouns they asked for
     )
 
     suspend fun reply(cfg: DiscordBotStore.Config, model: String, turns: List<Turn>, c: ReplyCtx): ReplyResult {
@@ -181,7 +184,9 @@ object DiscordBotAi {
         // Merge consecutive same-author turns so the transcript reads as fewer, fuller turns.
         for (t in mergeTurns(turns)) {
             if (t.text.isBlank()) continue
-            messages.put(obj(if (t.isBot) "assistant" else "user", if (t.isBot) t.text else "${t.name}: ${t.text}"))
+            // Each speaker's own pronouns ride next to their name, so the reply never has to guess.
+            val who = c.pronouns[t.name.lowercase().trim()]?.let { "${t.name} ($it)" } ?: t.name
+            messages.put(obj(if (t.isBot) "assistant" else "user", if (t.isBot) t.text else "$who: ${t.text}"))
         }
         val maxTok = if (c.shortHint) DiscordBotLimits.SHORT_REPLY_MAX_TOKENS else DiscordBotLimits.REPLY_MAX_TOKENS
         return when (val r = call(cfg, model, messages, maxTok)) {
@@ -223,11 +228,11 @@ object DiscordBotAi {
         if (followWith.isNotBlank()) {
             val (theirs, his) = exchange ?: ("" to turns.lastOrNull { it.isBot }?.text.orEmpty())
             val sys = "Cardinal (a member of this Discord) was talking with $followWith" +
-                (if (theirs.isNotBlank()) " — $followWith said \"${theirs.take(140)}\" and Cardinal answered \"${his.take(140)}\". " else "; his last line to them: \"${his.take(140)}\". ") +
-                "Is $followWith's LAST message a reply to Cardinal? Only if it clearly continues with HIM: answers his question, " +
-                "reacts to what he said, or asks him something. Output only JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<emoji or empty>\"}. " +
+                (if (theirs.isNotBlank()) " — $followWith said \"${theirs.take(140)}\" and Cardinal answered \"${his.take(140)}\". " else "; Cardinal's last line to them: \"${his.take(140)}\". ") +
+                "Is $followWith's LAST message a reply to Cardinal? Only if it clearly continues with Cardinal: answers Cardinal's question, " +
+                "reacts to what Cardinal said, or asks Cardinal something. Output only JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<emoji or empty>\"}. " +
                 "Reply (react if it's only 'lol'/'true'/an emoji). Ignore when it answers or continues with someone else, starts a new topic " +
-                "for the room, or you're not sure — most group chat isn't to him."
+                "for the room, or you're not sure — most group chat isn't to Cardinal."
             val messages = JSONArray().put(obj("system", sys)).put(obj("user", "RECENT CHAT:\n$transcript"))
             return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 80, DiscordBotLimits.DIRECTOR_TEMPERATURE)) {
                 is Result.Ok -> parsePlan(r.text) ?: run { logIssue("Follow-up check", "unreadable answer: ${r.text.take(60)}"); null }
@@ -240,7 +245,7 @@ object DiscordBotAi {
             "Output only JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<emoji or empty>\"}. " +
             "Reply to add a joke, an opinion or an answer; react to a low-value 'lol'; ignore private 1:1 talk or noise. " +
             "In an active room lean reply/react." +
-            (if (named) " The last message talks about Cardinal by name: answer it or react (a comeback to a roast, thanks for a compliment), ignore only if it's clearly not meant to reach him." else "")
+            (if (named) " The last message talks about Cardinal by name: answer it or react (a comeback to a roast, thanks for a compliment), ignore only if it's clearly not meant to reach Cardinal." else "")
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", "RECENT CHAT:\n$transcript"))
         return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 80, DiscordBotLimits.DIRECTOR_TEMPERATURE)) {
             is Result.Ok -> parsePlan(r.text) ?: run { logIssue("Director", "unreadable answer: ${r.text.take(60)}"); null }
@@ -385,18 +390,18 @@ object DiscordBotAi {
             append("{\"summary\":\"<one short sentence, under 20 words: who is talking about what right now>\",")
             append("\"moments\":[\"<only something people would bring up later (a legendary line, a big reveal, a joke that stuck), one short sentence with who; most chats have none: []>\"],")
             if (fix) append("\"wrong\":[<numbers of STORED items the chat says are untrue or out of date, or that people asked Cardinal to stop>],")
-            append("\"self\":{\"trait\":\"<ONE new lasting quirk, habit, opinion, role or bit of Cardinal's, one thing only, as a 3-8 word phrase saying what he does or is known for, clear to someone who wasn't there (never a single word) (shown in his own messages, or given to him by others and he went along with it; not a one-off event)>\",")
+            append("\"self\":{\"trait\":\"<ONE new lasting quirk, habit, opinion, role or bit of Cardinal's, one thing only, as a 3-8 word phrase saying what Cardinal does or is known for, clear to someone who wasn't there (never a single word) (shown in Cardinal's own messages, or given to Cardinal by others and Cardinal went along with it; not a one-off event)>\",")
             append("\"mood\":\"<a word or two>\"},")
             // The room is riffing on one of his bits: ask about that bit directly (a pointed question the small
             // model answers far better than the general "if a trait changed" rule).
-            if (bitFocus.isNotBlank()) append("\"bit\":\"<how Cardinal's bit '$bitFocus' stands after this chat, NOW — his current status, not the history — in at most 6 words, using the words the others used for what changed (name the new people or status they gave him, e.g. who he's with now) and keeping the bit's subject — only if the room changed it AND Cardinal went along in his own messages (his last word counts); else same>\",")
+            if (bitFocus.isNotBlank()) append("\"bit\":\"<how Cardinal's bit '$bitFocus' stands after this chat, NOW — Cardinal's current status, not the history — in at most 6 words, using the words the others used for what changed (name the new people or status they gave Cardinal, e.g. who Cardinal is with now) and keeping the bit's subject — only if the room changed it AND Cardinal went along in Cardinal's own messages (Cardinal's last word counts); else same>\",")
             append("\"people\":[{\"about\":\"<name exactly as shown (not Cardinal)>\",\"facts\":[\"<new lasting fact about who they are>\"]}],")
             append("\"event\":\"<an inside joke or legendary moment the server will keep bringing up, as one full sentence: what happened, who was involved (names) and why it stuck — or empty>\"}\n")
             append("Optional keys: add them ONLY when the chat clearly shows it, otherwise leave the key out entirely (no empty values). ")
             append("Per person: nickname (what others call them), relationship (their role here), language (if not English)")
             if (fix) append(", forget (a stored fact of theirs that's no longer true), notNickname (a name they said not to call them), avoid (something they asked Cardinal to stop doing to them)")
             append(". Top level: channelBit (a running joke in THIS channel, as one full sentence saying what it is and who's part of it). ")
-            append("If the chat changed one of Cardinal's known traits (a new partner, a breakup, a promotion he went along with), write the NEW version as self.trait and copy the old trait into self.replaces; just repeating or rewording a known trait isn't new; if his stance shifted during the chat, his LAST word on it is what counts. Name a trait with the chat's own words (the title or bit people actually used). ")
+            append("If the chat changed one of Cardinal's known traits (a new partner, a breakup, a promotion Cardinal went along with), write the NEW version as self.trait and copy the old trait into self.replaces; just repeating or rewording a known trait isn't new; if Cardinal's stance shifted during the chat, Cardinal's LAST word on it is what counts. Name a trait with the chat's own words (the title or bit people actually used). ")
             append("summary and moments are required (moments may be []); leave out self.trait if there's nothing new.\n")
             append("Only list people you learned something NEW and lasting about. A fact must be said or clearly shown in THIS chat ")
             append("(a question someone asks or a joke isn't a fact about them): ")
@@ -467,7 +472,7 @@ object DiscordBotAi {
             // The small model sometimes files Cardinal's own quirks under people: salvage one as the trait.
             val salvaged = selfEntries.firstOrNull()?.json?.let { j ->
                 (strList(j.optJSONArray("traits")) + strList(j.optJSONArray("facts")) + listOf(j.optString("trait")))
-                    .map { it.trim().replace(Regex("(?i)^(he'?s|he is|he|cardinal is|cardinal)\\s+"), "") }
+                    .map { it.trim().replace(Regex("(?i)^(he'?s|he is|he|they'?re|they are|cardinal is|cardinal)\\s+"), "") }
                     .firstOrNull { it.length in 3..80 }
             }.orEmpty()
             fun str(v: String?) = v?.trim().orEmpty().takeUnless { PLACEHOLDER.matches(it) }.orEmpty()
