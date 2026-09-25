@@ -166,7 +166,7 @@ object UserMemoryStore {
     private val GENERIC_REL = Regex("(?i)^(a |an |the )?(regular |server |discord |normal )?(member|user|participant|person|chatter|someone|human|guy|people)s?\\.?$")
 
     // Guesses aren't facts ("possibly a friend of Cardinal's", "is a member of the server").
-    private val SPECULATION = Regex("(?i)\\b(possibly|probably|maybe|perhaps|might be|seems to|likely|apparently)\\b|" +
+    private val SPECULATION = Regex("(?i)\\b(possibly|probably|maybe|perhaps|might be|seems to|likely|apparently|implied|implies|inferred|suggests?|judging by|based on)\\b|" +
         "\\b(a )?member of (the|this) (server|discord|chat)\\b|" +
         // How they play along with Cardinal is chat, not who they are (their relationship to him has its own slot).
         "\\bcardinal\\b")

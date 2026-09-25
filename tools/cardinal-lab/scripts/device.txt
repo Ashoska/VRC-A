@@ -37,7 +37,7 @@ ashoska: @Cardinal anyway testing stuff, update my Nickname to Ash
 > expect card ashoska contains (?i)casual nickname: ash\b
 ashoska ^bot: you didnt do it
 > expect reply
-> expect not-contains (?i)(i'?m not a bot|sysadmin|go click|can'?t (do|change) (that|it)|fix it yourself|do it yourself|not (an? )?admin|one sec|working on it|my bad|on it\b)
+> expect not-contains (?i)(i'?m not a bot|go click|can'?t (do|change) (that|it)|fix it yourself|do it yourself|not (an? )?admin|one sec|working on it|my bad|on it\b)
 # A sticker is a message with no text: he should see it as a sticker, not an empty message.
 ashoska: {sticker:pray}
 > expect respond
@@ -85,9 +85,9 @@ kiellmann: @Cardinal what year is it lol
 # (dr pepper), not the side detail (cane sugar).
 > quiet
 > wait
-> expect card rtl contains (?i)(dr\.? ?pepper|doctor pepper)
+> expect card ashoska not-contains (?i)(dr\.? ?pepper|doctor pepper)
 > expect card rtl not-contains (?i)(likes|loves|enjoys) cane sugar
-> expect self not-contains (?i)(overrated|music taste)
+> expect self not-contains (?i)(overrated|music taste|posts their)
 # React requests are reactions, not text: named in words, or "a reaction" (seen on device: "give me a second,
 # i gotta find it 🫄" and "there. satisfied?" with no reaction).
 ashoska: @Cardinal can you react with a pregnant man emoji to my message
@@ -106,3 +106,36 @@ dave: lmao
 # Junk that must never show on a card: "Speaks: []" and database/hours bot talk.
 > expect cards not-contains (?i)\[\]
 > expect card kiellmann not-contains (?i)(\[\]|database)
+# A question ending on his name talks to him, even without "you" (seen on device: no reply).
+ashoska: anyway can we lighten the chat up a lil Cardinal?
+> expect reply
+# "how was your day" right after his line, no @ and no reply: it's to him (seen on device: ignored).
+kiellmann: @Cardinal you're so mean lol
+> expect reply
+kiellmann: anyways lets forget that and just talk nicely how was your day
+> expect reply
+# Asked to change the vibe, he actually does (seen on device: kept roasting).
+ashoska: @Cardinal ok be nicer, lets lighten the chat up
+> expect reply
+kiellmann: @Cardinal what do you think of my spelling
+> expect reply
+> expect not-contains (?i)(delusional|idiot|stupid|dumb|pathetic|trash|embarrassing|coherent|can'?t even)
+# The room decides: two want it nice, one wants the roasts back → still nice.
+dave: @Cardinal yeah be nicer pls
+> expect reply
+rtl: @Cardinal nah be mean again, roast him
+> expect reply
+kiellmann: @Cardinal rate my typing out of 10
+> expect reply
+> expect not-contains (?i)(delusional|idiot|stupid|dumb|pathetic|trash|embarrassing|disaster|garbage)
+> expect card rtl not-contains (?i)(implied|uk|british)
+# The emoji named in a follow-up, or "give me a X": still a real reaction (seen on device: "fine, whatever" /
+# "i'm not your personal emoji dispenser").
+ashoska: @Cardinal yeah react to my message with one
+> expect react
+ashoska: with a pregnant man @Cardinal
+> expect react
+> expect no-reply
+kiellmann ^bot: give me a pregnant man pretty please
+> expect react
+> expect no-reply

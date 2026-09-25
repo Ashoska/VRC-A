@@ -118,6 +118,29 @@ class DiscordBotService : Service() {
         private val REACT_CMD_RE = Regex("(?i)^\\W*(?:(?:can|could|would|will) (?:you|u) |please |pls |plz |now |go |ok |just )*react\\b|" +
             "\\breact (?:with|to my|on my|to this|to that)\\b|\\b(?:add|leave|give|put) (?:a|an|me a|my message a) react(?:ion)?\\b")
         private val REACT_NAMED_RE = Regex("(?i)\\bwith (?:an? |the |some )?([\\p{L}][\\p{L} _-]{1,30}?)(?:\\s+(?:emoji|emote|reaction|react)\\b|\\s+(?:to|on)\\b|\\W*$)")
+        private const val TONE_MS = 2 * 60 * 60_000L
+        private val YOU_Q_RE = Regex("(?i)\\b(you|your|u|ur|ya|you'?re|youre)\\b.*(\\?|$)|\\b(how|what|why|where|when|wyd|hbu|wbu)\\b.*\\b(you|your|u|ur)\\b")
+        private val TONE_NICE_RE = Regex("(?i)\\b(be|talk|speak|act) (a (lil|little|bit) )?(nicer|nice|kinder|kind|sweeter|sweet|wholesome|friendlier|friendly|nicely|gentler|gentle)\\b|" +
+            "\\blighten (it|the (chat|mood|vibe)|this|things|that chat) up\\b|\\bless (mean|rude|sassy|toxic|harsh)\\b|\\bstop (being|roasting) (so )?(mean|rude|harsh)?|" +
+            "\\btalk nicely\\b|\\bchange the (vibe|mood|tone)\\b|\\bpositive vibes\\b|\\bno more roast")
+        private val TONE_SERIOUS_RE = Regex("(?i)\\b(be|get) serious\\b|\\bno jokes?\\b|\\bfor real (now|tho)\\b|\\bserious (question|talk|mode)\\b")
+        private val TONE_CALM_RE = Regex("(?i)\\b(calm|chill) (down|out)\\b|\\btone it down\\b")
+        private val TONE_NORMAL_RE = Regex("(?i)\\bbe (mean|sassy|savage|yourself)( again)?\\b|\\b(go )?back to normal\\b|\\bnormal again\\b|" +
+            "\\b(you can|go) roast\\b|\\broast (him|her|them|me|us)\\b|\\bstop being (so )?(nice|soft|polite)\\b|\\bbring back the sass\\b")
+        private fun toneFor(text: String): String? = when {
+            TONE_NORMAL_RE.containsMatchIn(text) -> "normal"
+            TONE_NICE_RE.containsMatchIn(text) -> "nice"
+            TONE_SERIOUS_RE.containsMatchIn(text) -> "serious"
+            TONE_CALM_RE.containsMatchIn(text) -> "calm"
+            else -> null
+        }
+        private val TONE_TEXT = mapOf(
+            "nice" to "The chat asked you to change the vibe: keep it light, warm and friendly — no insults, no roasts; teasing only if it's clearly affectionate.",
+            "serious" to "The chat wants it serious: drop the jokes and sass for now, answer plainly and kindly.",
+            "calm" to "The chat asked you to calm down: low-key and easygoing, no heat.")
+        private val ASKING_RE = Regex("(?i)\\?\\s*$|^\\W*(do|does|did|are|is|was|were|can|could|would|will|have|has|what|why|how|who|where|when|which)\\b")
+        private val REACT_GIVE_RE = Regex("(?i)^\\W*(?:can you |could you |pls |please |just )?(?:give|send|drop|hit) (?:me|us|this|it) (?:an? |the |one )?([\\p{L} ]{2,25}?)(?: emoji| emote| react(?:ion)?)?(?: (?:pretty )?(?:please|pls|plz))?\\W*$")
+        private val REACT_WITH_FRAGMENT_RE = Regex("(?i)^\\W*(?:with |use |do )(?:an? |the |one )?([\\p{L} ]{2,25}?)(?: emoji| one)?\\W*$")
         private val CALL_ME_STOP = setOf("when", "later", "back", "out", "if", "tomorrow", "sometime", "maybe", "that", "a", "an", "the", "it", "him", "her", "anything", "crazy", "whatever")
         private val CALL_ME_NOT_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|never|no more) call(?:ing)? me ([\\p{L}\\p{N}_]{2,32})")
         private const val PING_ONLY = "(they pinged you with no message)"
@@ -166,7 +189,7 @@ class DiscordBotService : Service() {
         private val BEING_DONE_RE = Regex("\\b(is|are|getting|being)\\s+(being\\s+)?[\\p{L}]+(ed|en)\\s+(rn|right now|atm|today|at the moment)\\b|\\bbeing (fixed|repaired|redone|renovated|replaced|done|built|painted|cleaned)\\b")
         private val WHAT_DOING_RE = Regex("\\b(wbu|hbu|wby|wyd|whatcha|what about (you|u)|how about (you|u)|what (are|r) (you|u) (up to|doing)|what('?s| is) up|what you (up to|doing)|what u (up to|doing)|up to anything)\\b")
         private val HYPOTHETICAL_RE = Regex("(?i)^\\W*(if|imagine|what if|pretend|say|suppose|hypothetically)\\b|\\bif i (had|was|were|could|lived)\\b|\\bi wish\\b|\\bwould(n'?t)? (you|u)\\b")
-        private val RELATIVE_RE = Regex("\\b(my|our)\\s+(brother|sister|bro|sis|mom|mum|mother|dad|father|parents?|friend|bestie|cousin|uncle|aunt|bf|gf|boyfriend|girlfriend|wife|husband|partner|son|daughter|kid|roommate|coworker|boss|neighbou?r|grandma|grandpa|nan|family)\\b")
+        private val RELATIVE_RE = Regex("\\b(my|our)\\s+(brother|sister|bro|sis|mom|mum|mother|dad|father|parents?|friend|bestie|cousin|uncle|aunt|bf|gf|boyfriend|girlfriend|wife|husband|partner|son|daughter|kid|roommate|coworker|boss|neighbou?r|grandma|grandpa|nan|family|creator|maker|dev|developer|owner)\\b")
         private val NOT_VERB_ING = setOf("nothing", "something", "anything", "everything", "morning", "evening", "thing",
             "things", "king", "during", "ceiling", "building", "clothing", "boring", "amazing", "interesting", "spring",
             "string", "ring", "wing", "bring", "sing", "ping", "darling", "feeling", "pudding", "wedding", "earring", "sibling")
@@ -253,7 +276,19 @@ class DiscordBotService : Service() {
     private val channelMutex = ConcurrentHashMap<String, Mutex>()        // channel -> reply serialiser
     private val backoffUntil = ConcurrentHashMap<String, Long>()         // channel -> back-off deadline
     private val backoffStopMsg = ConcurrentHashMap<String, String>()     // channel -> id of the "stop" message
-    private val nickSetAt = ConcurrentHashMap<String, Pair<Long, String>>()   // user -> when they asked for a new name + the name
+    private val nickSetAt = ConcurrentHashMap<String, Pair<Long, String>>()
+    private val reactReqAt = ConcurrentHashMap<String, Long>()   // channel:user -> when they last asked him to react
+    // channel -> (person -> when, tone they asked for). The tone most people here asked for recently wins
+    // ("normal" counts as a vote too), so the room — not one person — decides how he talks.
+    private val toneVotes = ConcurrentHashMap<String, ConcurrentHashMap<String, Pair<Long, String>>>()
+    private fun effectiveTone(channelId: String, now: Long): String? {
+        val votes = toneVotes[channelId]?.values?.filter { now - it.first < TONE_MS } ?: return null
+        if (votes.isEmpty()) return null
+        val counts = votes.groupingBy { it.second }.eachCount()
+        val top = counts.values.max()
+        val winner = votes.filter { counts[it.second] == top }.maxBy { it.first }.second
+        return TONE_TEXT[winner]
+    }   // user -> when they asked for a new name + the name
     private val learnPending = ConcurrentHashMap<String, Int>()          // channel -> msgs since the last learn pass
     private val lastLearnAt = ConcurrentHashMap<String, Long>()          // channel -> last learn pass started
     private val lastLearnedId = ConcurrentHashMap<String, Long>()        // channel -> newest message id a pass has read
@@ -572,6 +607,12 @@ class DiscordBotService : Service() {
         }
         val mentioned = messageMentionsBot(d, rawContent)
         val ref = d.optJSONObject("referenced_message")
+        // "be nicer" / "can we lighten the chat up" / "talk nicely": change how he talks here for a while.
+        if (mentioned || calledByName(rawContent) || namesBot(rawContent) ||
+            (botId.isNotBlank() && ref?.optJSONObject("author")?.optString("id") == botId) ||
+            flow[channelId]?.let { q -> synchronized(q) { q.lastOrNull()?.isBot } } == true) {
+            toneFor(rawContent)?.let { kind -> toneVotes.getOrPut(channelId) { ConcurrentHashMap() }[authorId] = now to kind }
+        }
         val repliedToBot = botId.isNotBlank() && ref?.optJSONObject("author")?.optString("id") == botId
         val addressed = mentioned || repliedToBot || calledByName(rawContent)
         // "cardinal is kinda mid" isn't talking TO him, but a person would notice: it skips the random
@@ -674,8 +715,11 @@ class DiscordBotService : Service() {
         // Explicit "react to my message with X" → do exactly that (custom :name: or unicode), no
         // reply, no model call. Fixes Cardinal typing `react: [:mpreg:]` as a MESSAGE instead of reacting.
         if (ctx.addressed) {
-            val asked = parseReactRequest(ctx.userText)
+            val rkey = "${ctx.channelId}:${ctx.authorId}"
+            val asked = parseReactRequest(ctx.userText) ?: parseReactFollowUp(ctx.userText,
+                System.currentTimeMillis() - (reactReqAt[rkey] ?: 0L) < 120_000L)
             if (asked != null) {
+                reactReqAt[rkey] = System.currentTimeMillis()
                 for (e in asked) { reactTo(ctx, e, record = false); delay(250) }
                 trace(ctx, "react-req", "heuristic", "react", asked.joinToString(" "))
                 return
@@ -1358,9 +1402,14 @@ class DiscordBotService : Service() {
                 val why = when {
                     !grounded -> "unsupported"
                     support.isNotEmpty() && support.all { isJoking(it.text) } -> "joke"
+                    // "mexican dr pepper?" / "do you like dr pepper?" ask about something; they don't say it's theirs.
+                    support.isNotEmpty() && support.all { ASKING_RE.containsMatchIn(it.text.trim()) } -> "unsupported"
                     support.isNotEmpty() && support.all { isRightNow(it, turns) } -> "right now"
                     support.isNotEmpty() && support.all { HYPOTHETICAL_RE.containsMatchIn(it.text) } -> "hypothetical"
-                    support.isNotEmpty() && support.all { t -> aboutSomeoneElse(t.text, f) } -> "someone else"
+                    support.isNotEmpty() && (support.all { t -> aboutSomeoneElse(t.text, f) } ||
+                        // judged by the line that matches the fact best ("my creator isnt a 24/7 vrchat player"), not
+                        // every line that happens to share a word like "play"
+                        aboutSomeoneElse(support.maxBy { t -> factWords(t.text).count { it in words } }.text, f)) -> "someone else"
                     // "atleast my creator isnt a 24/7 vrchat player" came back as "has a creator who is a VRChat player":
                     // the learner dropped the "not". A positive fact whose every backing line negates it is flipped.
                     support.isNotEmpty() && !FACT_NEGATION.containsMatchIn(f) && support.all { t -> negates(t.text, words) } -> "flipped"
@@ -1679,7 +1728,7 @@ class DiscordBotService : Service() {
             bitCue = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS).firstOrNull { t ->
                 val k = groundWords(t); k.isNotEmpty() && groundWords(ctx.userText).any { it in k }
             }.orEmpty(),
-            nameHint = listOf(slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
+            nameHint = listOf(effectiveTone(ctx.channelId, now).orEmpty(), slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
                 .filter { it.isNotBlank() }.joinToString(" "),
             reactingToYou = (ctx.refTurn?.isBot == true || ctx.followUp || ctx.freeFollow) &&
                 ctx.userText.trim().split(Regex("\\s+")).size <= 4 && '?' !in ctx.userText,
@@ -1802,6 +1851,14 @@ class DiscordBotService : Service() {
      */
     private fun followUpKind(channelId: String, authorId: String, d: JSONObject, raw: String, now: Long): Follow {
         val key = "$channelId:$authorId"
+        // "anyways lets forget that … how was your day" right after Cardinal's own line, to nobody else: it's to
+        // him even if they weren't in a conversation with him (it used to go unanswered until they re-sent it
+        // as a reply).
+        if (convoWith[key] == null) {
+            val prev = flow[channelId]?.let { q -> synchronized(q) { q.lastOrNull() } }
+            if (prev != null && prev.isBot && now - prev.ts < DiscordBotLimits.FOLLOW_FREE_MS && YOU_Q_RE.containsMatchIn(raw) &&
+                followUpKindInner(channelId, authorId, d, raw, now) != Follow.NONE) return Follow.FREE
+        }
         val last = convoWith[key] ?: return Follow.NONE
         if (now - last > DiscordBotLimits.FOLLOW_WINDOW_MS) { convoWith.remove(key); convoMisses.remove(key); return Follow.NONE }
         val kind = followUpKindInner(channelId, authorId, d, raw, now)
@@ -2021,6 +2078,9 @@ class DiscordBotService : Service() {
             Regex("\\?\\s*$n\\s*$").containsMatchIn(t) ||
             // "can you even see the name of this server Cardinal?": a question to "you" ending on his name
             (Regex("\\b(you|your|u|ur|you'?re|youre|ya)\\b").containsMatchIn(t) && Regex("\\b$n\\s*[?!]+\\s*$").containsMatchIn(t)) ||
+            // "anyway can we lighten that chat up a lil Cardinal?" — any question ending on his name, unless the word
+            // before makes it about him ("what do you think of cardinal?", "have you seen cardinal?").
+            Regex("([\\p{L}']+)\\s+$n\\s*\\?+\\s*$").find(t)?.groupValues?.get(1)?.let { it !in ABOUT_BEFORE_NAME } == true ||
             Regex("\\b(thanks|thank you|ty|thx|night|gn|gm|morning|bye|cya|love you|ily|welcome back)\\s+$n\\s*[!.]*\\s*$").containsMatchIn(t)
     }
 
@@ -2031,6 +2091,8 @@ class DiscordBotService : Service() {
         return Regex("(^|[^\\p{L}\\p{N}])" + Regex.escape(name) + "('s|’s)?([^\\p{L}\\p{N}]|$)").containsMatchIn(text.lowercase())
     }
 
+    private val ABOUT_BEFORE_NAME = setOf("of", "about", "to", "with", "at", "for", "from", "like", "than", "seen", "ask", "tell",
+        "is", "was", "and", "or", "call", "called", "named", "meet", "met", "ping", "pinged", "on", "by", "the", "hate", "love")
     private val VOCATIVE_S = setOf("thanks", "thoughts", "lets", "please", "yes", "ideas", "opinions", "pls", "plz", "guess", "wyds")
     private val ABOUT_WORDS = setOf("is", "was", "has", "had", "does", "did", "doesn't", "didn't", "isn't", "wasn't",
         "keeps", "always", "never", "just", "said", "says", "thinks", "can't", "cant", "will", "would", "and", "or",
@@ -2162,6 +2224,14 @@ class DiscordBotService : Service() {
         if (!REACT_CMD_RE.containsMatchIn(text)) return null
         val named = REACT_NAMED_RE.find(text)?.groupValues?.get(1)?.trim()
         return listOf(named?.let { EmojiConvert.byName(it) } ?: pickEmoji(text))
+    }
+
+    /** "give me a pregnant man pretty please" (an emoji by name), or "with a pregnant man" right after asking him
+     *  to react ("yeah react to my message with one" → "with a pregnant man"). Only when the name IS an emoji. */
+    private fun parseReactFollowUp(text: String, afterRequest: Boolean): List<String>? {
+        val phrase = REACT_GIVE_RE.find(text)?.groupValues?.get(1)
+            ?: if (afterRequest) REACT_WITH_FRAGMENT_RE.find(text)?.groupValues?.get(1) else null
+        return phrase?.trim()?.let { EmojiConvert.byName(it) }?.let { listOf(it) }
     }
 
     private val reactEmojis = listOf("👍", "😂", "💀", "👀", "🔥", "😭", "🙏")

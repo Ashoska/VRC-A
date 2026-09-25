@@ -94,8 +94,8 @@ object DiscordBotLimits {
     // pass reads EVERYTHING since the last one (up to LEARN_FETCH) — so nothing said in a busy
     // channel slips past the learner. Kept batched so each 8B call covers many messages.
     /** A pass runs once this many messages are unlearned (and LEARN_MIN_INTERVAL_MS has passed). */
-    const val LEARN_TRIGGER_MSGS = 10
-    const val LEARN_MIN_INTERVAL_MS = 120_000L
+    const val LEARN_TRIGGER_MSGS = 8
+    const val LEARN_MIN_INTERVAL_MS = 60_000L
     /** A very busy channel learns sooner, so messages never fall out of the LEARN_FETCH window. */
     const val LEARN_FORCE_MSGS = 30
     const val LEARN_FORCE_MIN_GAP_MS = 30_000L

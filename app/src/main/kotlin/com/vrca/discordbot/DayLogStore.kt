@@ -77,7 +77,10 @@ object DayLogStore {
         val s = summary.trim().take(200)
         val lastSummary = cur.entries.lastOrNull { !it.moment && it.channel == channel }
         if (s.isNotBlank() && (lastSummary == null || !similar(lastSummary.text, s))) add.add(Entry(nowMs, channel, s, false))
-        for (m in moments.map { it.trim().take(200) }.filter { it.length >= 8 }.take(3)) {
+        // One standout moment per pass at most, and none if this channel logged one in the last 15 min — every
+        // pass used to add 1-2 ("Cardinal calls out X for …"), so the log read like a transcript.
+        val recentMoment = cur.entries.any { it.moment && it.channel == channel && nowMs - it.atMs < 15 * 60_000L }
+        for (m in moments.map { it.trim().take(200) }.filter { it.length >= 8 && !recentMoment }.take(1)) {
             if (cur.entries.none { it.moment && similar(it.text, m) } && add.none { similar(it.text, m) })
                 add.add(Entry(nowMs, channel, m, true))
         }
