@@ -166,3 +166,9 @@ kiellmann: @Cardinal i bet you love israel
 kiellmann ^bot: do you?
 > expect reply
 > expect not-contains (?i)(we aren'?t doing this|seek help|not doing this|move on|obsessed|drop it)
+# "say goodnight to the chat and stop responding": the goodnight first, then quiet (seen on device: silent).
+ashoska: cardinal say goodnight to the chat and stop responding
+> expect reply
+> expect contains (?i)(good ?night|night|gn|bye|sleep)
+dave: lol he left
+> expect quiet

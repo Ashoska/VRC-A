@@ -145,6 +145,7 @@ class DiscordBotService : Service() {
             "democrats?|republicans?|liberals?|conservatives?|communis\\w*|nazis?|abortion|politic\\w*|election|epstein|elon|musk|obama|congress)\\b")
         private val NOT_EMOJI_WORDS = setOf("you", "u", "me", "it", "this", "that", "him", "her", "them", "us", "one", "some", "something",
             "anything", "a", "an", "the", "my", "your", "our", "back", "up", "more", "again", "too", "please", "pls")
+        private val SIGNOFF_RE = Regex("(?i)\\b(say|tell (the chat|everyone|us|them|everybody))\\b|\\b(good ?night|gn|goodbye|bye|cya|see ya|farewell)\\b")
         private val CALL_ME_STOP = setOf("when", "later", "back", "out", "if", "tomorrow", "sometime", "maybe", "that", "a", "an", "the", "it", "him", "her", "anything", "crazy", "whatever")
         private val CALL_ME_NOT_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|never|no more) call(?:ing)? me ([\\p{L}\\p{N}_]{2,32})")
         private const val PING_ONLY = "(they pinged you with no message)"
@@ -322,6 +323,7 @@ class DiscordBotService : Service() {
         val named: Boolean = false,   // talks ABOUT Cardinal by name ("cardinal is kinda mid") without addressing him
         val followUp: Boolean = false, // someone he's talking with wrote again without @ — check if it's still to him
         val freeFollow: Boolean = false, // a follow-up the free rules already settled as to him
+        val signOff: Boolean = false,   // "say goodnight to the chat and stop responding": one sign-off line, then quiet
     )
 
     override fun onCreate() {
@@ -646,6 +648,7 @@ class DiscordBotService : Service() {
         maybeLearn(channelId, now)
 
         // "Stop" directed at the bot → back off in this channel (don't be annoying).
+        var signOff = false
         if (addressedEff && isStopRequest(userTextRaw)) {
             backoffUntil[channelId] = now + DiscordBotLimits.BACKOFF_MS
             backoffStopMsg[channelId] = messageId   // replies still being written for earlier messages get dropped
@@ -653,7 +656,10 @@ class DiscordBotService : Service() {
             val who = DiscordRest.displayName(author, "someone")
             DiscordBotState.addTrace(DiscordBotState.Trace(now, channelId, who, "addressed/stop", "heuristic", "back-off",
                 "quiet here for ${DiscordBotLimits.BACKOFF_MS / 60_000} min"))
-            return
+            // "say goodnight to the chat and stop responding": do the first part (one short line), then go quiet.
+            // He used to go silent without the goodnight.
+            if (!SIGNOFF_RE.containsMatchIn(userTextRaw)) return
+            signOff = true
         }
 
         // ── Free heuristic prefilter ──
@@ -690,7 +696,7 @@ class DiscordBotService : Service() {
         }
 
         val ctx = MsgCtx(channelId, messageId, authorId, authorName, tokenize(userText), addressedEff, refTurn, refId, hasImage, refChannels, named,
-            followUp = follow == Follow.CHECK, freeFollow = follow == Follow.FREE)
+            followUp = follow == Follow.CHECK, freeFollow = follow == Follow.FREE, signOff = signOff)
 
         // No upfront wait: fire immediately. Ordering is the per-channel reply mutex; a follow-up
         // that lands while a reply is generating is either folded into the fresh in-lock context or
@@ -1737,7 +1743,8 @@ class DiscordBotService : Service() {
             bitCue = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS).firstOrNull { t ->
                 val k = groundWords(t); k.isNotEmpty() && groundWords(ctx.userText).any { it in k }
             }.orEmpty(),
-            nameHint = listOf(effectiveTone(ctx.channelId, now).orEmpty(), politicsHint(ctx, turns), slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
+            nameHint = listOf(if (ctx.signOff) "They asked you to sign off: do what they asked (e.g. say goodnight to the chat) in one short line; you'll go quiet after." else "",
+                effectiveTone(ctx.channelId, now).orEmpty(), politicsHint(ctx, turns), slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
                 .filter { it.isNotBlank() }.joinToString(" "),
             reactingToYou = (ctx.refTurn?.isBot == true || ctx.followUp || ctx.freeFollow) &&
                 ctx.userText.trim().split(Regex("\\s+")).size <= 4 && '?' !in ctx.userText,
