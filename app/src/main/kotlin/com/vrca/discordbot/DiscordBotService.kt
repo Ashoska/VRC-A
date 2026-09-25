@@ -1215,7 +1215,8 @@ class DiscordBotService : Service() {
         val roomGiven = if (!bitVariant && cardinalInBatch) roomTitle(turns) else null
         val learnedTrait = obs.selfTrait.takeIf { !bitVariant }?.takeIf { t ->
             // Named in the chat's words: "discerning gourmet" for "official pizza critic" is the small model's gloss.
-            val tw = groundWords(t)
+            // Emoji names aren't words of his ("clueless bank account ripper" from ":clueless:").
+            val tw = groundWords(t) - emojiNames.flatMap { groundWords(it) }.toSet()
             cardinalInBatch && t.isNotBlank() && disputed.none { PersonalityStore.isSameTrait(t, it) } &&
                 // (A trait is now a descriptive phrase, so a third of its words from the chat is enough.)
                 (tw.isEmpty() || tw.count { it in batchWords } * 3 >= tw.size) && !PersonalityStore.tooVague(t) &&
@@ -1223,7 +1224,8 @@ class DiscordBotService : Service() {
                 LEARNER_EXAMPLES.none { PersonalityStore.isSameTrait(t, it) } &&
                 // A lasting quirk shows up more than once: one throwaway line of his ("stay out of the kitchen")
                 // isn't a trait ("Kitchen Elite").
-                (tw.isEmpty() || turns.count { m -> groundWords(m.text).any { it in tw } } >= 2) &&
+                // …and each of those lines carries the trait, not one shared everyday word ("bank" in two unrelated lines).
+                (tw.isEmpty() || turns.count { m -> groundWords(m.text).count { it in tw } >= minOf(2, tw.size) } >= 2) &&
                 t.trim(':', ' ').lowercase() !in emojiNames   // "clueless" from :clueless: isn't a personality
         }
         // The room handed him a title ("you're the server's official pizza critic now") and others picked it up:
