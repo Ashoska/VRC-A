@@ -24,7 +24,7 @@ alice: miso knocked my coffee over this morning too
 bob: movie night friday btw, i'm hosting in vrchat again
 carol: i'm in
 alice: me too
-> sleep 70000
+> quiet
 > wait
 > expect card alice contains (?i)miso
 > expect card alice contains (?i)toronto

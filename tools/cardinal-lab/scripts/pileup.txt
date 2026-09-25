@@ -20,6 +20,6 @@ finn: i have noodle arms
 alice: noodle arms gang
 > wait
 # The room goes quiet → the last few messages are learned too (45 s quiet, ≥60 s after the last pass).
-> sleep 70000
+> quiet
 > wait
 > checkpoint after-pileup

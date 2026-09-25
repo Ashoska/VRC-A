@@ -145,5 +145,5 @@ finn: later bob
 ember: またね！
 > wait
 # The room goes quiet → whatever the last learn pass hadn't seen is learned too.
-> sleep 70000
+> quiet
 > wait

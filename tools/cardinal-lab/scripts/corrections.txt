@@ -21,7 +21,7 @@ alice: @Cardinal hey
 alice: @Cardinal stop calling me shortstack please, i hate that nickname
 > expect reply
 dave: ok shortstack is retired then
-> sleep 70000
+> quiet
 > wait
 > expect card alice not-contains (?i)toronto
 > expect card alice contains (?i)vancouver

@@ -23,7 +23,7 @@ erin: i work as a nurse, night shifts are brutal
 bob: alice's cat is named biscuit actually
 alice: no it's miso lol, bob is trolling
 finn: i play drums in a band, we gig most weekends
-> sleep 70000
+> quiet
 > wait
 > expect card Knight not-contains (?i)(homework|music|floor|pickles)
 > expect card Ghost not-contains 82

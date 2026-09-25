@@ -830,10 +830,11 @@ class DiscordBotService : Service() {
         val known = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS)
         val speakers = fresh.filter { it.authorId != botId }.map { it.authorId }.distinct()
         val knownPeople = if (items.isEmpty()) UserMemoryStore.knownFactsLine(this, speakers) else ""
-        val obs = DiscordBotAi.observe(cfg, turns, ConversationStore.summary(channelId), stored, known, knownPeople)
+        val bitFocus = bitInPlay(turns, known)
+        val obs = DiscordBotAi.observe(cfg, turns, ConversationStore.summary(channelId), stored, known, knownPeople, bitFocus)
         if (obs == null) { learnPending.merge(channelId, taken, Int::plus); return }   // retried with the next batch
         lastLearnedId[channelId] = maxOf(after, fresh.maxOf { it.id.toLongOrNull() ?: 0L })
-        applyObservation(channelId, obs, nameToId, System.currentTimeMillis(), turns, correcting = items.isNotEmpty(), items = items, known = known)
+        applyObservation(channelId, obs, nameToId, System.currentTimeMillis(), turns, correcting = items.isNotEmpty(), items = items, known = known, bitFocus = bitFocus)
         DiscordBotState.log("learned $channelId (${turns.size} msgs, ${obs.memDeltas.size} people" +
             (if (stored.isNotBlank()) ", checked corrections" else "") + ")")
         maybeDigestDay()
@@ -902,6 +903,7 @@ class DiscordBotService : Service() {
         turns: List<DiscordBotAi.Turn>, correcting: Boolean = false,
         items: List<Triple<String, String, String>> = emptyList(),
         known: List<String> = emptyList(),
+        bitFocus: String = "",
     ) {
         val globalIndex = UserMemoryStore.nameIndex(this)
         if (obs.summary.isNotBlank()) ConversationStore.updateSummary(this, channelId, obs.summary, now)
@@ -1020,9 +1022,8 @@ class DiscordBotService : Service() {
             old?.takeIf { !repeat && !PersonalityStore.isSameTrait(it, nt) && PersonalityStore.replaceTrait(this, it, nt) }
         }
         if (replaced != null) DiscordBotState.log("self: \"${replaced.take(40)}\" → \"${newTrait.take(40)}\"")
-        // The room riffing on one of his bits (2+ people using its words, him taking part): the small learner
-        // tends to miss the twist, so one focused check asks whether the bit changed.
-        if (replaced == null && cardinalInBatch) maybeEvolveTrait(turns, known)
+        // The bit the room was riffing on, as it stands now (asked in the same learn pass — no extra call).
+        if (replaced == null && bitFocus.isNotBlank() && obs.bitNow.isNotBlank()) applyBitNow(bitFocus, obs.bitNow, turns)
         // Mood too: only when Cardinal was part of it (someone else's bad day isn't his mood).
         val mood = obs.selfMood.takeIf { cardinalInBatch && it.isNotBlank() }
         if ((newTrait != null && replaced == null) || mood != null) {
@@ -1064,29 +1065,27 @@ class DiscordBotService : Service() {
             DiscordBotState.log("inside joke: \"$phrase\" (${who.size} people)")
         }
     }
-    private val traitEvolveAt = ConcurrentHashMap<String, Long>()
-
-    private fun maybeEvolveTrait(turns: List<DiscordBotAi.Turn>, known: List<String>) {
-        val now = System.currentTimeMillis()
+    /** One of Cardinal's bits the room is riffing on right now: 2+ people using its words, him taking part. Free. */
+    private fun bitInPlay(turns: List<DiscordBotAi.Turn>, known: List<String>): String {
+        if (turns.none { it.isBot || Regex("(?i)\\bcardinal\\b").containsMatchIn(it.text) }) return ""
         val humans = turns.filter { !it.isBot }
-        val trait = known.firstOrNull { t ->
+        return known.firstOrNull { t ->
             val keys = groundWords(t)
-            keys.isNotEmpty() && humans.filter { h -> groundWords(h.text).any { it in keys } }.map { it.name.lowercase() }.toSet().size >= 2 &&
-                now - (traitEvolveAt[t.lowercase()] ?: 0L) > DiscordBotLimits.TRAIT_EVOLVE_COOLDOWN_MS
-        } ?: return
-        traitEvolveAt[trait.lowercase()] = now
-        scope.launch {
-            val next = DiscordBotAi.evolveTrait(cfg, trait, turns) ?: return@launch
-            // Must add something the chat actually said (not a rewording) and mostly use the chat's / old trait's words.
-            val chat = groundWords(turns.joinToString(" ") { it.text })
-            val oldW = groundWords(trait)
-            val w = groundWords(next)
-            val fresh = w - oldW
-            if (w.isEmpty() || fresh.isEmpty() || fresh.none { it in chat } || w.count { it in chat || it in oldW } * 2 < w.size) return@launch
-            if (PersonalityStore.isSameTrait(trait, next)) return@launch
-            if (PersonalityStore.replaceTrait(this@DiscordBotService, trait, next))
-                DiscordBotState.log("self: bit evolved \"${trait.take(40)}\" → \"${next.take(40)}\"")
-        }
+            keys.isNotEmpty() && humans.filter { h -> groundWords(h.text).any { it in keys } }.map { it.name.lowercase() }.toSet().size >= 2
+        }.orEmpty()
+    }
+
+    /** Take the learner's "how the bit stands now" only if it adds something the chat said (not a rewording). */
+    private fun applyBitNow(old: String, next: String, turns: List<DiscordBotAi.Turn>) {
+        if (next.length > 80) return
+        val chat = groundWords(turns.joinToString(" ") { it.text })
+        val oldW = groundWords(old)
+        val w = groundWords(next)
+        val fresh = w - oldW
+        if (w.isEmpty() || fresh.isEmpty() || fresh.none { it in chat } || w.count { it in chat || it in oldW } * 2 < w.size) return
+        if (PersonalityStore.isSameTrait(old, next)) return
+        if (PersonalityStore.replaceTrait(this, old, next))
+            DiscordBotState.log("self: bit evolved \"${old.take(40)}\" → \"${next.take(40)}\"")
     }
 
     /** The card's owner said one of the item's key words in this batch without negating it. */

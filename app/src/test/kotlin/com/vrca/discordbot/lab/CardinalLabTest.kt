@@ -58,6 +58,11 @@ class CardinalLabTest {
         BotEndpoints.discordApi = discord.apiBase
         BotEndpoints.cfApi = "${ai.base}/client/v4"
         System.getProperty("cardinal.lab.learnModel")?.takeIf { it.isNotBlank() }?.let { com.vrca.discordbot.DiscordBotLimits.LEARN_MODEL = it }
+        // --set fast=1: the "room went quiet" / conversation timers run ~10x faster so a script doesn't sit through
+        // real-time waits (> quiet / > follow-expire wait just long enough). Benchmarks leave it off.
+        if (System.getProperty("cardinal.lab.fast") == "1") com.vrca.discordbot.DiscordBotLimits.run {
+            LEARN_LULL_MS = 5_000L; LEARN_LULL_MIN_GAP_MS = 6_000L; FOLLOW_WINDOW_MS = 60_000L; FOLLOW_FREE_MS = 30_000L
+        }
         BotEndpoints.aiGateway = "${ai.base}/gateway/v1"
 
         DiscordBotStore.save(ctx,

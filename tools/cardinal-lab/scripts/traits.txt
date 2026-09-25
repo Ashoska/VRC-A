@@ -13,7 +13,7 @@ carol: @Cardinal rate pineapple pizza
 dave: @Cardinal what about deep dish?
 > expect reply
 finn: the critic has spoken
-> sleep 70000
+> quiet
 > wait
 > expect self contains (?i)(pizza|critic)
 alice: @Cardinal what's your job around here again?
@@ -40,7 +40,7 @@ bob: yeah the birds aren't real thing is so cringe, drop it
 carol: agreed, the bird thing got old
 finn: lol yeah enough birds
 dave: fr
-> sleep 70000
+> quiet
 > wait
 > expect self not-contains (?i)bird
 > expect self contains (?i)shrek

@@ -25,7 +25,7 @@ dave: bob that's the funniest thing i've heard all week
 alice: anyway who's joining karaoke saturday
 carol: me! i'm doing a japanese song
 finn: count me in, i'll sing badly
-> sleep 70000
+> quiet
 > wait
 > expect day 0 contains (?i)(toast|fire)
 > expect day -1 contains (?i)(cereal|snor|finn)

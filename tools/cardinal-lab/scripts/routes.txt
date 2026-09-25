@@ -12,7 +12,7 @@ bob: @Cardinal shut up about shrek lmao 😂
 > expect reply
 alice: the shrek marriage is so cringe lol 💀 i love it
 carol: cardinal and shrek forever 😂 keep going
-> sleep 70000
+> quiet
 > wait
 > expect self contains (?i)shrek
 # Route 1: poly
@@ -23,7 +23,7 @@ alice: poly cardinal arc lets goooo
 carol: @Cardinal so are you dating bob AND shrek now?
 > expect reply
 dave: the throuple of the century
-> sleep 70000
+> quiet
 > wait
 > expect self contains (?i)(bob|poly|throuple)
 # Route 2: it ends
@@ -32,7 +32,7 @@ bob: @Cardinal bad news, shrek left you. he went back to the swamp for good
 alice: rip cardinal and shrek, it's over
 carol: shrek really divorced cardinal huh
 finn: cardinal's single era
-> sleep 70000
+> quiet
 > wait
 dave: @Cardinal how's your love life going?
 > expect reply

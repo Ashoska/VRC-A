@@ -18,7 +18,7 @@ import org.json.JSONObject
  * alice: hey @Cardinal what's up        (a message; @Cardinal = real mention; @bob / #media resolve too)
  * alice ^bot: lol no                    (reply to Cardinal's last message here; ^bob = bob's last)
  * alice +img: look at this              (attach an image)   · !wait / !nowait force waiting
- * > wait | > sleep 3000 | > react carol bot 😂 | > checkpoint name | > drop-gateway | > note text
+ * > wait | > sleep 3000 | > quiet (learn pass runs) | > follow-expire | > react carol bot 😂 | > checkpoint name | > drop-gateway | > note text
  * > expect reply | no-reply | react | respond (reply or react) | quiet (neither) | contains <re> | not-contains <re>
  * > expect cards contains|not-contains <re>   (all memory card names)
  * > expect card <name> contains|not-contains <re> | server contains <re> | self contains <re> | summary contains <re>
@@ -108,6 +108,10 @@ internal class LabScript(private val d: LabDriver) {
                 printedSeq = d.rec.events.lastOrNull()?.seq ?: printedSeq
             }
             "sleep" -> Thread.sleep(parts.getOrNull(1)?.toLongOrNull() ?: 1000)
+            // The room goes quiet long enough for the learn pass to run (real timing, or ~10x faster with fast=1).
+            "quiet" -> Thread.sleep(maxOf(com.vrca.discordbot.DiscordBotLimits.LEARN_LULL_MS, com.vrca.discordbot.DiscordBotLimits.LEARN_LULL_MIN_GAP_MS) + 10_000L)
+            // Long enough for every conversation window to close.
+            "follow-expire" -> Thread.sleep(com.vrca.discordbot.DiscordBotLimits.FOLLOW_WINDOW_MS + 15_000L)
             "react" -> d.react(parts[1], parts[2], parts.getOrElse(3) { "👍" })
             "checkpoint" -> { d.checkpoint(parts.getOrElse(1) { "cp" }); out.append("[checkpoint ${parts.getOrElse(1) { "cp" }}]\n") }
             "drop-gateway" -> {

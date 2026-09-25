@@ -81,13 +81,11 @@ object DiscordBotLimits {
     const val DIRECTOR_MIN_GAP_MS = 20_000L
     /** After Cardinal replies to someone, their next messages (no @, no reply) may still be to him for
      *  this long — each exchange renews it. Only people inside this window are ever checked. */
-    const val FOLLOW_WINDOW_MS = 3 * 60_000L
+    @Volatile @JvmStatic var FOLLOW_WINDOW_MS = 3 * 60_000L
     /** A follow-up check that says "not to Cardinal" this many times in a row ends that conversation. */
     const val FOLLOW_MISSES_TO_END = 2
     /** Their next line counts as to him for free only if it comes this soon after his reply, with nothing between. */
-    const val FOLLOW_FREE_MS = 90_000L
-    /** How often one trait can be re-checked for a twist the room gave it (one small call each). */
-    const val TRAIT_EVOLVE_COOLDOWN_MS = 5 * 60_000L
+    @Volatile @JvmStatic var FOLLOW_FREE_MS = 90_000L
     /** An unprompted (ambient) emoji reaction at most this often per channel. */
     const val AMBIENT_REACT_COOLDOWN_MS = 90_000L
     /** When told to stop, back off in that channel for this long. */
@@ -104,9 +102,9 @@ object DiscordBotLimits {
     const val LEARN_FORCE_MSGS = 30
     const val LEARN_FORCE_MIN_GAP_MS = 30_000L
     /** When a channel goes quiet this long with a few unlearned messages, learn the tail too. */
-    const val LEARN_LULL_MS = 45_000L
+    @Volatile @JvmStatic var LEARN_LULL_MS = 45_000L
     const val LEARN_LULL_MIN_MSGS = 3
-    const val LEARN_LULL_MIN_GAP_MS = 60_000L
+    @Volatile @JvmStatic var LEARN_LULL_MIN_GAP_MS = 60_000L
     /** Messages a learn pass reads (only the ones it hasn't seen are kept). */
     const val LEARN_FETCH = 50
     /** Quiet gap that ends the active conversation segment → archived as a topic. */

@@ -17,7 +17,7 @@ alice: me, we're watching shrek 2
 carol: shrek 2 is peak cinema
 bob: i'll bring snacks. and a spoon.
 finn: LMAO he learned
-> sleep 70000
+> quiet
 > wait
 > expect server contains (?i)(fork|soup)
 > expect server contains (?i)bob

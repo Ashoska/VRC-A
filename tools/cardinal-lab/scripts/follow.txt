@@ -47,6 +47,6 @@ ghost ^bot: ohh shit
 > expect respond
 > expect not-contains (?i)^\W*(yo+|hey+|sup|what'?s (good|up)|hi+)\b
 # the conversation window closes after a few quiet minutes
-> sleep 200000
+> follow-expire
 carol !wait: anyway what do you think about the new map
 > expect quiet
