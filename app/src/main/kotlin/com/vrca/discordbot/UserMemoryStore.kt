@@ -471,6 +471,12 @@ object UserMemoryStore {
         ids.distinct().mapNotNull { load(ctx, it) }.filter { it.facts.isNotEmpty() && it.name.isNotBlank() }
             .joinToString("\n") { c -> c.name + ": " + c.facts.takeLast(perPerson).joinToString("; ") { it.trim().trimEnd('.') } }
 
+    /** Admin: remove one exact fact (works on pinned cards too). */
+    fun removeFact(ctx: Context, id: String, fact: String) {
+        val cur = load(ctx, id) ?: return
+        save(ctx, cur.copy(facts = cur.facts.filterNot { it == fact }))
+    }
+
     /** The chat said this stored item is wrong / unwanted: drop the fact, or stop using the nickname. */
     fun forgetItem(ctx: Context, id: String, item: String) {
         val cur = load(ctx, id) ?: return

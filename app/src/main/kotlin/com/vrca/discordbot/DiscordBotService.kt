@@ -1819,7 +1819,7 @@ class DiscordBotService : Service() {
                 val k = groundWords(t); k.isNotEmpty() && groundWords(ctx.userText).any { it in k }
             }.orEmpty(),
             nameHint = listOf(if (ctx.signOff) "They asked you to sign off: do what they asked (e.g. say goodnight to the chat) in one short line; you'll go quiet after." else "",
-                effectiveTone(ctx.channelId, now).orEmpty(), slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
+                effectiveTone(ctx.channelId, now).orEmpty(), slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(ctx, built) })
                 .filter { it.isNotBlank() }.joinToString(" "),
             reactingToYou = (ctx.refTurn?.isBot == true || ctx.followUp || ctx.freeFollow) &&
                 ctx.userText.trim().split(Regex("\\s+")).size <= 4 && '?' !in ctx.userText,
@@ -1844,10 +1844,13 @@ class DiscordBotService : Service() {
     /** People talk ABOUT him in the third person ("btw he's constantly on now", "cardinal is mid") right
      *  next to talking TO him; without a nudge the model picked that up and said "don't encourage him"
      *  about itself. Only when a recent human line uses he/him/his or his name. Free. */
-    private fun selfRefHint(built: Built): String {
+    private fun selfRefHint(ctx: MsgCtx, built: Built): String {
         val recent = built.turns.filter { !it.isBot }.takeLast(4)
         val re = Regex("(?i)\\b(he|him|his|he'?s|hes)\\b")
         val line = recent.lastOrNull { re.containsMatchIn(it.text) } ?: return ""
+        // Someone else's "is he dead" must not pull the reply off what THEY asked ("今日はどうですか?" got
+        // "who's 'he'? i'm alive"): only when the "he" line is the message itself, or it asks nothing of its own.
+        if (line !== recent.lastOrNull() && QUESTION_RE.containsMatchIn(ctx.userText)) return ""
         val quote = line.text.replace(Regex("^\\(replying to [^)]*\\)\\s*"), "").take(80)
         return "${line.name} said \"$quote\": that \"he\" is probably you (you go by they/them). Refer to yourself only as I/me (\"don't encourage me\", never \"him\"), and don't bring this up."
     }

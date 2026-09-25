@@ -292,6 +292,12 @@ object PersonalityStore {
     fun traitTexts(ctx: Context, max: Int): List<String> =
         load(ctx).traits.sortedByDescending { (if (it.pinned) 100 else 0) + it.strength }.take(max).map { it.text }
 
+    /** Admin: remove one trait (pinned or not). */
+    fun removeTrait(ctx: Context, traitText: String) {
+        val cur = load(ctx)
+        save(ctx, cur.copy(traits = cur.traits.filterNot { it.text.equals(traitText, true) }))
+    }
+
     /** Admin: pin/unpin a trait (pinned = protected from decay). */
     fun setTraitPinned(ctx: Context, traitText: String, pinned: Boolean) {
         val cur = load(ctx)

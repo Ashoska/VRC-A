@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -210,6 +211,9 @@ private fun PersonalitySection() {
                     )
                 }
                 Text("${t.text}  ·  ${t.strength}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                IconButton(onClick = { PersonalityStore.removeTrait(ctx, t.text); tick++ }) {
+                    Icon(Icons.Filled.Delete, "Remove trait", tint = MaterialTheme.colorScheme.error)
+                }
             }
         }
         if (self.episodes.isNotEmpty()) {
@@ -439,7 +443,18 @@ private fun UsersSection() {
                             ) {
                                 Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                                     verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                    card.facts.forEach { Text("•  $it", style = MaterialTheme.typography.bodySmall) }
+                                    card.facts.forEach { f ->
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("•  $f", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                                            IconButton(
+                                                onClick = { UserMemoryStore.removeFact(ctx, card.id, f); tick++ },
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(Icons.Filled.Delete, "Remove fact", tint = MaterialTheme.colorScheme.error,
+                                                    modifier = Modifier.size(18.dp))
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
