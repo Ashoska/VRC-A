@@ -140,7 +140,11 @@ class DiscordBotService : Service() {
             "calm" to "The chat asked you to calm down: low-key and easygoing, no heat.")
         private val ASKING_RE = Regex("(?i)\\?\\s*$|^\\W*(do|does|did|are|is|was|were|can|could|would|will|have|has|what|why|how|who|where|when|which)\\b")
         private val REACT_GIVE_RE = Regex("(?i)^\\W*(?:can you |could you |pls |please |just )?(?:give|send|drop|hit) (?:me|us|this|it) (?:an? |the |one )?([\\p{L} ]{2,25}?)(?: emoji| emote| react(?:ion)?)?(?: (?:pretty )?(?:please|pls|plz))?\\W*$")
-        private val REACT_WITH_FRAGMENT_RE = Regex("(?i)^\\W*(?:with |use |do )(?:an? |the |one )?([\\p{L} ]{2,25}?)(?: emoji| one)?\\W*$")
+        private val REACT_WITH_FRAGMENT_RE = Regex("(?i)^\\W*(?:with |use )(?:an? |the |one )?([\\p{L} ]{2,25}?)(?: emoji| one)?\\W*$")
+        private val POLITICS_RE = Regex("(?i)\\b(israel\\w*|palestin\\w*|gaza|hamas|zionis\\w*|ukrain\\w*|russia|putin|trump|biden|kamala|maga|" +
+            "democrats?|republicans?|liberals?|conservatives?|communis\\w*|nazis?|abortion|politic\\w*|election|epstein|elon|musk|obama|congress)\\b")
+        private val NOT_EMOJI_WORDS = setOf("you", "u", "me", "it", "this", "that", "him", "her", "them", "us", "one", "some", "something",
+            "anything", "a", "an", "the", "my", "your", "our", "back", "up", "more", "again", "too", "please", "pls")
         private val CALL_ME_STOP = setOf("when", "later", "back", "out", "if", "tomorrow", "sometime", "maybe", "that", "a", "an", "the", "it", "him", "her", "anything", "crazy", "whatever")
         private val CALL_ME_NOT_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|never|no more) call(?:ing)? me ([\\p{L}\\p{N}_]{2,32})")
         private const val PING_ONLY = "(they pinged you with no message)"
@@ -180,7 +184,9 @@ class DiscordBotService : Service() {
             // "Cardinal Yuri or Yaoi?" — a bare this-or-that (he dodged with "zero of the above"), and the
             // "…answer" / "just pick" nudge after a dodge.
             "^\\W*(?:(?:hey |yo |ok |so )?cardinal[,:]?\\s+)?[\\p{L}\\p{N}' .-]{1,30} or [\\p{L}\\p{N}' .-]{1,30}\\?+\\W*$|" +
-            "\\b(just )?(answer|pick|choose)( it| one| the question| already)?\\W*$)")
+            "\\b(just )?(answer|pick|choose)( it| one| the question| already)?\\W*$|" +
+            // pressed for an answer: "do you?" / "well?" / "yes or no"
+            "^\\W*(do|would|will|are|did|have) (you|u)\\?+\\W*$|^\\W*(well|so|answer me|yes or no)\\W*\\??\\W*$)")
         /** "you're the (server's) (official) X now" / "cardinal is our resident X" → X (1-3 words). */
         private val TITLE_RE = Regex("(?i)\\b(?:you'?re|you are|ur|u r|cardinal(?:'s| is))\\s+(?:now\\s+)?(?:(?:the|our|this|a)\\s+)(?:(?:server|chat|group)'?s\\s+)?(?:(?:official|new|resident|designated|certified|local)\\s+)?(\\p{L}+(?:\\s+\\p{L}+){0,2}?)(?=\\s+(?:now|here|forever|lol|lmao|fr|officially)\\b|\\s*[,.!?]|\\s*$)")
         private val TITLE_NOT = setOf("so", "kinda", "really", "too", "very", "such", "not", "being", "gonna", "going", "just", "worst", "best", "same", "only", "one", "reason", "problem", "bot", "ai")
@@ -845,7 +851,7 @@ class DiscordBotService : Service() {
                     trace(ctx, "reply", "backed off", "dropped", "told to stop while writing")
                     return
                 }
-                val replyText = tameEmoji(ctx.channelId, oneMessage(res.text))
+                val replyText = tameEmoji(ctx.channelId, deShout(oneMessage(res.text), ctx.userText))
                 val outText = EmojiConvert.convert(replyText)
                 val now = System.currentTimeMillis()
                 if (cfg.shadowMode) {
@@ -1670,7 +1676,10 @@ class DiscordBotService : Service() {
     ): DiscordBotAi.ReplyCtx {
         val now = System.currentTimeMillis()
         val selfRecall = built.recall && SELF_RECALL_RE.containsMatchIn(ctx.userText)
-        val answering = UserMemoryStore.answeringLine(this, ctx.authorId, ctx.authorName, built.keywords, selfRecall)
+        // What's relevant about THEM is decided by what they just said (plus what they replied to), not the last six
+        // lines: "i dont play fortnite" from someone else pulled "plays JJ's on PC" into "what should i eat tonight?".
+        val answerKeys = (keywordList(ctx.userText) + (ctx.refTurn?.text?.let { keywordList(it) } ?: emptyList())).toHashSet()
+        val answering = UserMemoryStore.answeringLine(this, ctx.authorId, ctx.authorName, answerKeys, selfRecall)
 
         // Other people: the ones the message names first (whole card when asked about), then — for a
         // "who …?" question with nobody named — the cards that best match it, then other speakers
@@ -1728,7 +1737,7 @@ class DiscordBotService : Service() {
             bitCue = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS).firstOrNull { t ->
                 val k = groundWords(t); k.isNotEmpty() && groundWords(ctx.userText).any { it in k }
             }.orEmpty(),
-            nameHint = listOf(effectiveTone(ctx.channelId, now).orEmpty(), slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
+            nameHint = listOf(effectiveTone(ctx.channelId, now).orEmpty(), politicsHint(ctx, turns), slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
                 .filter { it.isNotBlank() }.joinToString(" "),
             reactingToYou = (ctx.refTurn?.isBot == true || ctx.followUp || ctx.freeFollow) &&
                 ctx.userText.trim().split(Regex("\\s+")).size <= 4 && '?' !in ctx.userText,
@@ -1736,6 +1745,18 @@ class DiscordBotService : Service() {
     }
 
     /** A reply is one chat message: a blank-line second paragraph reads like a speech, so it's joined up. */
+    /** His core rule says no all caps, but a shouty bit ("THE MATRIX IS A DISTRACTION…") dragged him into whole
+     *  replies in caps. Lowercase a mostly-caps reply unless they asked for caps/yelling. Custom emoji tags kept. */
+    private fun deShout(text: String, asked: String): String {
+        if (Regex("(?i)\\b(all ?caps|caps lock|yell|scream|shout|in caps)\\b").containsMatchIn(asked)) return text
+        val plain = text.replace(Regex("<a?:[^>]+>|:[\\w~]+:"), "")
+        val letters = plain.filter { it.isLetter() && it.isUpperCase() != it.isLowerCase() }
+        if (letters.length < 12 || letters.count { it.isUpperCase() } * 10 < letters.length * 7) return text
+        return Regex("<a?:[^>]+>|:[\\w~]+:|[^<:]+|[<:]").findAll(text).joinToString("") { m ->
+            if (m.value.startsWith("<") || (m.value.startsWith(":") && m.value.length > 1)) m.value else m.value.lowercase()
+        }
+    }
+
     private fun oneMessage(text: String): String = text.trim().replace(Regex("\\s*\\n\\s*\\n\\s*"), " ")
 
     // Capitalised words that aren't people.
@@ -1781,6 +1802,14 @@ class DiscordBotService : Service() {
         }.distinctBy { it.second }.take(2)
         if (hits.isEmpty()) return ""
         return "Slang: " + hits.joinToString("; ") { (w, m) -> "\"$w\" = $m" } + "."
+    }
+
+    /** "i bet you love israel" / "do you?": a bait. He stonewalled ("we aren't doing this", "seek help"). The owner's
+     *  call: political jokes about any side are fine here, so he plays along. Free, only when the topic is on the table. */
+    private fun politicsHint(ctx: MsgCtx, turns: List<DiscordBotAi.Turn>): String {
+        val recent = (turns.takeLast(4).map { it.text } + ctx.userText).joinToString(" ")
+        if (!POLITICS_RE.containsMatchIn(recent)) return ""
+        return "Politics as a bit: political jokes are welcome here, about any side (politicians, parties, scandals — equal-opportunity roasting). Answer with a joke that actually plays along; no dodging, no 'we aren't doing this', no lecture."
     }
 
     /** Asked about the server ("can you even see this server's name?"): he knew it but just said "of course". */
@@ -2186,7 +2215,14 @@ class DiscordBotService : Service() {
      * Banter, not a real request: laughing/teasing markers ("shut up lmao", "stop 😂", "you're so cringe
      * lol") with nothing that makes it serious ("genuinely", "for real", "please", "i mean it").
      */
-    private fun isJoking(text: String): Boolean = JOKE_RE.containsMatchIn(text) && !SERIOUS_RE.containsMatchIn(text)
+    private fun isJoking(text: String): Boolean =
+        (JOKE_RE.containsMatchIn(text) || NONSENSE_RE.containsMatchIn(text) || BANTER_AT_HIM_RE.containsMatchIn(text)) &&
+            !SERIOUS_RE.containsMatchIn(text)
+    // "i release my houd dogs to go kill cardinal": roleplay aimed at him is a bit, not a fact about the speaker.
+    private val BANTER_AT_HIM_RE = Regex("(?i)\\b(kill|murder|destroy|nuke|beat up|fight|sic|attack|delete|unplug|shut down|hunt|eat)\\b.{0,40}\\bcardinal\\b|" +
+        "\\bcardinal\\b.{0,40}\\b(dies|is dead|gets? (killed|deleted|unplugged)|only option is to run)\\b")
+    // "pluh pluh pluh im a little fishie": a sound repeated three times is a bit, not a statement about themselves.
+    private val NONSENSE_RE = Regex("(?i)\\b(\\p{L}{2,8})\\b(?:\\W+\\1\\b){2,}")
 
     private fun isStopRequest(text: String): Boolean {
         if (isJoking(text)) return false
@@ -2231,7 +2267,9 @@ class DiscordBotService : Service() {
     private fun parseReactFollowUp(text: String, afterRequest: Boolean): List<String>? {
         val phrase = REACT_GIVE_RE.find(text)?.groupValues?.get(1)
             ?: if (afterRequest) REACT_WITH_FRAGMENT_RE.find(text)?.groupValues?.get(1) else null
-        return phrase?.trim()?.let { EmojiConvert.byName(it) }?.let { listOf(it) }
+        // A pronoun/filler is never an emoji name ("do you?" found "I LOVE YOU HAND SIGN").
+        if (phrase == null || phrase.trim().lowercase().split(' ').all { it in NOT_EMOJI_WORDS }) return null
+        return EmojiConvert.byName(phrase.trim())?.let { listOf(it) }
     }
 
     private val reactEmojis = listOf("👍", "😂", "💀", "👀", "🔥", "😭", "🙏")

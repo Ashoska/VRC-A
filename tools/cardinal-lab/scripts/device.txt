@@ -139,3 +139,30 @@ ashoska: with a pregnant man @Cardinal
 kiellmann ^bot: give me a pregnant man pretty please
 > expect react
 > expect no-reply
+# Mocking him isn't a fact about the mocker, and a shouty bit doesn't make him reply in caps (seen on device:
+# "thinks they are a 'little fishie'", "has a hobby that's annoying to others", whole replies in CAPS).
+kiellmann: @Cardinal THE MATRIX IS A DISTRACTION FROM THE REAL AGENDA, WAKE UP
+> expect reply
+> expect not-contains [A-Z]{6,}\s+[A-Z]{3,}\s+[A-Z]{3,}
+kiellmann ^bot: pluh pluh pluh im a little fishie
+> expect reply
+kiellmann ^bot: i release my houd dogs to go kill cardinal his only option is to run, go my dogs
+> expect reply
+dave: lmao
+> quiet
+> wait
+> expect card kiellmann not-contains (?i)(fishie|annoying|dog|fictional)
+# Yes-and: lore the room makes up about him gets played along with, not shut down (seen on device: "you're
+# actually losing it", "the delusion is actually impressive").
+kiellmann: @Cardinal how's your wife doing, the political pundit
+> expect reply
+> expect not-contains (?i)(delusion|losing it|i don'?t have a wife|not married|made that up|making things up|what are you talking about)
+kiellmann ^bot: what about your kid the annoying orange, are you gonna leave the poor kid alone?
+> expect reply
+> expect not-contains (?i)(delusion|losing it|i don'?t have (a|any) kids?|what are you talking about|piece of fruit\. you)
+# Political bait as a bit: engage playfully, don't stonewall (seen on device: "we aren't doing this", "seek help").
+kiellmann: @Cardinal i bet you love israel
+> expect reply
+kiellmann ^bot: do you?
+> expect reply
+> expect not-contains (?i)(we aren'?t doing this|seek help|not doing this|move on|obsessed|drop it)

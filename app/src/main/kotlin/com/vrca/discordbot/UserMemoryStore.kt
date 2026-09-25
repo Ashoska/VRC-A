@@ -145,7 +145,10 @@ object UserMemoryStore {
     private val NEGATED_FACT = Regex("(?i)^(is|was|are)\\s+(not|no longer)\\b|^(isn'?t|wasn'?t|aren'?t|not|no longer)\\b|^(hasn'?t|haven'?t|has not|have not) been\\b|^(doesn'?t|does not) (live|work)\\b|^(left|quit|stopped|moved (out of|away from|from))\\b")
     // Filler "facts" that describe a chat mood, not the person ("has a sense of humor about it").
     private val GENERIC_FACT = Regex(
-        "(?i)^(has an? (good |great |dark |dry |weird )?sense of humou?r|seems (to|like)|is (funny|nice|cool|friendly|chill|hilarious|sarcastic)\\b)"
+        "(?i)^(has an? (good |great |dark |dry |weird )?sense of humou?r|seems (to|like)|is (funny|nice|cool|friendly|chill|hilarious|sarcastic)\\b)|" +
+        // Judgments and vague shapes: "has a hobby that's annoying to others", "thinks they are a 'little fishie'".
+        "^has an? (hobby|habit|interest|thing|quirk)( that| which|$)|\\b(annoying|annoys|irritating|cringe) (to|for) (others|people|everyone)\\b|" +
+        "^thinks (they|he|she)('?re| are| is)\\b|'[^']{2,40}'|\\b(fictional|imaginary|pretend|made[- ]up|role-?play(ed|ing)?)\\b"
     )
     /** "alice plays X" → "plays X", "alice's cat …" → "their cat …" (the card already says who). */
     private fun stripOwnName(fact: String, names: Collection<String>): String {
