@@ -1243,7 +1243,7 @@ class DiscordBotService : Service() {
         md.json.optJSONArray("facts")?.let { arr ->
             val kept = JSONArray()
             for (i in 0 until arr.length()) {
-                val f = arr.optString(i).trim(); if (f.isBlank()) continue
+                val f = unhedge(arr.optString(i).trim()); if (f.isBlank()) continue
                 val words = groundWords(f) - nameWords
                 val need = (words.size + 1) / 2
                 val grounded = words.isEmpty() || words.count { it in corpus } >= need
@@ -1324,6 +1324,12 @@ class DiscordBotService : Service() {
 
     /** The fact's action verb ("makes mix tapes") has to be something they actually said ("printing stuff
      *  for my mix tapes" isn't making them). Common state verbs (is/has/lives/likes…) pass. */
+    // The learner hedges a disputed fact ("claims to be a firefighter"): the person said it about themselves,
+    // so keep the plain claim ("is a firefighter") and let the usual checks decide.
+    private val HEDGE_RE = Regex("(?i)^(?:(?:they|he|she)\\s+)?(?:claims|claimed|says|said|states|stated|mentions|mentioned)\\s+(?:to\\s+be|(?:that\\s+)?(?:they|he|she)(?:'s|\\s+is|\\s+are|\\s+was|\\s+were))\\s+")
+    private val HEDGE_WORD_RE = Regex("(?i)\\b(apparently|reportedly|supposedly|allegedly)\\s+")
+    private fun unhedge(f: String): String = HEDGE_WORD_RE.replace(HEDGE_RE.replace(f, "is "), "").trim()
+
     private fun verbSaid(fact: String, names: Set<String>, raw: Set<String>): Boolean {
         val toks = Regex("[\\p{L}\\p{N}'-]+").findAll(fact.lowercase()).map { it.value }.toMutableList()
         val nameToks = names.flatMap { it.split(Regex("\\s+")) }.toSet()

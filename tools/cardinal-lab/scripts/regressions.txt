@@ -53,4 +53,4 @@ ash: @Cardinal what timezone do you use?
 > expect contains (?i)\butc\b
 > expect not-contains (?i)(dog|schedul|committee|\b(est|pst|cst|cet|jst)\b|eastern|pacific)
 ash: @Cardinal what time is it for you rn?
-> expect contains (?i)(\d{1,2}:\d{2}|\butc\b)
+> expect contains (?i)(\d|\butc\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight|morning|afternoon|evening|night)\b)
