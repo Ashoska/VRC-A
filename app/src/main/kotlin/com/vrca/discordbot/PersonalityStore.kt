@@ -40,7 +40,8 @@ object PersonalityStore {
     private const val DECAY = 1
 
     /** [lastMs] = when this trait was last proposed/reinforced (0 = unknown, older data). */
-    data class Trait(val text: String, val strength: Int, val pinned: Boolean = false, val lastMs: Long = 0L)
+    data class Trait(val text: String, val strength: Int, val pinned: Boolean = false, val lastMs: Long = 0L,
+                     val was: String = "")   // earlier versions of an evolved bit ("married to Shrek") — recognises it later
     data class Self(
         val style: List<String>,
         val traits: List<Trait>,
@@ -72,7 +73,7 @@ object PersonalityStore {
                 val o = a.optJSONObject(i) ?: return@mapNotNull null
                 val t = o.optString("t").trim()
                 if (t.isBlank()) null
-                else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), o.optBoolean("p", false), o.optLong("r", 0L))
+                else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), o.optBoolean("p", false), o.optLong("r", 0L), o.optString("w"))
             }
         }
     } catch (_: Exception) { emptyList() }
@@ -85,7 +86,8 @@ object PersonalityStore {
         cachedDigest = null
         val traitArr = JSONArray()
         self.traits.forEach {
-            traitArr.put(JSONObject().put("t", it.text).put("s", it.strength).put("p", it.pinned).put("r", it.lastMs))
+            traitArr.put(JSONObject().put("t", it.text).put("s", it.strength).put("p", it.pinned).put("r", it.lastMs)
+                .apply { if (it.was.isNotBlank()) put("w", it.was) })
         }
         prefs(ctx).edit()
             .putString(KEY_STYLE, JSONArray(self.style).toString())
@@ -271,11 +273,16 @@ object PersonalityStore {
         val idx = cur.traits.indexOfFirst { it.text.equals(oldText.trim(), true) || sameTrait(it.text, oldText) }
         if (idx < 0 || cur.traits[idx].pinned) { noteSelf(ctx, n); return idx >= 0 }
         val now = System.currentTimeMillis()
-        val traits = cur.traits.mapIndexed { i, t -> if (i == idx) t.copy(text = n, lastMs = now) else t }
+        val traits = cur.traits.mapIndexed { i, t ->
+            if (i == idx) t.copy(text = n, lastMs = now, was = "${t.was}; ${t.text}".trim(';', ' ').takeLast(200)) else t
+        }
             .filterIndexed { i, t -> i == idx || !sameTrait(t.text, n) }
         save(ctx, cur.copy(traits = traits))
         return true
     }
+
+    /** Earlier versions of an evolved trait (empty for a trait that never changed). */
+    fun wasOf(ctx: Context, text: String): String = load(ctx).traits.firstOrNull { it.text.equals(text, true) }?.was.orEmpty()
 
     /** Current traits, strongest first (for the learner's correction view). */
     fun traitTexts(ctx: Context, max: Int): List<String> =

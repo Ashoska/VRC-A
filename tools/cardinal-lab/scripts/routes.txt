@@ -34,5 +34,6 @@ carol: shrek really divorced cardinal huh
 finn: cardinal's single era
 > quiet
 > wait
+> expect self not-contains (?i)((married to|dating|throuple with|poly with|with|and) shrek|shrek and)
 dave: @Cardinal how's your love life going?
 > expect reply

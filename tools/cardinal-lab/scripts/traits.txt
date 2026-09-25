@@ -44,3 +44,4 @@ dave: fr
 > wait
 > expect self not-contains (?i)bird
 > expect self contains (?i)shrek
+> expect self not-contains (?i)divorc

@@ -1007,8 +1007,14 @@ class DiscordBotService : Service() {
         // small model is describing someone else's joke as his.
         val cardinalInBatch = turns.any { it.isBot || Regex("(?i)\\bcardinal\\b").containsMatchIn(it.text) }
         val emojiNames = EmojiConvert.customNames().map { it.lowercase() }.toSet()
-        val newTrait = obs.selfTrait.takeIf { t ->
+        val batchWords = groundWords(turns.joinToString(" ") { it.text })
+        // While the room riffs on one of his bits, a "new" trait about the same subject is that bit's update.
+        val bitVariant = bitFocus.isNotBlank() && obs.selfTrait.isNotBlank() && groundWords(obs.selfTrait).any { it in groundWords(bitFocus) }
+        val newTrait = obs.selfTrait.takeIf { !bitVariant }?.takeIf { t ->
+            // Named in the chat's words: "discerning gourmet" for "official pizza critic" is the small model's gloss.
+            val tw = groundWords(t)
             cardinalInBatch && t.isNotBlank() && disputed.none { PersonalityStore.isSameTrait(t, it) } &&
+                (tw.isEmpty() || tw.count { it in batchWords } * 2 >= tw.size) &&
                 t.trim(':', ' ').lowercase() !in emojiNames   // "clueless" from :clueless: isn't a personality
         }
         // A trait that evolved replaces the one it came from (the learner names the old one in self.replaces).
@@ -1016,14 +1022,18 @@ class DiscordBotService : Service() {
             val r = obs.selfReplaces.trim().trimEnd('.')
             if (r.length < 3) return@let null
             // The learner copies the old trait's text; match it to a known trait (exact or same trait reworded).
-            val old = known.firstOrNull { it.equals(r, true) } ?: known.firstOrNull { PersonalityStore.isSameTrait(it, r) }
+            val old = (known.firstOrNull { it.equals(r, true) } ?: known.firstOrNull { PersonalityStore.isSameTrait(it, r) })
+                // The bit the room is riffing on only changes through the bit slot (checked against the chat).
+                ?.takeUnless { bitFocus.isNotBlank() && (it.equals(bitFocus, true) || PersonalityStore.isSameTrait(it, bitFocus)) }
             // A "new" trait that's just another known trait repeated isn't a change.
             val repeat = known.any { k -> !k.equals(old, true) && PersonalityStore.isSameTrait(k, nt) }
             old?.takeIf { !repeat && !PersonalityStore.isSameTrait(it, nt) && PersonalityStore.replaceTrait(this, it, nt) }
         }
         if (replaced != null) DiscordBotState.log("self: \"${replaced.take(40)}\" → \"${newTrait.take(40)}\"")
         // The bit the room was riffing on, as it stands now (asked in the same learn pass — no extra call).
-        if (replaced == null && bitFocus.isNotBlank() && obs.bitNow.isNotBlank()) applyBitNow(bitFocus, obs.bitNow, turns)
+        if (replaced == null && bitFocus.isNotBlank()) {
+            applyBitNow(bitFocus, obs.bitNow, if (bitVariant) obs.selfTrait else "", turns)
+        }
         // Mood too: only when Cardinal was part of it (someone else's bad day isn't his mood).
         val mood = obs.selfMood.takeIf { cardinalInBatch && it.isNotBlank() }
         if ((newTrait != null && replaced == null) || mood != null) {
@@ -1070,23 +1080,37 @@ class DiscordBotService : Service() {
         if (turns.none { it.isBot || Regex("(?i)\\bcardinal\\b").containsMatchIn(it.text) }) return ""
         val humans = turns.filter { !it.isBot }
         return known.firstOrNull { t ->
-            val keys = groundWords(t)
+            val keys = groundWords(t + " " + PersonalityStore.wasOf(this, t))   // its old subject counts too
             keys.isNotEmpty() && humans.filter { h -> groundWords(h.text).any { it in keys } }.map { it.name.lowercase() }.toSet().size >= 2
         }.orEmpty()
     }
 
-    /** Take the learner's "how the bit stands now" only if it adds something the chat said (not a rewording). */
-    private fun applyBitNow(old: String, next: String, turns: List<DiscordBotAi.Turn>) {
-        if (next.length > 80) return
-        val chat = groundWords(turns.joinToString(" ") { it.text })
-        val oldW = groundWords(old)
-        val w = groundWords(next)
-        val fresh = w - oldW
-        if (w.isEmpty() || fresh.isEmpty() || fresh.none { it in chat } || w.count { it in chat || it in oldW } * 2 < w.size) return
-        if (PersonalityStore.isSameTrait(old, next)) return
+    /** Take the learner's "how the bit stands now" when it's the same bit, changed, in the chat's words. */
+    private fun applyBitNow(old: String, bitAnswer: String, variant: String, turns: List<DiscordBotAi.Turn>) {
+        fun toks(x: String) = Regex("[\\p{L}\\p{N}]+").findAll(x.lowercase()).map { it.value }
+            .filter { it.length >= 3 && it !in BIT_FILLER }.map { discordStem(it) }.toSet()
+        val oldW = toks(old + " " + PersonalityStore.wasOf(this, old))
+        val chat = toks(turns.joinToString(" ") { it.text })
+        // The bit slot answered about THIS bit ("single era" after a breakup needn't repeat "Shrek"); a general
+        // trait only counts as this bit's update when it keeps the bit's subject.
+        fun ok(next: String, needSubject: Boolean): Boolean {
+            val w = toks(next); val fresh = w - oldW
+            return next.split(Regex("\\s+")).size <= 10 && w.isNotEmpty() &&
+                !next.equals(old, true) && fresh.isNotEmpty() &&            // a change…
+                (!needSubject || w.any { it in oldW }) &&                    // …of this bit…
+                fresh.any { it in chat } && w.count { it in chat || it in oldW } * 2 >= w.size &&   // …in the chat's words
+                !BIT_COMMENTARY.containsMatchIn(next)                         // not "the group loves the idea"
+        }
+        // The shortest valid version reads best as a trait ("divorced from Shrek").
+        fun clean(c: String) = c.substringAfterLast(" is now ", c).replace(Regex("\\s*\\([^)]*\\)"), "")   // "(no change, …)"
+            .trim().trim('\'', '"', '.', ' ').replace(Regex("(?i)^cardinal('s|’s| is| has)?\\s+"), "").trim()
+        val next = listOf(clean(bitAnswer) to false, clean(variant) to true)
+            .filter { (c, needSubject) -> c.isNotBlank() && ok(c, needSubject) }.map { it.first }.minByOrNull { it.length } ?: return
         if (PersonalityStore.replaceTrait(this, old, next))
             DiscordBotState.log("self: bit evolved \"${old.take(40)}\" → \"${next.take(40)}\"")
     }
+    private val BIT_FILLER = setOf("the", "and", "with", "now", "his", "him", "is", "are", "was", "has", "one", "who", "for", "but", "still")
+    private val BIT_COMMENTARY = Regex("(?i)\\b(the group|the chat|the room|everyone|people|the idea|loves the|likes the|is joking|jokes about)\\b")
 
     /** The card's owner said one of the item's key words in this batch without negating it. */
     private fun affirmedBySubject(id: String, item: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>): Boolean {
@@ -1409,6 +1433,9 @@ class DiscordBotService : Service() {
             }.orEmpty(),
             shortHint = short,
             aboutSelf = SELF_ASK_RE.containsMatchIn(ctx.userText),
+            bitCue = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS).firstOrNull { t ->
+                val k = groundWords(t); k.isNotEmpty() && groundWords(ctx.userText).any { it in k }
+            }.orEmpty(),
             reactingToYou = (ctx.refTurn?.isBot == true || ctx.followUp || ctx.freeFollow) &&
                 ctx.userText.trim().split(Regex("\\s+")).size <= 4 && '?' !in ctx.userText,
         )

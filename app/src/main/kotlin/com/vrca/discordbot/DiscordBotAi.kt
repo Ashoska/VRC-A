@@ -131,6 +131,7 @@ object DiscordBotAi {
         val shortHint: Boolean,
         val dayLog: String = "",     // "what happened <day>?" → that day's log/recap
         val aboutSelf: Boolean = false,  // they're asking about Cardinal himself (his job/role/what he's known for)
+        val bitCue: String = "",         // one of his bits the message is riffing on → yes-and it
         val reactingToYou: Boolean = false, // a short reaction ("ohh shit", "no way") to what Cardinal just said
     )
 
@@ -140,6 +141,7 @@ object DiscordBotAi {
             if (c.selfDigest.isNotBlank()) append("\n\n[You] ").append(c.selfDigest)
                 .append(" Your quirks come out when they fit the moment, not in every message, and evolve: when the room pushes a twist on one of your bits (a new partner, a breakup, a new title), yes-and it instead of shutting it down. Asked about yourself, name the real ones above.")
                 .append(if (c.aboutSelf) " They're asking about you right now: say your role or quirk plainly (its actual name), then add flavour." else "")
+                .append(if (c.bitCue.isNotBlank()) " They're riffing on your bit \"${c.bitCue}\": yes-and where they take it (a new twist is fun), don't shut it down." else "")
             if (c.channelInfo.isNotBlank()) append("\n\n[Channel] ").append(c.channelInfo)
             // Who he's talking to first, then background knowledge, then rules.
             if (c.answering.isNotBlank()) {
@@ -377,14 +379,14 @@ object DiscordBotAi {
             append("\"mood\":\"<a word or two>\"},")
             // The room is riffing on one of his bits: ask about that bit directly (a pointed question the small
             // model answers far better than the general "if a trait changed" rule).
-            if (bitFocus.isNotBlank()) append("\"bit\":\"<how Cardinal's bit '$bitFocus' stands after this chat, in at most 8 words, keeping the joke (e.g. 'in a throuple with Shrek and bob', 'divorced from Shrek') — only if the room changed it AND Cardinal went along in his own messages (his last word counts); else same>\",")
+            if (bitFocus.isNotBlank()) append("\"bit\":\"<how Cardinal's bit '$bitFocus' stands after this chat, NOW — his current status, not the history — in at most 6 words, using the chat's own words for what changed (the new people or status they gave him) and keeping the bit's subject — only if the room changed it AND Cardinal went along in his own messages (his last word counts); else same>\",")
             append("\"people\":[{\"about\":\"<name exactly as shown (not Cardinal)>\",\"facts\":[\"<new lasting fact about who they are>\"]}],")
             append("\"event\":\"<an inside joke or legendary moment the server will keep bringing up, as one full sentence: what happened, who was involved (names) and why it stuck — or empty>\"}\n")
             append("Optional keys: add them ONLY when the chat clearly shows it, otherwise leave the key out entirely (no empty values). ")
             append("Per person: nickname (what others call them), relationship (their role here), language (if not English)")
             if (fix) append(", forget (a stored fact of theirs that's no longer true), notNickname (a name they said not to call them), avoid (something they asked Cardinal to stop doing to them)")
             append(". Top level: channelBit (a running joke in THIS channel, as one full sentence saying what it is and who's part of it). ")
-            append("If the chat changed one of Cardinal's known traits (a new partner, a breakup, a promotion he went along with), write the NEW version as self.trait and copy the old trait into self.replaces; just repeating or rewording a known trait isn't new; if his stance shifted during the chat, his LAST word on it is what counts. ")
+            append("If the chat changed one of Cardinal's known traits (a new partner, a breakup, a promotion he went along with), write the NEW version as self.trait and copy the old trait into self.replaces; just repeating or rewording a known trait isn't new; if his stance shifted during the chat, his LAST word on it is what counts. Name a trait with the chat's own words (the title or bit people actually used). ")
             append("summary and moments are required (moments may be []); leave out self.trait if there's nothing new.\n")
             append("Only list people you learned something NEW and lasting about. A fact must be said or clearly shown in THIS chat ")
             append("(a question someone asks or a joke isn't a fact about them): ")
@@ -406,7 +408,10 @@ object DiscordBotAi {
         }
         val user = "PREVIOUS SUMMARY: ${prevSummary.ifBlank { "(none)" }}\n\nRECENT CHAT:\n$transcript"
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", user))
-        return when (val r = call(cfg, DiscordBotLimits.LEARN_MODEL, messages, DiscordBotLimits.LEARN_MAX_TOKENS)) {
+        // A batch where the room is reshaping one of his bits needs better judgement than the 8B shows (it
+        // garbles "how does the bit stand now") — the same single pass runs on the reply model then. Rare.
+        val model = if (bitFocus.isNotBlank()) DiscordBotLimits.MERGE_MODEL else DiscordBotLimits.LEARN_MODEL
+        return when (val r = call(cfg, model, messages, DiscordBotLimits.LEARN_MAX_TOKENS)) {
             is Result.Ok -> parseObservation(r.text) ?: run { logIssue("Learn pass", "unreadable answer: ${r.text.take(60)}"); null }
             is Result.Error -> { logIssue("Learn pass", r.message); null }
         }
