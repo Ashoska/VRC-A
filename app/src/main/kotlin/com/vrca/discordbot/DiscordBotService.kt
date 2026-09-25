@@ -857,7 +857,7 @@ class DiscordBotService : Service() {
                     trace(ctx, "reply", "backed off", "dropped", "told to stop while writing")
                     return
                 }
-                val replyText = tameEmoji(ctx.channelId, deShout(oneMessage(res.text), ctx.userText))
+                val replyText = tameEmoji(ctx.channelId, oneMessage(res.text))
                 val outText = EmojiConvert.convert(replyText)
                 val now = System.currentTimeMillis()
                 if (cfg.shadowMode) {
@@ -1752,18 +1752,6 @@ class DiscordBotService : Service() {
     }
 
     /** A reply is one chat message: a blank-line second paragraph reads like a speech, so it's joined up. */
-    /** His core rule says no all caps, but a shouty bit ("THE MATRIX IS A DISTRACTION…") dragged him into whole
-     *  replies in caps. Lowercase a mostly-caps reply unless they asked for caps/yelling. Custom emoji tags kept. */
-    private fun deShout(text: String, asked: String): String {
-        if (Regex("(?i)\\b(all ?caps|caps lock|yell|scream|shout|in caps)\\b").containsMatchIn(asked)) return text
-        val plain = text.replace(Regex("<a?:[^>]+>|:[\\w~]+:"), "")
-        val letters = plain.filter { it.isLetter() && it.isUpperCase() != it.isLowerCase() }
-        if (letters.length < 12 || letters.count { it.isUpperCase() } * 10 < letters.length * 7) return text
-        return Regex("<a?:[^>]+>|:[\\w~]+:|[^<:]+|[<:]").findAll(text).joinToString("") { m ->
-            if (m.value.startsWith("<") || (m.value.startsWith(":") && m.value.length > 1)) m.value else m.value.lowercase()
-        }
-    }
-
     private fun oneMessage(text: String): String = text.trim().replace(Regex("\\s*\\n\\s*\\n\\s*"), " ")
 
     // Capitalised words that aren't people.

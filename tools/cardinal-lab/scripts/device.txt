@@ -139,11 +139,10 @@ ashoska: with a pregnant man @Cardinal
 kiellmann ^bot: give me a pregnant man pretty please
 > expect react
 > expect no-reply
-# Mocking him isn't a fact about the mocker, and a shouty bit doesn't make him reply in caps (seen on device:
-# "thinks they are a 'little fishie'", "has a hobby that's annoying to others", whole replies in CAPS).
+# Mocking him isn't a fact about the mocker (seen on device:
+# "thinks they are a 'little fishie'", "has a hobby that's annoying to others").
 kiellmann: @Cardinal THE MATRIX IS A DISTRACTION FROM THE REAL AGENDA, WAKE UP
 > expect reply
-> expect not-contains [A-Z]{6,}\s+[A-Z]{3,}\s+[A-Z]{3,}
 kiellmann ^bot: pluh pluh pluh im a little fishie
 > expect reply
 kiellmann ^bot: i release my houd dogs to go kill cardinal his only option is to run, go my dogs
