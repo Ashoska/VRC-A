@@ -111,6 +111,7 @@ internal class LabScript(private val d: LabDriver) {
             // The room goes quiet long enough for the learn pass to run (real timing, or ~10x faster with fast=1).
             "quiet" -> Thread.sleep(maxOf(com.vrca.discordbot.DiscordBotLimits.LEARN_LULL_MS, com.vrca.discordbot.DiscordBotLimits.LEARN_LULL_MIN_GAP_MS) + 10_000L)
             // Long enough for every conversation window to close.
+            "time-skip" -> d.discord.skipTime(parts.getOrNull(1)?.toLongOrNull() ?: 60)
             "follow-expire" -> Thread.sleep(com.vrca.discordbot.DiscordBotLimits.FOLLOW_WINDOW_MS + 15_000L)
             "react" -> d.react(parts[1], parts[2], parts.getOrElse(3) { "👍" })
             "checkpoint" -> { d.checkpoint(parts.getOrElse(1) { "cp" }); out.append("[checkpoint ${parts.getOrElse(1) { "cp" }}]\n") }

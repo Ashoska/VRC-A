@@ -103,6 +103,29 @@ class DiscordBotService : Service() {
         private val ROOM_RE = Regex("\\b(guys|everyone|everybody|y'?all|yall|anyone|anybody|you all|chat|people|@here|@everyone)\\b")
         // Asking about Cardinal himself: his job, role, what he's known for.
         /** Asking for a rating or a pick — the model likes to dodge these ("hard pass"), which reads as a refusal. */
+        /** Asked the time, date or his timezone: he only knows it if the prompt tells him (he made up "EST"). */
+        private val TIME_ASK_RE = Regex("(?i)(time ?zone|\\btz\\b|what time|what'?s the time|\\bthe time (is it|there|for you)|what (day|date)|today'?s date|\\b(utc|gmt)\\b)")
+
+        private fun clockLine(now: Long): String {
+            val t = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneOffset.UTC)
+            val f = java.time.format.DateTimeFormatter.ofPattern("EEEE d MMMM, HH:mm", java.util.Locale.ENGLISH)
+            return "It's ${f.format(t)} UTC. Your timezone is UTC."
+        }
+
+        /** Snowflake → epoch millis. */
+        private fun snowflakeMs(id: String): Long = (id.toLongOrNull() ?: 0L).let { if (it <= 0L) 0L else (it ushr 22) + 1420070400000L }
+
+        /** The newest message id that belongs to an OLDER conversation (0 = none): walking back from the newest id,
+         *  the first message followed by a quiet gap longer than CONVO_GAP_MS, and everything before it. */
+        internal fun staleCutoff(ids: List<String>): Long {
+            val sorted = ids.mapNotNull { it.toLongOrNull() }.filter { it > 0 }.distinct().sortedDescending()
+            for (i in 1 until sorted.size) {
+                val newer = snowflakeMs(sorted[i - 1].toString()); val older = snowflakeMs(sorted[i].toString())
+                if (newer - older > DiscordBotLimits.CONVO_GAP_MS) return sorted[i]
+            }
+            return 0L
+        }
+
         private val VERDICT_ASK_RE = Regex("(?i)(\\brate\\b|\\brank\\b|\\b(1|one) ?(-|–|to) ?10\\b|out of (10|ten)|on a scale|\\bpick (one|between)|\\bchoose (one|between)|would (you|u) rather|smash or pass|which (one )?(is|would you|do you)|\\bwho wins\\b|\\b(better|worse)[,:]? .{1,30}\\bor\\b)")
         /** "you're the (server's) (official) X now" / "cardinal is our resident X" → X (1-3 words). */
         private val TITLE_RE = Regex("(?i)\\b(?:you'?re|you are|ur|u r|cardinal(?:'s| is))\\s+(?:now\\s+)?(?:(?:the|our|this|a)\\s+)(?:(?:server|chat|group)'?s\\s+)?(?:(?:official|new|resident|designated|certified|local)\\s+)?(\\p{L}+(?:\\s+\\p{L}+){0,2}?)(?=\\s+(?:now|here|forever|lol|lmao|fr|officially)\\b|\\s*[,.!?]|\\s*$)")
@@ -1342,12 +1365,19 @@ class DiscordBotService : Service() {
         val ctxIdL = ctx.messageId.toLongOrNull() ?: Long.MAX_VALUE
         var maxSeenId = ctx.messageId.toLongOrNull() ?: 0L
         var fetchedCount = 0
+        var transcriptCut = false
         val speakerOrder = ArrayList<String>()
         if (cfg.contextTurns > 0) {
             val recent = DiscordRest.fetchRecentMessages(cfg.botToken, ctx.channelId, cfg.contextTurns)
             fetchedCount = recent.size
+            // Only the conversation that's happening now: walking back from the newest message, stop at the
+            // first quiet gap longer than CONVO_GAP_MS. Lines from hours ago read as live context otherwise
+            // (a dog walk at 01:54 turned a 05:53 question into "since when are we a scheduling committee").
+            val staleCutId = staleCutoff(recent.map { it.id } + ctx.messageId)
+            if (staleCutId > 0L) transcriptCut = true
             for (m in recent) {
                 val mid = m.id.toLongOrNull() ?: 0L
+                if (mid <= staleCutId) continue
                 if (mid > maxSeenId) maxSeenId = mid
                 if (m.id == ctx.messageId) continue
                 // A higher snowflake id = a message that arrived AFTER the one we're answering.
@@ -1360,7 +1390,7 @@ class DiscordBotService : Service() {
                 turns.add(DiscordBotAi.Turn(m.authorId == botId, m.authorName, text))
             }
         }
-        val windowFull = cfg.contextTurns > 0 && fetchedCount >= cfg.contextTurns
+        val windowFull = cfg.contextTurns > 0 && fetchedCount >= cfg.contextTurns && !transcriptCut
         val refOutOfWindow = ctx.refTurn != null && (ctx.refId == null || ctx.refId !in seen)
         // A Discord reply says which message it answers — inline, so the transcript stays in order and
         // an old quoted message is clearly a quote, not a new turn.
@@ -1491,6 +1521,7 @@ class DiscordBotService : Service() {
             shortHint = short,
             aboutSelf = SELF_ASK_RE.containsMatchIn(ctx.userText),
             verdictAsk = VERDICT_ASK_RE.containsMatchIn(ctx.userText),
+            clock = if (TIME_ASK_RE.containsMatchIn(ctx.userText)) clockLine(now) else "",
             bitCue = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS).firstOrNull { t ->
                 val k = groundWords(t); k.isNotEmpty() && groundWords(ctx.userText).any { it in k }
             }.orEmpty(),

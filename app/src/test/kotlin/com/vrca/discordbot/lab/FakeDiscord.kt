@@ -37,12 +37,16 @@ internal class FakeDiscord(private val rec: LabRecorder, val botToken: String) {
     private object Snowflake {
         private const val DISCORD_EPOCH = 1420070400000L
         private var last = 0L
+        /** Lab clock skew: `> time-skip N` makes every later message look N minutes newer than the ones before. */
+        @Volatile var skewMs = 0L
         @Synchronized fun next(): String {
-            val candidate = (System.currentTimeMillis() - DISCORD_EPOCH) shl 22
+            val candidate = (System.currentTimeMillis() + skewMs - DISCORD_EPOCH) shl 22
             last = maxOf(candidate, last + 1)
             return last.toString()
         }
     }
+
+    fun skipTime(minutes: Long) { Snowflake.skewMs += minutes * 60_000L }
 
     val server = MockWebServer()
     val bot = User("1100000000000000001", "Cardinal", "Cardinal", bot = true)
