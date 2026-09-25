@@ -94,7 +94,7 @@ object ServerMemoryStore {
      */
     @Synchronized
     fun remember(ctx: Context, text: String, nowMs: Long) {
-        val t = text.trim().take(160); if (t.length < 6 || ContentBoundary.hatefulAboutGroup(t)) return
+        val t = text.trim().take(160); if (t.length < 6) return
         val kw = keywordsOf(t)
         val list = load(ctx).toMutableList()
         val hit = list.indexOfFirst { m ->
