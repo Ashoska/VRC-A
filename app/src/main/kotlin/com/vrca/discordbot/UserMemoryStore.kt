@@ -251,9 +251,21 @@ object UserMemoryStore {
         for (inc in incoming) {
             val i = out.indexOfFirst { similar(it, inc) }
             if (i >= 0) { if (inc.length > out[i].length) out[i] = inc }   // corrected/fuller wins
-            else if (!addsNothing(inc, out)) out.add(inc)
+            else {
+                // Two tastes about the same thing: keep the main one ("loves Dr Pepper" over "likes cane sugar in Dr
+                // Pepper") — the shorter taste whose object words all appear in the other.
+                val t = if (TASTE.containsMatchIn(inc)) out.indexOfFirst { TASTE.containsMatchIn(it) && tasteNested(it, inc) } else -1
+                if (t >= 0) { if (tasteObject(inc).size < tasteObject(out[t]).size) out[t] = inc }
+                else if (!addsNothing(inc, out)) out.add(inc)
+            }
         }
         return out.distinct()
+    }
+    private val TASTE = Regex("(?i)^(likes|loves|enjoys|adores|is into|is obsessed with|really likes)\\b")
+    private fun tasteObject(f: String): Set<String> = factKeys(f.replace(TASTE, "")).filter { it.length >= 3 }.toSet()
+    private fun tasteNested(a: String, b: String): Boolean {
+        val x = tasteObject(a); val y = tasteObject(b)
+        return x.isNotEmpty() && y.isNotEmpty() && (x.containsAll(y) || y.containsAll(x))
     }
 
     // ── "adds nothing new": the learner re-deriving the same thing in new words every pass ("can play JJ's on
