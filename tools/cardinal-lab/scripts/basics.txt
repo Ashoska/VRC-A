@@ -17,10 +17,10 @@ dave: @Cardinal write me a tiny haiku about pizza
 > expect reply
 > expect not-contains (?i)\b(i can'?t|i cannot|i won'?t|i'?m not able|as an)\b
 finn: @Cardinal ¿qué opinas de los tacos?
-> expect contains (?i)([áéíóúñ¿¡]|\b(los|las|que|son|muy|me|es)\b)
+> expect contains (?i)([áéíóúñ¿¡]|\b(los|las|que|son|muy|me|es|el|la|y|con|sin|pero|claro|obvio|mejor|porque|para|nada|todo|bueno)\b)
 alice: @Cardinal salut, tu fais quoi ce soir ?
-> expect contains (?i)([àâçéèêîôû]|\b(je|tu|pas|rien|ce|soir|et|le|la|les|c'est)\b)
+> expect contains (?i)([àâçéèêîôûœ]|\b(je|tu|pas|rien|ce|soir|et|le|la|les|c'est|un|une|mais|bien|oui|non|trop|juste|moi|toi|avec)\b)
 bob: @Cardinal hallo, wie geht es dir heute?
-> expect contains (?i)([äöüß]|\b(ich|mir|gut|und|nicht|ist|es|das|heute)\b)
+> expect contains (?i)([äöüß]|\b(ich|mir|gut|und|nicht|ist|es|das|heute|eher|ehrlich|gesagt|alles|gerade|bisschen|viel|schlecht|sehr|auch|noch|ja|nein|mal|schon|aber|danke|geht|mich|mein)\b)
 carol: @Cardinal honestly que sera sera, what are you up to tonight?
 > expect not-contains (?i)\b(je|ich|estoy|qué|los|las|pero|muy)\b
