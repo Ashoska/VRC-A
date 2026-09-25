@@ -37,7 +37,7 @@ ashoska: @Cardinal anyway testing stuff, update my Nickname to Ash
 > expect card ashoska contains (?i)casual nickname: ash\b
 ashoska ^bot: you didnt do it
 > expect reply
-> expect not-contains (?i)(settings|i'?m not a bot|go click|can'?t (do|change) (that|it)|yourself|admin|one sec|working on it|my bad|on it\b)
+> expect not-contains (?i)(i'?m not a bot|sysadmin|go click|can'?t (do|change) (that|it)|fix it yourself|do it yourself|not (an? )?admin|one sec|working on it|my bad|on it\b)
 # A sticker is a message with no text: he should see it as a sticker, not an empty message.
 ashoska: {sticker:pray}
 > expect respond
@@ -53,3 +53,18 @@ niko ^bot: yes exactly, bring out your inner gremlin, unleash the chaos
 ashoska: can you even see the name of this server Cardinal?
 > expect reply
 > expect contains (?i)lab server
+# Talk about Cardinal / a test isn't a fact about the person talking (seen on device: "can make a server
+# reply in 0.81 seconds", "has a 100% success rate", "will train the server … until it's approved").
+ashoska: ok so i got cardinal to reply in 0.81 seconds and it has a 100% success rate on the tests
+ashoska: next i'll train it to handle the inconsistencies by adding them to the training run until it's approved
+carol: that's actually impressive
+ashoska: yeah i also play guitar when i'm not doing this lol
+> quiet
+> wait
+> expect card ashoska not-contains (?i)(seconds|success rate|training|train it|cardinal|0\.81|100%)
+# Slang reaction: "peakkk" under his answer is praise, not a grudging "fine".
+ashoska: @Cardinal do you like dr pepper?
+> expect reply
+ashoska ^bot: peakkk
+> expect respond
+> expect not-contains (?i)(don'?t act like|aren'?t impressed|not impressed|pretend|peak what|what'?s peak)

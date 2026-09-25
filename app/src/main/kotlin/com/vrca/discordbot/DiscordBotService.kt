@@ -100,6 +100,17 @@ class DiscordBotService : Service() {
         private val SELF_STATED_TAIL = setOf("and", "but", "for", "too", "lol", "now", "who", "that", "the", "with", "at", "in",
             "lmao", "fr", "btw", "tho", "bit", "lot", "little", "big", "huge", "fan", "mess", "joke", "genius", "idiot")
         private val STANDS_BY_RE = Regex("\\b(yes|yeah|yea|yep|ya)\\b.{0,12}\\b(i am|i'?m|i do|i swear)\\b|\\bi (really|actually|literally) am\\b|\\bask anyone\\b|\\bi swear\\b")
+        private val DETAIL_ASK_RE = Regex("(?i)\\b(explain|describe|tell (me|us) (about|more|everything|what)|walk (me|us) through|" +
+            "help (me|us)|list|give (me|us) (a|some|the)|write|recommend|suggest|compare|summari[sz]e|story|details?|in depth|step by step)\\b")
+        private val SLANG = mapOf(
+            "peak" to "that's great / the best (they love it)", "goated" to "the best (praise)", "goat" to "the best ever (praise)",
+            "bussin" to "really good", "based" to "respectably bold (approval)", "ate" to "nailed it (praise)",
+            "slay" to "did great (praise)", "valid" to "fair / approved", "w" to "a win (approval)", "dub" to "a win (approval)",
+            "mid" to "mediocre (a dig)", "l" to "a loss (a dig)", "cooked" to "done for / in trouble", "ratio" to "your take got outvoted (a dig)",
+            "cap" to "a lie", "nocap" to "no lie, for real", "fr" to "for real (agreeing)",
+            "sus" to "suspicious", "lowkey" to "kind of / secretly", "highkey" to "openly / very", "ong" to "on god, for real",
+            "deadass" to "seriously", "bet" to "ok, deal", "rizz" to "charm / flirting skill", "delulu" to "delusional (teasing)",
+            "iykyk" to "an inside joke", "sheesh" to "wow (impressed)", "yapping" to "talking too much", "yap" to "talk too much")
         private val CALL_ME_STOP = setOf("when", "later", "back", "out", "if", "tomorrow", "sometime", "maybe", "that", "a", "an", "the", "it", "him", "her", "anything", "crazy", "whatever")
         private val CALL_ME_NOT_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|never|no more) call(?:ing)? me ([\\p{L}\\p{N}_]{2,32})")
         private const val PING_ONLY = "(they pinged you with no message)"
@@ -755,6 +766,11 @@ class DiscordBotService : Service() {
             }
         }
 
+        // Length follows the need: banter, reactions and statements get one short line; only a real question
+        // or an ask for detail ("explain…", "tell me about…") gets room for more. Replies to "your memory is a
+        // mess" used to run three sentences because every @ / reply got the full budget.
+        if (!QUESTION_RE.containsMatchIn(ctx.userText) && !DETAIL_ASK_RE.containsMatchIn(ctx.userText) &&
+            built.dayAsk == null && !built.recall) short = true
         val model = if (rung == DiscordBotState.Rung.CHEAP) DiscordBotLimits.CHEAP_MODEL else cfg.model
         val turns = if (rung == DiscordBotState.Rung.TRIM || rung == DiscordBotState.Rung.CHEAP)
             built.turns.takeLast(DiscordBotLimits.CONTEXT_RAW_TURNS / 2) else built.turns
@@ -1600,7 +1616,7 @@ class DiscordBotService : Service() {
             bitCue = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS).firstOrNull { t ->
                 val k = groundWords(t); k.isNotEmpty() && groundWords(ctx.userText).any { it in k }
             }.orEmpty(),
-            nameHint = listOf(nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
+            nameHint = listOf(slangHint(ctx), nickDoneHint(ctx), serverHint(ctx), unknownNameHint(ctx, built).ifBlank { selfRefHint(built) })
                 .filter { it.isNotBlank() }.joinToString(" "),
             reactingToYou = (ctx.refTurn?.isBot == true || ctx.followUp || ctx.freeFollow) &&
                 ctx.userText.trim().split(Regex("\\s+")).size <= 4 && '?' !in ctx.userText,
@@ -1640,6 +1656,19 @@ class DiscordBotService : Service() {
         if (!Regex("(?i)\\b(didn'?t|did not|didnt|never|not|haven'?t|hasn'?t)\\b.{0,20}\\b(do|did|done|change|changed|save|saved|update|updated|work|worked|it)\\b|\\bdidn'?t work\\b")
                 .containsMatchIn(ctx.userText)) return ""
         return "They think you didn't change their name, but you did: you call them \"${set.second}\" now and it's saved in your memory of them (not their Discord profile). Tell them it's done."
+    }
+
+    /** Short slang reactions ("peakkk" under his answer = that's great) got misread ("don't act like you aren't
+     *  impressed"). Stretched letters are squeezed ("peakkk" → "peak"), then a one-line meaning. Free. */
+    private fun slangHint(ctx: MsgCtx): String {
+        val words = Regex("[\\p{L}]+").findAll(ctx.userText.lowercase()).map { it.value }.toList()
+        if (words.isEmpty() || words.size > 8) return ""
+        val hits = words.mapNotNull { w ->
+            val sq = w.replace(Regex("(\\p{L})\\1{2,}"), "$1$1")
+            (SLANG[w] ?: SLANG[sq] ?: SLANG[w.replace(Regex("(\\p{L})\\1+"), "$1")])?.let { w to it }
+        }.distinctBy { it.second }.take(2)
+        if (hits.isEmpty()) return ""
+        return "Slang: " + hits.joinToString("; ") { (w, m) -> "\"$w\" = $m" } + "."
     }
 
     /** Asked about the server ("can you even see this server's name?"): he knew it but just said "of course". */

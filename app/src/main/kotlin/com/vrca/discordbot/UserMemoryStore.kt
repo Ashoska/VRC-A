@@ -187,8 +187,15 @@ object UserMemoryStore {
         if (NEGATED_FACT.containsMatchIn(t)) return null
         if (SPECULATION.containsMatchIn(t)) return null
         if (t.contains("http://") || t.contains("https://")) return null
+        // Chat ABOUT Cardinal / the bot / a test isn't who they are ("can make a server reply in 0.81 seconds",
+        // "has a 100% success rate"), and a plan isn't a fact ("will train the server … until it's approved").
+        if (BOT_TALK.containsMatchIn(t) || MEASUREMENT.containsMatchIn(t) || PLAN.containsMatchIn(t)) return null
         return t
     }
+    private val BOT_TALK = Regex("(?i)\\b(bots?|cardinal|llm|a\\.i\\.?|ai|chat ?gpt|prompts?|training runs?|success rate|neurons?|" +
+        "response time|reply (time|speed)|repl(y|ies) in)\\b")
+    private val MEASUREMENT = Regex("(?i)\\d+(\\.\\d+)?\\s*(%|percent\\b|seconds?\\b|secs?\\b|ms\\b|milliseconds?\\b)")
+    private val PLAN = Regex("(?i)^(will|is going to|is gonna|are going to|plans? to|is planning to|is about to|intends to)\\b")
     private fun cleanNick(s: String, ownNames: Set<String>): String? {
         val t = s.trim()
         if (t.length < 2 || t.length > 32) return null
