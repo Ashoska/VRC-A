@@ -6,6 +6,69 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 3 — cheaper reply model, conversation following, safer learning (LIVE lab)
+
+**What changed** (details in CLAUDE.md "v5" + "Round 3b")
+- Reply model moved from the 70B to `gemma-4-26b-a4b-it` with thinking off (≈6.5 neurons per reply call
+  instead of ≈19.5). The learner and director stay on the 8B; gemma handles only fact-pile merges and
+  learn passes where one of his bits is changing.
+- Conversation following: he answers follow-ups from someone he's talking with, even without an @. A free
+  rule handles the easy cases, and one cheap 8B check handles the unclear ones. He is called by name
+  ("cardinal, …"); being talked *about* only goes to the director.
+- Stale context: transcript lines from an older conversation (more than 12 minutes before the current
+  run) are cut, so a question asked hours later isn't answered from the old thread. Time/date questions
+  get a `[Clock]` line (UTC).
+- Learning hygiene: jokes, right-now states ("rn", "been busy", "hasn't been on for a bit"), what-ifs,
+  relatives, reworded verbs, negated facts and joke ages are not stored as facts. Hedged self-statements
+  ("apparently a nurse") are kept as plain facts. A trait needs its words in at least 2 batch messages.
+  Nicknames must come from someone else and can't be slang. There are no content restrictions on traits.
+- The summary keeps the conversation's main topic when a short tail pass only summarises the last joke
+  (`ConversationStore.keepThread`).
+- A request written in English to answer in another language ("can you answer in spanish?") now gets a
+  reply in that language (`askedLang`).
+- Lab additions: `> time-skip N`, `regressions.txt` (every case that failed before), plus 22 suites in
+  rotation.
+
+**Pass rates.** Every suite passed 3 LIVE runs in a row after the last change that touched it. The
+"original" column is code at `cf1bda9` running the same script.
+
+| suite | checks | original | now (3 runs) | neurons/run now |
+|---|---|---|---|---|
+| regressions | 16 | — | 16/16 ×3 | 78–80 |
+| basics | 12 | 11/12 | 12/12 ×3 | 46–54 |
+| recall | 10 | 7/9 | 10/10 ×3 | 66–75 |
+| traits | 13 | 10/13 | 13/13 ×3 | 75–84 |
+| routes | 8 | 5/8 | 8/8 ×3 | 84–85 |
+| corrections | 12 | 8/12 | 12/12 ×3 | 31–41 |
+| days | 6 | 2/6 | 6/6 ×3 | 38–58 |
+| silent | 5 | 1/5 | 5/5 ×3 | 26–35 |
+| pile | 8 | 8/8 | 8/8 ×3 | 10–11 |
+| follow | 18 | 13/18 | 18/18 ×3 | 77–81 |
+| edge-replies | 24 | 18/22 | 24/24 ×3 | 96–126 (original 325) |
+| edge-learning | 14 | 9/14 | 14/14 ×3 | 19–22 |
+| structure | 22 | 22/22 | 22/22 ×3 | 50–56 (original 214) |
+| smoke / burst / pileup | 5 / 2 / 2 | — | all ×3 | 11–28 |
+| gateway-codes / lifecycle / ladder | 3 / 6 / 4 | — | all ×3 | 4–9 |
+| identity-filter / personality-cap | 6 / 1 | — | all ×3 | 0 (DRY) |
+| evening (seeded memory + 127-message hangout) | 22 | — | 22/22 ×3 | 340 / 368 / 341 |
+
+**Cost and speed, evening script** (original → round 1 → round 2 → now)
+
+| metric | original | round 1 | round 2 | now |
+|---|---|---|---|---|
+| total neurons | 1,090 | 631 | 588 | **340–368** |
+| per reply call | 37.5 | 19.6 | 19.4 | **6.4–6.7** |
+| all calls ÷ replies | — | — | — | 10.3–10.8 |
+| reply prompt (tokens) | 1,241 | 568 | 582 | ≈625–676 |
+| learning per evening | 34 (≈18 msgs read) | 77 | 81 | ≈100–108 (8B ≈70 + gemma bit passes ≈33) |
+| director per call | 4.8 | 5.5 | — | ≈1.8 |
+| per 1,000 messages | 8,583 | 4,972 | ≈4,630 | **≈2,680–2,900** |
+| reply time p50 / p95 | 1.12 s / 4.51 s | 0.86 s / 1.81 s | — | 0.81–1.23 s / 1.85–3.0 s |
+
+The reply prompt grew slightly from round 2 because of the conversation-following cues and the
+language/clock/verdict hints. Each hint is only added when it applies. Reply p95 moves with Cloudflare
+latency from run to run. The three runs spread from 1.85 s to 3.0 s on identical code.
+
 ## Round 2 — day log, revisable memory, emergent traits (LIVE lab)
 
 **New behaviour**
