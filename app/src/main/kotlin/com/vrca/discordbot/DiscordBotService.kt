@@ -96,6 +96,10 @@ class DiscordBotService : Service() {
         private val CALL_ME_RE = Regex("(?i)\\b(just call me|you can call me|call me|i go by|everyone calls me|" +
             "(?:update|change|set|switch|make) my (?:nick ?name|name) (?:to|as)|my (?:new )?nick ?name is(?: now)?)\\s+([\\p{L}\\p{N}_]{2,32})")
         private const val NICK_NOTE_MS = 15 * 60_000L   // "you didnt do it" a few minutes later: he knows it's done
+        private val SELF_STATED_RE = Regex("\\b(i'?m|im|i am) (an? )([\\p{L}]{3,20}(?: [\\p{L}]{3,20})?)(?=\\W|$)")
+        private val SELF_STATED_TAIL = setOf("and", "but", "for", "too", "lol", "now", "who", "that", "the", "with", "at", "in",
+            "lmao", "fr", "btw", "tho", "bit", "lot", "little", "big", "huge", "fan", "mess", "joke", "genius", "idiot")
+        private val STANDS_BY_RE = Regex("\\b(yes|yeah|yea|yep|ya)\\b.{0,12}\\b(i am|i'?m|i do|i swear)\\b|\\bi (really|actually|literally) am\\b|\\bask anyone\\b|\\bi swear\\b")
         private val CALL_ME_STOP = setOf("when", "later", "back", "out", "if", "tomorrow", "sometime", "maybe", "that", "a", "an", "the", "it", "him", "her", "anything", "crazy", "whatever")
         private val CALL_ME_NOT_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|never|no more) call(?:ing)? me ([\\p{L}\\p{N}_]{2,32})")
         private const val PING_ONLY = "(they pinged you with no message)"
@@ -1030,6 +1034,22 @@ class DiscordBotService : Service() {
             val m = CALL_ME_RE.find(t.text) ?: continue
             val nick = m.groupValues[2]
             if (nick.lowercase() !in CALL_ME_STOP) UserMemoryStore.applyDelta(this, id, t.name, JSONObject().put("preferredName", nick))
+        }
+        // "i'm a firefighter" → "you're not a firefighter lol" → "yes i am, station 12": the learner goes into
+        // correction mode on the dispute and sometimes never writes the fact down at all. Someone who says what
+        // they are and stands by it when challenged has told us who they are (free backstop).
+        for ((i, t) in turns.withIndex()) {
+            if (t.isBot || isJoking(t.text)) continue
+            val id = nameToId[t.name.lowercase().trim()] ?: continue
+            val what = SELF_STATED_RE.find(t.text.lowercase())?.groupValues?.get(3)?.trim()
+                ?.split(' ')?.let { w -> if (w.size > 1 && w[1] in SELF_STATED_TAIL) w.take(1) else w }?.joinToString(" ") ?: continue
+            if (what.split(' ').first() in SELF_STATED_TAIL) continue
+            val key = what.split(' ').last()
+            val later = turns.drop(i + 1)
+            val disputed = later.any { o -> !o.isBot && nameToId[o.name.lowercase().trim()] != id &&
+                Regex("\\b(not|no|isn'?t|aint|ain'?t)\\b.{0,20}\\b" + Regex.escape(key)).containsMatchIn(o.text.lowercase()) }
+            val stands = later.any { o -> !o.isBot && nameToId[o.name.lowercase().trim()] == id && STANDS_BY_RE.containsMatchIn(o.text.lowercase()) }
+            if (disputed && stands) UserMemoryStore.applyDelta(this, id, t.name, JSONObject().put("facts", JSONArray().put("is a $what")))
         }
         // "stop calling me X" / "don't call me X" from the person themselves → retire that name (free).
         if (correcting) for (t in turns) {
