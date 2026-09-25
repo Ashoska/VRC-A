@@ -1055,6 +1055,9 @@ class DiscordBotService : Service() {
             val tw = groundWords(t)
             cardinalInBatch && t.isNotBlank() && disputed.none { PersonalityStore.isSameTrait(t, it) } &&
                 (tw.isEmpty() || tw.count { it in batchWords } * 2 >= tw.size) &&
+                // A lasting quirk shows up more than once: one throwaway line of his ("stay out of the kitchen")
+                // isn't a trait ("Kitchen Elite").
+                (tw.isEmpty() || turns.count { m -> groundWords(m.text).any { it in tw } } >= 2) &&
                 t.trim(':', ' ').lowercase() !in emojiNames   // "clueless" from :clueless: isn't a personality
         }
         // The room handed him a title ("you're the server's official pizza critic now") and others picked it up:

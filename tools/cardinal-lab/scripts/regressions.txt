@@ -51,6 +51,7 @@ ash: lmao
 > time-skip 29
 ash: @Cardinal what timezone do you use?
 > expect contains (?i)\butc\b
-> expect not-contains (?i)(dog|schedul|committee|\b(est|pst|cst|cet|jst)\b|eastern|pacific)
+> expect not-contains (?i)(dog|walk|trash|schedul\w* committee|planning our|\b(est|pst|cst|cet|jst)\b|eastern|pacific)
 ash: @Cardinal what time is it for you rn?
 > expect contains (?i)(\d|\butc\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight|morning|afternoon|evening|night)\b)
+> expect self not-contains (?i)kitchen
