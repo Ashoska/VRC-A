@@ -1449,7 +1449,7 @@ class DiscordBotService : Service() {
                     else -> null
                 }
                 if (why == "unsupported") onUnsupported(f)
-                if (why == null) kept.put(f) else onDrop("${md.about}: $f ($why)")
+                if (why == null) kept.put(trimTaste(f, support)) else onDrop("${md.about}: $f ($why)")
             }
             out.put("facts", kept)
         }
@@ -1588,6 +1588,23 @@ class DiscordBotService : Service() {
         "her", "his", "him", "she", "too", "own", "its", "got", "get", "try", "off", "out", "one", "all", "any", "who", "how",
         "why", "now", "yet", "per", "via", "use", "big", "lot", "way", "day", "new", "old", "bit")
     /** Like [groundWords] but keeps 3-letter words (dog, cat, gym, pc game names) — for checking learned facts. */
+    /** "loves cane sugar Doctor Pepper" from "just got a 48 crate of doctor pepper" + "it's got cane sugar in it":
+     *  a taste keeps only the words the line that shows it backs up ("loves Doctor Pepper"), not a side detail
+     *  explained later. */
+    private fun trimTaste(f: String, support: List<DiscordBotAi.Turn>): String {
+        val m = TASTE_FACT_RE.find(f) ?: return f
+        if (support.size < 2) return f
+        val obj = m.groupValues[2].trim()
+        val objWords = factWords(obj)
+        val best = support.maxByOrNull { t -> factWords(t.text).count { it in objWords } } ?: return f
+        val bestWords = factWords(best.text)
+        val kept = obj.split(Regex("\\s+")).filter { w -> factWords(w).let { it.isEmpty() || it.any { x -> x in bestWords } } }
+            .dropWhile { factWords(it).isEmpty() }.dropLastWhile { factWords(it).isEmpty() }
+        if (kept.none { factWords(it).isNotEmpty() } || kept.size == obj.split(Regex("\\s+")).size) return f
+        return m.groupValues[1] + " " + kept.joinToString(" ")
+    }
+    private val TASTE_FACT_RE = Regex("(?i)^((?:really |also )?(?:loves|likes|enjoys|adores|is into|is (?:a )?(?:big |huge )?fan of))\\s+(.+)$")
+
     private fun factWords(s: String): Set<String> =
         Regex("[\\p{L}\\p{N}]+").findAll(s.lowercase().replace(Regex("['’]s\\b"), "")).map { it.value }
             .filter { it.length >= 3 && it !in FACT_STOP }.map { discordStem(it) }.toSet()
