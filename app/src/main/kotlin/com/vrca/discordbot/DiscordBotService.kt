@@ -195,6 +195,7 @@ class DiscordBotService : Service() {
     private val flow = ConcurrentHashMap<String, ArrayDeque<FlowMsg>>()
     private val channelMutex = ConcurrentHashMap<String, Mutex>()        // channel -> reply serialiser
     private val backoffUntil = ConcurrentHashMap<String, Long>()         // channel -> back-off deadline
+    private val backoffStopMsg = ConcurrentHashMap<String, String>()     // channel -> id of the "stop" message
     private val learnPending = ConcurrentHashMap<String, Int>()          // channel -> msgs since the last learn pass
     private val lastLearnAt = ConcurrentHashMap<String, Long>()          // channel -> last learn pass started
     private val lastLearnedId = ConcurrentHashMap<String, Long>()        // channel -> newest message id a pass has read
@@ -534,6 +535,7 @@ class DiscordBotService : Service() {
         // "Stop" directed at the bot → back off in this channel (don't be annoying).
         if (addressedEff && isStopRequest(userTextRaw)) {
             backoffUntil[channelId] = now + DiscordBotLimits.BACKOFF_MS
+            backoffStopMsg[channelId] = messageId   // replies still being written for earlier messages get dropped
             DiscordBotState.log("backing off in $channelId")
             val who = DiscordRest.displayName(author, "someone")
             DiscordBotState.addTrace(DiscordBotState.Trace(now, channelId, who, "addressed/stop", "heuristic", "back-off",
@@ -720,6 +722,14 @@ class DiscordBotService : Service() {
 
         when (val res = DiscordBotAi.reply(cfg, model, turns, rc)) {
             is DiscordBotAi.ReplyResult.Ok -> {
+                // Someone told him to stop while this reply was being written: drop it rather than talk over them.
+                val stopId = backoffStopMsg[ctx.channelId]?.toLongOrNull()
+                val msgId = ctx.messageId.toLongOrNull()
+                if (System.currentTimeMillis() < (backoffUntil[ctx.channelId] ?: 0L) &&
+                    stopId != null && msgId != null && msgId < stopId) {
+                    trace(ctx, "reply", "backed off", "dropped", "told to stop while writing")
+                    return
+                }
                 val replyText = tameEmoji(ctx.channelId, res.text)
                 val outText = EmojiConvert.convert(replyText)
                 val now = System.currentTimeMillis()

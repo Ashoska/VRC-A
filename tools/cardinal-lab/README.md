@@ -69,6 +69,8 @@ into TRIM/CHEAP/SILENT for the rest of the UTC day). `--cap` is a hard per-run c
 | `--set gap=MS` / `quiet=MS` / `idle=MIN` | pacing between non-waited lines / settle quiet window / interactive idle exit |
 | `--set dry.director=reply\|react\|ignore\|mix` / `dry.latency=MS` | DRY-mode behaviour |
 | `--set affinity=1` | LIVE: send `x-session-affinity` (prefix-cache experiment) |
+| `--set fast=1` | shrink the real waits (learn lull 5 s, follow window 60 s, free follow 30 s) so a script runs in seconds; leave it off for timing/cost benchmarks like `evening.txt` |
+| `--set learnModel=@cf/...` | swap the learner model (A/B the 8B against another) |
 
 ## Script format (`scripts/*.txt`)
 
@@ -83,6 +85,9 @@ alice ^bot: lol no                reply to Cardinal's last message here (^bob = 
 ~rtl84: hi                        a user with no display name (Discord sends global_name: null)
 alice +img: look at this          attach an image          (!wait / !nowait force waiting)
 > wait                            let the bot finish (incl. background learning)
+> quiet                           end the room's activity so the lull learner runs (fast mode: ~6 s)
+> follow-expire                   end every open conversation (as if its window ran out)
+~name: text                       a user with no display name (Discord sends global_name: null)
 > sleep 3000 · > react carol bot 😂 · > checkpoint name · > note text
 > drop-gateway [code] · > gateway-reject [code] · > gateway-accept · > gateway-stats
 > gateway-heartbeat MS              HELLO heartbeat for NEW sessions (default 41250; shorten for fast gateway tests)
@@ -132,6 +137,9 @@ Addressed lines (mention or `^bot`) wait until the bot has decided and gone quie
 | `pile.txt` | paraphrased facts about one topic are merged into 1-2 notes that keep every detail (LIVE) |
 | `edge-replies.txt` | called by name without an @, talked ABOUT by name, nickname lookup, an unknown person, prompt injection, two questions at once, a new person, "ping everyone", emoji-only ping, stop then ask (LIVE) |
 | `edge-learning.txt` | from a real chat: a joke age, what someone's doing right now, slang aimed at someone else, a reworded fact, family facts, what-ifs, sarcasm, a troll, a user with no display name (LIVE) |
+| `follow.txt` | conversation following without @: carrying on with him, turning to someone else, a group talking to him at once, "ohh shit" as a reaction, a bare @ on a message, windows ending (LIVE) |
+| `structure.txt` | replies read like texting: no name prefix/quotes/markdown headers, short banter stays short, a how-to can be longer, few emojis, no pings, a real number when asked to rate, a pick on would-you-rather (LIVE) |
+| `evening.txt` | the cost/speed benchmark: a 127-message evening with ~30 asks mixed in (run without `fast`) |
 | `gateway-codes.txt` | server-initiated close resumes in ~1 s; a 4014 intents rejection stops with FAILED + reason |
 
 ## Production observability
