@@ -2064,7 +2064,12 @@ class DiscordBotService : Service() {
         "haha","hey","hi","ok","okay","yeah","wow","way","own","off","yet","also","then","than",
         "there","here","about","know","does","doing","from","into","were","been","being","some",
         "really","very","much","more","most","would","could","should","will","dont","cant","thats",
-        "im","ive","its","youre","whats","who's","what's","me","my","we","us","them","their","do"
+        "im","ive","its","youre","whats","who's","what's","me","my","we","us","them","their","do",
+        // Everyday verbs/fillers: "he really thinks he can handle me" pulled in dave's "thinks JJ's is fun".
+        "think","thinks","thought","gonna","wanna","gotta","want","wants","going","make","makes","made",
+        "thing","things","stuff","good","feel","feels","actually","still","even","well","back","only",
+        "right","though","sure","maybe","literally","kinda","lowkey","ngl","tho","rn","already","need",
+        "take","come","look","give","tell","said","says","saying","keep","go","goes","went","use","used"
     )
     // 3+ letters so short-but-meaningful words (cat, dog, gym, art) still drive relevance.
     private fun keywordList(s: String): List<String> =
