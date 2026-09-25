@@ -1031,7 +1031,10 @@ class DiscordBotService : Service() {
         }
         if (replaced != null) DiscordBotState.log("self: \"${replaced.take(40)}\" → \"${newTrait.take(40)}\"")
         // The bit the room was riffing on, as it stands now (asked in the same learn pass — no extra call).
-        if (replaced == null && bitFocus.isNotBlank()) {
+        // A bit people are complaining about is being toned down, not evolved.
+        val bitDisputed = bitFocus.isNotBlank() && (disputed.any { PersonalityStore.isSameTrait(it, bitFocus) || it.equals(bitFocus, true) } ||
+            turns.any { !it.isBot && COMPLAINT_RE.containsMatchIn(it.text) && !isJoking(it.text) && groundWords(it.text).any { w -> w in groundWords(bitFocus) } })
+        if (replaced == null && bitFocus.isNotBlank() && !bitDisputed) {
             applyBitNow(bitFocus, obs.bitNow, if (bitVariant) obs.selfTrait else "", turns)
         }
         // Mood too: only when Cardinal was part of it (someone else's bad day isn't his mood).
@@ -1110,7 +1113,7 @@ class DiscordBotService : Service() {
             DiscordBotState.log("self: bit evolved \"${old.take(40)}\" → \"${next.take(40)}\"")
     }
     private val BIT_FILLER = setOf("the", "and", "with", "now", "his", "him", "is", "are", "was", "has", "one", "who", "for", "but", "still")
-    private val BIT_COMMENTARY = Regex("(?i)\\b(the group|the chat|the room|everyone|people|the idea|loves the|likes the|is joking|jokes about)\\b")
+    private val BIT_COMMENTARY = Regex("(?i)\\b(the group|the chat|the room|everyone|people|the idea|loves the|likes the|is joking|jokes about|annoying|cringe|got old|enough|stop|drop it)\\b")
 
     /** The card's owner said one of the item's key words in this batch without negating it. */
     private fun affirmedBySubject(id: String, item: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>): Boolean {
