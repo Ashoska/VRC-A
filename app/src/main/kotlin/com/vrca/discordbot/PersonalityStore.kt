@@ -42,7 +42,9 @@ object PersonalityStore {
     /** [lastMs] = when this trait was last proposed/reinforced (0 = unknown, older data). */
     data class Trait(val text: String, val strength: Int, val pinned: Boolean = false, val lastMs: Long = 0L,
                      val was: String = "",   // earlier versions of an evolved bit ("married to Shrek") — recognises it later
-                     val kind: String = "")  // taste / title / bit / habit ("" = unsorted)
+                     val kind: String = "",  // title / likes / dislikes / speech / bit / habit ("" = unsorted)
+                     val sure: Boolean = true,  // false = tentative: gone after TENTATIVE_MS unless shown again
+                     val firstMs: Long = 0L)
     data class Self(
         val style: List<String>,
         val traits: List<Trait>,
@@ -74,8 +76,13 @@ object PersonalityStore {
                 val o = a.optJSONObject(i) ?: return@mapNotNull null
                 val t = o.optString("t").trim()
                 val pinned = o.optBoolean("p", false)
-                if (t.isBlank() || (!pinned && tooVague(t))) null
-                else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), o.optBoolean("p", false), o.optLong("r", 0L), o.optString("w"), normKind(o.optString("k"), t))
+                val sure = pinned || o.optBoolean("c", true)
+                val first = o.optLong("f", o.optLong("r", 0L))
+                // A tentative trait that was never shown again is gone after TENTATIVE_MS.
+                if (t.isBlank() || (!pinned && tooVague(t)) ||
+                    (!sure && first > 0L && System.currentTimeMillis() - first > DiscordBotLimits.TENTATIVE_MS)) null
+                else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), pinned, o.optLong("r", 0L), o.optString("w"),
+                    normKind(o.optString("k"), t), sure, first)
             }
         }
     } catch (_: Exception) { emptyList() }
@@ -89,6 +96,7 @@ object PersonalityStore {
         val traitArr = JSONArray()
         self.traits.forEach {
             traitArr.put(JSONObject().put("t", it.text).put("s", it.strength).put("p", it.pinned).put("r", it.lastMs)
+                .put("c", it.sure).put("f", it.firstMs)
                 .apply { if (it.was.isNotBlank()) put("w", it.was); if (it.kind.isNotBlank()) put("k", it.kind) })
         }
         prefs(ctx).edit()
@@ -248,12 +256,10 @@ object PersonalityStore {
         if (last == 0L) { p.edit().putLong(KEY_LAST_DECAY, nowMs).apply(); return traits }
         if (nowMs - last < DiscordBotLimits.TRAIT_DECAY_INTERVAL_MS) return traits
         p.edit().putLong(KEY_LAST_DECAY, nowMs).apply()
-        return traits.mapNotNull { t ->
-            when {
-                t.pinned || t.lastMs >= last -> t
-                t.strength - DECAY > 0 -> t.copy(strength = t.strength - DECAY)
-                else -> null
-            }
+        // Confirmed traits only lose rank (never below 1), so an old good trait isn't lost just for being old;
+        // tentative ones expire on their own (readTraits).
+        return traits.map { t ->
+            if (t.pinned || t.lastMs >= last) t else t.copy(strength = (t.strength - DECAY).coerceAtLeast(1))
         }
     }
 
@@ -265,16 +271,19 @@ object PersonalityStore {
      */
     private fun addOrReinforce(traits: List<Trait>, t: String, nowMs: Long, kind: String = ""): List<Trait> {
         val idx = traits.indexOfFirst { sameTrait(it.text, t) }
+        // Shown again in a later conversation = confirmed.
         if (idx >= 0) return traits.mapIndexed { i, tr ->
-            if (i == idx) tr.copy(strength = (tr.strength + REINFORCE_INLINE).coerceAtMost(MAX_STRENGTH), lastMs = nowMs) else tr
+            if (i == idx) tr.copy(strength = (tr.strength + REINFORCE_INLINE).coerceAtMost(MAX_STRENGTH), lastMs = nowMs,
+                sure = tr.sure || nowMs - tr.lastMs >= DiscordBotLimits.CONFIRM_GAP_MS) else tr
         }
-        val fresh = Trait(t, START_STRENGTH, false, nowMs, kind = kind)
+        val fresh = Trait(t, START_STRENGTH, false, nowMs, kind = kind, sure = false, firstMs = nowMs)
         // Each slot has its own room, like a person's card: a full slot swaps out its weakest new entry.
         val sameKind = traits.count { it.kind == kind }
         if (sameKind < (KIND_CAP[kind] ?: 4) && traits.size < DiscordBotLimits.MAX_TRAITS) return traits + fresh
         val victim = traits.withIndex()
             .filter { (sameKind >= (KIND_CAP[kind] ?: 4)).let { full -> !full || it.value.kind == kind } }
-            .filter { !it.value.pinned && it.value.strength <= START_STRENGTH }
+            // Only a tentative entry makes room; a slot full of confirmed traits keeps them (the new one waits).
+            .filter { !it.value.pinned && !it.value.sure }
             .minWithOrNull(compareBy<IndexedValue<Trait>>({ it.value.strength }, { it.value.lastMs }))
             ?: return traits
         return traits.toMutableList().also { it[victim.index] = fresh }
@@ -291,7 +300,7 @@ object PersonalityStore {
         val m = mood?.trim()?.trimEnd('.')?.takeIf { it.isNotBlank() && it.length <= 40 }
         // A trait must be DURABLE identity, never just the current mood word (that was the dup bug).
         val t = trait?.trim()?.trimEnd('.')?.takeIf {
-            it.isNotBlank() && it.length in 3..80 && !it.equals(m, true) && !it.equals(mood?.trim(), true) &&
+            it.isNotBlank() && it.length in 3..60 && it.split(Regex("\\s+")).size <= 7 && !it.equals(m, true) && !it.equals(mood?.trim(), true) &&
                 !GENERIC_SELF.matches(it) && !restatesCore(it) && !tooVague(it) && !MOOD_TRAIT.containsMatchIn(it)
         }
         val s = style?.trim()?.takeIf { it.isNotBlank() && it.length in 4..90 }
@@ -360,6 +369,16 @@ object PersonalityStore {
     /** Current traits, strongest first (for the learner's correction view). */
     fun traitTexts(ctx: Context, max: Int): List<String> =
         load(ctx).traits.sortedByDescending { (if (it.pinned) 100 else 0) + it.strength }.take(max).map { it.text }
+
+    /** Tentative traits (for the free confirm check). */
+    fun tentativeTraits(ctx: Context): List<String> = load(ctx).traits.filter { !it.sure }.map { it.text }
+
+    /** One of his lines showed a tentative trait again: confirmed. */
+    fun confirmTrait(ctx: Context, text: String) {
+        val cur = load(ctx); val now = System.currentTimeMillis()
+        if (cur.traits.none { it.text.equals(text, true) && !it.sure && now - it.lastMs >= DiscordBotLimits.CONFIRM_GAP_MS }) return
+        save(ctx, cur.copy(traits = cur.traits.map { if (it.text.equals(text, true)) it.copy(sure = true, lastMs = now) else it }))
+    }
 
     /** Admin: remove one trait (pinned or not). */
     fun removeTrait(ctx: Context, traitText: String) {

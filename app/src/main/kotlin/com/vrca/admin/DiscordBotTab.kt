@@ -216,7 +216,7 @@ private fun PersonDetail(card: UserMemoryStore.Card, changed: () -> Unit) {
         if (vals.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
             Key(UserMemoryStore.LABEL[slot] ?: slot)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                vals.forEach { v -> Chip(v) { UserMemoryStore.removeNote(ctx, card.id, slot, v, force = true); changed() } }
+                vals.forEach { v -> Chip(if (UserMemoryStore.isUnsure(card, slot, v)) "$v ?" else v) { UserMemoryStore.removeNote(ctx, card.id, slot, v, force = true); changed() } }
             }
         }
     }
@@ -274,7 +274,7 @@ private fun CardinalSection() {
                             tint = if (t.pinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
                     }
                     Column(Modifier.weight(1f)) {
-                        Text(t.text, style = MaterialTheme.typography.bodyMedium)
+                        Text(if (t.sure) t.text else "${t.text} ?", style = MaterialTheme.typography.bodyMedium)
                         Small("strength ${t.strength}" + (discordRelTime(t.lastMs, System.currentTimeMillis()).takeIf { it.isNotBlank() }?.let { " · $it" } ?: "") +
                             (if (t.was.isNotBlank()) " · was ${t.was.substringAfterLast(';').trim()}" else ""))
                     }

@@ -42,6 +42,8 @@ object UserMemoryStore {
         val pronouns: String = "",
         /** IANA zone id ("America/Toronto") or a fixed "UTC+2"; shown as a live UTC offset. */
         val tz: String = "",
+        /** Tentative notes: "slot|value" → when first seen. Not in here = confirmed. */
+        val unsure: Map<String, Long> = emptyMap(),
     )
 
     // ── Slots ──────────────────────────────────────────────────────────────
@@ -89,6 +91,15 @@ object UserMemoryStore {
         val o = JSONObject(raw)
         val notes = LinkedHashMap<String, List<String>>()
         o.optJSONObject("nt")?.let { n -> SLOTS.forEach { s -> strList(n.optJSONArray(s)).takeIf { it.isNotEmpty() }?.let { notes[s] = it } } }
+        // A tentative note nobody confirmed within TENTATIVE_MS is gone.
+        val now = System.currentTimeMillis()
+        val unsure = HashMap<String, Long>()
+        o.optJSONObject("un")?.let { u -> u.keys().forEach { k -> unsure[k] = u.optLong(k) } }
+        unsure.entries.filter { now - it.value > DiscordBotLimits.TENTATIVE_MS }.forEach { e ->
+            val (sl, v) = e.key.split('|', limit = 2).let { it[0] to it.getOrElse(1) { "" } }
+            notes[sl]?.let { l -> l.filterNot { norm(it) == v }.let { if (it.isEmpty()) notes.remove(sl) else notes[sl] = it } }
+            unsure.remove(e.key)
+        }
         Card(
             id = id,
             name = o.optString("n"),
@@ -107,6 +118,7 @@ object UserMemoryStore {
             avoid = strList(o.optJSONArray("av")),
             pronouns = o.optString("pro"),
             tz = o.optString("tz"),
+            unsure = unsure,
         )
     } catch (_: Exception) { null }
 
@@ -134,6 +146,7 @@ object UserMemoryStore {
             .put("av", JSONArray(card.avoid.takeLast(4)))
             .put("pro", card.pronouns)
             .put("tz", card.tz)
+            .put("un", JSONObject().apply { card.unsure.forEach { (k, v) -> put(k, v) } })
         prefs(ctx).edit().putString(keyOf(card.id), o.toString()).apply()
     }
 
@@ -188,26 +201,73 @@ object UserMemoryStore {
      * appends (the same thing said twice keeps the shorter wording, the main thing), dropping the oldest
      * past its cap. A like/dislike about the same thing flips the other one out.
      */
-    fun addNote(ctx: Context, id: String, name: String, slot: String, raw: String): Boolean {
+    fun addNote(ctx: Context, id: String, name: String, slot: String, raw: String, confirm: Boolean = false): Boolean {
         if (id.isBlank() || slot !in SLOTS) return false
-        var v = value(raw).replace(EXAMPLE, "").trim().trimEnd('.', '!', ',', ':', ';').take(80)
+        var v = value(raw).replace(EXAMPLE, "").trim().trimEnd('.', '!', ',', ':', ';').take(60)
         // "Straftat's game" / "Valorant game" → the name itself (the slot already says it's a game).
         if (slot in setOf("game", "hobby", "likes", "dislikes")) v = v.replace(Regex("(?i)^(the )?(video ?)?games? "), "")
             .replace(Regex("(?i)('s)?\\s+(video ?)?games?$"), "").trim().ifBlank { v }
         if (v.isBlank() || POISON.containsMatchIn(v)) return false
+        val now = System.currentTimeMillis()
         val cur = load(ctx, id) ?: Card(id = id, name = name.take(60))
         val notes = LinkedHashMap(cur.notes)
+        val unsure = HashMap(cur.unsure)
         val list = notes[slot].orEmpty()
-        val next = if (slot in SINGLE) listOf(v) else {
-            val i = list.indexOfFirst { sameValue(it, v) }
-            val merged = if (i >= 0) list.toMutableList().also { if (v.length < it[i].length) it[i] = v } else list + v
-            merged.takeLast(CAP[slot] ?: 4)
+        val i = list.indexOfFirst { sameValue(it, v) }
+        if (i >= 0) {
+            // Known already: said again in a later conversation (or by a second person) = confirmed.
+            val key = "$slot|${norm(list[i])}"
+            val first = unsure[key] ?: return false
+            if (!confirm && now - first < DiscordBotLimits.CONFIRM_GAP_MS) return false
+            unsure.remove(key)
+            save(ctx, cur.copy(unsure = unsure)); return true
         }
-        if (next == list) return false
+        val next: List<String> = if (slot in SINGLE) {
+            list.forEach { unsure.remove("$slot|${norm(it)}") }   // a real update ("moved to vancouver")
+            listOf(v)
+        } else if (list.size < (CAP[slot] ?: 4)) list + v
+        else {
+            // Full: only a tentative note makes room; confirmed ones are never pushed out for a newer one.
+            val drop = list.indexOfFirst { "$slot|${norm(it)}" in unsure }
+            if (drop < 0) return false
+            unsure.remove("$slot|${norm(list[drop])}")
+            list.filterIndexed { k, _ -> k != drop } + v
+        }
+        if (!confirm) unsure["$slot|${norm(v)}"] = now
         notes[slot] = next
         val flip = when (slot) { "likes" -> "dislikes"; "dislikes" -> "likes"; else -> null }
         if (flip != null) notes[flip] = notes[flip].orEmpty().filterNot { sameValue(it, v) }
-        save(ctx, cur.copy(name = cur.name.ifBlank { name.take(60) }, notes = notes))
+        save(ctx, cur.copy(name = cur.name.ifBlank { name.take(60) }, notes = notes, unsure = unsure))
+        return true
+    }
+
+    fun isUnsure(card: Card, slot: String, v: String) = "$slot|${norm(v)}" in card.unsure
+
+    /** Their own later line says a tentative note again ("yeah i'm a nurse"): confirmed. Free. */
+    fun confirmSaid(ctx: Context, id: String, lines: List<String>): Int {
+        val cur = load(ctx, id) ?: return 0
+        if (cur.unsure.isEmpty()) return 0
+        val now = System.currentTimeMillis()
+        val said = lines.map { valueWords(it) }
+        val hit = cur.unsure.filter { (k, first) ->
+            now - first >= DiscordBotLimits.CONFIRM_GAP_MS && valueWords(k.substringAfter('|')).let { w ->
+                w.isNotEmpty() && said.any { l -> w.count { it in l } * 3 >= w.size * 2 } }
+        }.keys
+        if (hit.isEmpty()) return 0
+        save(ctx, cur.copy(unsure = cur.unsure - hit))
+        return hit.size
+    }
+
+    /** They answered Cardinal's check ("you're a nurse, right?") with yes / no: confirm or drop that note. */
+    fun answerCheck(ctx: Context, id: String, yes: Boolean, botLine: String): Boolean {
+        val cur = load(ctx, id) ?: return false
+        val said = valueWords(botLine)
+        val k = cur.unsure.keys.firstOrNull { key -> valueWords(key.substringAfter('|')).let { w ->
+            w.isNotEmpty() && w.count { it in said } * 3 >= w.size * 2 } } ?: return false
+        if (yes) { save(ctx, cur.copy(unsure = cur.unsure - k)); return true }
+        val (sl, v) = k.split('|', limit = 2).let { it[0] to it[1] }
+        val kept = cur.notes[sl].orEmpty().filterNot { norm(it) == v }
+        save(ctx, cur.copy(unsure = cur.unsure - k, notes = LinkedHashMap(cur.notes).apply { if (kept.isEmpty()) remove(sl) else put(sl, kept) }))
         return true
     }
 
@@ -221,7 +281,8 @@ object UserMemoryStore {
         val list = cur.notes[slot] ?: return false
         val kept = list.filterNot { it.equals(raw, true) || sameValue(it, raw) }
         if (kept.size == list.size) return false
-        save(ctx, cur.copy(notes = LinkedHashMap(cur.notes).apply { if (kept.isEmpty()) remove(slot) else put(slot, kept) }))
+        save(ctx, cur.copy(notes = LinkedHashMap(cur.notes).apply { if (kept.isEmpty()) remove(slot) else put(slot, kept) },
+            unsure = cur.unsure.filterKeys { k -> !k.startsWith("$slot|") || kept.any { "$slot|${norm(it)}" == k } }))
         return true
     }
 
@@ -239,7 +300,7 @@ object UserMemoryStore {
     /** Every note of a card as "work: bank teller, cashier · plays: Valorant" (compact, slot order). */
     private fun renderSlots(card: Card, slots: Collection<String>): String =
         SLOTS.filter { it in slots && card.notes[it].orEmpty().isNotEmpty() }
-            .joinToString(" · ") { s -> (if (s == "about") "" else LABEL[s] + ": ") + card.notes[s]!!.joinToString(", ") }
+            .joinToString(" · ") { s -> (if (s == "about") "" else LABEL[s] + ": ") + card.notes[s]!!.joinToString(", ") { v -> v + if (isUnsure(card, s, v)) " (?)" else "" } }
 
     private fun stemmedWords(s: String): Set<String> =
         Regex("[\\p{L}\\p{N}]+").findAll(s.lowercase()).map { discordStem(it.value) }.filter { it.length >= 3 }.toSet()
@@ -469,10 +530,12 @@ object UserMemoryStore {
             val rel = if (all) SLOTS else relevantSlots(card, keywords)
             val back = ArrayList<String>()
             for (sl in SLOTS) card.notes[sl].orEmpty().takeIf { it.isNotEmpty() }?.let {
-                if (sl in rel) sb.append("\n- ").append(LABEL[sl]).append(": ").append(it.joinToString(", "))
-                else back.add(LABEL[sl] + " " + it.joinToString(", "))
+                val vals = it.joinToString(", ") { v -> v + if (isUnsure(card, sl, v)) " (?)" else "" }
+                if (sl in rel) sb.append("\n- ").append(LABEL[sl]).append(": ").append(vals)
+                else back.add(LABEL[sl] + " " + vals)
             }
             if (back.isNotEmpty()) sb.append("\n- background (don't bring up unless asked): ").append(back.joinToString("; "))
+            if (card.unsure.isNotEmpty()) sb.append("\n(?) = not sure yet: check it with them before stating it")
             card.bits.lastOrNull()?.let { sb.append("\n- running bit: ").append(it) }
             if (card.avoid.isNotEmpty()) sb.append("\n- never (silently): ").append(card.avoid.joinToString("; ") { it.trim().trimEnd('.') })
         }
@@ -494,7 +557,7 @@ object UserMemoryStore {
         if (full) spokenLanguages(card).takeIf { l -> l.isNotEmpty() && (langAsk || l.any { !it.equals("english", true) }) }
             ?.let { notes.add("speaks " + it.joinToString(", ")) }
         SLOTS.filter { it in slots }.forEach { sl -> card.notes[sl].orEmpty().takeIf { it.isNotEmpty() }?.let {
-            notes.add((if (sl == "about") "" else LABEL[sl] + " ") + it.joinToString(", ")) } }
+            notes.add((if (sl == "about") "" else LABEL[sl] + " ") + it.joinToString(", ") { v -> v + if (isUnsure(card, sl, v)) " (?)" else "" }) } }
         val basic = header != card.name || hasNick
         if (notes.isEmpty() && !basic) return null
         return PromptLine("- " + header + if (notes.isNotEmpty()) ": " + notes.joinToString("; ") else "", hasNick)
@@ -593,7 +656,7 @@ object UserMemoryStore {
      */
     fun noteFromText(ctx: Context, id: String, name: String, text: String, pin: Boolean = false): Boolean {
         val (slot, v) = guessSlot(text) ?: return false
-        val ok = addNote(ctx, id, name, slot, v)
+        val ok = addNote(ctx, id, name, slot, v, confirm = true)
         if (pin) setPinned(ctx, id, true)
         return ok
     }

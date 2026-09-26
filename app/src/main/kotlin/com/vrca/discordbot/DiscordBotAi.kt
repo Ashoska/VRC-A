@@ -351,8 +351,8 @@ object DiscordBotAi {
         val sys = buildString {
             append("You keep memory for Cardinal, a member of this Discord (\"Cardinal\" lines are theirs). Read the numbered chat; output only JSON:\n")
             append("{\"sum\":\"<who is talking about what, under 15 words>\",")
-            append("\"notes\":[{\"p\":\"<name as shown>\",\"t\":\"<type>\",\"v\":\"<1-6 words, their words>\",\"l\":<line that shows it>}],")
-            append("\"me\":[{\"t\":\"likes|dislikes|speech|title|bit|habit\",\"v\":\"<3-8 words about Cardinal>\",\"l\":[<lines>]}],")
+            append("\"notes\":[{\"p\":\"<name as shown>\",\"t\":\"<type>\",\"v\":\"<1-4 words, their words>\",\"l\":<line that shows it>}],")
+            append("\"me\":[{\"t\":\"likes|dislikes|speech|title|bit|habit\",\"v\":\"<2-6 words about Cardinal>\",\"l\":[<lines>]}],")
             append("\"mood\":\"<Cardinal's mood, a word>\"")
             if (fix) append(",\"wrong\":[<numbers of STORED items>]")
             if (bitFocus.isNotBlank()) append(",\"bit\":\"<Cardinal's bit '$bitFocus' as it stands NOW, max 6 words, in the others' words; else same>\"")

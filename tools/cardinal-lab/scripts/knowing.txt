@@ -1,0 +1,38 @@
+# Getting to know people: new notes start tentative "(?)"; two people backing one confirms it; a slot full of
+# confirmed notes isn't pushed out by a new one; "yeah" to Cardinal checking an unsure note confirms it.
+@set ambient=0 context=10
+@channel general main hangout — anything goes
+[general]
+alice: i'm a nurse btw, night shifts are killing me
+dave: oof night shifts
+alice: yeah they're rough
+> quiet
+> expect card alice contains (?i)nurse \(\?\)
+# Two people = confirmed at once.
+bob: i work at a bank
+carol: yeah bob is a bank teller, he hates it
+dave: lol bank life
+> quiet
+> expect card bob contains (?i)bank
+> expect card bob not-contains (?i)bank[^·]*\(\?\)
+# A full slot of confirmed games keeps them (the new one waits).
+> teach card erin plays: Valorant
+> teach card erin plays: Minecraft
+> teach card erin plays: Beat Saber
+> teach card erin plays: VRChat
+> teach card erin plays: Rocket League
+erin: i play fortnite sometimes too
+dave: fortnite lol
+erin: yeah it's alright
+> quiet
+> expect card erin contains (?i)valorant
+> expect card erin not-contains (?i)fortnite
+# Cardinal checks an unsure note; "yeah" confirms it.
+alice: @Cardinal do you remember what i do for work?
+> expect reply
+> expect contains (?i)nurse
+alice: yeah
+dave: lol
+alice: anyway
+> quiet
+> expect card alice not-contains (?i)nurse \(\?\)

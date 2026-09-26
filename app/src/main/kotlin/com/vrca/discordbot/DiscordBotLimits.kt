@@ -126,6 +126,13 @@ object DiscordBotLimits {
     const val MAX_EPISODES = 6
     /** A trait not shown again within this window loses 1 strength (dropped at 0). */
     const val TRAIT_DECAY_INTERVAL_MS = 3 * 24 * 3_600_000L
+    /** A new note / trait is tentative: kept this long unless it's confirmed (said again later, backed by a
+     *  second person, or checked with them). Confirmed ones are never pushed out for newer ones. */
+    const val TENTATIVE_MS = 3 * 24 * 3_600_000L
+    /** "Said again" = in a later conversation, not the same burst. */
+    const val CONFIRM_GAP_MS = 10 * 60_000L
+    /** How often Cardinal may ask one person about an empty slot. */
+    const val CURIOUS_GAP_MS = 24 * 3_600_000L
     /** The mood line changes at most this often, so the tone doesn't swing reply to reply. */
     const val MOOD_MIN_INTERVAL_MS = 20 * 60_000L
 

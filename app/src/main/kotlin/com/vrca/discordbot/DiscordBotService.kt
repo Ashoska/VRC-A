@@ -134,6 +134,8 @@ class DiscordBotService : Service() {
             else -> null
         }
         // "what's our relationship?", "what am i to you?", "are we friends?": answer from the card, never invent one.
+        private val CURIOUS_ASK = linkedMapOf("work" to "what they do", "game" to "what they play", "from" to "where they're from", "likes" to "what they're into")
+        private val OPINION_RE = Regex("(?i)\\b(do you like|you like|thoughts on|what do you think (of|about)|opinion on|fan of|how do you feel about|you into|is \\w+ (good|bad|mid|overrated))\\b")
         private val SAVE_ASK_RE = Regex("(?i)\\b(add|put|save|set|make|note|write|log)\\b.{0,30}\\b(as|to|in|into) my\\b|\\b(set|change|update|make) my \\w+|\\bremember (that|this|me|my)\\b|\\b(note|save) (that|this|it)\\b")
         private val REL_ASK_RE = Regex("(?i)\\b(our relationship|relationship (with|between) (me|us)|what am i to (you|u)|what are we( to each other)?\\b|are (we|me and you|you and i) (friends|besties|close|cool|good|enemies|rivals)|do you (like|hate) me|how do you (see|feel about) me)")
         private val TONE_TEXT = mapOf(
@@ -311,6 +313,7 @@ class DiscordBotService : Service() {
     private val backoffUntil = ConcurrentHashMap<String, Long>()         // channel -> back-off deadline
     private val backoffStopMsg = ConcurrentHashMap<String, String>()     // channel -> id of the "stop" message
     private val nickSetAt = ConcurrentHashMap<String, Pair<Long, String>>()
+    private val curiousAt = ConcurrentHashMap<String, Long>()   // person → when he was last nudged to ask about them
     private val pronounSetAt = ConcurrentHashMap<String, Pair<Long, String>>()
     private val seenWriteAt = ConcurrentHashMap<String, Long>()
     private val knownLanguages = ConcurrentHashMap<String, MutableSet<String>>()  // already on their card (skip the reload)
@@ -1030,6 +1033,12 @@ class DiscordBotService : Service() {
             if (text.isBlank()) continue
             val isBot = m.authorId == botId
             if (!isBot && isFiller(text)) {
+                // "yeah" / "nope" right after Cardinal checked an unsure note: confirm or drop it (free).
+                val lastBot = lines.lastOrNull()?.takeIf { it.turn.isBot }
+                if (lastBot != null) {
+                    if (YES_RE.matches(text.trim())) UserMemoryStore.answerCheck(this, m.authorId, true, lastBot.turn.text)
+                    else if (NO_RE.matches(text.trim())) UserMemoryStore.answerCheck(this, m.authorId, false, lastBot.turn.text)
+                }
                 if (LAUGH_RE.containsMatchIn(text)) {
                     val i = lines.indexOfLast { it.authorId != m.authorId }
                     if (i >= 0 && lines.size - i <= 3) lines[i] = lines[i].copy(laughs = (lines[i].laughs + m.authorName).distinct())
@@ -1164,6 +1173,26 @@ class DiscordBotService : Service() {
         }
         if (dropped.isNotEmpty())
             DiscordBotState.log("learn: skipped ${dropped.size} note(s), e.g. ${dropped.first().take(70)}")
+
+        // ── Keeping cards current (free): a tentative note they say again is confirmed; "yeah"/"nope" to
+        // Cardinal checking one confirms or drops it. Tentative notes nobody confirms expire on their own.
+        for ((i, t) in turns.withIndex()) {
+            if (t.isBot) continue
+            val uid = nameToId[t.name.lowercase().trim()] ?: continue
+            val prevBot = turns.getOrNull(i - 1)?.takeIf { it.isBot }
+            if (prevBot != null && YES_RE.matches(t.text.trim())) UserMemoryStore.answerCheck(this, uid, true, prevBot.text)
+            else if (prevBot != null && NO_RE.matches(t.text.trim())) UserMemoryStore.answerCheck(this, uid, false, prevBot.text)
+        }
+        turns.filter { !it.isBot && !QUESTION_LINE.containsMatchIn(it.text.trim()) && !isJoking(it.text) }
+            .groupBy { nameToId[it.name.lowercase().trim()] }
+            .forEach { (uid, ls) -> if (uid != null) UserMemoryStore.confirmSaid(this, uid, ls.map { withoutAtYou(it.text) }) }
+        // Cardinal's own tentative traits: shown again in one of his lines (not just repeating the line before) = confirmed.
+        PersonalityStore.tentativeTraits(this).forEach { tr ->
+            val tw = groundWords(tr); if (tw.isEmpty()) return@forEach
+            val shown = turns.indices.any { i -> turns[i].isBot && groundWords(turns[i].text).count { it in tw } >= minOf(2, tw.size) &&
+                (i - 1 downTo 0).firstOrNull { !turns[it].isBot }?.let { p -> groundWords(turns[p].text).count { it in tw } < minOf(2, tw.size) } != false }
+            if (shown) PersonalityStore.confirmTrait(this, tr)
+        }
 
         // Stored items the chat said are wrong / unwanted: a person's note or nickname is dropped; one of
         // Cardinal's traits is toned down (gone if it was new).
@@ -1542,8 +1571,10 @@ class DiscordBotService : Service() {
             slot = "lang"; v = asLang
         }
         if (slot != "lang" && asLang in LANGUAGES) return "language in the wrong slot"
+        // "into: play fortnite" is a game.
+        if (slot in setOf("hobby", "likes", "about")) Regex("(?i)^(?:play|plays|playing)\\s+(.{2,40})$").find(v)?.let { slot = "game"; v = it.groupValues[1] }
         if (Regex("(?i)\\bcardinal\\b").containsMatchIn(v)) return "about Cardinal"
-        if (v.split(Regex("\\s+")).size > (if (slot == "about") 9 else 6)) return "long"
+        if (v.split(Regex("\\s+")).size > (if (slot == "about") 7 else 5)) return "long"
         val vw = factWords(v) - names.flatMap { factWords(it) }.toSet()
         if (vw.isEmpty() && slot !in setOf("nick", "lang", "tz")) return "empty"
         val humans = turns.indices.filter { !turns[it].isBot }
@@ -1634,7 +1665,10 @@ class DiscordBotService : Service() {
                 UserMemoryStore.setTz(this, id, n.about, tz, overwrite = true)
             }
             else -> {
-                if (!UserMemoryStore.addNote(this, id, n.about, slot, v)) return "known"
+                // Two different people backing it (each saying at least half of it) = confirmed at once; else tentative.
+                val loose = humans.filter { vw.isEmpty() || support(it) * 2 >= vw.size }.filter { ownLine(it) || namesThem(it) }
+                    .map { turns[it].name.lowercase().trim() }.toSet()
+                if (!UserMemoryStore.addNote(this, id, n.about, slot, v, confirm = loose.size >= 2)) return "known"
                 // Where they live (or are from) tells us their time too, when nothing better is known.
                 if (slot == "lives" || slot == "from") TimezoneGuess.fromPlace(v)?.let { UserMemoryStore.setTz(this, id, n.about, it, overwrite = false) }
             }
@@ -1703,6 +1737,11 @@ class DiscordBotService : Service() {
         "\\bmy (?:native|first|main|mother) (?:language|tongue)\\b|\\bto my languages?\\b|\\bmy languages? (?:are|is|include)\\b|\\bi(?:'m| am|m) (?:a )?native \\p{L}+ speaker\\b")
     private val LANG_NOT_RE = Regex("(?i)\\b(?:don'?t|dont|do not|can'?t|cant|cannot|barely|not) (?:really )?(?:speak|fluent)\\b|\\bremove\\b|\\bnot my\\b")
 
+    private val YES_RE = Regex("(?i)\\W*(yes+|yeah+|yea|yep|yup|ya|correct|right|true|exactly|ye+s*|mhm|indeed|thats? right|that'?s me)\\W*")
+    private val NO_RE = Regex("(?i)\\W*(no+|nope|nah|wrong|not really|not true|that'?s not me|incorrect)\\W*")
+    /** A line with the "you …" part cut off (their own words about themselves only). */
+    private fun withoutAtYou(text: String): String = text.split(Regex("[!?,;]|\\s+(?:and|but|so)\\s+"))
+        .filterNot { Regex("(?i)\\b(you|your|you'?re|ur|u)\\b").containsMatchIn(it) }.joinToString(" ")
     private val PET_RE = Regex("(?i)\\b(pets?|cats?|kitten|kitty|dogs?|puppy|pup|doggo|birds?|parrot|budgie|snakes?|rabbits?|bunny|hamsters?|ferrets?|lizards?|gecko|fish|turtles?|tortoise|horses?|pony|guinea pig|rats?|mouse|mice|chinchilla|hedgehog|axolotl|spider|tarantula|frogs?|goats?|chickens?|ducks?|cows?|pigs?|iguana|bearded dragon|cockatiel)\\b")
     private val VAGUE_WORK = setOf("plans", "plan", "stuff", "things", "thing", "nothing", "something", "work", "busy", "idk", "it", "that", "this", "job", "jobs", "stuff to do")
     private val STOP_ASK_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|dont|no more|never|please not|cut it out|knock it off|hate (it|being|when)|not (a fan|okay|ok) )")
@@ -1712,6 +1751,7 @@ class DiscordBotService : Service() {
     private val STMT_END = "(?=\\s*(?:[,.!;?]|$|\\s(?:and|but|so|now|since|for|last|this|these|lol|lmao|haha|tho|though|rn|atm|btw)\\b))"
     private val SELF_STATEMENT = listOf(
         Regex("(?i)\\bi (?:work|am working) as an? ([\\p{L}' -]{3,30}?)$STMT_END") to "work",
+        Regex("(?i)\\bi (?:work|am working|'m working|m working) ((?:at|in|for) (?:a |an |the )?[\\p{L}' -]{3,30}?)$STMT_END") to "work",
         Regex("(?i)\\bi(?:'m| am|m) an? ((?:\\p{L}+ )?(?:nurse|teacher|developer|programmer|engineer|artist|student|doctor|firefighter|baker|chef|driver|designer|streamer|mechanic|electrician|accountant|lawyer|cashier|barista|bank teller|teller))$STMT_END") to "work",
         Regex("(?i)\\bi (?:live|am living|'m living|m living) in ([\\p{L}' -]{3,25}?)$STMT_END") to "lives",
         Regex("(?i)\\b(?:i )?moved to ([\\p{L}' -]{3,25}?)$STMT_END") to "lives",
@@ -1981,6 +2021,19 @@ class DiscordBotService : Service() {
         if ((ctx.refTurn?.isBot == true || ctx.followUp || ctx.freeFollow) &&
             ctx.userText.trim().split(Regex("\\s+")).size <= 4 && '?' !in ctx.userText) hints.add("They're reacting to your last line.")
         if (VERDICT_ASK_RE.containsMatchIn(ctx.userText)) hints.add("They want a rating/pick: give your actual number or choice, no dodging.")
+        // Getting to know them (rationed): an empty basic slot → ask about it once a day at most, only in a casual
+        // moment (not while they're asking him something, not in a serious chat, not a first message).
+        UserMemoryStore.load(this, ctx.authorId)?.let { card ->
+            val gap = CURIOUS_ASK.keys.firstOrNull { card.notes[it].isNullOrEmpty() }
+            if (gap != null && card.interactions >= 2 && !built.asking && !built.recall && built.dayAsk == null &&
+                effectiveTone(ctx.channelId, now) == null && now - (curiousAt[ctx.authorId] ?: 0L) >= DiscordBotLimits.CURIOUS_GAP_MS) {
+                curiousAt[ctx.authorId] = now
+                hints.add("If it fits naturally, ask them ${CURIOUS_ASK[gap]}.")
+            }
+        }
+        // Asked his opinion on something and he has room for more likes/dislikes: take a side (that's what fills them).
+        if (OPINION_RE.containsMatchIn(ctx.userText) && !VERDICT_ASK_RE.containsMatchIn(ctx.userText))
+            hints.add("Say plainly if you like it or not.")
         if (SAVE_ASK_RE.containsMatchIn(ctx.userText)) hints.add("They want something about them noted: you do keep notes on people, so say it's noted (never that you can't).")
         if (built.recall || built.dayAsk != null || REL_ASK_RE.containsMatchIn(ctx.userText)) hints.add("Memory question: say plainly who did what, from above. Nothing there? Say so.")
         listOf(slangHint(ctx), effectiveTone(ctx.channelId, now).orEmpty(), nickDoneHint(ctx), serverHint(ctx),

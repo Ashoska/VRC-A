@@ -6,6 +6,26 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 7 — getting to know people: tentative/confirmed memory, curiosity (LIVE lab)
+
+Everything new here is free code: no extra model calls.
+- **Tentative for 3 days.** A new note on a person, or a new trait of Cardinal's, is tentative. It disappears after 3 days unless it's confirmed.
+- **What confirms it (people).** Two different people back it. Or the person says it again in a later conversation (10+ min after it was first seen). Or they answer "yeah" when Cardinal checks it; "nope" drops it.
+- **What confirms it (Cardinal).** He shows the trait again in a later conversation, in his own words (not just repeating the line before).
+- **Confirmed entries are protected.** They're never pushed out for newer ones: a full slot only swaps out a tentative entry. The old 3-day fade no longer deletes Cardinal's confirmed traits; they only lose rank.
+- **Shown to him.** Unsure notes appear as "value (?)", with one line telling him to check before stating them. The admin tab shows "?".
+- **Shorter entries.** Notes are 1-4 words; traits are 2-6.
+- **Curiosity.** At most once a day per person, only in a casual moment and only when a basic slot is empty, the reply gets "If it fits naturally, ask them what they do / play / where they're from / what they're into". On the evening run it fired on 6 of 32 replies and he used it once, naturally ("so what's your poison, dave? games or just observing the madness?").
+- **Opinions.** Asked his opinion, he gets "Say plainly if you like it or not", which fills his likes/dislikes. An earlier "take a clear side" was echoed word for word.
+
+Lab: `knowing.txt` 8/8 three times in a row (unsure marker, two-person confirm, a full confirmed games slot keeps its entries, "yeah" confirms). The fixes it drove:
+- The two-person check needed half the note per person, not two-thirds.
+- A "play X" note filed under hobbies now goes to games.
+- The yes/no check runs on filler lines ("yeah" is filler).
+- New free rule: "i work at/in/for X".
+
+All other suites pass: evening, people, recall, device, titles, traits, edge-learning, corrections, regressions, structure, basics, edge-replies, follow. Evening cost: 267.9 → 273.8 neurons (+2%).
+
 ## Round 6 — compact reply layout, Cardinal slots, device fixes (LIVE lab)
 
 **Reply prompt, new layout** (`DiscordBotAi.reply`): a 4-rule core ("Do fun asks (politicians too). Answer what you know. Play
