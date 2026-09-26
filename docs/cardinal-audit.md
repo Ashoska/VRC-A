@@ -6,6 +6,58 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 5 — typed memory, evidence-checked learning, timezones, compact prompt (LIVE lab)
+
+**Why.** Cards were a free-text fact pile guarded by a growing wall of regex filters (joke/right-now/bot-talk/
+transient/…); each new junk case needed another filter, and a real "bot developer" fact could be cut by one.
+The learner also re-read everyone's known facts every pass, and the day log recorded a topic line every pass.
+
+**What changed** (details in CLAUDE.md "v7")
+- **Typed slots**: work, from, lives, game, hobby, likes, dislikes, pet, about (+ timezone). A note is a
+  slot + a short value, shown as "work: bank teller · plays: Valorant". The old fact filters are gone.
+- **Learner**: numbered lines, filler dropped, laughs folded onto the line they laugh at, and a batch of
+  small talk is skipped without a model call. The answer is `{sum, notes, me, mood, moment?, joke?}` with
+  at most 4 notes; the known-people block is gone (the 8B copied it back into its answer).
+- **Evidence check** (free): each note must be backed by the line it cites — the person's own line (with
+  I/me/my) or one naming them — and is rejected when that line is a question, joke, what-if, plan,
+  right-now, about a relative, negated, denied, said *to* them as banter, or a place without a place word.
+  A regex backstop adds plain "i work as / i live in / moved to / i play / i have a cat named" statements
+  the 8B skipped, through the same checks.
+- **Timezone**: stated ("i'm on EST", "utc+2"), revealed ("it's 3am here"), or from where they live;
+  stored as a zone and always shown as the live UTC offset (daylight saving included), only when time is
+  asked about.
+- **Last seen** is their last message anywhere (was: their last talk with Cardinal).
+- **Day log**: one topic per finished conversation; moments only when line-proven with 2+ people, a laugh,
+  or a running joke forming. Server memories need 2+ people.
+- **Reply prompt**: [You] shows titles/pinned + the 4 strongest traits + ones the message touches; shorter
+  core, emoji, names and don't-repeat lines.
+- **Admin Bot tab** rebuilt with no explanatory text: People / Cardinal / Server / Days / Traces / Cost /
+  Settings; every note, trait, nickname and language is individually removable.
+
+**Measured (LIVE, same scripts, baseline = commit 539d57d)**
+
+Evening = seeded memory + a 127-message hangout (31-32 replies); device = the 61-message device-bug script
+(36-38 replies). New numbers are the average of the 3 sweep runs.
+
+| | before | after | change |
+|---|---:|---:|---:|
+| **Evening total** | 327.6 n | 297.1 n (292.6 / 297.5 / 301.3) | **−9%** |
+| Evening reply prompt | ≈639 tokens | ≈561 tokens | −78 tokens (−12%) |
+| Evening reply neurons per call | 6.4 | 5.7 | −10% |
+| Evening learner input (8B, per pass) | ≈1,297 tokens | ≈725 tokens | −44% |
+| Evening learner neurons (all passes) | 109.3 | 94.7 | −13% |
+| **Device total** | 293.4 n | 280.8 n (278.8 / 293.2 / 270.5) | **−4%** |
+| Device learner input (8B, per pass) | ≈1,067 tokens | ≈656 tokens | −39% |
+| Per 1,000 messages (evening mix) | ≈2,579 n | ≈2,339 n | −9% |
+
+Reply prompt sections (evening): [You] 96 → 65, [Emojis] 44 → 29, [Earlier] 28 → 17, [Names] 18 → 13,
+[Don't repeat] 53 → 43, core 128 → 119 tokens. Token savings are bigger than neuron savings because
+input tokens are the cheap part of a Workers AI call; reply output and the per-call base dominate.
+
+Every suite (26: identity-filter, personality-cap, smoke, burst, pileup, gateway-codes, lifecycle, ladder,
+device, people, tz, basics, recall, routes, corrections, traits, edge-learning, edge-replies, structure,
+regressions, follow, days, pile, thread, silent, evening) passed 3 LIVE runs in a row on the final code.
+
 ## Round 3 — cheaper reply model, conversation following, safer learning (LIVE lab)
 
 **What changed** (details in CLAUDE.md "v5" + "Round 3b")
