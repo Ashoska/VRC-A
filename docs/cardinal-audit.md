@@ -6,6 +6,25 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 8 — their own word, "none" answers, karma (LIVE lab)
+
+Everything new here is free code: no extra model calls.
+- **Plain statements stick.** "i'm a firefighter", "i have a dog named miso" or "i actually live in vancouver now", said by the person about themselves, is confirmed at once. Guesses by the learner and claims about someone else stay tentative.
+- **Jokes about themselves.** There's no filter for unbelievable claims (owner's call: a goofy job like "the president" is stored like any other, and they can fix it). With their own "lol" on it, a claim is kept as tentative instead of thrown away. Other people's "cap", laughs or "sure you are" never remove or block a note, because friends say those about true things too.
+- **Changes.** "i work at a bank now" (or new job / switched / got hired) replaces the old job. Their own denial drops the matching note: "i'm not a nurse", "i don't play valorant anymore", "i don't have a cat".
+- **"Nothing fits" answers.** "i have no pets", "im too young to work", "unemployed", "retired", "i don't play games", "no hobbies", or a bare "nope" to his question about it, marks the slot none ("pets: none", "work: none (too young)"). He knows it and stops asking; a later real answer replaces it. "i'm in school" is saved as work: student. Pets were added to what he asks about.
+- **Cardinal's traits confirm sooner.** A like or hate he says outright, his yes/no to "do you like X", and a title two people give him are confirmed at once. A tentative trait someone else brings up later is confirmed too. Guessed habits and speech still wait.
+- **Karma drives "with them".** Everyone starts as an acquaintance (0). Ladder: 30+ close friend, 15+ friend, 5+ friendly, −2..4 acquaintance, −3..−7 on thin ice, −8..−19 rival, −20 and below enemy.
+  - Moves: +1 the first time they talk each day; +2 kind words (+1 with a laugh); +1 a laugh at his line or a positive reaction; −2 a real insult (with a laugh it's banter, 0); −1 a negative reaction or a serious stop.
+  - Held to ±6 per person per day and −40..60 overall.
+  - The admin edit field is gone: the People tab shows the level and karma, read-only.
+
+Lab: new `knowing2.txt` 13/13 three runs in a row; `knowing` 8/8 twice (its tentative case is now "i'm a nurse lol").
+- The first corrections run found "i actually live in vancouver now" staying tentative ("actually" broke the direct-statement match). Cardinal then wouldn't state it. Fixed by allowing one filler word, and corrections passed 12/12 twice after.
+- One device run missed the server name (the hint was in the prompt; the model ignored it once). It passed 81/81 on the rerun.
+
+People 25/25, titles 23/23, edge-learning 14/14, basics 12/12, recall 10/10, evening 22/22. Evening cost: 273.8 → 282.9 neurons (+3%, the always-on "with them" line plus run-to-run noise).
+
 ## Round 7 — getting to know people: tentative/confirmed memory, curiosity (LIVE lab)
 
 Everything new here is free code: no extra model calls.
