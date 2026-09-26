@@ -42,7 +42,7 @@ leo: @Cardinal good bot
 > expect reply
 > expect card leo contains (?i)friendly \(karma [5-9]\)
 mia: @Cardinal shut up you're useless
-> expect reply
+> quiet
 > expect card mia contains (?i)karma -
 nate: @Cardinal stfu lmao 💀
 > expect reply
