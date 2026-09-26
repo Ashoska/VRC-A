@@ -62,9 +62,6 @@ object DiscordBotAi {
     /** One conversation turn. [isBot] marks Cardinal's OWN past replies (role=assistant). */
     data class Turn(val isBot: Boolean, val name: String, val text: String)
 
-    /** One memory update, attributed to a specific person by their display NAME as in the chat. */
-    data class MemDelta(val about: String, val json: JSONObject)
-
     sealed class Result {
         data class Ok(val text: String) : Result()
         data class Error(val message: String) : Result()
@@ -79,16 +76,21 @@ object DiscordBotAi {
     enum class Act { REPLY, REACT, IGNORE }
     data class Plan(val action: Act, val short: Boolean, val emoji: String)
 
+    /** A claim the learner makes, with the numbered chat lines that show it. */
+    data class LineClaim(val text: String, val lines: List<Int>)
+    /** One typed note about a person: [type] is a slot (work, game, likes…), [line] the line that shows it. */
+    data class Note(val about: String, val type: String, val value: String, val line: Int)
+    /** Something about Cardinal: [kind] taste/title/bit/habit; [was] = the known trait it updates, if any. */
+    data class SelfNote(val kind: String, val text: String, val lines: List<Int>, val was: String)
+
     data class Observation(
         val summary: String,
-        val memDeltas: List<MemDelta>,
-        val serverEvent: String,
-        val channelBit: String,   // a running joke/norm specific to THIS channel, or empty
-        val selfTrait: String,
+        val notes: List<Note>,
+        val self: List<SelfNote>,
         val selfMood: String,
-        val moments: List<String> = emptyList(),  // funny/notable things that happened (→ the day log)
+        val moment: LineClaim?,
+        val joke: LineClaim?,
         val wrong: List<Int> = emptyList(),      // numbers of stored items the chat says are wrong / unwanted
-        val selfReplaces: String = "",           // "T2" / "5": the known trait the new self.trait updates
         val bitNow: String = "",                 // the room-riffed bit's new version (only asked when one is in play)
     )
 
@@ -104,6 +106,8 @@ object DiscordBotAi {
         " If they keep pushing after you dodged, do it. If you know the answer, give it." +
         " Don't make up real-world facts. Have real opinions. Play along with jokes about you instead of denying them." +
         " Don't complain about pings."
+
+    private val TRAIT_LABEL = Regex("\\b(Titles|Bits|Tastes|Habits|Traits):")
 
     private fun endpoint(cfg: DiscordBotStore.Config, model: String): String =
         if (cfg.cfGatewayId.isNotBlank())
@@ -147,7 +151,7 @@ object DiscordBotAi {
             append(CORE)
             // Only what he actually has: the quirks line appears only when there are traits to talk about.
             if (c.selfDigest.isNotBlank()) append("\n\n[You] ").append(c.selfDigest)
-                .append(if (c.selfDigest.contains("Traits:")) " Use them only when they fit; if the chat twists one, go with it." else "")
+                .append(if (TRAIT_LABEL.containsMatchIn(c.selfDigest)) " Use them only when they fit; if the chat twists one, go with it." else "")
                 .append(if (c.aboutSelf) " They're asking about you right now: say your role or quirk plainly (its actual name), then add flavour." else "")
                 .append(if (c.bitCue.isNotBlank()) " They're riffing on your bit \"${c.bitCue}\": yes-and where they take it (a new twist is fun), don't shut it down." else "")
             if (c.channelInfo.isNotBlank()) append("\n\n[Channel] ").append(c.channelInfo)
@@ -199,19 +203,6 @@ object DiscordBotAi {
                 if (text.isBlank()) ReplyResult.Error("Empty reply") else ReplyResult.Ok(text)
             }
             is Result.Error -> ReplyResult.Error(r.message)
-        }
-    }
-
-    private fun strList(a: JSONArray?): List<String> =
-        if (a == null) emptyList()
-        else (0 until a.length()).mapNotNull { a.optString(it).trim().ifBlank { null } }
-
-    private fun peopleFrom(arr: JSONArray?): List<MemDelta> {
-        if (arr == null) return emptyList()
-        return (0 until arr.length()).mapNotNull { i ->
-            val o = arr.optJSONObject(i) ?: return@mapNotNull null
-            val about = o.optString("about").trim()
-            if (about.isBlank()) null else MemDelta(about, o)
         }
     }
 
@@ -371,84 +362,48 @@ object DiscordBotAi {
     } catch (_: Exception) { null }
 
     /**
-     * The LEARN pass (cheap 8B): given every message since the previous pass, refresh the summary,
-     * learn lasting facts about people (absent ones included), note server culture / a channel bit,
-     * and nudge the self. One 8B call. Null on error (the batch is retried with the next one).
+     * The LEARN pass (cheap 8B) over a numbered chat: a one-line summary, typed notes about people (each naming
+     * the line that shows it, checked by the app before anything is stored), Cardinal's own tastes / titles / bits
+     * / habits, a mood, and at most one moment + one inside joke — also line-referenced. [stored] (numbered) only
+     * when the chat has a correction in it. Null on error (the batch is retried with the next one).
      */
     suspend fun observe(
         cfg: DiscordBotStore.Config, turns: List<Turn>, prevSummary: String, stored: String = "",
         selfTraits: List<String> = emptyList(), knownPeople: String = "", bitFocus: String = "",
     ): Observation? {
-        val transcript = mergeTurns(turns).takeLast(DiscordBotLimits.LEARN_FETCH).joinToString("\n") {
-            if (it.isBot) "Cardinal: ${it.text}" else "${it.name}: ${it.text}"
+        val transcript = turns.withIndex().joinToString("\n") { (i, t) ->
+            "${i + 1} ${if (t.isBot) "Cardinal" else t.name}: ${t.text.replace('\n', ' ').take(DiscordBotLimits.LEARN_LINE_MAX_CHARS)}"
         }
-        // Correction mode: only when the batch contains a correction/complaint cue does the learner see
-        // what's stored (people's facts + Cardinal's traits), so it can remove what the chat says is
-        // wrong. The everyday pass stays lean.
         val fix = stored.isNotBlank()
         val sys = buildString {
-            append("You keep long-term MEMORY for Cardinal, a member of this Discord. Don't write a reply. ")
-            append("Read the chat and output only this JSON (use 'single quotes' inside text):\n")
-            append("{\"summary\":\"<one short sentence, under 20 words: who is talking about what right now>\",")
-            append("\"moments\":[\"<only something people would bring up later (a legendary line, a big reveal, a joke that stuck), one short sentence with who; most chats have none: []>\"],")
-            if (fix) append("\"wrong\":[<numbers of STORED items the chat says are untrue or out of date, or that people asked Cardinal to stop>],")
-            append("\"self\":{\"trait\":\"<ONE new lasting quirk, habit, opinion, role or bit of Cardinal's, one thing only, as a 3-8 word phrase saying what Cardinal does or is known for, clear to someone who wasn't there (never a single word) (shown in Cardinal's own messages, or given to Cardinal by others and Cardinal went along with it; not a one-off event)>\",")
-            append("\"mood\":\"<a word or two>\"},")
-            // The room is riffing on one of his bits: ask about that bit directly (a pointed question the small
-            // model answers far better than the general "if a trait changed" rule).
-            if (bitFocus.isNotBlank()) append("\"bit\":\"<how Cardinal's bit '$bitFocus' stands after this chat, NOW — Cardinal's current status, not the history — in at most 6 words, using the words the others used for what changed (name the new people or status they gave Cardinal, e.g. who Cardinal is with now) and keeping the bit's subject — only if the room changed it AND Cardinal went along in Cardinal's own messages (Cardinal's last word counts); else same>\",")
-            append("\"people\":[{\"about\":\"<name exactly as shown (not Cardinal)>\",\"facts\":[\"<new lasting fact about who they are>\"]}],")
-            append("\"event\":\"<an inside joke or legendary moment the server will keep bringing up, as one full sentence: what happened, who was involved (names) and why it stuck — or empty>\"}\n")
-            append("Optional keys: add them ONLY when the chat clearly shows it, otherwise leave the key out entirely (no empty values). ")
-            append("Per person: nickname (what others call them), relationship (their role here), language (if not English)")
-            if (fix) append(", forget (a stored fact of theirs that's no longer true), notNickname (a name they said not to call them), avoid (something they asked Cardinal to stop doing to them)")
-            append(". Top level: channelBit (a running joke in THIS channel, as one full sentence saying what it is and who's part of it). ")
-            append("If the chat changed one of Cardinal's known traits (a new partner, a breakup, a promotion Cardinal went along with), write the NEW version as self.trait and copy the old trait into self.replaces; just repeating or rewording a known trait isn't new; if Cardinal's stance shifted during the chat, Cardinal's LAST word on it is what counts. Name a trait with the chat's own words (the title or bit people actually used). ")
-            append("summary and moments are required (moments may be []); leave out self.trait if there's nothing new.\n")
-            append("Only list people you learned something NEW and lasting about. A fact must be said or clearly shown in THIS chat ")
-            append("(a question someone asks or a joke isn't a fact about them): ")
-            append("never guess, and never reuse wording from these instructions. Lasting means who someone is (hobbies, games, work, ")
-            append("where they're from, pets, tastes), in the words they used (\"printing stuff for my mix tapes\" is not \"makes mix tapes\"), keeping the main thing, not a side detail (\"loves Dr Pepper\", not \"likes cane sugar in Dr Pepper\"); buying or owning a lot of something shows a taste (\"got a 48 crate of Dr Pepper\" → \"loves Dr Pepper\"). Not lasting: what they're doing right now (homework, music, chores), jokes and what-ifs (\"i'm 82 lol\"), what they just said or did (a one-off event like a burnt toaster goes in moments, not facts), things about their family or friends, what they think of someone else, anything about Cardinal, bots, AI or this app (tests, stats, reply speed, plans to train or fix it), what they plan to do, ")
-            append("their name. Keep each person's info on that person; Cardinal's own quirks go only in self, never in people. ")
-            if (selfTraits.isNotEmpty() && !fix)
-                append("\nCardinal's known traits (don't repeat or reword these): ").append(selfTraits.joinToString("; "))
-            if (knownPeople.isNotBlank() && !fix)
-                append("\nAlready known about people here (only add what's NEW):\n").append(knownPeople)
+            append("You keep memory for Cardinal, a member of this Discord (\"Cardinal\" lines are theirs). Read the numbered chat; output only JSON:\n")
+            append("{\"sum\":\"<who is talking about what, under 15 words>\",")
+            append("\"notes\":[{\"p\":\"<name as shown>\",\"t\":\"<type>\",\"v\":\"<1-6 words, their words>\",\"l\":<line that shows it>}],")
+            append("\"me\":[{\"t\":\"taste|title|bit|habit\",\"v\":\"<3-8 words about Cardinal>\",\"l\":[<lines>]}],")
+            append("\"mood\":\"<Cardinal's mood, a word>\"")
+            if (fix) append(",\"wrong\":[<numbers of STORED items>]")
+            if (bitFocus.isNotBlank()) append(",\"bit\":\"<Cardinal's bit '$bitFocus' as it stands NOW, max 6 words, in the others' words; else same>\"")
+            append("}\nTypes: from, lives, tz, work (job or study), game, hobby, likes, dislikes, pet, role (their role in this server), nick (a name others call them), about (said about themselves, fits no other type)")
+            if (fix) append(", notnick (a name they asked not to be called), avoid (what they asked Cardinal to stop)")
+            append(".\nA note needs a line where the person says it about themselves or someone says it plainly about them. ")
+            append("Not notes: questions, jokes, what-ifs, what someone is doing right now or will do, family or friends' things, anything about Cardinal. Few chats have notes; [] is fine.\n")
+            append("me: only what Cardinal's own lines show, or a title/bit two people give Cardinal; add \"was\":\"<known trait>\" if it changes one.\n")
+            append("Optional, only if clearly true: \"moment\":{\"v\":\"<one sentence with names>\",\"l\":[<lines>]} (something people will bring up later), ")
+            append("\"joke\":{\"v\":\"<the inside joke, who, why>\",\"l\":[<lines>]} (a running joke several people kept up).")
+            if (selfTraits.isNotEmpty() && !fix) append("\nCardinal already: ").append(selfTraits.joinToString("; "))
+            if (knownPeople.isNotBlank() && !fix) append("\nKnown (don't repeat):\n").append(knownPeople)
             if (fix) {
-                append("\n\nSTORED MEMORY (numbered):\n").append(stored).append('\n')
-                append("If the chat says a stored item is untrue or out of date (the person themselves, or others clearly agreeing), or people ")
-                append("really asked Cardinal to stop doing it, put its number in wrong, and add the correct fact if one was given. ")
-                append("Teasing or laughing along (\"stop 😂\", \"so cringe lol\") is not a real request. ")
-                append("Don't re-add stored items. Otherwise leave stored memory alone.")
+                append("\n\nSTORED:\n").append(stored).append('\n')
+                append("Put an item's number in wrong if the chat says it's untrue or out of date, or people really asked Cardinal to stop it (teasing isn't asking). Add the correct note if one was given.")
             }
         }
-        val user = "PREVIOUS SUMMARY: ${prevSummary.ifBlank { "(none)" }}\n\nRECENT CHAT:\n$transcript"
+        val user = (if (prevSummary.isNotBlank()) "Before: $prevSummary\n\n" else "") + transcript
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", user))
-        // A batch where the room is reshaping one of his bits needs better judgement than the 8B shows (it
-        // garbles "how does the bit stand now") — the same single pass runs on the reply model then. Rare.
+        // A batch where the room is reshaping one of Cardinal's bits needs better judgement than the 8B shows.
         val model = if (bitFocus.isNotBlank()) DiscordBotLimits.MERGE_MODEL else DiscordBotLimits.LEARN_MODEL
         return when (val r = call(cfg, model, messages, DiscordBotLimits.LEARN_MAX_TOKENS)) {
             is Result.Ok -> parseObservation(r.text) ?: run { logIssue("Learn pass", "unreadable answer: ${r.text.take(60)}"); null }
             is Result.Error -> { logIssue("Learn pass", r.message); null }
-        }
-    }
-
-    /**
-     * Merge a paraphrase pile (the facts on one card that share a topic, e.g. six "AI" facts) into 1-2 notes
-     * (cheap 8B, only the pile is sent). Null on error; the caller rejects anything invented or not shorter.
-     */
-    suspend fun mergeFacts(cfg: DiscordBotStore.Config, name: String, topic: String, facts: List<String>): List<String>? {
-        val sys = "These notes about $name all say similar things about \"$topic\". Rewrite them as 1 or 2 short notes " +
-            "that keep every specific detail and drop the repeats. Use only words from the notes. Output only a JSON array of strings."
-        val messages = JSONArray().put(obj("system", sys)).put(obj("user", facts.joinToString("\n") { "- $it" }))
-        return when (val r = call(cfg, DiscordBotLimits.MERGE_MODEL, messages, 120)) {
-            is Result.Ok -> try {
-                val s = r.text.indexOf('['); val e = r.text.lastIndexOf(']')
-                if (s < 0 || e <= s) null else JSONArray(r.text.substring(s, e + 1)).let { a ->
-                    (0 until a.length()).mapNotNull { a.optString(it).trim().ifBlank { null } }
-                }
-            } catch (_: Exception) { null }
-            is Result.Error -> { logIssue("Fact merge", r.message); null }
         }
     }
 
@@ -467,34 +422,45 @@ object DiscordBotAi {
         }
     }
 
+    private fun ints(v: Any?): List<Int> = when (v) {
+        is JSONArray -> (0 until v.length()).mapNotNull { Regex("\\d+").find(v.opt(it)?.toString().orEmpty())?.value?.toIntOrNull() }
+        null -> emptyList()
+        else -> Regex("\\d+").findAll(v.toString()).mapNotNull { it.value.toIntOrNull() }.toList()
+    }
+
+    private fun claim(o: JSONObject?): LineClaim? {
+        o ?: return null
+        val v = o.optString("v").trim().ifBlank { o.optString("text").trim() }
+        if (PLACEHOLDER.matches(v) || v.split(' ').size < 3) return null
+        return LineClaim(v, ints(o.opt("l")))
+    }
+
     private fun parseObservation(text: String): Observation? = try {
         jsonObjectIn(text)?.let { o ->
-            val people = peopleFrom(o.optJSONArray("people"))
-            val (selfEntries, others) = people.partition { it.about.equals("cardinal", true) }
-            // The small model sometimes files Cardinal's own quirks under people: salvage one as the trait.
-            val salvaged = selfEntries.firstOrNull()?.json?.let { j ->
-                (strList(j.optJSONArray("traits")) + strList(j.optJSONArray("facts")) + listOf(j.optString("trait")))
-                    .map { it.trim().replace(Regex("(?i)^(he'?s|he is|he|they'?re|they are|cardinal is|cardinal)\\s+"), "") }
-                    .firstOrNull { it.length in 3..80 }
-            }.orEmpty()
             fun str(v: String?) = v?.trim().orEmpty().takeUnless { PLACEHOLDER.matches(it) }.orEmpty()
+            val notes = o.optJSONArray("notes")?.let { a -> (0 until a.length()).mapNotNull { i ->
+                val n = a.optJSONObject(i) ?: return@mapNotNull null
+                val about = n.optString("p").ifBlank { n.optString("about") }.trim()
+                val v = str(n.optString("v").ifBlank { n.optString("value") })
+                if (about.isBlank() || v.isBlank()) null
+                else Note(about, n.optString("t").ifBlank { n.optString("type") }.trim(), v, ints(n.opt("l")).firstOrNull() ?: 0)
+            } }.orEmpty()
+            // "me" is a list; the small model sometimes sends one object, or files a note about Cardinal under notes.
+            val meArr = o.optJSONArray("me") ?: o.optJSONObject("me")?.let { JSONArray().put(it) } ?: JSONArray()
+            val self = (0 until meArr.length()).mapNotNull { i ->
+                val m = meArr.optJSONObject(i) ?: return@mapNotNull null
+                val v = str(m.optString("v")).replace(Regex("(?i)^(cardinal|they|they'?re|they are|he|he'?s)\\s+"), "").trim()
+                if (v.isBlank() || v.all { it.isDigit() }) null else SelfNote(m.optString("t").trim().lowercase(), v, ints(m.opt("l")), m.optString("was").trim())
+            } + notes.filter { it.about.equals("cardinal", true) }.map { SelfNote("habit", it.value, listOf(it.line), "") }
             Observation(
-                summary = str(o.optString("summary")).take(DiscordBotLimits.SUMMARY_MAX_CHARS),
-                memDeltas = others,
-                serverEvent = str(o.optString("event")),
-                channelBit = str(o.optString("channelBit")),
-                // A bare number/"none" isn't a trait (the small model sometimes answers with a list index).
-                selfTrait = o.optJSONObject("self")?.optString("trait")?.trim().orEmpty()
-                    .takeUnless { it.all { c -> c.isDigit() } || PLACEHOLDER.matches(it) }
-                    .orEmpty().ifBlank { salvaged },
-                selfMood = str(o.optJSONObject("self")?.optString("mood")),
-                // "a; b" is two moments (each is checked against the chat on its own).
-                moments = strList(o.optJSONArray("moments")).flatMap { it.split(';') }.map { it.trim() }
-                    .filter { !PLACEHOLDER.matches(it) && it.split(' ').size >= 3 }.take(3),
-                selfReplaces = o.optJSONObject("self")?.optString("replaces")?.trim().orEmpty(),
+                summary = str(o.optString("sum").ifBlank { o.optString("summary") }).take(DiscordBotLimits.SUMMARY_MAX_CHARS),
+                notes = notes.filterNot { it.about.equals("cardinal", true) },
+                self = self,
+                selfMood = str(o.optString("mood").ifBlank { o.optJSONObject("self")?.optString("mood").orEmpty() }),
+                moment = claim(o.optJSONObject("moment")),
+                joke = claim(o.optJSONObject("joke")),
                 bitNow = str(o.optString("bit")).trim('.', ' ').takeUnless { it.equals("same", true) || it.startsWith("same ", true) }.orEmpty(),
-                wrong = o.optJSONArray("wrong")?.let { a -> (0 until a.length()).mapNotNull {
-                    a.opt(it)?.toString()?.let { v -> Regex("\\d+").find(v)?.value?.toIntOrNull() } } }.orEmpty(),
+                wrong = ints(o.opt("wrong")),
             )
         }
     } catch (_: Exception) { null }

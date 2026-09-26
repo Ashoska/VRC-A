@@ -105,6 +105,8 @@ object ConversationStore {
     }
 
     private fun archive(ctx: Context, channelId: String, summary: String, nowMs: Long) {
+        // One day-log line per finished conversation (not one per learn pass).
+        DayLogStore.record(ctx, ChannelInfoStore.name(channelId) ?: channelId, nowMs, summary, emptyList())
         val list = load(ctx, channelId).toMutableList()
         // Don't archive a near-duplicate of the newest topic.
         if (list.firstOrNull()?.summary?.equals(summary, true) == true) return

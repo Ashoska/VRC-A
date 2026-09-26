@@ -41,7 +41,8 @@ object PersonalityStore {
 
     /** [lastMs] = when this trait was last proposed/reinforced (0 = unknown, older data). */
     data class Trait(val text: String, val strength: Int, val pinned: Boolean = false, val lastMs: Long = 0L,
-                     val was: String = "")   // earlier versions of an evolved bit ("married to Shrek") — recognises it later
+                     val was: String = "",   // earlier versions of an evolved bit ("married to Shrek") — recognises it later
+                     val kind: String = "")  // taste / title / bit / habit ("" = unsorted)
     data class Self(
         val style: List<String>,
         val traits: List<Trait>,
@@ -74,7 +75,7 @@ object PersonalityStore {
                 val t = o.optString("t").trim()
                 val pinned = o.optBoolean("p", false)
                 if (t.isBlank() || (!pinned && tooVague(t))) null
-                else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), o.optBoolean("p", false), o.optLong("r", 0L), o.optString("w"))
+                else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), o.optBoolean("p", false), o.optLong("r", 0L), o.optString("w"), o.optString("k"))
             }
         }
     } catch (_: Exception) { emptyList() }
@@ -88,7 +89,7 @@ object PersonalityStore {
         val traitArr = JSONArray()
         self.traits.forEach {
             traitArr.put(JSONObject().put("t", it.text).put("s", it.strength).put("p", it.pinned).put("r", it.lastMs)
-                .apply { if (it.was.isNotBlank()) put("w", it.was) })
+                .apply { if (it.was.isNotBlank()) put("w", it.was); if (it.kind.isNotBlank()) put("k", it.kind) })
         }
         prefs(ctx).edit()
             .putString(KEY_STYLE, JSONArray(self.style).toString())
@@ -112,7 +113,12 @@ object PersonalityStore {
         val traits = s.traits.sortedWith(
             compareByDescending<Trait> { (if (it.pinned) 100 else 0) + it.strength }.thenByDescending { it.lastMs }
         ).map { it.text.trim().trimEnd('.') }
-        if (traits.isNotEmpty()) sb.append(if (sb.isEmpty()) "" else " ").append("Traits: ").append(traits.joinToString("; ")).append('.')
+        // Grouped by kind so the model knows a title from a taste ("Titles: server pizza critic. Tastes: loves Dr Pepper.").
+        val sorted = s.traits.sortedWith(compareByDescending<Trait> { (if (it.pinned) 100 else 0) + it.strength }.thenByDescending { it.lastMs })
+        for ((label, kinds) in KIND_LABELS) {
+            val g = sorted.filter { it.kind in kinds }.map { it.text.trim().trimEnd('.') }
+            if (g.isNotEmpty()) sb.append(if (sb.isEmpty()) "" else " ").append(label).append(": ").append(g.joinToString("; ")).append('.')
+        }
         // Admin-taught extras (rare) stay bounded.
         val extras = ArrayList<String>()
         if (s.style.isNotEmpty()) extras.add("How you talk: ${s.style.take(3).joinToString("; ") { it.trim().trimEnd('.') }}.")
@@ -124,6 +130,9 @@ object PersonalityStore {
         }
         return sb.toString().also { cachedDigest = it }
     }
+
+    private val KIND_LABELS = listOf("Titles" to setOf("title"), "Bits" to setOf("bit"), "Tastes" to setOf("taste"),
+        "Habits" to setOf("habit"), "Traits" to setOf("", "other"))
 
     /** One-line mood for the admin dashboard. */
     fun mood(ctx: Context): String = load(ctx).mood
@@ -197,12 +206,12 @@ object PersonalityStore {
      * first) — so Cardinal keeps developing instead of freezing once [DiscordBotLimits.MAX_TRAITS]
      * exist. Established and pinned traits are never pushed out; the fade makes room over time.
      */
-    private fun addOrReinforce(traits: List<Trait>, t: String, nowMs: Long): List<Trait> {
+    private fun addOrReinforce(traits: List<Trait>, t: String, nowMs: Long, kind: String = ""): List<Trait> {
         val idx = traits.indexOfFirst { sameTrait(it.text, t) }
         if (idx >= 0) return traits.mapIndexed { i, tr ->
             if (i == idx) tr.copy(strength = (tr.strength + REINFORCE_INLINE).coerceAtMost(MAX_STRENGTH), lastMs = nowMs) else tr
         }
-        val fresh = Trait(t, START_STRENGTH, false, nowMs)
+        val fresh = Trait(t, START_STRENGTH, false, nowMs, kind = kind)
         if (traits.size < DiscordBotLimits.MAX_TRAITS) return traits + fresh
         val victim = traits.withIndex()
             .filter { !it.value.pinned && it.value.strength <= START_STRENGTH }
@@ -217,7 +226,7 @@ object PersonalityStore {
      * [mood] — at most every [DiscordBotLimits.MOOD_MIN_INTERVAL_MS] so the tone doesn't swing between
      * consecutive replies.
      */
-    fun noteSelf(ctx: Context, trait: String?, style: String? = null, mood: String? = null) {
+    fun noteSelf(ctx: Context, trait: String?, style: String? = null, mood: String? = null, kind: String = "") {
         val now = System.currentTimeMillis()
         val m = mood?.trim()?.trimEnd('.')?.takeIf { it.isNotBlank() && it.length <= 40 }
         // A trait must be DURABLE identity, never just the current mood word (that was the dup bug).
@@ -228,7 +237,7 @@ object PersonalityStore {
         val s = style?.trim()?.takeIf { it.isNotBlank() && it.length in 4..90 }
         val cur = load(ctx)
         var traits = decayIfDue(ctx, cur.traits, now)
-        if (t != null) traits = addOrReinforce(traits, t, now)
+        if (t != null) traits = addOrReinforce(traits, t, now, kind.takeIf { it in setOf("taste", "title", "bit", "habit") }.orEmpty())
         // Learned speech habits: dedup near-identical, keep the most recent handful.
         val newStyle = if (s != null && cur.style.none { it.equals(s, true) })
             (cur.style + s).takeLast(6) else cur.style

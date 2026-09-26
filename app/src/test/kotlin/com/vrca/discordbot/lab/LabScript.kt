@@ -165,8 +165,8 @@ internal class LabScript(private val d: LabDriver) {
             "card", "nick", "prefer", "rel", "lang" -> {
                 val (u, text) = person()
                 val delta = JSONObject()
+                if (what == "card") { UserMemoryStore.noteFromText(ctx, u.id, u.globalName, text); d.rec.event("teach", JSONObject().put("what", what).put("text", rest)); return }
                 when (what) {
-                    "card" -> delta.put("facts", org.json.JSONArray().put(text))
                     "nick" -> delta.put("nickname", text)
                     "prefer" -> delta.put("preferredName", text)
                     "rel" -> delta.put("relationship", text)

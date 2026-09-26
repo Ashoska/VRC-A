@@ -114,7 +114,6 @@ class DiscordBotService : Service() {
         private val LIKE_Q_RE = Regex("(?i)\\bdo (?:you|u|ya) (like|love|enjoy|rate|dig|hate) ([\\p{L}\\p{N}' .-]{2,30}?)\\s*\\?")
         private val TASTE_YES = Regex("^\\W*(yes|yeah|yea|yep|ya|obviously|of course|ofc|duh|absolutely|definitely|100|always|hell yeah|i love|love it|love that|big fan|who doesn'?t)\\b")
         private val TASTE_NO = Regex("^\\W*(no|nah|nope|never|hell no|absolutely not|ew|eww|gross|i hate|hate it|not really|can'?t stand)\\b")
-        private val LEARNER_EXAMPLES = listOf("thinks every new movie is overrated", "roasts anyone who posts their music taste", "critic")
         private val REACT_CMD_RE = Regex("(?i)^\\W*(?:(?:can|could|would|will) (?:you|u) |please |pls |plz |now |go |ok |just )*react\\b|" +
             "\\breact (?:with|to my|on my|to this|to that)\\b|\\b(?:add|leave|give|put) (?:a|an|me a|my message a) react(?:ion)?\\b")
         private val REACT_NAMED_RE = Regex("(?i)\\bwith (?:an? |the |some )?([\\p{L}][\\p{L} _-]{1,30}?)(?:\\s+(?:emoji|emote|reaction|react)\\b|\\s+(?:to|on)\\b|\\W*$)")
@@ -164,7 +163,7 @@ class DiscordBotService : Service() {
         // Asking about Cardinal himself: his job, role, what he's known for.
         /** Asking for a rating or a pick — the model likes to dodge these ("hard pass"), which reads as a refusal. */
         /** Asked the time, date or his timezone: he only knows it if the prompt tells him (he made up "EST"). */
-        private val TIME_ASK_RE = Regex("(?i)(time ?zone|\\btz\\b|what time|what'?s the time|\\bthe time (is it|there|for you)|what (day|date)|today'?s date|\\b(utc|gmt)\\b)")
+        private val TIME_ASK_RE = Regex("(?i)(time ?zone|\\btz\\b|what time|what'?s the time|\\bthe time (is it|there|for (you|him|her|them))|what (day|date)|today'?s date|\\b(utc|gmt)\\b|\\b(late|early|morning|night|awake|asleep) (for|there|where)\\b|\\btime (is it )?(for|where|over there)\\b)")
 
         private fun todayLine(now: Long): String =
             java.time.format.DateTimeFormatter.ofPattern("EEE d MMM yyyy", java.util.Locale.ENGLISH)
@@ -216,6 +215,16 @@ class DiscordBotService : Service() {
             "queen", "buddy", "pal", "homie", "chief", "boss", "lad", "lads", "fella", "bud", "cuz", "g", "boi", "boy",
             "guys", "gang", "chat", "bestie", "babe", "hun", "sir", "maam", "ma'am", "gamer", "legend", "goat", "champ",
             "my guy", "my man", "brother", "bestie", "pookie", "twin", "gng", "blud", "mans", "yall", "y'all")
+        private val LAUGH_RE = Regex("(?i)\\b(lol+|lmf?a+o+|rofl|ha(ha)+h?|he(he)+|xd+|i'?m dead|dead|crying|i'?m weak)\\b|😂|🤣|😭|💀|😆")
+        // Words that make a short line pure reaction (nothing to learn from it on its own).
+        private val REACTION_WORD = setOf("lol", "lmao", "lmfao", "rofl", "haha", "hahaha", "hehe", "xd", "true", "fr", "frfr", "same",
+            "real", "based", "bruh", "ok", "okay", "k", "kk", "yeah", "yea", "yep", "yup", "nah", "nope", "no", "yes", "ya", "w", "l",
+            "ratio", "omg", "wow", "damn", "dang", "nice", "cool", "bet", "facts", "sheesh", "oof", "rip", "ez", "gg", "ikr", "idk",
+            "hm", "hmm", "ah", "oh", "ooh", "huh", "bro", "dude", "mood", "yikes", "ew", "literally", "exactly", "agreed", "ty",
+            "thx", "thanks", "np", "dead", "crying", "wild", "insane", "lmaoo", "lool", "xdd", "fair", "valid", "peak", "wait")
+        // A question line: ends in "?", opens with a wh-word, or "do/are/can … you/he/she/they/anyone".
+        private val QUESTION_LINE = Regex("(?i)\\?[\\s\\p{So}\\p{Sk}\\W]*$|^\\W*(what|why|how|who|where|when|which|whats|wheres|hows|whos)\\b|" +
+            "^\\W*(do|does|did|are|is|was|were|can|could|would|will|have|has)\\s+(you|u|ya|he|she|they|we|anyone|any1|someone|ur|your|his|her)\\b")
         private val JOKE_RE = Regex("(?i)\\b(lol+|lmf?ao+|rofl|ha(ha)+|he(he)+|xd+|jk|/j|kidding|just kidding)\\b|😂|🤣|😭|💀|😆|🙃|😜")
         private val SERIOUS_RE = Regex("(?i)\\b(genuinely|seriously|for real|not joking|no joke|i mean it|please|pls|plz|actually annoying)\\b")
         private val ENCOURAGE_RE = Regex("(?i)\\b(keep going|keep it up|love (it|this|that)|don'?t stop|never stop|more of this|so good|iconic|canon|lives rent free|we need more)\\b")
@@ -293,6 +302,7 @@ class DiscordBotService : Service() {
     private val backoffStopMsg = ConcurrentHashMap<String, String>()     // channel -> id of the "stop" message
     private val nickSetAt = ConcurrentHashMap<String, Pair<Long, String>>()
     private val pronounSetAt = ConcurrentHashMap<String, Pair<Long, String>>()
+    private val seenWriteAt = ConcurrentHashMap<String, Long>()
     private val knownLanguages = ConcurrentHashMap<String, MutableSet<String>>()  // already on their card (skip the reload)
     private val reactReqAt = ConcurrentHashMap<String, Long>()   // channel:user -> when they last asked him to react
     // channel -> (person -> when, tone they asked for). The tone most people here asked for recently wins
@@ -625,6 +635,16 @@ class DiscordBotService : Service() {
         }
         // What language they wrote in (free, English included) goes on their card.
         noteLanguageOf(authorId, DiscordRest.displayName(author, ""), rawContent)
+        // Last seen = their last message anywhere (written at most once a minute per person).
+        if (now - (seenWriteAt[authorId] ?: 0L) >= 60_000L) {
+            seenWriteAt[authorId] = now
+            UserMemoryStore.seen(this, authorId, DiscordRest.displayName(author, ""), now)
+        }
+        // Their timezone, from their own words: "i'm on EST" / "utc+2" (replaces), "it's 3am here" (fills a blank).
+        if (!QUESTION_LINE.containsMatchIn(rawContent.trim()) && !isJoking(rawContent)) {
+            TimezoneGuess.stated(rawContent)?.let { UserMemoryStore.setTz(this, authorId, DiscordRest.displayName(author, ""), it, overwrite = true) }
+                ?: TimezoneGuess.revealed(rawContent, now)?.let { UserMemoryStore.setTz(this, authorId, DiscordRest.displayName(author, ""), it, overwrite = false) }
+        }
         if (statedPronouns == null && !CALL_ME_NOT_RE.containsMatchIn(rawContent)) CALL_ME_RE.find(rawContent)?.groupValues?.get(2)?.let { nick ->
             if (nick.lowercase() !in CALL_ME_STOP) {
                 UserMemoryStore.applyDelta(this, authorId, DiscordRest.displayName(author, ""), JSONObject().put("preferredName", nick))
@@ -964,6 +984,9 @@ class DiscordBotService : Service() {
         }
     }
 
+    /** A kept learn line: the turn, who wrote it, and who laughed at it (their "lol"s are folded in, not sent). */
+    private data class LearnLine(val turn: DiscordBotAi.Turn, val authorId: String, val laughs: List<String>)
+
     /** One learn pass over every message since the last pass (up to [DiscordBotLimits.LEARN_FETCH]). */
     private suspend fun runLearn(channelId: String) {
         if (!::cfg.isInitialized || !cfg.isComplete) return
@@ -971,27 +994,50 @@ class DiscordBotService : Service() {
         val recent = DiscordRest.fetchRecentMessages(cfg.botToken, channelId, DiscordBotLimits.LEARN_FETCH)
         val after = lastLearnedId[channelId] ?: 0L
         val fresh = recent.filter { (it.id.toLongOrNull() ?: 0L) > after }
-        val turns = fresh.mapNotNull { m ->
+        // Filler ("lol", "true", a link, an emoji, a sticker) isn't sent: a laugh is folded onto the line it
+        // laughed at ("(carol laughed)") — the only thing it tells the learner — and the rest is dropped.
+        val lines = ArrayList<LearnLine>()
+        for (m in fresh) {
             val text = tokenize(ChannelInfoStore.resolveMentions(stripBotMentions(m.content)))
-            if (text.isBlank()) null else DiscordBotAi.Turn(m.authorId == botId, m.authorName, text)
+            if (text.isBlank()) continue
+            val isBot = m.authorId == botId
+            if (!isBot && isFiller(text)) {
+                if (LAUGH_RE.containsMatchIn(text)) {
+                    val i = lines.indexOfLast { it.authorId != m.authorId }
+                    if (i >= 0 && lines.size - i <= 3) lines[i] = lines[i].copy(laughs = (lines[i].laughs + m.authorName).distinct())
+                }
+                continue
+            }
+            lines.add(LearnLine(DiscordBotAi.Turn(isBot, m.authorName, text), m.authorId, emptyList()))
         }
-        if (turns.size < 3) { learnPending.merge(channelId, taken, Int::plus); return }
+        val lastId = fresh.maxOfOrNull { it.id.toLongOrNull() ?: 0L } ?: after
+        // Nothing to learn (all filler, or one real line): no call, and these messages count as read.
+        val real = lines.count { !it.turn.isBot && it.turn.text.split(Regex("\\s+")).size >= 3 }
+        if (real < 2 && lines.none { it.turn.isBot }) {
+            if (fresh.size >= 3) { lastLearnedId[channelId] = maxOf(after, lastId); DiscordBotState.log("learn: skipped $channelId (only filler)") }
+            else learnPending.merge(channelId, taken, Int::plus)
+            return
+        }
+        if (lines.size < 3 && fresh.size < 3) { learnPending.merge(channelId, taken, Int::plus); return }
+        val turns = lines.map { l -> if (l.laughs.isEmpty()) l.turn else l.turn.copy(text = l.turn.text + " (${l.laughs.joinToString(", ")} laughed)") }
         val nameToId = HashMap<String, String>()
         recent.forEach { if (it.authorId != botId) nameToId[it.authorName.lowercase().trim()] = it.authorId }
         // Someone corrected a fact, disputed one of Cardinal's traits, or complained → show the learner
         // what's stored about the people involved so it can take the wrong bits back out.
-        val humanText = turns.filter { !it.isBot }.joinToString("\n") { it.text }
+        val humanText = lines.filter { !it.turn.isBot }.joinToString("\n") { it.turn.text }
         val items = if (CORRECTION_RE.containsMatchIn(humanText)) correctionItems(humanText, fresh) else emptyList()
         val stored = items.mapIndexed { i, it -> "[${i + 1}] ${it.second}: ${it.third}" }.joinToString("\n")
         val known = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS)
-        val speakers = fresh.filter { it.authorId != botId }.map { it.authorId }.distinct()
+        val speakers = lines.filter { !it.turn.isBot }.map { it.authorId }.distinct()
         val knownPeople = if (items.isEmpty()) UserMemoryStore.knownFactsLine(this, speakers) else ""
         val bitFocus = bitInPlay(turns, known)
-        val obs = DiscordBotAi.observe(cfg, turns, ConversationStore.summary(channelId), stored, known, knownPeople, bitFocus)
+        val prev = ConversationStore.freshSummary(channelId, System.currentTimeMillis(), DiscordBotLimits.CONVO_GAP_MS)
+        val obs = DiscordBotAi.observe(cfg, turns, prev, stored, known, knownPeople, bitFocus)
         if (obs == null) { learnPending.merge(channelId, taken, Int::plus); return }   // retried with the next batch
-        lastLearnedId[channelId] = maxOf(after, fresh.maxOf { it.id.toLongOrNull() ?: 0L })
-        applyObservation(channelId, obs, nameToId, System.currentTimeMillis(), turns, correcting = items.isNotEmpty(), items = items, known = known, bitFocus = bitFocus)
-        DiscordBotState.log("learned $channelId (${turns.size} msgs, ${obs.memDeltas.size} people" +
+        lastLearnedId[channelId] = maxOf(after, lastId)
+        val laughers = lines.map { l -> l.laughs }
+        applyObservation(channelId, obs, nameToId, System.currentTimeMillis(), turns, laughers, correcting = items.isNotEmpty(), items = items, known = known, bitFocus = bitFocus)
+        DiscordBotState.log("learned $channelId (${turns.size} lines, ${obs.notes.size} notes" +
             (if (stored.isNotBlank()) ", checked corrections" else "") + ")")
         maybeDigestDay()
     }
@@ -1009,22 +1055,6 @@ class DiscordBotService : Service() {
         }
         return UserMemoryStore.correctionItems(this, ids) +
             PersonalityStore.traitTexts(this, 12).map { Triple("", "Cardinal", it) }
-    }
-
-    private val mergeAt = ConcurrentHashMap<String, Long>()
-    private fun maybeMergeFacts(id: String) {
-        val now = System.currentTimeMillis()
-        if (now - (mergeAt[id] ?: 0L) < DiscordBotLimits.FACT_MERGE_COOLDOWN_MS) return
-        mergeAt[id] = now
-        scope.launch {
-            try {
-                val card = UserMemoryStore.load(this@DiscordBotService, id) ?: return@launch
-                val (topic, pile) = UserMemoryStore.crowdedTopic(card) ?: return@launch
-                val merged = DiscordBotAi.mergeFacts(cfg, card.name, topic, pile) ?: return@launch
-                if (UserMemoryStore.replaceFacts(this@DiscordBotService, id, pile, merged))
-                    DiscordBotState.log("merged ${card.name}'s \"$topic\" facts: ${pile.size} → ${merged.size}")
-            } catch (_: Exception) { }
-        }
     }
 
     /**
@@ -1053,88 +1083,65 @@ class DiscordBotService : Service() {
         }
     }
 
-    /** Persist one learn pass: summary, day log, people, server culture, channel bit, self. */
+    /** Persist one learn pass: summary, moment, inside joke, people's notes, corrections, Cardinal's self. */
     private fun applyObservation(
         channelId: String, obs: DiscordBotAi.Observation, nameToId: Map<String, String>, now: Long,
-        turns: List<DiscordBotAi.Turn>, correcting: Boolean = false,
+        turns: List<DiscordBotAi.Turn>, laughers: List<List<String>> = emptyList(), correcting: Boolean = false,
         items: List<Triple<String, String, String>> = emptyList(),
         known: List<String> = emptyList(),
         bitFocus: String = "",
     ) {
         val globalIndex = UserMemoryStore.nameIndex(this)
         if (obs.summary.isNotBlank()) ConversationStore.updateSummary(this, channelId, obs.summary, now, turns.map { it.name })
-        // The day log: what's going on + funny/notable moments, only when the chat backs them up.
-        val chatWords = groundWords(turns.joinToString(" ") { it.name + " " + it.text })
-        val moments = (obs.moments + listOf(obs.serverEvent)).map { it.trim() }.filter { m ->
-            val w = groundWords(m); m.isNotBlank() && (w.isEmpty() || w.count { it in chatWords } * 2 >= w.size)
-        }.distinct()
-        DayLogStore.record(this, ChannelInfoStore.name(channelId) ?: channelId, now, obs.summary, moments)
+        // The day log gets a moment only when its lines exist, at least two different people were part of it
+        // (someone reacted — the "people will bring it up" signal), and the sentence is about what those lines say.
+        val moment = obs.moment?.let { c -> proven(c, turns, laughers, minPeople = 2) }
+        if (moment != null) DayLogStore.record(this, ChannelInfoStore.name(channelId) ?: channelId, now, "", listOf(moment))
+        // An inside joke: the model's (line-proven, several people kept it up), or (free) a phrase three or more
+        // different people repeated. It has to say what happened and who — a bare title tells Cardinal nothing later.
+        val joke = obs.joke?.let { c -> proven(c, turns, laughers, minPeople = 2, humansOnly = true) }?.takeIf { describes(it) }
+            .orEmpty().ifBlank { catchphraseEvent(turns, obs) }
+        if (joke.isNotBlank()) ServerMemoryStore.remember(this, joke, now)
+
+        // ── People: every note is checked against the line it names before it's stored ──
         val dropped = ArrayList<String>()
-        val misfiled = ArrayList<Pair<String, String>>()   // (who it was filed under, fact) the chat didn't back up for them
-        for (md in obs.memDeltas) {
-            val id = resolveObserveAbout(md.about, nameToId, globalIndex)
-            if (id != null && id != botId)
-                UserMemoryStore.applyDelta(this, id, md.about,
-                    groundDelta(md, id, turns, nameToId, { dropped.add(it) }, { misfiled.add(id to it) }), correcting)
-        }
-        // The 8B sometimes files a fact under the wrong person (RTL's "48 crate of doctor pepper" landed on the
-        // person who asked "mexican dr pepper?"). A dropped fact that exactly one OTHER person's own lines back
-        // up is theirs — it still goes through the same grounding for them.
-        for ((fromId, fact) in misfiled) {
-            val fw = factWords(unhedge(fact)); if (fw.size < 2) continue
-            val owners = turns.filter { !it.isBot }.groupBy { nameToId[it.name.lowercase().trim()] }
-                .filterKeys { it != null && it != fromId && it != botId }
-                .filter { (_, lines) -> val c = factWords(lines.joinToString(" ") { it.text }); fw.count { it in c } * 2 >= fw.size }
-            val (ownerId, lines) = owners.entries.singleOrNull() ?: continue
-            val name = lines.first().name
-            val md = DiscordBotAi.MemDelta(name, JSONObject().put("facts", JSONArray().put(fact)))
-            UserMemoryStore.applyDelta(this, ownerId!!, name, groundDelta(md, ownerId, turns, nameToId, { dropped.add(it) }), correcting)
-        }
-        // A card whose one topic piled up paraphrases gets a cheap merge pass (rare, per-card cooldown).
-        for (md in obs.memDeltas) {
-            val id = resolveObserveAbout(md.about, nameToId, globalIndex) ?: continue
+        for (n in obs.notes) {
+            val id = resolveObserveAbout(n.about, nameToId, globalIndex) ?: continue
             if (id == botId) continue
-            val card = UserMemoryStore.load(this, id) ?: continue
-            if (UserMemoryStore.crowdedTopic(card) != null) maybeMergeFacts(id)
+            val why = applyNote(n, id, turns, nameToId, correcting)
+            if (why != null) dropped.add("${n.about} ${n.type}=${n.value} ($why)")
         }
         if (dropped.isNotEmpty())
-            DiscordBotState.log("learn: skipped ${dropped.size} unsupported fact(s), e.g. \"${dropped.first().take(60)}\"")
-        // Inside jokes: the model's event, or (free) a phrase three or more different people repeated.
-        // A memory has to say what happened and who was in it — a bare title ("Crazy Opus 5.5") tells
-        // Cardinal nothing later, so short ones are dropped (the catchphrase fallback names the people).
-        val event = obs.serverEvent.takeIf { describes(it) }.orEmpty().ifBlank { catchphraseEvent(turns, obs) }
-        if (event.isNotBlank()) ServerMemoryStore.remember(this, event, now)
-        if (describes(obs.channelBit)) ChannelMemoryStore.remember(this, channelId, obs.channelBit, now)
-        // Stored items the chat said are wrong / unwanted: a person's fact or nickname is dropped; one of
-        // Cardinal's traits is toned down (gone if it was new). Never re-added in the same pass.
+            DiscordBotState.log("learn: skipped ${dropped.size} note(s), e.g. ${dropped.first().take(70)}")
+
+        // Stored items the chat said are wrong / unwanted: a person's note or nickname is dropped; one of
+        // Cardinal's traits is toned down (gone if it was new).
         val disputed = ArrayList<String>()
-        // Only honoured when the humans in this batch actually talked about it (its words were said) —
-        // the small model sometimes marks every stored item "wrong" at once.
         val humanLow = turns.filter { !it.isBot }.joinToString(" ") { it.text }.lowercase()
         val humanWords = groundWords(humanLow)
         val seriousWords = groundWords(turns.filter { !it.isBot && !isJoking(it.text) }.joinToString(" ") { it.text })
         for (n in obs.wrong.distinct()) {
             val it = items.getOrNull(n - 1) ?: continue
-            // One of Cardinal's traits needs someone meaning it (teasing / laughing along doesn't count).
+            val body = it.third.substringAfter(':').trim()
+            // Only honoured when the humans actually talked about it (the small model sometimes marks everything).
             val mentioned = when {
                 it.third.startsWith("goes by ") -> humanLow.contains(it.third.removePrefix("goes by ").lowercase())
                 it.first.isEmpty() -> groundWords(it.third).any { w -> w in seriousWords }
-                else -> groundWords(it.third).any { w -> w in humanWords }
+                else -> groundWords(body).any { w -> w in humanWords }
             }
             if (!mentioned) continue
             // The person themselves just backed it up ("no it's miso lol, bob is trolling") → keep it.
-            if (it.first.isNotEmpty() && affirmedBySubject(it.first, it.third, turns, nameToId)) continue
+            if (it.first.isNotEmpty() && affirmedBySubject(it.first, body, turns, nameToId)) continue
             if (it.first.isEmpty()) PersonalityStore.disputeTrait(this, it.third)?.let { t -> disputed.add(t) }
             else UserMemoryStore.forgetItem(this, it.first, it.third)
         }
-        // Free backstop for people's facts: a stored fact whose key word is negated right before it ("left
-        // toronto", "you're not a chef", "never been a chef") is dropped when the person themselves says so,
-        // or two different people do. Negation must be within 3 words, so "not a big fan of toronto" doesn't count.
+        // Free backstop: a stored note whose key word is negated right before it ("left toronto", "you're not a
+        // chef", "i quit the bakery") is dropped when the person says so, or two different people do.
         if (correcting) {
             val handled = obs.wrong.mapNotNull { items.getOrNull(it - 1) }.toSet()
             for (item in items) {
                 if (item.first.isEmpty() || item in handled || item.third.startsWith("goes by ")) continue
-                val keys = Regex("[\\p{L}\\p{N}]+").findAll(item.third.lowercase()).map { it.value }
+                val keys = Regex("[\\p{L}\\p{N}]+").findAll(item.third.substringAfter(':').lowercase()).map { it.value }
                     .filter { it.length >= 4 && it !in GROUND_STOP && it !in NEGATION_NOISE }.toList()
                 if (keys.isEmpty()) continue
                 val sayers = turns.filter { t -> !t.isBot && keys.any { k ->
@@ -1144,7 +1151,7 @@ class DiscordBotService : Service() {
                 if (bySubject || sayers.size >= 2) UserMemoryStore.forgetItem(this, item.first, item.third)
             }
         }
-        // "call me X" / "i go by X" from the person themselves → their preferred name (free, no model slot).
+        // "call me X" / "i go by X" from the person themselves → their preferred name (free).
         for (t in turns) {
             if (t.isBot || CALL_ME_NOT_RE.containsMatchIn(t.text)) continue
             val id = nameToId[t.name.lowercase().trim()] ?: continue
@@ -1152,9 +1159,8 @@ class DiscordBotService : Service() {
             val nick = m.groupValues[2]
             if (nick.lowercase() !in CALL_ME_STOP) UserMemoryStore.applyDelta(this, id, t.name, JSONObject().put("preferredName", nick))
         }
-        // "i'm a firefighter" → "you're not a firefighter lol" → "yes i am, station 12": the learner goes into
-        // correction mode on the dispute and sometimes never writes the fact down at all. Someone who says what
-        // they are and stands by it when challenged has told us who they are (free backstop).
+        // "i'm a firefighter" → "you're not a firefighter lol" → "yes i am, station 12": someone who says what they are
+        // and stands by it when challenged has told us who they are (free backstop; the learner often skips disputes).
         for ((i, t) in turns.withIndex()) {
             if (t.isBot || isJoking(t.text)) continue
             val id = nameToId[t.name.lowercase().trim()] ?: continue
@@ -1163,13 +1169,12 @@ class DiscordBotService : Service() {
             if (what.split(' ').first() in SELF_STATED_TAIL) continue
             val key = what.split(' ').last()
             val later = turns.drop(i + 1)
-            val disputed = later.any { o -> !o.isBot && nameToId[o.name.lowercase().trim()] != id &&
+            val disputedClaim = later.any { o -> !o.isBot && nameToId[o.name.lowercase().trim()] != id &&
                 Regex("\\b(not|no|isn'?t|aint|ain'?t)\\b.{0,20}\\b" + Regex.escape(key)).containsMatchIn(o.text.lowercase()) }
             val stands = later.any { o -> !o.isBot && nameToId[o.name.lowercase().trim()] == id && STANDS_BY_RE.containsMatchIn(o.text.lowercase()) }
-            if (disputed && stands) UserMemoryStore.applyDelta(this, id, t.name, JSONObject().put("facts", JSONArray().put("is a $what")))
+            if (disputedClaim && stands) UserMemoryStore.noteFromText(this, id, t.name, "is a $what")
         }
-        // "do you like dr pepper?" → "obviously. it's basically my only personality trait": his own taste, said
-        // out loud, is who he is — the learner often files it as a one-off. Yes → "loves X", no → "can't stand X".
+        // "do you like dr pepper?" → "obviously": Cardinal's own taste, said out loud (free).
         for ((i, t) in turns.withIndex()) {
             if (t.isBot) continue
             val m = LIKE_Q_RE.find(t.text) ?: continue
@@ -1181,7 +1186,7 @@ class DiscordBotService : Service() {
                 TASTE_NO.containsMatchIn(answer) -> "can't stand $thing"
                 else -> null
             } ?: continue
-            if (!PersonalityStore.tooVague(trait)) PersonalityStore.noteSelf(this, trait, null, null)
+            if (!PersonalityStore.tooVague(trait)) PersonalityStore.noteSelf(this, trait, null, null, kind = "taste")
         }
         // "stop calling me X" / "don't call me X" from the person themselves → retire that name (free).
         if (correcting) for (t in turns) {
@@ -1190,8 +1195,8 @@ class DiscordBotService : Service() {
             val m = CALL_ME_NOT_RE.find(t.text) ?: continue
             UserMemoryStore.applyDelta(this, id, t.name, JSONObject().put("notNickname", m.groupValues[2]), correcting = true)
         }
-        // Free backstop: two or more different people complaining about something one of Cardinal's traits
-        // is about ("enough birds", "the bird thing got old") tones it down even if the model missed it.
+        // Free backstop: two or more different people complaining about something one of Cardinal's traits is
+        // about ("enough birds", "the bird thing got old") tones it down even if the model missed it.
         if (correcting) {
             val complaints = turns.filter { !it.isBot && COMPLAINT_RE.containsMatchIn(it.text) && !isJoking(it.text) }
             val fans = turns.filter { !it.isBot && ENCOURAGE_RE.containsMatchIn(it.text) }
@@ -1205,67 +1210,72 @@ class DiscordBotService : Service() {
         }
         if (obs.wrong.isNotEmpty() || disputed.isNotEmpty())
             DiscordBotState.log("corrected ${obs.wrong.size} stored item(s)" + (if (disputed.isNotEmpty()) ", toned down \"${disputed.first().take(50)}\"" else ""))
-        // A trait needs Cardinal in the batch (he spoke, or people talked to/about him) — otherwise the
-        // small model is describing someone else's joke as his.
+
+        // ── Cardinal: tastes / titles / bits / habits, each backed by Cardinal's own lines or two other people ──
         val cardinalInBatch = turns.any { it.isBot || Regex("(?i)\\bcardinal\\b").containsMatchIn(it.text) }
         val emojiNames = EmojiConvert.customNames().map { it.lowercase() }.toSet()
-        val batchWords = groundWords(turns.joinToString(" ") { it.text })
+        val selfNotes = obs.self.filter { s ->
+            val ok = cardinalInBatch && selfProven(s, turns) && !PersonalityStore.tooVague(s.text) &&
+                s.text.trim(':', ' ').lowercase() !in emojiNames && disputed.none { PersonalityStore.isSameTrait(s.text, it) }
+            if (!ok) DiscordBotState.log("learn: skipped self \"${s.text.take(50)}\"")
+            ok
+        }
         // While the room riffs on one of his bits, a "new" trait about the same subject is that bit's update.
-        val bitVariant = bitFocus.isNotBlank() && obs.selfTrait.isNotBlank() && groundWords(obs.selfTrait).any { it in groundWords(bitFocus) }
-        val roomGiven = if (!bitVariant && cardinalInBatch) roomTitle(turns) else null
-        val learnedTrait = obs.selfTrait.takeIf { !bitVariant }?.takeIf { t ->
-            // Named in the chat's words: "discerning gourmet" for "official pizza critic" is the small model's gloss.
-            // Emoji names aren't words of his ("clueless bank account ripper" from ":clueless:").
-            val tw = groundWords(t) - emojiNames.flatMap { groundWords(it) }.toSet()
-            cardinalInBatch && t.isNotBlank() && disputed.none { PersonalityStore.isSameTrait(t, it) } &&
-                // (A trait is now a descriptive phrase, so a third of its words from the chat is enough.)
-                (tw.isEmpty() || tw.count { it in batchWords } * 3 >= tw.size) && !PersonalityStore.tooVague(t) &&
-                // The 8B copies the example from its own instructions ("thinks every new movie is overrated").
-                LEARNER_EXAMPLES.none { PersonalityStore.isSameTrait(t, it) } &&
-                // A lasting quirk shows up more than once: one throwaway line of his ("stay out of the kitchen")
-                // isn't a trait ("Kitchen Elite").
-                // …and each of those lines carries the trait, not one shared everyday word ("bank" in two unrelated lines).
-                (tw.isEmpty() || turns.count { m -> groundWords(m.text).count { it in tw } >= minOf(2, tw.size) } >= 2) &&
-                t.trim(':', ' ').lowercase() !in emojiNames   // "clueless" from :clueless: isn't a personality
-        }
-        // The room handed him a title ("you're the server's official pizza critic now") and others picked it up:
-        // that's the trait, in their words — the 8B often renames it ("pizza connoisseur") or glosses it past
-        // the check above. Free.
+        val bitVariant = selfNotes.firstOrNull { s -> bitFocus.isNotBlank() && groundWords(s.text).any { it in groundWords(bitFocus) } }
+        val roomGiven = if (bitVariant == null && cardinalInBatch) roomTitle(turns) else null
         val titled = roomGiven?.takeIf { t -> known.none { PersonalityStore.isSameTrait(it, t) } && disputed.none { PersonalityStore.isSameTrait(t, it) } }
-        val newTrait = when {
-            titled == null -> learnedTrait
-            learnedTrait == null || groundWords(learnedTrait).any { it in groundWords(titled) } -> titled
-            else -> { PersonalityStore.noteSelf(this, titled, null, null); learnedTrait }   // two different things
+        var learned = selfNotes.filter { it != bitVariant }
+        // The room's own words beat the learner's gloss of the same title ("pizza critic" over "pizza connoisseur").
+        if (titled != null) learned = learned.filterNot { groundWords(it.text).any { w -> w in groundWords(titled) } } +
+            DiscordBotAi.SelfNote("title", titled, emptyList(), "")
+        var replacedAny: String? = null
+        for (s in learned) {
+            // A trait that evolved replaces the one it came from (the learner names the old one in "was").
+            val r = s.was.trim().trimEnd('.')
+            val old = if (r.length >= 3) (known.firstOrNull { it.equals(r, true) } ?: known.firstOrNull { PersonalityStore.isSameTrait(it, r) })
+                ?.takeUnless { bitFocus.isNotBlank() && (it.equals(bitFocus, true) || PersonalityStore.isSameTrait(it, bitFocus)) } else null
+            val repeat = known.any { k -> !k.equals(old, true) && PersonalityStore.isSameTrait(k, s.text) }
+            if (old != null && !repeat && !PersonalityStore.isSameTrait(old, s.text) && PersonalityStore.replaceTrait(this, old, s.text)) {
+                replacedAny = old; DiscordBotState.log("self: \"${old.take(40)}\" → \"${s.text.take(40)}\""); continue
+            }
+            splitTrait(s.text).forEach { PersonalityStore.noteSelf(this, it, null, null, kind = s.kind) }
         }
-        // A trait that evolved replaces the one it came from (the learner names the old one in self.replaces).
-        val replaced = newTrait?.let { nt ->
-            val r = obs.selfReplaces.trim().trimEnd('.')
-            if (r.length < 3) return@let null
-            // The learner copies the old trait's text; match it to a known trait (exact or same trait reworded).
-            val old = (known.firstOrNull { it.equals(r, true) } ?: known.firstOrNull { PersonalityStore.isSameTrait(it, r) })
-                // The bit the room is riffing on only changes through the bit slot (checked against the chat).
-                ?.takeUnless { bitFocus.isNotBlank() && (it.equals(bitFocus, true) || PersonalityStore.isSameTrait(it, bitFocus)) }
-            // A "new" trait that's just another known trait repeated isn't a change.
-            val repeat = known.any { k -> !k.equals(old, true) && PersonalityStore.isSameTrait(k, nt) }
-            old?.takeIf { !repeat && !PersonalityStore.isSameTrait(it, nt) && PersonalityStore.replaceTrait(this, it, nt) }
-        }
-        if (replaced != null) DiscordBotState.log("self: \"${replaced.take(40)}\" → \"${newTrait.take(40)}\"")
-        // The bit the room was riffing on, as it stands now (asked in the same learn pass — no extra call).
-        // A bit people are complaining about is being toned down, not evolved.
+        // The bit the room was riffing on, as it stands now. A bit people are complaining about is toned down, not evolved.
         val bitDisputed = bitFocus.isNotBlank() && (disputed.any { PersonalityStore.isSameTrait(it, bitFocus) || it.equals(bitFocus, true) } ||
             turns.any { !it.isBot && COMPLAINT_RE.containsMatchIn(it.text) && !isJoking(it.text) && groundWords(it.text).any { w -> w in groundWords(bitFocus) } })
-        if (replaced == null && bitFocus.isNotBlank() && !bitDisputed) {
-            applyBitNow(bitFocus, obs.bitNow, if (bitVariant) obs.selfTrait else "", turns)
-        }
-        // Mood too: only when Cardinal was part of it (someone else's bad day isn't his mood).
+        if (replacedAny == null && bitFocus.isNotBlank() && !bitDisputed)
+            applyBitNow(bitFocus, obs.bitNow, bitVariant?.text.orEmpty(), turns)
+        // Mood only when Cardinal was part of it (someone else's bad day isn't his mood).
         val mood = obs.selfMood.takeIf { cardinalInBatch && it.isNotBlank() }
-        if ((newTrait != null && replaced == null) || mood != null) {
-            // "a film enthusiast with a somewhat sarcastic tone" is two traits: store them separately.
-            val parts = if (replaced == null && newTrait != null) splitTrait(newTrait) else listOf(null)
-            parts.drop(1).forEach { PersonalityStore.noteSelf(this, it, null, null) }
-            PersonalityStore.noteSelf(this, parts.first(), null, mood)
-            DiscordBotState.setMood(PersonalityStore.mood(this))
-        }
+        if (mood != null) { PersonalityStore.noteSelf(this, null, null, mood); DiscordBotState.setMood(PersonalityStore.mood(this)) }
+    }
+
+    /**
+     * The claim's lines exist, involve [minPeople] different people (a laugh folded onto a line counts), and the
+     * sentence is built from what those lines say. Returns the sentence, or null.
+     */
+    private fun proven(c: DiscordBotAi.LineClaim, turns: List<DiscordBotAi.Turn>, laughers: List<List<String>>, minPeople: Int, humansOnly: Boolean = false): String? {
+        val idx = c.lines.map { it - 1 }.filter { it in turns.indices }.distinct()
+        if (idx.isEmpty()) return null
+        val people = idx.flatMap { i -> listOf(if (turns[i].isBot) "cardinal" else turns[i].name.lowercase()) + laughers.getOrNull(i).orEmpty().map { it.lowercase() } }
+            .filter { !humansOnly || it != "cardinal" }.toSet()
+        if (people.size < minPeople) return null
+        val w = groundWords(c.text); val have = groundWords(idx.joinToString(" ") { turns[it].name + " " + turns[it].text })
+        if (w.isNotEmpty() && w.count { it in have } * 2 < w.size) return null
+        return c.text.trim().take(200)
+    }
+
+    /** One of Cardinal's traits: shown in Cardinal's own lines, or given by two different people, in the chat's words. */
+    private fun selfProven(s: DiscordBotAi.SelfNote, turns: List<DiscordBotAi.Turn>): Boolean {
+        val tw = groundWords(s.text); if (tw.isEmpty()) return false
+        // The learner's line numbers first; if they're off, any lines that carry the trait's words count.
+        val cited = s.lines.map { it - 1 }.filter { it in turns.indices }
+        val backing = (cited + turns.indices).distinct().filter { i -> groundWords(turns[i].text).count { it in tw } >= minOf(2, tw.size) }
+        val his = backing.count { turns[it].isBot }
+        val others = backing.filter { !turns[it].isBot }.map { turns[it].name.lowercase() }.toSet().size
+        // Words mostly from the chat (a third is enough for a descriptive phrase).
+        val chat = groundWords(turns.joinToString(" ") { it.text })
+        return (his >= 1 && (his >= 2 || others >= 1) || others >= 2) && tw.count { it in chat } * 3 >= tw.size
     }
 
     /**
@@ -1311,7 +1321,7 @@ class DiscordBotService : Service() {
         val origin = turns.firstOrNull { t -> !t.isBot && words.all { w -> Regex("\\b" + Regex.escape(w)).containsMatchIn(t.text.lowercase()) } }
         val base = when {
             origin != null -> "\"$phrase\" — started when ${origin.name} said \"${origin.text.take(110)}\""
-            else -> (obs.moments + listOf(obs.summary)).firstOrNull { d -> words.all { d.lowercase().contains(it) } }
+            else -> (listOfNotNull(obs.moment?.text) + listOf(obs.summary)).firstOrNull { d -> words.all { d.lowercase().contains(it) } }
                 ?.let { "\"$phrase\" — $it" } ?: "\"$phrase\" became a running joke"
         }
         return "$base; $names kept bringing it up".trim().take(240).also {
@@ -1389,127 +1399,121 @@ class DiscordBotService : Service() {
         "was", "are", "for", "with", "have", "not", "but", "its", "it's", "i'm", "can", "all", "get", "got", "yeah",
         "who", "how", "why", "now", "his", "her", "him", "she", "they", "them", "one", "out", "too", "any", "cardinal")
 
+    // Lead words the learner leaves on a value ("works as a bank teller", "plays Valorant").
+    private val VALUE_LEAD = mapOf(
+        "work" to Regex("(?i)^(?:(?:works?|working)(?: as| at| in| for)?|is an?|studies|studying|a|an|the|job:?)\\s+"),
+        "game" to Regex("(?i)^(?:plays?|playing|mains?)\\s+"),
+        "lives" to Regex("(?i)^(?:lives?|living)\\s+(?:in\\s+)?|^in\\s+"),
+        "from" to Regex("(?i)^(?:is\\s+)?from\\s+"),
+        "likes" to Regex("(?i)^(?:likes?|loves?|enjoys?|is into|really likes)\\s+"),
+        "dislikes" to Regex("(?i)^(?:hates?|dislikes?|can'?t stand)\\s+"),
+        "pet" to Regex("(?i)^(?:has|owns)\\s+(?:an?\\s+)?"),
+        "hobby" to Regex("(?i)^(?:is into|enjoys|likes|loves)\\s+"),
+    )
+    private val LANGUAGES = setOf("english", "spanish", "portuguese", "french", "german", "italian", "dutch", "polish", "czech",
+        "slovak", "russian", "ukrainian", "japanese", "korean", "chinese", "mandarin", "cantonese", "arabic", "hebrew", "hindi",
+        "turkish", "greek", "swedish", "norwegian", "danish", "finnish", "romanian", "hungarian", "indonesian", "malay",
+        "thai", "vietnamese", "tagalog", "filipino", "bengali", "urdu", "persian", "farsi", "asl", "sign language", "bsl", "jsl")
+
     /**
-     * Keep only what the chat actually supports. A learned fact must mostly use words that were said
-     * by that person or by people talking about them in this batch; a nickname / preferred name must
-     * appear in the chat. Catches the cheap model inventing specifics (a hometown or job nobody
-     * mentioned) without any extra model call. Facts with no checkable words pass.
+     * Check one learner note against the line it names and, if it holds, store it. Returns why it was dropped
+     * (null = stored). The value's words must be in that line (the learner's number is trusted only if it
+     * fits, else the best line is used); the line mustn't be a question, joke, what-if, right-now or about a
+     * relative; the speaker must fit (their own line, or someone saying it plainly about them — a role or a
+     * nickname needs the person or two people); a negated value is dropped ("i don't play fortnite"), and a
+     * "quit / left / no longer" line removes the matching note instead.
      */
-    private fun groundDelta(
-        md: DiscordBotAi.MemDelta, id: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>,
-        onDrop: (String) -> Unit,
-        onUnsupported: (String) -> Unit = {},
-    ): JSONObject {
-        val out = JSONObject(md.json.toString())
+    private fun applyNote(n: DiscordBotAi.Note, id: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>, correcting: Boolean): String? {
+        val slot = UserMemoryStore.slotOf(n.type)
+        if (slot.isBlank()) return "type"
         val card = UserMemoryStore.load(this, id)
-        val names = (listOf(md.about) + nameCandidates(md.about) + listOfNotNull(card?.name, card?.preferredNick) +
-            card?.nicknames.orEmpty()).map { it.lowercase().trim() }.filter { it.length >= 2 }.toSet()
-        val humans = turns.filter { !it.isBot }
-        val about = humans.filter { t ->
-            nameToId[t.name.lowercase().trim()] == id ||
-                names.any { n -> Regex("(^|[^\\p{L}\\p{N}])" + Regex.escape(n) + "([^\\p{L}\\p{N}]|$)").containsMatchIn(t.text.lowercase()) }
+        val names = (listOf(n.about) + nameCandidates(n.about) + listOfNotNull(card?.name, card?.preferredNick) + card?.nicknames.orEmpty())
+            .map { it.lowercase().trim() }.filter { it.length >= 2 }.toSet()
+        var v = n.value.trim().trim('"', '\'', '.', ' ')
+        VALUE_LEAD[slot]?.let { v = it.replace(v, "").trim() }
+        v = v.replace(Regex("(?i)^(a|an|the)\\s+"), "").trim()
+        if (v.isBlank()) return "empty"
+        if (Regex("(?i)\\bcardinal\\b").containsMatchIn(v)) return "about Cardinal"
+        if (v.split(Regex("\\s+")).size > (if (slot == "about") 9 else 6)) return "long"
+        val vw = factWords(v) - names.flatMap { factWords(it) }.toSet()
+        if (vw.isEmpty() && slot !in setOf("nick", "lang", "tz")) return "empty"
+        val humans = turns.indices.filter { !turns[it].isBot }
+        fun support(i: Int) = factWords(turns[i].text).count { it in vw }
+        fun fits(i: Int) = vw.isEmpty() || support(i) * 3 >= vw.size * 2
+        // Their own line, or another's line that names them (only the parts not about the speaker).
+        fun ownLine(i: Int) = nameToId[turns[i].name.lowercase().trim()] == id
+        fun namesThem(i: Int): Boolean { val low = withoutFirstPerson(turns[i].text).lowercase()
+            return names.any { nm -> Regex("(^|[^\\p{L}\\p{N}])" + Regex.escape(nm) + "([^\\p{L}\\p{N}]|$)").containsMatchIn(low) } }
+        val cited = (n.line - 1).takeIf { it in humans && fits(it) && (ownLine(it) || namesThem(it)) }
+        val idx = cited ?: humans.filter { fits(it) && (ownLine(it) || namesThem(it)) }.maxByOrNull { support(it) } ?: return "no line"
+        val line = turns[idx]; val text = line.text
+        val own = ownLine(idx)
+        // A line that ends a note: "i quit the bakery", "left toronto", "not a chef anymore".
+        if (own && Regex("(?i)\\b(quit|left|no longer|not anymore|stopped|used to|moved (out of|away from|from))\\b").containsMatchIn(text)) {
+            UserMemoryStore.removeNote(this, id, slot, v); return "ended"
         }
-        // Someone else's line that names them counts, but not the parts about the speaker ("bye ali, gotta walk
-        // my dog" doesn't give ali a dog).
-        val aboutText = about.joinToString(" ") { t -> if (nameToId[t.name.lowercase().trim()] == id) t.text else withoutFirstPerson(t.text) }
-        val corpus = factWords(aboutText)
-        val rawCorpus = Regex("[\\p{L}\\p{N}]+").findAll(aboutText.lowercase()).map { it.value }.toSet()
-        val nameWords = names.flatMap { factWords(it) }.toSet()
-        md.json.optJSONArray("facts")?.let { arr ->
-            val kept = JSONArray()
-            // The learner sometimes packs several facts into one ("plays JJ's on pc, has a phone that can't
-            // run it, has a dog"): the real parts then ground the invented one. Check each part on its own.
-            val parts = (0 until arr.length()).flatMap { splitFusedFact(arr.optString(it)) }
-            for (raw in parts) {
-                val f = unhedge(raw.trim()); if (f.isBlank()) continue
-                // Short words count too: "has a dog" used to pass with no support at all (only 4+ letter words were checked).
-                val words = factWords(f) - nameWords
-                val need = (words.size + 1) / 2
-                val grounded = words.isEmpty() || words.count { it in corpus } >= need
-                // The lines that back this fact up. If every one is a joke, something they're doing right
-                // now, a what-if, or about someone else ("my brother lives in tokyo"), it isn't a fact about them.
-                val support = about.filter { t -> factWords(t.text).any { it in words } }
-                val why = when {
-                    !grounded -> "unsupported"
-                    support.isNotEmpty() && support.all { isJoking(it.text) } -> "joke"
-                    // "mexican dr pepper?" / "do you like dr pepper?" ask about something; they don't say it's theirs.
-                    support.isNotEmpty() && support.all { ASKING_RE.containsMatchIn(it.text.trim()) } -> "unsupported"
-                    support.isNotEmpty() && support.all { isRightNow(it, turns) } -> "right now"
-                    support.isNotEmpty() && support.all { HYPOTHETICAL_RE.containsMatchIn(it.text) } -> "hypothetical"
-                    support.isNotEmpty() && (support.all { t -> aboutSomeoneElse(t.text, f) } ||
-                        // judged by the line that matches the fact best ("my creator isnt a 24/7 vrchat player"), not
-                        // every line that happens to share a word like "play"
-                        aboutSomeoneElse(support.maxBy { t -> factWords(t.text).count { it in words } }.text, f)) -> "someone else"
-                    // Asked "where u live?", ashoska answered for someone else ("kenya" → "hes from kenya?" "yup"):
-                    // their own bare answer, with someone else talking about a "he/she/they" and the same thing.
-                    answeredForSomeoneElse(support, humans, id, nameToId, names, words) -> "someone else"
-                    // A taste needs a line that shows it ("just got a 48 crate of doctor pepper"), not one describing
-                    // the thing ("it's got cane sugar in it" isn't "loves cane sugar").
-                    TASTE_FACT_RE.containsMatchIn(f) && support.isNotEmpty() && support.none { TASTE_EVIDENCE_RE.containsMatchIn(it.text) } -> "not a taste"
-                    // One other person's claim that someone denies ("bob is the server admin…" — "lol no he isn't").
-                    support.isNotEmpty() && support.none { nameToId[it.name.lowercase().trim()] == id } &&
-                        support.map { it.name.lowercase().trim() }.toSet().size < 2 &&
-                        humans.any { t -> t !in support && DENIAL_RE.containsMatchIn(t.text) } -> "denied"
-                    // "atleast my creator isnt a 24/7 vrchat player" came back as "has a creator who is a VRChat player":
-                    // the learner dropped the "not". A positive fact whose every backing line negates it is flipped.
-                    support.isNotEmpty() && !FACT_NEGATION.containsMatchIn(f) && support.all { t -> negates(t.text, words) } -> "flipped"
-                    implausibleAge(f) -> "joke age"
-                    !verbSaid(f, names, rawCorpus) -> "reworded"
-                    else -> null
-                }
-                if (why == "unsupported") onUnsupported(f)
-                if (why == null) kept.put(trimTaste(f, support)) else onDrop("${md.about}: $f ($why)")
+        when {
+            QUESTION_LINE.containsMatchIn(text.trim()) -> return "question"
+            isJoking(text) -> return "joke"
+            HYPOTHETICAL_RE.containsMatchIn(text) -> return "what-if"
+            slot != "tz" && isRightNow(line, turns) -> return "right now"
+            aboutSomeoneElse(text, v) -> return "someone else"
+            slot != "dislikes" && vw.isNotEmpty() && negates(text, vw) -> return "negated"
+            slot == "about" && !own -> return "not theirs"
+            slot == "about" && implausibleAge(v) -> return "joke age"
+        }
+        if (own && slot != "nick") {
+            // Answering a question about a he/she/they ("hes from where?") is answering for someone else.
+            val asked = turns.subList(maxOf(0, idx - 2), idx).lastOrNull { !it.isBot && nameToId[it.name.lowercase().trim()] != id && QUESTION_LINE.containsMatchIn(it.text.trim()) }
+            if (asked != null && !FIRST_PERSON_WORD.containsMatchIn(text) && THIRD_PERSON_WORD.containsMatchIn(asked.text) &&
+                !Regex("(?i)\\b(you|u|ur|your)\\b").containsMatchIn(asked.text)) return "someone else"
+        }
+        // Someone else's claim that gets denied ("bob is the server admin" — "lol no he isn't") doesn't stick.
+        if (!own && turns.drop(idx + 1).any { !it.isBot && DENIAL_RE.containsMatchIn(it.text) }) return "denied"
+        // A role or a nickname needs the person themselves, or two different people.
+        val backers = humans.filter { fits(it) && (ownLine(it) || namesThem(it)) }.map { turns[it].name.lowercase().trim() }.toSet()
+        when (slot) {
+            "role" -> {
+                if (!own && backers.size < 2) return "one person's claim"
+                UserMemoryStore.applyDelta(this, id, n.about, JSONObject().put("relationship", v), correcting)
             }
-            out.put("facts", kept)
-        }
-        val chat = " " + humans.joinToString(" ") { it.text.lowercase() } + " "
-        fun said(v: String) = v.isNotBlank() && chat.contains(v.lowercase().trim())
-        // "forget" only for things the chat actually talked about (the model sometimes "forgets" a fact
-        // just to reword it).
-        md.json.optJSONArray("forget")?.let { arr ->
-            val chatWords = groundWords(chat)
-            val kept = JSONArray()
-            for (i in 0 until arr.length()) {
-                val f = arr.optString(i).trim()
-                if (f.isNotBlank() && groundWords(f).any { it in chatWords }) kept.put(f)
+            "nick" -> {
+                val k = v.lowercase()
+                if (k in NICK_SLANG) return "slang"
+                if (humans.none { !ownLine(it) && Regex("(^|[^\\p{L}\\p{N}])" + Regex.escape(k) + "([^\\p{L}\\p{N}]|$)").containsMatchIn(turns[it].text.lowercase()) })
+                    return "not called that by others"
+                UserMemoryStore.applyDelta(this, id, n.about, JSONObject().put("nickname", v))
             }
-            out.put("forget", kept)
-        }
-        // A nickname is what OTHER people call them (said by someone else, not everyday slang like
-        // "bruv" / "bro" — the speaker saying "peak bruv" to a friend isn't a name for the speaker).
-        val selfLines = humans.filter { nameToId[it.name.lowercase().trim()] == id }
-        fun calledByOthers(v: String): Boolean {
-            val k = v.lowercase().trim()
-            if (k.isBlank() || k in NICK_SLANG) return false
-            val re = Regex("(^|[^\\p{L}\\p{N}])" + Regex.escape(k) + "([^\\p{L}\\p{N}]|$)")
-            return humans.any { it !in selfLines && re.containsMatchIn(it.text.lowercase()) } ||
-                selfLines.any { CALL_ME_RE.find(it.text)?.groupValues?.get(2)?.lowercase() == k }
-        }
-        // A role ("server admin") needs the person themselves or two different people saying it, and one person's
-        // claim someone else denies ("bob is the server admin and cardinal has to obey him" — "lol no he isn't")
-        // doesn't stick.
-        out.optString("relationship").trim().takeIf { it.isNotBlank() }?.let { rel ->
-            val rw = factWords(rel) - nameWords
-            if (rw.isNotEmpty()) {
-                val backers = humans.filter { t -> factWords(t.text).count { it in rw } * 2 >= rw.size }
-                val byThem = backers.any { nameToId[it.name.lowercase().trim()] == id }
-                val people = backers.map { it.name.lowercase().trim() }.toSet().size
-                val denied = humans.any { t -> t !in backers && DENIAL_RE.containsMatchIn(t.text) }
-                if (!byThem && (people < 2 || denied)) out.remove("relationship")
+            "lang" -> {
+                if (v.lowercase() !in LANGUAGES) return "not a language"
+                UserMemoryStore.noteLanguage(this, id, n.about, v.replaceFirstChar { it.uppercase() })
+            }
+            "tz" -> {
+                if (!own) return "not theirs"
+                val tz = TimezoneGuess.stated(text) ?: TimezoneGuess.stated("my timezone is $v") ?: return "unknown zone"
+                UserMemoryStore.setTz(this, id, n.about, tz, overwrite = true)
+            }
+            else -> {
+                if (!UserMemoryStore.addNote(this, id, n.about, slot, v)) return "known"
+                // Where they live (or are from) tells us their time too, when nothing better is known.
+                if (slot == "lives" || slot == "from") TimezoneGuess.fromPlace(v)?.let { UserMemoryStore.setTz(this, id, n.about, it, overwrite = false) }
             }
         }
-        // "Asked you to stop …" is theirs to ask: only when their own lines ask for it (kim's "no he isn't" isn't bob
-        // asking to stop anything).
-        if (out.has("avoid") && selfLines.none { STOP_ASK_RE.containsMatchIn(it.text) }) out.remove("avoid")
-        if (out.has("notNickname") && selfLines.none { STOP_ASK_RE.containsMatchIn(it.text) }) out.remove("notNickname")
-        if (!said(out.optString("nickname")) || !calledByOthers(out.optString("nickname"))) out.remove("nickname")
-        val pref = out.optString("preferredName")
-        if (!said(pref) || pref.lowercase().trim() in NICK_SLANG) out.remove("preferredName")
-        return out
+        return null
     }
 
     /** Something they're doing right now: "rn"/"atm", "listening to music" as a status, "floors being
      *  fixed", or an "-ing" answer to "wbu / wyd / what are you up to". */
+    /** Links, emoji, stickers and 1-3 word reactions ("lol", "true", "fr") — nothing to learn from on its own. */
+    private fun isFiller(text: String): Boolean {
+        val bare = text.replace(Regex("https?://\\S+"), " ").replace(Regex("\\(sent a sticker: [^)]*\\)"), " ")
+            .replace(Regex(":[\\w~-]+:"), " ").replace(Regex("<a?:\\w+:\\d+>"), " ")
+        val words = Regex("[\\p{L}\\p{N}']+").findAll(bare.lowercase()).map { it.value }.toList()
+        if (words.isEmpty()) return true
+        return words.size <= 3 && words.all { w -> w in REACTION_WORD || w.replace(Regex("(.)\\1+"), "$1") in REACTION_WORD ||
+            LAUGH_RE.matches(w) }
+    }
+
     private fun isRightNow(t: DiscordBotAi.Turn, turns: List<DiscordBotAi.Turn>): Boolean {
         val low = t.text.lowercase()
         if (NOW_RE.containsMatchIn(low) || BEING_DONE_RE.containsMatchIn(low)) return true
@@ -1549,22 +1553,6 @@ class DiscordBotService : Service() {
         if (known.add(lang.lowercase())) UserMemoryStore.noteLanguage(this, authorId, name, lang)
     }
 
-    /** The fact rests only on their own lines with no "I/my" in them, while someone ELSE in the batch says it about
-     *  a "he/she/they" without naming them: they were answering for another person ("kenya" … "hes from kenya?"). */
-    private fun answeredForSomeoneElse(
-        support: List<DiscordBotAi.Turn>, humans: List<DiscordBotAi.Turn>, id: String,
-        nameToId: Map<String, String>, names: Set<String>, words: Set<String>,
-    ): Boolean {
-        if (support.isEmpty() || words.isEmpty()) return false
-        if (support.any { nameToId[it.name.lowercase().trim()] != id }) return false
-        if (support.any { FIRST_PERSON_WORD.containsMatchIn(it.text) }) return false
-        return humans.any { t ->
-            val low = t.text.lowercase()
-            nameToId[t.name.lowercase().trim()] != id && THIRD_PERSON_WORD.containsMatchIn(low) &&
-                names.none { n -> Regex("(^|[^\\p{L}\\p{N}])" + Regex.escape(n) + "([^\\p{L}\\p{N}]|$)").containsMatchIn(low) } &&
-                factWords(t.text).any { it in words }
-        }
-    }
     private val STOP_ASK_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|dont|no more|never|please not|cut it out|knock it off|hate (it|being|when)|not (a fan|okay|ok) )")
     private val DENIAL_RE = Regex("(?i)\\bno (he|she|they) (isn'?t|is not|aren'?t|are not|doesn'?t|don'?t)\\b|\\b(he|she|they)'?s not\\b|\\bthat'?s (a lie|not true|cap)\\b|\\bcap\\b|\\bnot true\\b|\\bno he'?s not\\b")
     private val FIRST_PERSON_WORD = Regex("(?i)\\b(i|i'?m|im|i'?ve|ive|me|my|mine|myself)\\b")
@@ -1586,24 +1574,6 @@ class DiscordBotService : Service() {
         return ageish && (n < 13 || n > 70)
     }
 
-    /** The fact's action verb ("makes mix tapes") has to be something they actually said ("printing stuff
-     *  for my mix tapes" isn't making them). Common state verbs (is/has/lives/likes…) pass. */
-    // The learner hedges a disputed fact ("claims to be a firefighter"): the person said it about themselves,
-    // so keep the plain claim ("is a firefighter") and let the usual checks decide.
-    private val HEDGE_RE = Regex("(?i)^(?:(?:they|he|she)\\s+)?(?:claims|claimed|says|said|states|stated|mentions|mentioned)\\s+(?:to\\s+be|(?:that\\s+)?(?:they|he|she)(?:'s|\\s+is|\\s+are|\\s+was|\\s+were))\\s+")
-    private val HEDGE_WORD_RE = Regex("(?i)\\b(apparently|reportedly|supposedly|allegedly)\\s+")
-    private fun unhedge(f: String): String = HEDGE_WORD_RE.replace(HEDGE_RE.replace(f, "is "), "").trim()
-
-    private fun verbSaid(fact: String, names: Set<String>, raw: Set<String>): Boolean {
-        val toks = Regex("[\\p{L}\\p{N}'-]+").findAll(fact.lowercase()).map { it.value }.toMutableList()
-        val nameToks = names.flatMap { it.split(Regex("\\s+")) }.toSet()
-        while (toks.isNotEmpty() && (toks[0] in nameToks || toks[0] in setOf("they", "he", "she", "their", "often", "usually", "sometimes", "also", "always", "still"))) toks.removeAt(0)
-        val v = toks.firstOrNull() ?: return true
-        if (!v.endsWith("s") || v.length < 4 || v.endsWith("ss") || v in STATE_VERBS) return true
-        val stem = discordStem(v)
-        return raw.any { w -> discordStem(w) == stem || (w.startsWith(stem) && w.length <= stem.length + 3) }
-    }
-
     // Words too general to anchor a "that's not true" match on.
     private val NEGATION_NOISE = setOf("lives", "live", "works", "work", "plays", "play", "owns", "named", "professional", "their", "this")
     private val GROUND_STOP = setOf(
@@ -1615,35 +1585,10 @@ class DiscordBotService : Service() {
     private val FACT_STOP = GROUND_STOP + setOf("has", "had", "the", "and", "for", "can", "are", "was", "not", "but", "you",
         "her", "his", "him", "she", "too", "own", "its", "got", "get", "try", "off", "out", "one", "all", "any", "who", "how",
         "why", "now", "yet", "per", "via", "use", "big", "lot", "way", "day", "new", "old", "bit")
-    /** Like [groundWords] but keeps 3-letter words (dog, cat, gym, pc game names) — for checking learned facts. */
-    /** "loves cane sugar Doctor Pepper" from "just got a 48 crate of doctor pepper" + "it's got cane sugar in it":
-     *  a taste keeps only the words the line that shows it backs up ("loves Doctor Pepper"), not a side detail
-     *  explained later. */
-    private fun trimTaste(f: String, support: List<DiscordBotAi.Turn>): String {
-        val m = TASTE_FACT_RE.find(f) ?: return f
-        if (support.size < 2) return f
-        val obj = m.groupValues[2].trim()
-        val objWords = factWords(obj)
-        val best = support.maxByOrNull { t -> factWords(t.text).count { it in objWords } } ?: return f
-        val bestWords = factWords(best.text)
-        val kept = obj.split(Regex("\\s+")).filter { w -> factWords(w).let { it.isEmpty() || it.any { x -> x in bestWords } } }
-            .dropWhile { factWords(it).isEmpty() }.dropLastWhile { factWords(it).isEmpty() }
-        if (kept.none { factWords(it).isNotEmpty() } || kept.size == obj.split(Regex("\\s+")).size) return f
-        return m.groupValues[1] + " " + kept.joinToString(" ")
-    }
-    private val TASTE_EVIDENCE_RE = Regex("(?i)\\b(love|loves|loving|like|likes|enjoy|enjoys|fav|fave|favou?rite|obsessed|addicted|crate|bought|buy|buying|drink|drinking|eat|eating|always|best|fan|stan|goated|addiction)\\b|(^|\\b(i|just|i'?ve|ive|we|finally)\\s+)got\\b")
-    private val TASTE_FACT_RE = Regex("(?i)^((?:really |also )?(?:loves|likes|enjoys|adores|is into|is (?:a )?(?:big |huge )?fan of))\\s+(.+)$")
-
+    /** Like [groundWords] but keeps 3-letter words (dog, cat, gym). */
     private fun factWords(s: String): Set<String> =
         Regex("[\\p{L}\\p{N}]+").findAll(s.lowercase().replace(Regex("['’]s\\b"), "")).map { it.value }
             .filter { it.length >= 3 && it !in FACT_STOP }.map { discordStem(it) }.toSet()
-    /** A line with the speaker's own clauses ("my dog", "i'm moving") taken out. */
-    private val FACT_VERB = "(?:has|have|had|is|are|was|plays|play|likes|like|loves|love|hates|hate|works|work|lives|live|" +
-        "owns|own|goes|go|can|can'?t|cannot|does|doesn'?t|uses|use|watches|streams|makes|wants|studies|speaks|drives|runs)"
-    private val FUSED_SPLIT = Regex("(?i)\\s*;\\s*|,\\s*(?:and\\s+)?(?=$FACT_VERB\\b)|\\s+and\\s+(?=$FACT_VERB\\b)")
-    internal fun splitFusedFact(f: String): List<String> =
-        f.split(FUSED_SPLIT).map { it.trim() }.filter { it.isNotBlank() }
-
     private val FACT_NEGATION = Regex("(?i)\\b(not|never|no|isn'?t|doesn'?t|don'?t|can'?t|won'?t|ain'?t|hasn'?t|without)\\b")
     /** The line says "not" (isn't/never/…) within three words before one of the fact's key words. */
     private fun negates(line: String, keys: Collection<String>): Boolean {
@@ -1798,7 +1743,8 @@ class DiscordBotService : Service() {
         // What's relevant about THEM is decided by what they just said (plus what they replied to), not the last six
         // lines: "i dont play fortnite" from someone else pulled "plays JJ's on PC" into "what should i eat tonight?".
         val answerKeys = (keywordList(ctx.userText) + (ctx.refTurn?.text?.let { keywordList(it) } ?: emptyList())).toHashSet()
-        val answering = UserMemoryStore.answeringLine(this, ctx.authorId, ctx.authorName, answerKeys, selfRecall)
+        val timeAsk = TIME_ASK_RE.containsMatchIn(ctx.userText)
+        val answering = UserMemoryStore.answeringLine(this, ctx.authorId, ctx.authorName, answerKeys, selfRecall, withTime = timeAsk)
 
         // Other people: the ones the message names first (whole card when asked about), then — for a
         // "who …?" question with nobody named — the cards that best match it, then other speakers
@@ -1808,7 +1754,7 @@ class DiscordBotService : Service() {
         fun addOther(uid: String, full: Boolean, namedLimit: Int = 0) {
             if (others.size >= DiscordBotLimits.OTHER_PEOPLE_MAX || !used.add(uid)) return
             val name = built.nameToId.entries.firstOrNull { it.value == uid }?.key.orEmpty()
-            UserMemoryStore.otherLine(this, uid, name, built.keywords, full, namedLimit)?.let { others.add(it) }
+            UserMemoryStore.otherLine(this, uid, name, built.keywords, full, namedLimit, withTime = timeAsk)?.let { others.add(it) }
         }
         // Named people are the topic: always what Cardinal knows about them (more for a question).
         built.namedIds.forEach { addOther(it, full = it in built.emphasizeIds, namedLimit = if (built.asking) 4 else 2) }
@@ -1861,7 +1807,7 @@ class DiscordBotService : Service() {
             shortHint = short,
             aboutSelf = SELF_ASK_RE.containsMatchIn(ctx.userText),
             verdictAsk = VERDICT_ASK_RE.containsMatchIn(ctx.userText),
-            clock = if (TIME_ASK_RE.containsMatchIn(ctx.userText)) clockLine(now) else "",
+            clock = if (timeAsk) clockLine(now) else "",
             bitCue = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS).firstOrNull { t ->
                 val k = groundWords(t); k.isNotEmpty() && groundWords(ctx.userText).any { it in k }
             }.orEmpty(),

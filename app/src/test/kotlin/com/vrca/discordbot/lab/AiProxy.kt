@@ -88,7 +88,7 @@ internal class AiProxy(private val cfg: LabConfig, private val rec: LabRecorder)
         return when {
             // By shape, so rewording a prompt doesn't break the lab (old and new wordings both work).
             sys.contains("\"action\":\"reply|react|ignore\"") -> "director"
-            sys.contains("\"people\":[") -> "observe"
+            sys.contains("\"notes\":[") || sys.contains("\"people\":[") -> "observe"
             sys.contains("Reply with") && sys.startsWith("You're Cardinal") -> "reply"
             else -> "other"
         }
@@ -169,7 +169,7 @@ internal class AiProxy(private val cfg: LabConfig, private val rec: LabRecorder)
                 )[call.n % 3]
                 else -> """{"action":"reply","short":true,"emoji":""}"""
             }
-            "observe" -> """{"summary":"(dry) the chat continues","people":[],"event":"","channelBit":"","self":{"trait":"","mood":""}}"""
+            "observe" -> """{"sum":"(dry) the chat continues","notes":[],"me":[],"mood":""}"""
             else -> "(dry)"
         }
         call.estimated = true

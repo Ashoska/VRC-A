@@ -105,6 +105,8 @@ object DiscordBotLimits {
     @Volatile @JvmStatic var LEARN_LULL_MIN_GAP_MS = 60_000L
     /** Messages a learn pass reads (only the ones it hasn't seen are kept). */
     const val LEARN_FETCH = 50
+    /** Each numbered line in the learn transcript is cut to this (a wall of text needs no more to be learned from). */
+    const val LEARN_LINE_MAX_CHARS = 220
     /** Quiet gap that ends the active conversation segment → archived as a topic. */
     const val CONVO_GAP_MS = 12 * 60 * 1000L
 
