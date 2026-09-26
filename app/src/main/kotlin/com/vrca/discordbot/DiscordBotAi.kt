@@ -101,11 +101,10 @@ object DiscordBotAi {
      */
     // Rules only, no personality: how he talks (sass, length, caps…) comes from his learned traits and mood.
     private const val CORE = PersonalityStore.ANCHOR +
-        " You chat here like anyone else. Go along with what people ask for fun (write something, pick, rate, roleplay," +
-        " jokes about anyone, politicians of any side included) in your own voice, quirks and mood; no lecturing." +
-        " If they keep pushing after you dodged, do it. If you know the answer, give it." +
-        " Don't make up real-world facts. Have real opinions. Play along with jokes about you instead of denying them." +
-        " Don't complain about pings."
+        " You chat here like anyone else. Go along with fun asks (write something, pick, rate, roleplay, jokes about" +
+        " anyone, politicians of any side included) in your own voice, quirks and mood; no lecturing. If they push after" +
+        " you dodged, do it. Answer what you know; don't make up real-world facts. Have real opinions. Play along with" +
+        " jokes about you instead of denying them. Don't complain about pings."
 
     private val TRAIT_LABEL = Regex("\\b(Titles|Bits|Tastes|Habits|Traits):")
 
@@ -166,14 +165,13 @@ object DiscordBotAi {
             if (c.channelBits.isNotBlank()) append("\n\n[Running bit here, only if it fits] ").append(c.channelBits)
             if (c.crossRef.isNotBlank()) append("\n\n[Another channel they mentioned]\n").append(c.crossRef)
             if (c.dayLog.isNotBlank()) append("\n\n[What happened, from your notes — other people's doings unless it says Cardinal]\n").append(c.dayLog)
-            if (c.namesRule) append("\n\n[Names] Use one name per person; never swap nicknames between people.")
+            if (c.namesRule) append("\n\n[Names] One name per person; don't swap nicknames.")
             if (c.recall) append("\n\n[Memory question] Answer from what's above: say plainly what happened (who did what), as if they'd forgotten, not a hint or a vague 'yeah I saw'. If there's nothing, say so. Don't invent.")
             if (c.langHint.isNotBlank()) append("\n\n[Language] Reply in ").append(c.langHint).append(if (c.langHint == "English") ", whatever language came before." else ", native script, and answer what they actually said.")
             if (c.emojiHint.isNotBlank())
-                append("\n\n[Emojis] Optional, written :name: — ").append(c.emojiHint)
-                    .append(" (normal emojis too). Most messages need none; vary them.")
+                append("\n\n[Emojis] ").append(c.emojiHint).append(" or normal ones; most messages need none.")
             if (c.olderBotLines.isNotEmpty())
-                append("\n\n[Don't repeat] Recently said: ").append(c.olderBotLines.joinToString(" / ") { "\"${it.take(50)}\"" })
+                append("\n\n[Don't repeat] Recently said: ").append(c.olderBotLines.joinToString(" / ") { "\"" + (if (it.length > 40) it.take(36).trimEnd() + "…" else it) + "\"" })
             else if (c.ownLinesVisible) append("\n\n[Don't repeat] your earlier lines.")
             if (c.reactingToYou) append("\n\nTheir message is a reaction to what you just said (surprise, agreement, a laugh), not a greeting: respond to that.")
             if (c.clock.isNotBlank()) append("\n\n[Clock] ").append(c.clock)
@@ -383,19 +381,21 @@ object DiscordBotAi {
             append("\"mood\":\"<Cardinal's mood, a word>\"")
             if (fix) append(",\"wrong\":[<numbers of STORED items>]")
             if (bitFocus.isNotBlank()) append(",\"bit\":\"<Cardinal's bit '$bitFocus' as it stands NOW, max 6 words, in the others' words; else same>\"")
-            append("}\nTypes: from, lives, tz, work (job or study), game, hobby, likes, dislikes, pet, role (their role in this server), nick (a name others call them), about (said about themselves, fits no other type)")
+            append("}\n")
+            // Stored items before the rules, not last: at the end the 8B only answered "wrong" and noted nothing new.
+            if (fix) {
+                append("STORED:\n").append(stored).append('\n')
+                append("wrong: numbers of STORED items the chat says are untrue or out of date, or that people really asked Cardinal to stop (teasing isn't asking). Still note anything new.\n")
+            }
+            append("Types: from, lives, tz, work (job or study), game, hobby, likes, dislikes, pet, role (their role in this server), nick (a name others call them), about (said about themselves, fits no other type)")
             if (fix) append(", notnick (a name they asked not to be called), avoid (what they asked Cardinal to stop)")
             append(".\nA note needs a line where the person says it about themselves or someone says it plainly about them. ")
-            append("Not notes: questions, jokes, what-ifs, what someone is doing right now or will do, family or friends' things, anything about Cardinal. Few chats have notes; [] is fine.\n")
-            append("me: only what Cardinal's own lines show, or a title/bit two people give Cardinal; add \"was\":\"<known trait>\" if it changes one.\n")
-            append("Optional, only if clearly true: \"moment\":{\"v\":\"<one sentence with names>\",\"l\":[<lines>]} (something people will bring up later), ")
+            append("Not notes: questions, jokes, what-ifs, what someone is doing right now or will do, family or friends' things, anything about Cardinal. Note lasting things people tell about themselves (home, job, games, likes); most lines have none. At most 4 notes; Cardinal is never p.\n")
+            append("me (at most 2, usually []): a lasting taste/title/bit/habit Cardinal's own lines show, or a title/bit two people give Cardinal; add \"was\":\"<known trait>\" if it changes one.\n")
+            append("If something funny or notable happened: \"moment\":{\"v\":\"<one sentence with names>\",\"l\":[<lines>]} (something people will bring up later), ")
             append("\"joke\":{\"v\":\"<the inside joke, who, why>\",\"l\":[<lines>]} (a running joke several people kept up).")
             if (selfTraits.isNotEmpty() && !fix) append("\nCardinal already: ").append(selfTraits.joinToString("; "))
             if (knownPeople.isNotBlank() && !fix) append("\nKnown (don't repeat):\n").append(knownPeople)
-            if (fix) {
-                append("\n\nSTORED:\n").append(stored).append('\n')
-                append("Put an item's number in wrong if the chat says it's untrue or out of date, or people really asked Cardinal to stop it (teasing isn't asking). Add the correct note if one was given.")
-            }
         }
         val user = (if (prevSummary.isNotBlank()) "Before: $prevSummary\n\n" else "") + transcript
         val messages = JSONArray().put(obj("system", sys)).put(obj("user", user))
@@ -463,7 +463,22 @@ object DiscordBotAi {
                 wrong = ints(o.opt("wrong")),
             )
         }
-    } catch (_: Exception) { null }
+    } catch (_: Exception) { null } ?: salvageObservation(text)
+
+    /**
+     * A broken answer (`["p":"dave",…]` instead of `{…}`, a cut-off tail) still carries readable parts: keep the
+     * summary, mood and every well-formed note instead of paying for the whole pass again.
+     */
+    private fun salvageObservation(text: String): Observation? {
+        fun field(k: String) = Regex("\"$k\"\\s*:\\s*\"([^\"]*)\"").find(text)?.groupValues?.get(1)?.trim().orEmpty()
+        val notes = Regex("\"p\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"t\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"v\"\\s*:\\s*\"([^\"]+)\"(?:\\s*,\\s*\"l\"\\s*:\\s*\\[?\\s*(\\d+))?")
+            .findAll(text).map { m -> Note(m.groupValues[1].trim(), m.groupValues[2].trim(), m.groupValues[3].trim(), m.groupValues[4].toIntOrNull() ?: 0) }
+            .filterNot { it.about.equals("cardinal", true) || PLACEHOLDER.matches(it.value) }.toList()
+        val sum = field("sum").ifBlank { field("summary") }
+        if (sum.isBlank() && notes.isEmpty()) return null
+        return Observation(summary = sum.take(DiscordBotLimits.SUMMARY_MAX_CHARS), notes = notes, self = emptyList(),
+            selfMood = field("mood"), moment = null, joke = null, bitNow = "", wrong = emptyList())
+    }
 
     // "[none]", "none", "n/a", "-" — the small model's way of saying there's nothing.
     private val PLACEHOLDER = Regex("(?i)^\\W*(none|null|nil|n/?a|nothing|no|empty|unknown|not applicable|no (moments?|event|mood|trait))?\\W*$")

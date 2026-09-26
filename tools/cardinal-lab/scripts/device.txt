@@ -34,7 +34,7 @@ ashoska: @Cardinal what should i eat tonight?
 # Nickname request: saved the moment it's said (not at the next learn pass), and he knows it's done.
 ashoska: @Cardinal anyway testing stuff, update my Nickname to Ash
 > expect reply
-> expect card ashoska contains (?i)casual nickname: ash\b
+> expect card ashoska contains (?i)goes by ash\b
 ashoska ^bot: you didnt do it
 > expect reply
 > expect not-contains (?i)(i'?m not a bot|go click|can'?t (do|change) (that|it)|fix it yourself|do it yourself|not (an? )?admin|one sec|working on it|my bad|on it\b)

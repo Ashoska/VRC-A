@@ -32,7 +32,7 @@ object DiscordBotLimits {
     const val SHORT_REPLY_MAX_TOKENS = 90
     const val SUMMARY_MAX_CHARS = 500
     /** Learn-pass answer cap (it lists only people with something new, so this is rarely reached). */
-    const val LEARN_MAX_TOKENS = 480
+    const val LEARN_MAX_TOKENS = 320
     /** The director's reply/react/ignore call runs cooler for a steadier decision. (Not the learn pass:
      *  at 0.2 the small model looped until max_tokens; invented facts are caught by grounding instead.) */
     const val DIRECTOR_TEMPERATURE = 0.2
@@ -48,7 +48,7 @@ object DiscordBotLimits {
     /** Cards found by searching everyone's facts for a "who …?" question with nobody named. */
     const val RECALL_SEARCH_MAX = 2
     /** Custom server emojis offered in the prompt (most-used first). */
-    const val EMOJI_HINT_MAX = 8
+    const val EMOJI_HINT_MAX = 6
     /** Extra custom emojis whose NAME matches the conversation, added on top of the most-used ones. */
     const val EMOJI_TOPICAL_MAX = 4
     /** Revived topics / relevant server memories injected for a given message. */
@@ -56,6 +56,8 @@ object DiscordBotLimits {
     const val EVENT_RETRIEVE_MAX = 3
     /** Cap for the admin-taught extras in the personality digest (every trait is always shown). */
     const val SELF_DIGEST_MAX_CHARS = 600
+    /** Strongest traits always in a reply's [You] (plus titles, pinned, and ones the message touches). */
+    const val SELF_TRAITS_IN_PROMPT = 4
     /** Admin-side full render cap (prompt uses the retrieval-limited render). */
     const val USER_CARD_MAX_CHARS = 600
     /** The bot's own recent replies fed back so it doesn't repeat itself. */

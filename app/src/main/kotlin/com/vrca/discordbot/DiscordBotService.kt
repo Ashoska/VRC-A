@@ -224,7 +224,9 @@ class DiscordBotService : Service() {
             "thx", "thanks", "np", "dead", "crying", "wild", "insane", "lmaoo", "lool", "xdd", "fair", "valid", "peak", "wait")
         // A question line: ends in "?", opens with a wh-word, or "do/are/can … you/he/she/they/anyone".
         private val QUESTION_LINE = Regex("(?i)\\?[\\s\\p{So}\\p{Sk}\\W]*$|^\\W*(what|why|how|who|where|when|which|whats|wheres|hows|whos)\\b|" +
-            "^\\W*(do|does|did|are|is|was|were|can|could|would|will|have|has)\\s+(you|u|ya|he|she|they|we|anyone|any1|someone|ur|your|his|her)\\b")
+            "^\\W*(do|does|did|are|is|was|were|can|could|would|will|have|has)\\s+(you|u|ya|he|she|they|we|anyone|any1|someone|ur|your|his|her)\\b|" +
+            // A question after a greeting, no "?": "welcome back, how's the ai stuff going".
+            "[,;.]\\s*(how'?s|how is|how are|what'?s|what are|where'?s)\\s+(\\S+\\s+){0,3}(going|doing|up|been|new|you|u|ur|your)\\b")
         private val JOKE_RE = Regex("(?i)\\b(lol+|lmf?ao+|rofl|ha(ha)+|he(he)+|xd+|jk|/j|kidding|just kidding)\\b|😂|🤣|😭|💀|😆|🙃|😜")
         private val SERIOUS_RE = Regex("(?i)\\b(genuinely|seriously|for real|not joking|no joke|i mean it|please|pls|plz|actually annoying)\\b")
         private val ENCOURAGE_RE = Regex("(?i)\\b(keep going|keep it up|love (it|this|that)|don'?t stop|never stop|more of this|so good|iconic|canon|lives rent free|we need more)\\b")
@@ -1028,11 +1030,13 @@ class DiscordBotService : Service() {
         val items = if (CORRECTION_RE.containsMatchIn(humanText)) correctionItems(humanText, fresh) else emptyList()
         val stored = items.mapIndexed { i, it -> "[${i + 1}] ${it.second}: ${it.third}" }.joinToString("\n")
         val known = PersonalityStore.traitTexts(this, DiscordBotLimits.MAX_TRAITS)
-        val speakers = lines.filter { !it.turn.isBot }.map { it.authorId }.distinct()
-        val knownPeople = if (items.isEmpty()) UserMemoryStore.knownFactsLine(this, speakers) else ""
         val bitFocus = bitInPlay(turns, known)
         val prev = ConversationStore.freshSummary(channelId, System.currentTimeMillis(), DiscordBotLimits.CONVO_GAP_MS)
-        val obs = DiscordBotAi.observe(cfg, turns, prev, stored, known, knownPeople, bitFocus)
+        // Only the traits this batch touches (for "was"): the whole list (and everyone's known facts) just got
+        // copied back into the answer — hundreds of output tokens per pass. A repeated note is a free no-op anyway.
+        val batchWords = groundWords(turns.joinToString(" ") { it.text })
+        val touched = known.filter { t -> groundWords(t).count { it in batchWords } >= minOf(2, groundWords(t).size) }.take(4)
+        val obs = DiscordBotAi.observe(cfg, turns, prev, stored, touched, "", bitFocus)
         if (obs == null) { learnPending.merge(channelId, taken, Int::plus); return }   // retried with the next batch
         lastLearnedId[channelId] = maxOf(after, lastId)
         val laughers = lines.map { l -> l.laughs }
@@ -1092,20 +1096,32 @@ class DiscordBotService : Service() {
         bitFocus: String = "",
     ) {
         val globalIndex = UserMemoryStore.nameIndex(this)
-        if (obs.summary.isNotBlank()) ConversationStore.updateSummary(this, channelId, obs.summary, now, turns.map { it.name })
+        // A summary that has people talking to/about Cardinal when nobody did (8B: "kiellmann asks about Cardinal's
+        // location" for a question to someone else) would steer the next reply onto the wrong thing: keep the old one.
+        val sumAboutMe = obs.summary.contains("cardinal", true) &&
+            turns.none { it.isBot || it.text.contains("cardinal", true) || it.text.contains("<@") }
+        if (obs.summary.isNotBlank() && !sumAboutMe) ConversationStore.updateSummary(this, channelId, obs.summary, now, turns.map { it.name })
         // The day log gets a moment only when its lines exist, at least two different people were part of it
         // (someone reacted — the "people will bring it up" signal), and the sentence is about what those lines say.
         val moment = obs.moment?.let { c -> proven(c, turns, laughers, minPeople = 2) }
+            // Free fallback: the 8B often skips the moment. Someone laughing at a line is the signal; the pass's own
+            // summary (grounded in the lines) says what it was.
+            ?: obs.summary.takeIf { sm -> sm.isNotBlank() && !sumAboutMe &&
+                turns.indices.any { i -> !turns[i].isBot && laughers.getOrNull(i).orEmpty().any { !it.equals(turns[i].name, true) } } &&
+                groundWords(sm).let { w -> w.isNotEmpty() && w.count { it in groundWords(turns.joinToString(" ") { t -> t.name + " " + t.text }) } * 2 >= w.size } }
         if (moment != null) DayLogStore.record(this, ChannelInfoStore.name(channelId) ?: channelId, now, "", listOf(moment))
         // An inside joke: the model's (line-proven, several people kept it up), or (free) a phrase three or more
         // different people repeated. It has to say what happened and who — a bare title tells Cardinal nothing later.
         val joke = obs.joke?.let { c -> proven(c, turns, laughers, minPeople = 2, humansOnly = true) }?.takeIf { describes(it) }
             .orEmpty().ifBlank { catchphraseEvent(turns, obs) }
         if (joke.isNotBlank()) ServerMemoryStore.remember(this, joke, now)
+        // A running joke starting is a moment of the day too (when nothing else was logged for this pass).
+        if (moment == null && joke.isNotBlank()) DayLogStore.record(this, ChannelInfoStore.name(channelId) ?: channelId, now, "", listOf(joke))
 
         // ── People: every note is checked against the line it names before it's stored ──
         val dropped = ArrayList<String>()
-        for (n in obs.notes) {
+        // The model's notes, then (free) plain first-person statements it skipped — both go through the same checks.
+        for (n in obs.notes + selfStatements(turns)) {
             val id = resolveObserveAbout(n.about, nameToId, globalIndex) ?: continue
             if (id == botId) continue
             val why = applyNote(n, id, turns, nameToId, correcting)
@@ -1246,7 +1262,10 @@ class DiscordBotService : Service() {
         if (replacedAny == null && bitFocus.isNotBlank() && !bitDisputed)
             applyBitNow(bitFocus, obs.bitNow, bitVariant?.text.orEmpty(), turns)
         // Mood only when Cardinal was part of it (someone else's bad day isn't his mood).
-        val mood = obs.selfMood.takeIf { cardinalInBatch && it.isNotBlank() }
+        // Not an emoji's name (":clueless:" in his line made him "clueless" and he played dumb at 2+2).
+        val batchEmoji = emojiNames + turns.flatMap { t -> Regex(":([\\w-]+):").findAll(t.text).map { it.groupValues[1].lowercase() }.toList() }
+        val mood = obs.selfMood.takeIf { m -> cardinalInBatch && m.isNotBlank() &&
+            Regex("[\\p{L}]+").findAll(m.lowercase()).none { it.value in batchEmoji } }
         if (mood != null) { PersonalityStore.noteSelf(this, null, null, mood); DiscordBotState.setMood(PersonalityStore.mood(this)) }
     }
 
@@ -1423,6 +1442,27 @@ class DiscordBotService : Service() {
      * nickname needs the person or two people); a negated value is dropped ("i don't play fortnite"), and a
      * "quit / left / no longer" line removes the matching note instead.
      */
+    /**
+     * Plain "i work as a nurse" / "i live in berlin" / "moved to berlin" / "i'm from X" / "i play drums" /
+     * "i have a cat named miso" statements, as notes (free; the 8B skips these when it's busy with corrections).
+     */
+    private fun selfStatements(turns: List<DiscordBotAi.Turn>): List<DiscordBotAi.Note> {
+        val out = ArrayList<DiscordBotAi.Note>()
+        turns.forEachIndexed { i, t ->
+            if (t.isBot) return@forEachIndexed
+            for ((re, slot) in SELF_STATEMENT) re.findAll(t.text).forEach { m ->
+                var v = m.groupValues[1].trim().trimEnd('.', ',', '!')
+                if (v.isBlank() || v.split(' ').size > 4 || v.lowercase().split(' ').first() in SELF_STMT_STOP) return@forEach
+                val s = if (slot == "game" && INSTRUMENT_RE.containsMatchIn(v)) "hobby" else slot
+                out.add(DiscordBotAi.Note(t.name, s, v, i + 1))
+            }
+        }
+        return out
+    }
+
+    private fun namesThemIn(text: String, names: Set<String>): Boolean = text.lowercase().let { low ->
+        names.any { nm -> Regex("(^|[^\\p{L}\\p{N}])" + Regex.escape(nm) + "([^\\p{L}\\p{N}]|$)").containsMatchIn(low) } }
+
     private fun applyNote(n: DiscordBotAi.Note, id: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>, correcting: Boolean): String? {
         val slot = UserMemoryStore.slotOf(n.type)
         if (slot.isBlank()) return "type"
@@ -1445,11 +1485,17 @@ class DiscordBotService : Service() {
         fun namesThem(i: Int): Boolean { val low = withoutFirstPerson(turns[i].text).lowercase()
             return names.any { nm -> Regex("(^|[^\\p{L}\\p{N}])" + Regex.escape(nm) + "([^\\p{L}\\p{N}]|$)").containsMatchIn(low) } }
         val cited = (n.line - 1).takeIf { it in humans && fits(it) && (ownLine(it) || namesThem(it)) }
-        val idx = cited ?: humans.filter { fits(it) && (ownLine(it) || namesThem(it)) }.maxByOrNull { support(it) } ?: return "no line"
+        // Their own words beat someone else's about them ("you're not a chef, you work at a bank" / "i'm a bank teller").
+        val idx = cited?.takeIf { ownLine(it) } ?: humans.filter { fits(it) && ownLine(it) }.maxByOrNull { support(it) }
+            ?: cited ?: humans.filter { fits(it) && namesThem(it) }.maxByOrNull { support(it) } ?: return "no line"
         val line = turns[idx]; val text = line.text
         val own = ownLine(idx)
         // A line that ends a note: "i quit the bakery", "left toronto", "not a chef anymore".
-        if (own && Regex("(?i)\\b(quit|left|no longer|not anymore|stopped|used to|moved (out of|away from|from))\\b").containsMatchIn(text)) {
+        // Only when the thing that ended is THIS note ("left toronto" ends toronto, not the vancouver in the same line).
+        if (own && ENDED_RE.findAll(text).any { m ->
+                val after = factWords(text.substring(m.range.last + 1).split(Regex("\\s+")).take(5).joinToString(" "))
+                val before = factWords(text.substring(0, m.range.first).split(Regex("\\s+")).takeLast(4).joinToString(" "))
+                vw.any { it in after } || (m.value.contains("anymore", true) || m.value.contains("no longer", true)) && vw.any { it in before + after } }) {
             UserMemoryStore.removeNote(this, id, slot, v); return "ended"
         }
         when {
@@ -1460,13 +1506,26 @@ class DiscordBotService : Service() {
             aboutSomeoneElse(text, v) -> return "someone else"
             slot != "dislikes" && vw.isNotEmpty() && negates(text, vw) -> return "negated"
             slot == "about" && !own -> return "not theirs"
+            // Their own line has to be about themselves ("fork soup is canon now" / "someone make that an emoji" aren't).
+            own && slot !in setOf("lang", "tz", "nick") && !FIRST_PERSON_WORD.containsMatchIn(text) -> return "not about them"
+            // A plan isn't a fact yet ("next i'll train it by adding them to the training run").
+            slot !in setOf("lang", "tz", "nick") && PLAN_RE.containsMatchIn(text) -> return "plan"
+            // "bob you are a walking disaster" — said TO them is banter, not a fact.
+            !own && TEASE_RE.containsMatchIn(text) -> return "teasing"
             slot == "about" && implausibleAge(v) -> return "joke age"
+            // A place needs a place word in front of it ("cardinal is kinda mid" isn't being from "mid").
+            (slot == "from" || slot == "lives") && !Regex("(?i)\\b(from|in|live|lives|living|moved( back)? to|based|born|grew up)\\s+(\\S+\\s+){0,2}" +
+                Regex.escape(v.split(Regex("[\\s,]+")).first().lowercase())).containsMatchIn(text) -> return "no place"
         }
         if (own && slot != "nick") {
             // Answering a question about a he/she/they ("hes from where?") is answering for someone else.
             val asked = turns.subList(maxOf(0, idx - 2), idx).lastOrNull { !it.isBot && nameToId[it.name.lowercase().trim()] != id && QUESTION_LINE.containsMatchIn(it.text.trim()) }
             if (asked != null && !FIRST_PERSON_WORD.containsMatchIn(text) && THIRD_PERSON_WORD.containsMatchIn(asked.text) &&
                 !Regex("(?i)\\b(you|u|ur|your)\\b").containsMatchIn(asked.text)) return "someone else"
+            // A bare answer ("kenya", no I/my) that the next lines take as being about a he/she/they ("hes from kenya?").
+            if (!FIRST_PERSON_WORD.containsMatchIn(text) && turns.drop(idx + 1).take(3).any { t ->
+                    !t.isBot && nameToId[t.name.lowercase().trim()] != id && THIRD_PERSON_WORD.containsMatchIn(t.text) &&
+                        factWords(t.text).any { it in vw } && !namesThemIn(t.text, names) }) return "someone else"
         }
         // Someone else's claim that gets denied ("bob is the server admin" — "lol no he isn't") doesn't stick.
         if (!own && turns.drop(idx + 1).any { !it.isBot && DENIAL_RE.containsMatchIn(it.text) }) return "denied"
@@ -1556,6 +1615,21 @@ class DiscordBotService : Service() {
     private val STOP_ASK_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|dont|no more|never|please not|cut it out|knock it off|hate (it|being|when)|not (a fan|okay|ok) )")
     private val DENIAL_RE = Regex("(?i)\\bno (he|she|they) (isn'?t|is not|aren'?t|are not|doesn'?t|don'?t)\\b|\\b(he|she|they)'?s not\\b|\\bthat'?s (a lie|not true|cap)\\b|\\bcap\\b|\\bnot true\\b|\\bno he'?s not\\b")
     private val FIRST_PERSON_WORD = Regex("(?i)\\b(i|i'?m|im|i'?ve|ive|me|my|mine|myself)\\b")
+    private val STMT_END = "(?=\\s*(?:[,.!;?]|$|\\s(?:and|but|so|now|since|for|last|this|these|lol|lmao|haha|tho|though|rn|atm|btw)\\b))"
+    private val SELF_STATEMENT = listOf(
+        Regex("(?i)\\bi (?:work|am working) as an? ([\\p{L}' -]{3,30}?)$STMT_END") to "work",
+        Regex("(?i)\\bi(?:'m| am|m) an? ((?:\\p{L}+ )?(?:nurse|teacher|developer|programmer|engineer|artist|student|doctor|firefighter|baker|chef|driver|designer|streamer|mechanic|electrician|accountant|lawyer|cashier|barista|bank teller|teller))$STMT_END") to "work",
+        Regex("(?i)\\bi (?:live|am living|'m living|m living) in ([\\p{L}' -]{3,25}?)$STMT_END") to "lives",
+        Regex("(?i)\\b(?:i )?moved to ([\\p{L}' -]{3,25}?)$STMT_END") to "lives",
+        Regex("(?i)\\bi(?:'m| am|m) (?:originally )?from ([\\p{L}' -]{3,25}?)$STMT_END") to "from",
+        Regex("(?i)\\bi play (?:the )?([\\p{L}\\p{N}' +-]{3,25}?)$STMT_END") to "game",
+        Regex("(?i)\\bi (?:have|own|got) an? ((?:\\p{L}+ )?(?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko)(?: (?:named|called) \\p{L}+)?)$STMT_END") to "pet",
+    )
+    private val SELF_STMT_STOP = setOf("my", "the", "a", "an", "it", "this", "that", "here", "there", "some", "with", "on", "by", "your", "his", "her", "their")
+    private val INSTRUMENT_RE = Regex("(?i)\\b(drums?|guitar|bass|piano|keys|violin|cello|sax(ophone)?|trumpet|flute|ukulele|synth)\\b")
+    private val PLAN_RE = Regex("(?i)\\b(i'?ll|i will|i'?m (?:going to|gonna)|im (?:going to|gonna)|gonna|going to|plan(?:ning)? to|about to|want to|wanna|next i)\\b")
+    private val TEASE_RE = Regex("(?i)\\b(you are|you'?re|youre|ur an?|u r|u are)\\b")
+    private val ENDED_RE = Regex("(?i)\\b(quit|left|no longer|not anymore|anymore|stopped|used to|moved (?:out of|away from|from))\\b")
     private val THIRD_PERSON_WORD = Regex("(?i)\\b(he|she|they|he'?s|hes|she'?s|shes|they'?re|theyre|his|her|their|him|them)\\b")
 
     /** "my brother lives in tokyo" backs up a fact about the brother, not the speaker. */
@@ -1765,10 +1839,10 @@ class DiscordBotService : Service() {
 
         // The model already sees its own lines that are in the transcript; only list older ones.
         val visible = turns.filter { it.isBot }.map { normLine(it.text) }.toSet()
-        val older = (recentBotReplies[ctx.channelId]?.toList() ?: emptyList()).filter { normLine(it) !in visible }
+        val older = (recentBotReplies[ctx.channelId]?.toList() ?: emptyList()).filter { normLine(it) !in visible }.takeLast(3)
 
         return DiscordBotAi.ReplyCtx(
-            selfDigest = PersonalityStore.snapshot(this),
+            selfDigest = PersonalityStore.forReply(this, answerKeys + built.keywords, all = selfRecall || SELF_ASK_RE.containsMatchIn(ctx.userText)),
             // The date always rides along (a few tokens): without it he guessed his training year ("a robot joke
             // in 2024?") and argued when told it's 2026.
             channelInfo = ChannelInfoStore.describe(ctx.channelId).let { c -> listOf(c, "today is ${todayLine(now)}").filter { it.isNotBlank() }.joinToString("; ") },

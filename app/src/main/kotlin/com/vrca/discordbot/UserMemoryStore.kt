@@ -48,7 +48,7 @@ object UserMemoryStore {
     /** Display order. */
     val SLOTS = listOf("work", "from", "lives", "game", "hobby", "likes", "dislikes", "pet", "about")
     private val SINGLE = setOf("from", "lives")
-    private val CAP = mapOf("work" to 3, "game" to 5, "hobby" to 4, "likes" to 5, "dislikes" to 4, "pet" to 3, "about" to 3)
+    private val CAP = mapOf("work" to 3, "game" to 5, "hobby" to 4, "likes" to 5, "dislikes" to 4, "pet" to 3, "about" to 5)
     val LABEL = mapOf("work" to "work", "from" to "from", "lives" to "lives in", "game" to "plays", "hobby" to "into",
         "likes" to "likes", "dislikes" to "dislikes", "pet" to "pets", "about" to "about")
     /** Words that make a slot relevant to a message even when no value word matches ("what does bob do for work"). */

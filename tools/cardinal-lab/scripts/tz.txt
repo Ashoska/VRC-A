@@ -1,0 +1,22 @@
+# Timezones: stated ("i'm on EST" → a real zone, shown as the live UTC offset), where they live (city → zone,
+# via the learner), a question isn't a statement, and a time question about someone uses their local time.
+@set ambient=0 context=8
+@channel general main hangout — anything goes
+[general]
+alice: i'm on EST btw
+bob: cool
+> expect card alice contains UTC-(4|5)
+frank: are you on PST?
+> expect card frank not-contains UTC
+erin: my timezone is utc+2
+> expect card erin contains UTC\+2\b
+carol: i live in toronto, moved there last year for work
+dave: nice, how are the winters
+carol: brutal honestly, i just stay in and play valorant
+dave: lol fair
+> quiet
+> expect card carol contains (?i)toronto
+> expect card carol contains UTC-(4|5)
+alice: @Cardinal what time is it for erin right now?
+> expect reply
+> expect contains \d{1,2}(:\d{2}|\s?(am|pm))

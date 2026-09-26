@@ -106,15 +106,35 @@ object PersonalityStore {
      */
     fun snapshot(ctx: Context): String {
         cachedDigest?.let { return it }
+        return build(load(ctx), null).also { cachedDigest = it }
+    }
+
+    /**
+     * The reply prompt's [You]: titles and pinned traits always, then the strongest few, then any trait the
+     * message touches (by word) — every trait on every call was the second-biggest section of the prompt.
+     */
+    fun forReply(ctx: Context, keywords: Set<String>, all: Boolean): String {
+        if (all) return snapshot(ctx)
         val s = load(ctx)
+        val want = keywords.filter { it.length >= 3 }.map { discordStem(it.lowercase()) }.toSet()
+        val ranked = ranked(s.traits)
+        val keep = LinkedHashSet<Trait>()
+        ranked.filter { it.pinned || it.kind == "title" }.forEach { keep.add(it) }
+        ranked.take(DiscordBotLimits.SELF_TRAITS_IN_PROMPT).forEach { keep.add(it) }
+        if (want.isNotEmpty()) ranked.filter { t ->
+            Regex("[\\p{L}\\p{N}]+").findAll(t.text.lowercase()).any { w -> w.value.length >= 3 && discordStem(w.value) in want }
+        }.take(3).forEach { keep.add(it) }
+        return build(s, keep)
+    }
+
+    private fun ranked(traits: List<Trait>) =
+        traits.sortedWith(compareByDescending<Trait> { (if (it.pinned) 100 else 0) + it.strength }.thenByDescending { it.lastMs })
+
+    private fun build(s: Self, only: Set<Trait>?): String {
         val sb = StringBuilder()
         if (s.mood.isNotBlank()) sb.append("Mood: ").append(s.mood.trim().trimEnd('.')).append('.')
-        // EVERY trait, strongest first (so he never strays from who he's become); each is a short phrase.
-        val traits = s.traits.sortedWith(
-            compareByDescending<Trait> { (if (it.pinned) 100 else 0) + it.strength }.thenByDescending { it.lastMs }
-        ).map { it.text.trim().trimEnd('.') }
         // Grouped by kind so the model knows a title from a taste ("Titles: server pizza critic. Tastes: loves Dr Pepper.").
-        val sorted = s.traits.sortedWith(compareByDescending<Trait> { (if (it.pinned) 100 else 0) + it.strength }.thenByDescending { it.lastMs })
+        val sorted = ranked(s.traits).filter { only == null || it in only }
         for ((label, kinds) in KIND_LABELS) {
             val g = sorted.filter { it.kind in kinds }.map { it.text.trim().trimEnd('.') }
             if (g.isNotEmpty()) sb.append(if (sb.isEmpty()) "" else " ").append(label).append(": ").append(g.joinToString("; ")).append('.')
@@ -124,11 +144,11 @@ object PersonalityStore {
         if (s.style.isNotEmpty()) extras.add("How you talk: ${s.style.take(3).joinToString("; ") { it.trim().trimEnd('.') }}.")
         if (s.episodes.isNotEmpty()) extras.add("You remember: ${s.episodes.takeLast(2).joinToString("; ") { it.trim().trimEnd('.') }}.")
         for (p in extras) {
-            if (sb.length + p.length + 1 > DiscordBotLimits.SELF_DIGEST_MAX_CHARS + traits.sumOf { it.length }) break
+            if (sb.length + p.length + 1 > DiscordBotLimits.SELF_DIGEST_MAX_CHARS + sorted.sumOf { it.text.length }) break
             if (sb.isNotEmpty()) sb.append(' ')
             sb.append(p)
         }
-        return sb.toString().also { cachedDigest = it }
+        return sb.toString()
     }
 
     private val KIND_LABELS = listOf("Titles" to setOf("title"), "Bits" to setOf("bit"), "Tastes" to setOf("taste"),
