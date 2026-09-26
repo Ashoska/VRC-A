@@ -1443,6 +1443,10 @@ class DiscordBotService : Service() {
                     // Asked "where u live?", ashoska answered for someone else ("kenya" → "hes from kenya?" "yup"):
                     // their own bare answer, with someone else talking about a "he/she/they" and the same thing.
                     answeredForSomeoneElse(support, humans, id, nameToId, names, words) -> "someone else"
+                    // One other person's claim that someone denies ("bob is the server admin…" — "lol no he isn't").
+                    support.isNotEmpty() && support.none { nameToId[it.name.lowercase().trim()] == id } &&
+                        support.map { it.name.lowercase().trim() }.toSet().size < 2 &&
+                        humans.any { t -> t !in support && DENIAL_RE.containsMatchIn(t.text) } -> "denied"
                     // "atleast my creator isnt a 24/7 vrchat player" came back as "has a creator who is a VRChat player":
                     // the learner dropped the "not". A positive fact whose every backing line negates it is flipped.
                     support.isNotEmpty() && !FACT_NEGATION.containsMatchIn(f) && support.all { t -> negates(t.text, words) } -> "flipped"
