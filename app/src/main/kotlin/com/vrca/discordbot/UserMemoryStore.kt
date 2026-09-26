@@ -214,7 +214,8 @@ object UserMemoryStore {
     }
     private val PRONOUN_FACT = Regex("(?i)\\bpronouns?\\b|\\b(he|she|they|it|xe|ze|fae|ey)\\s*/\\s*(him|her|hers|them|their|it|its|xem|xir|zir|hir|faer|em|he|she|they)\\b")
     private val EXAMPLE_PAREN = Regex("(?i)\\s*\\((?:e\\.?\\s?g\\.?|eg|ex\\.?|i\\.?\\s?e\\.?|like|such as|for example|\"|')[^)]*\\)?")
-    private val BOT_TALK = Regex("(?i)\\b(bots?|cardinal|llm|a\\.i\\.?|ai|chat ?gpt|prompts?|training runs?|success rate|neurons?|" +
+    // "AI" alone isn't bot talk ("studies AI and machine learning" is a real fact); chat ABOUT Cardinal is.
+    private val BOT_TALK = Regex("(?i)\\b(bots?|cardinal|prompts?|training runs?|success rate|neurons?|" +
         "response time|reply (time|speed)|repl(y|ies) in|(has|have|their|his|her|my) (a )?creator|database)\\b")
     private val MEASUREMENT = Regex("(?i)\\d+(\\.\\d+)?\\s*(%|percent\\b|seconds?\\b|secs?\\b|ms\\b|milliseconds?\\b)")
     private val PLAN = Regex("(?i)^(will|is going to|is gonna|are going to|plans? to|is planning to|is about to|intends to)\\b")

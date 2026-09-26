@@ -1443,6 +1443,9 @@ class DiscordBotService : Service() {
                     // Asked "where u live?", ashoska answered for someone else ("kenya" → "hes from kenya?" "yup"):
                     // their own bare answer, with someone else talking about a "he/she/they" and the same thing.
                     answeredForSomeoneElse(support, humans, id, nameToId, names, words) -> "someone else"
+                    // A taste needs a line that shows it ("just got a 48 crate of doctor pepper"), not one describing
+                    // the thing ("it's got cane sugar in it" isn't "loves cane sugar").
+                    TASTE_FACT_RE.containsMatchIn(f) && support.isNotEmpty() && support.none { TASTE_EVIDENCE_RE.containsMatchIn(it.text) } -> "not a taste"
                     // One other person's claim that someone denies ("bob is the server admin…" — "lol no he isn't").
                     support.isNotEmpty() && support.none { nameToId[it.name.lowercase().trim()] == id } &&
                         support.map { it.name.lowercase().trim() }.toSet().size < 2 &&
@@ -1628,6 +1631,7 @@ class DiscordBotService : Service() {
         if (kept.none { factWords(it).isNotEmpty() } || kept.size == obj.split(Regex("\\s+")).size) return f
         return m.groupValues[1] + " " + kept.joinToString(" ")
     }
+    private val TASTE_EVIDENCE_RE = Regex("(?i)\\b(love|loves|loving|like|likes|enjoy|enjoys|fav|fave|favou?rite|obsessed|addicted|crate|bought|buy|buying|drink|drinking|eat|eating|always|best|fan|stan|goated|addiction)\\b|(^|\\b(i|just|i'?ve|ive|we|finally)\\s+)got\\b")
     private val TASTE_FACT_RE = Regex("(?i)^((?:really |also )?(?:loves|likes|enjoys|adores|is into|is (?:a )?(?:big |huge )?fan of))\\s+(.+)$")
 
     private fun factWords(s: String): Set<String> =
