@@ -20,3 +20,18 @@ dave: lol fair
 alice: @Cardinal what time is it for erin right now?
 > expect reply
 > expect contains \d{1,2}(:\d{2}|\s?(am|pm))
+# A US state (not a zone city) sets the zone; a move updates it; their own stated zone wins over the place.
+gina: i live in wisconsin btw, it's freezing already
+hank: i live in madison, wi too lol
+ivy: i live in oregon
+dave: nice
+> quiet
+> expect card gina contains UTC-(5|6)
+> expect card hank contains UTC-(5|6)
+> expect card ivy contains UTC-(7|8)
+ivy: actually i moved to texas last month
+gina: my timezone is utc+2 right now, travelling
+dave: jealous
+> quiet
+> expect card ivy contains UTC-(5|6)
+> expect card gina contains UTC\+2\b

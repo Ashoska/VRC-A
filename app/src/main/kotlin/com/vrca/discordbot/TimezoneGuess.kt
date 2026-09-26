@@ -81,17 +81,28 @@ object TimezoneGuess {
     }
 
     /** A city that names a zone ("toronto" → America/Toronto), or a country whose zones share one offset. */
-    fun fromPlace(place: String): String? {
+    fun fromPlace(place: String): String? = placeCache.getOrPut(place.lowercase().trim()) { lookupPlace(place) ?: "" }.ifBlank { null }
+    private val placeCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun lookupPlace(place: String): String? {
         val p = place.lowercase().replace(Regex("[^\\p{L} ,]"), " ").replace(Regex("\\s+"), " ").trim()
         if (p.isBlank()) return null
         val ids = com.vrca.ui.common.allTimeZoneIds
         // Any part ("osaka, japan" → osaka first) that is a zone's city.
         val parts = p.split(',').map { it.trim() }.filter { it.isNotBlank() } + p
+        // A state/province after the comma decides it ("paris, texas", "london, ontario", "madison, wi").
+        parts.drop(1).dropLast(1).forEach { part ->
+            regionOf(part)?.let { return it }
+            if (part.length == 2) REGION_CODE[part]?.let { return it }
+        }
         for (part in parts) {
             val key = part.replace(' ', '_')
             ids.firstOrNull { it.substringAfterLast('/').equals(key, true) }?.let { return it }
             CITY_ALIAS[part]?.let { return it }
+            regionOf(part)?.let { return it }
         }
+        // "madison wi": a state code as the last word.
+        if (p.contains(' ')) REGION_CODE[p.substringAfterLast(' ')]?.let { return it }
         for (part in parts.reversed()) {
             val country = com.vrca.ui.common.countrySynonyms[part] ?: part
             val zones = ids.filter { com.vrca.ui.common.zoneCountryName(it).equals(country, true) }
@@ -115,6 +126,53 @@ object TimezoneGuess {
         "munich" to "Europe/Berlin", "hamburg" to "Europe/Berlin", "barcelona" to "Europe/Madrid", "milan" to "Europe/Rome",
         "mumbai" to "Asia/Kolkata", "delhi" to "Asia/Kolkata", "bangalore" to "Asia/Kolkata",
     )
+    // States/provinces of countries with several zones (the zone most of the state is in).
+    private val US_STATE = mapOf(
+        "alabama" to "America/Chicago", "alaska" to "America/Anchorage", "arizona" to "America/Phoenix", "arkansas" to "America/Chicago",
+        "california" to "America/Los_Angeles", "colorado" to "America/Denver", "connecticut" to "America/New_York", "delaware" to "America/New_York",
+        "florida" to "America/New_York", "georgia" to "America/New_York", "hawaii" to "Pacific/Honolulu", "idaho" to "America/Boise",
+        "illinois" to "America/Chicago", "indiana" to "America/Indiana/Indianapolis", "iowa" to "America/Chicago", "kansas" to "America/Chicago",
+        "kentucky" to "America/New_York", "louisiana" to "America/Chicago", "maine" to "America/New_York", "maryland" to "America/New_York",
+        "massachusetts" to "America/New_York", "michigan" to "America/Detroit", "minnesota" to "America/Chicago", "mississippi" to "America/Chicago",
+        "missouri" to "America/Chicago", "montana" to "America/Denver", "nebraska" to "America/Chicago", "nevada" to "America/Los_Angeles",
+        "new hampshire" to "America/New_York", "new jersey" to "America/New_York", "new mexico" to "America/Denver", "new york" to "America/New_York",
+        "north carolina" to "America/New_York", "north dakota" to "America/Chicago", "ohio" to "America/New_York", "oklahoma" to "America/Chicago",
+        "oregon" to "America/Los_Angeles", "pennsylvania" to "America/New_York", "rhode island" to "America/New_York", "south carolina" to "America/New_York",
+        "south dakota" to "America/Chicago", "tennessee" to "America/Chicago", "texas" to "America/Chicago", "utah" to "America/Denver",
+        "vermont" to "America/New_York", "virginia" to "America/New_York", "washington" to "America/Los_Angeles", "west virginia" to "America/New_York",
+        "wisconsin" to "America/Chicago", "wyoming" to "America/Denver", "washington dc" to "America/New_York", "dc" to "America/New_York",
+        "puerto rico" to "America/Puerto_Rico",
+    )
+    private val US_CODE = mapOf(
+        "al" to "alabama", "ak" to "alaska", "az" to "arizona", "ar" to "arkansas", "ca" to "california", "co" to "colorado", "ct" to "connecticut",
+        "de" to "delaware", "fl" to "florida", "ga" to "georgia", "hi" to "hawaii", "id" to "idaho", "il" to "illinois", "in" to "indiana",
+        "ia" to "iowa", "ks" to "kansas", "ky" to "kentucky", "la" to "louisiana", "me" to "maine", "md" to "maryland", "ma" to "massachusetts",
+        "mi" to "michigan", "mn" to "minnesota", "ms" to "mississippi", "mo" to "missouri", "mt" to "montana", "ne" to "nebraska", "nv" to "nevada",
+        "nh" to "new hampshire", "nj" to "new jersey", "nm" to "new mexico", "ny" to "new york", "nc" to "north carolina", "nd" to "north dakota",
+        "oh" to "ohio", "ok" to "oklahoma", "or" to "oregon", "pa" to "pennsylvania", "ri" to "rhode island", "sc" to "south carolina",
+        "sd" to "south dakota", "tn" to "tennessee", "tx" to "texas", "ut" to "utah", "vt" to "vermont", "va" to "virginia", "wa" to "washington",
+        "wv" to "west virginia", "wi" to "wisconsin", "wy" to "wyoming",
+    )
+    private val OTHER_REGION = mapOf(
+        // Canada
+        "ontario" to "America/Toronto", "quebec" to "America/Toronto", "british columbia" to "America/Vancouver", "alberta" to "America/Edmonton",
+        "manitoba" to "America/Winnipeg", "saskatchewan" to "America/Regina", "nova scotia" to "America/Halifax", "new brunswick" to "America/Moncton",
+        "newfoundland" to "America/St_Johns", "prince edward island" to "America/Halifax", "yukon" to "America/Whitehorse",
+        // Australia
+        "new south wales" to "Australia/Sydney", "nsw" to "Australia/Sydney", "victoria" to "Australia/Melbourne", "queensland" to "Australia/Brisbane",
+        "western australia" to "Australia/Perth", "south australia" to "Australia/Adelaide", "tasmania" to "Australia/Hobart",
+        "northern territory" to "Australia/Darwin",
+        // UK nations and a few big regions people name instead of a country
+        "england" to "Europe/London", "scotland" to "Europe/London", "wales" to "Europe/London", "northern ireland" to "Europe/London",
+        "bavaria" to "Europe/Berlin", "catalonia" to "Europe/Madrid", "sicily" to "Europe/Rome", "siberia" to "Asia/Novosibirsk",
+        "sao paulo" to "America/Sao_Paulo", "são paulo" to "America/Sao_Paulo", "rio de janeiro" to "America/Sao_Paulo",
+        "hokkaido" to "Asia/Tokyo", "okinawa" to "Asia/Tokyo", "bali" to "Asia/Makassar", "java" to "Asia/Jakarta",
+    )
+    private val REGION: Map<String, String> = US_STATE + OTHER_REGION
+    private fun regionOf(part: String): String? = REGION[part.removePrefix("the ").removeSuffix(" state").trim()]
+    private val REGION_CODE: Map<String, String> = US_CODE.mapValues { US_STATE.getValue(it.value) } +
+        mapOf("bc" to "America/Vancouver", "ab" to "America/Edmonton", "on" to "America/Toronto", "qc" to "America/Toronto")
+
     // Countries with several zones where one covers most people only when nothing better is known? No: ambiguous
     // countries stay unknown unless listed here because one zone clearly dominates.
     private val COUNTRY_MAIN = mapOf("india" to "Asia/Kolkata", "china" to "Asia/Shanghai", "spain" to "Europe/Madrid",

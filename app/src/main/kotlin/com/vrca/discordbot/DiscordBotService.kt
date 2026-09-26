@@ -660,6 +660,16 @@ class DiscordBotService : Service() {
             TimezoneGuess.stated(rawContent)?.let { UserMemoryStore.setTz(this, authorId, DiscordRest.displayName(author, ""), it, overwrite = true) }
                 ?: TimezoneGuess.revealed(rawContent, now)?.let { UserMemoryStore.setTz(this, authorId, DiscordRest.displayName(author, ""), it, overwrite = false) }
         }
+        // A plain "i have a cat called asuna" / "i live in wisconsin" / "i'm a nurse" goes on their card right away
+        // (free, same checks as a learn pass — a quiet channel may not get a learn pass for a long time).
+        run {
+            val nm = DiscordRest.displayName(author, "")
+            if (nm.isBlank()) return@run
+            val one = listOf(DiscordBotAi.Turn(false, nm, stripBotMentions(rawContent).trim()))
+            val n2i = mapOf(nm.lowercase().trim() to authorId)
+            selfStatements(one).forEach { n -> applyNote(n, authorId, one, n2i, false)?.let { DiscordBotState.log("note ${n.type} \"${n.value}\" skipped: $it") } }
+            ownUpdates(one, n2i)
+        }
         if (statedPronouns == null && !CALL_ME_NOT_RE.containsMatchIn(rawContent)) CALL_ME_RE.find(rawContent)?.groupValues?.get(2)?.let { nick ->
             if (nick.lowercase() !in CALL_ME_STOP) {
                 UserMemoryStore.applyDelta(this, authorId, DiscordRest.displayName(author, ""), JSONObject().put("preferredName", nick))
@@ -1800,8 +1810,7 @@ class DiscordBotService : Service() {
                 // "i also work at a bar now" / "got a second job" is another job, not a change of job.
                 val replace = slot == "work" && own && !isJoking(text) && NEW_JOB_RE.containsMatchIn(text) && !EXTRA_JOB_RE.containsMatchIn(text)
                 if (!UserMemoryStore.addNote(this, id, n.about, slot, v, confirm = loose.size >= 2 || direct, replace = replace)) return "known"
-                // Where they live (or are from) tells us their time too, when nothing better is known.
-                if (slot == "lives" || slot == "from") TimezoneGuess.fromPlace(v)?.let { UserMemoryStore.setTz(this, id, n.about, it, overwrite = false) }
+                // (Where they live / are from sets their time zone too, unless they said one — UserMemoryStore.save.)
             }
         }
         return null
@@ -1879,14 +1888,14 @@ class DiscordBotService : Service() {
     private val DENIAL_RE = Regex("(?i)\\bno (he|she|they) (isn'?t|is not|aren'?t|are not|doesn'?t|don'?t)\\b|\\b(he|she|they)'?s not\\b|\\bthat'?s (a lie|not true|cap)\\b|\\bcap\\b|\\bnot true\\b|\\bno he'?s not\\b")
     // The "I" of an acronym ("A.I", "I.T") isn't first person: "rename cardinal to A.I" isn't about the speaker.
     private val FIRST_PERSON_WORD = Regex("(?i)(?<![\\p{L}\\p{N}.])(i|i'?m|im|i'?ve|ive|me|my|mine|myself)(?![\\p{L}\\p{N}]|\\.\\p{L})")
-    private val STMT_END = "(?=\\s*(?:[,.!;?]|$|\\s(?:and|but|so|now|since|for|last|this|these|lol|lmao|haha|tho|though|rn|atm|btw)\\b))"
+    private val STMT_END = "(?=\\s*(?:[,.!;?]|$|\\s(?:and|but|so|now|since|for|last|this|these|lol|lmao|haha|tho|though|rn|atm|btw|too)\\b))"
     private val SELF_STATEMENT = listOf(
         Regex("(?i)\\bi (?:work|am working) as an? ([\\p{L}' -]{3,30}?)$STMT_END") to "work",
         Regex("(?i)\\bi (?:work|am working|'m working|m working) ((?:at|in|for) (?:a |an |the )?[\\p{L}' -]{3,30}?)$STMT_END") to "work",
         Regex("(?i)\\bi(?:'m| am|m) an? ((?:\\p{L}+ )?(?:nurse|teacher|developer|programmer|engineer|artist|student|doctor|firefighter|baker|chef|driver|designer|streamer|mechanic|electrician|accountant|lawyer|cashier|barista|bank teller|teller))$STMT_END") to "work",
-        Regex("(?i)\\bi (?:live|am living|'m living|m living) in ([\\p{L}' -]{3,25}?)$STMT_END") to "lives",
-        Regex("(?i)\\b(?:i )?moved to ([\\p{L}' -]{3,25}?)$STMT_END") to "lives",
-        Regex("(?i)\\bi(?:'m| am|m) (?:originally )?from ([\\p{L}' -]{3,25}?)$STMT_END") to "from",
+        Regex("(?i)\\bi (?:live|am living|'m living|m living) in ([\\p{L}' -]{3,25}?(?:, ?(?!(?:and|but|so|lol|lmao|haha|tho|btw|rn|atm|too|now|then|ok|okay)\\b)\\p{L}{2,20})?)$STMT_END") to "lives",
+        Regex("(?i)\\b(?:i )?moved to ([\\p{L}' -]{3,25}?(?:, ?(?!(?:and|but|so|lol|lmao|haha|tho|btw|rn|atm|too|now|then|ok|okay)\\b)\\p{L}{2,20})?)$STMT_END") to "lives",
+        Regex("(?i)\\bi(?:'m| am|m) (?:originally )?from ([\\p{L}' -]{3,25}?(?:, ?(?!(?:and|but|so|lol|lmao|haha|tho|btw|rn|atm|too|now|then|ok|okay)\\b)\\p{L}{2,20})?)$STMT_END") to "from",
         // A title they claim in the server: "yeah im the notorious pisser", "im supposed to be the pisser".
         Regex("(?i)\\bi(?:'m| am|m) (?:supposed to be |meant to be |known as |basically )?(the (?:notorious|infamous|famous|official|resident|designated|local|legendary|og|server'?s?|one and only) [\\p{L}'-]{3,20}|the [\\p{L}'-]{3,20}(?= of (?:this|the) server))$STMT_END") to "about",
         Regex("(?i)\\bi(?:'m| am|m) (?:supposed to be|meant to be|known as) (the [\\p{L}'-]{3,20})$STMT_END") to "about",

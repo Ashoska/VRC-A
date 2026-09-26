@@ -50,6 +50,7 @@ object UserMemoryStore {
         val karma: Int = 0,
         val karmaDay: String = "",     // UTC day of [karmaToday]
         val karmaToday: Int = 0,       // net change so far that day (capped, so one session can't swing it far)
+        val tzAuto: Boolean = false,   // tz came from where they live / are from (a stated or revealed one replaces it; a new place too)
         val talkDay: String = "",      // last UTC day Cardinal talked with them (each new day is +1 karma)
     )
 
@@ -159,20 +160,22 @@ object UserMemoryStore {
             avoid = strList(o.optJSONArray("av")),
             pronouns = o.optString("pro"),
             tz = o.optString("tz"),
+            tzAuto = o.optBoolean("ta"),
             unsure = unsure,
             karma = o.optInt("kar", 0),
             karmaDay = o.optString("kd"),
             karmaToday = o.optInt("kt", 0),
             talkDay = o.optString("td"),
             none = HashMap<String, String>().apply { o.optJSONObject("no")?.let { n -> n.keys().forEach { k -> if (k in SLOTS && notes[k].isNullOrEmpty()) put(k, n.optString(k)) } } },
-        )
+        ).withPlaceTz()
     } catch (_: Exception) { null }
 
     private fun strList(a: JSONArray?): List<String> =
         if (a == null) emptyList()
         else (0 until a.length()).mapNotNull { a.optString(it).trim().ifBlank { null } }
 
-    fun save(ctx: Context, card: Card) {
+    fun save(ctx: Context, input: Card) {
+        val card = input.withPlaceTz()
         val nt = JSONObject()
         card.notes.forEach { (k, v) -> if (v.isNotEmpty()) nt.put(k, JSONArray(v)) }
         val o = JSONObject()
@@ -194,7 +197,7 @@ object UserMemoryStore {
             .put("tz", card.tz)
             .put("un", JSONObject().apply { card.unsure.forEach { (k, v) -> put(k, v) } })
             .put("no", JSONObject().apply { card.none.forEach { (k, v) -> put(k, v) } })
-            .put("kar", card.karma).put("kd", card.karmaDay).put("kt", card.karmaToday).put("td", card.talkDay)
+            .put("kar", card.karma).put("kd", card.karmaDay).put("kt", card.karmaToday).put("td", card.talkDay).put("ta", card.tzAuto)
         prefs(ctx).edit().putString(keyOf(card.id), o.toString()).apply()
     }
 
@@ -371,11 +374,28 @@ object UserMemoryStore {
         return true
     }
 
+    /** [overwrite] = they said it themselves ("i'm on EST"); otherwise ("it's 3am here") only fills a blank.
+     *  Either replaces a zone guessed from where they live. */
     fun setTz(ctx: Context, id: String, name: String, tz: String, overwrite: Boolean) {
         if (id.isBlank() || tz.isBlank()) return
         val cur = load(ctx, id) ?: Card(id = id, name = name.take(60))
-        if (cur.tz == tz || (!overwrite && cur.tz.isNotBlank())) return
-        save(ctx, cur.copy(tz = tz, name = cur.name.ifBlank { name.take(60) }))
+        if (cur.tz == tz && !cur.tzAuto || (!overwrite && cur.tz.isNotBlank() && !cur.tzAuto)) return
+        save(ctx, cur.copy(tz = tz, tzAuto = false, name = cur.name.ifBlank { name.take(60) }))
+    }
+
+    /** The zone of where they live, else where they're from ("wisconsin" → America/Chicago). */
+    fun placeTz(notes: Map<String, List<String>>): String? =
+        notes["lives"]?.firstNotNullOfOrNull { TimezoneGuess.fromPlace(it) } ?: notes["from"]?.firstNotNullOfOrNull { TimezoneGuess.fromPlace(it) }
+
+    /** No zone of their own → follow where they live/are from (moving updates it; dropping the place clears it). */
+    private fun Card.withPlaceTz(): Card {
+        if (tz.isNotBlank() && !tzAuto) return this
+        val p = placeTz(notes)
+        return when {
+            p != null -> if (p == tz && tzAuto) this else copy(tz = p, tzAuto = true)
+            tzAuto -> copy(tz = "", tzAuto = false)
+            else -> this
+        }
     }
 
     /** "work: bank teller" rows, slot order — for corrections, admin, search. */
@@ -722,7 +742,7 @@ object UserMemoryStore {
         save(ctx, cur.copy(relationship = relationship.trim(), howToTreat = howToTreat.trim(), preferredNick = preferredNick.trim()))
     }
 
-    fun clearTz(ctx: Context, id: String) { load(ctx, id)?.let { save(ctx, it.copy(tz = "")) } }
+    fun clearTz(ctx: Context, id: String) { load(ctx, id)?.let { save(ctx, it.copy(tz = "", tzAuto = false)) } }
     fun clearPronouns(ctx: Context, id: String) { load(ctx, id)?.let { save(ctx, it.copy(pronouns = "")) } }
     fun removeLanguage(ctx: Context, id: String, lang: String) {
         val c = load(ctx, id) ?: return

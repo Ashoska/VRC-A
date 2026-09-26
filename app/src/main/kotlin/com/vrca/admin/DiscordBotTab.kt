@@ -204,7 +204,8 @@ private fun PersonDetail(card: UserMemoryStore.Card, changed: () -> Unit) {
         FieldRow("with them") { Small("${UserMemoryStore.bondOf(card.karma).substringBefore(" (")} · karma ${card.karma}") }
         FieldRow("pronouns") { ValueOrDash(card.pronouns) { UserMemoryStore.clearPronouns(ctx, card.id); changed() } }
         FieldRow("time") {
-            ValueOrDash(UserMemoryStore.tzLine(card, now).let { if (it.isBlank()) "" else "$it (${card.tz})" }) { UserMemoryStore.clearTz(ctx, card.id); changed() }
+            ValueOrDash(UserMemoryStore.tzLine(card, now).let { if (it.isBlank()) "" else "$it (${card.tz})" },
+                if (card.tzAuto) null else ({ UserMemoryStore.clearTz(ctx, card.id); changed() }))
         }
         EditableRow("role here", card.relationship) { UserMemoryStore.editFields(ctx, card.id, it, card.howToTreat, card.preferredNick); changed() }
         EditableRow("calls them", card.preferredNick) { UserMemoryStore.editFields(ctx, card.id, card.relationship, card.howToTreat, it); changed() }
@@ -266,11 +267,11 @@ private fun Dash() = Small("—")
 
 /** A value with a small ✕, or a dash when empty. */
 @Composable
-private fun ValueOrDash(value: String, onRemove: () -> Unit) {
+private fun ValueOrDash(value: String, onRemove: (() -> Unit)?) {
     if (value.isBlank()) { Dash(); return }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(value, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f, fill = false))
-        IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
+        if (onRemove != null) IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
             Icon(Icons.Filled.Close, "Remove", modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }

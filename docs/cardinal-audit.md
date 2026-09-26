@@ -6,6 +6,17 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 8b — device: "lives in Wisconsin" gave no time zone, a cat wasn't saved (LIVE lab)
+
+- **Plain statements save at once.** A one-off "I have a cat called Asuna" or "i live in wisconsin" used to wait for a learn pass. In a quiet channel (fewer than 3 new messages) none came, so nothing was saved. The free self-statement rules now run on each message as it arrives, through the same checks, at no model cost.
+- **Places give a zone.**
+  - Before, only zone cities, a few aliases and single-zone countries mapped. Now US states (names, and codes like "madison, wi" or "madison wi") map too, plus Canadian provinces, Australian states, the UK nations and a few big regions.
+  - A state or province after a comma wins over the city name: "paris, texas" is Chicago time, not Paris.
+  - "i live in X, ST" keeps the ", ST" part.
+- **The zone follows the place.** A zone guessed from where someone lives (else where they're from) is marked as a guess (`tzAuto`). It updates when they move and clears when the place is removed. A zone they stated themselves ("i'm on EST") or revealed ("it's 3am here") always wins. Cards saved before this pick up their zone on load. In the admin tab a guessed zone has no ✕ (remove the place instead).
+
+Lab: tz 12/12 (Wisconsin → UTC-5, "madison, wi", Oregon → Texas move, a stated utc+2 beats the place) and a device-replica script (one message, then quiet) 6/6.
+
 ## Round 8 — their own word, "none" answers, karma (LIVE lab)
 
 Everything new here is free code: no extra model calls.
