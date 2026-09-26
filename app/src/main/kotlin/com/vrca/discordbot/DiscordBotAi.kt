@@ -175,6 +175,8 @@ object DiscordBotAi {
             if (c.clock.isNotBlank()) append("\n\n[Clock] ").append(c.clock)
             if (c.verdictAsk) append("\n\nThey asked you to rate or pick: your reply must include your actual number or choice (even with little to go on, guess from the chat). Roast them while you give it; no dodging or asking for more.")
             if (c.shortHint) append("\n\nKeep it to one short line.")
+            // A detail question still gets a chat message, not a guide cut off at the token limit.
+            else append("\n\nA few lines at most, like a chat message (no headings or long lists).")
             // Last before the output line: the model weighs the end of the prompt most, and these are the
             // "who is who" calls it kept getting wrong ("don't encourage him" about itself).
             if (c.nameHint.isNotBlank()) append("\n\n[Who] ").append(c.nameHint)
