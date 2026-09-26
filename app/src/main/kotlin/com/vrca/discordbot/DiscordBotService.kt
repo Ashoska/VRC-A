@@ -1674,7 +1674,9 @@ class DiscordBotService : Service() {
         val best = clauses.maxByOrNull { c -> factWords(c).count { it in vw } } ?: return false
         return DIRECT_CLAIM_RE.containsMatchIn(best) && !Regex("(?i)\\b(you|your|ur|u)\\b").containsMatchIn(best)
     }
-    private val DIRECT_CLAIM_RE = Regex("(?i)\\b(i'?m|im|i am|i work|i'?m working|i live|i moved|i'?m from|im from|i play|i main|i study|i have|i own|i'?ve got|ive got|i got|i love|i like|i hate|i can'?t stand|i'?m into|im into|i do|my (job|work|pet|cat|dog|hobby|hobbies|main|fav\\w*))\\b")
+    // "i'm a nurse", "i actually live in vancouver now", "my dog is called miso" (one filler word may sit after "i").
+    private val DIRECT_CLAIM_RE = Regex("(?i)\\b(i'?m|im|i am)\\b|\\bi\\s+(?:(?:actually|really|also|still|now|just|currently|kinda|basically|mostly|finally|totally|honestly|literally|even|do)\\s+)?" +
+        "(work|live|moved|play|main|study|have|own|got|love|like|hate|can'?t stand|do)\\b|\\bi'?ve got\\b|\\bive got\\b|\\bmy (job|work|pet|cat|dog|hobby|hobbies|main|fav\\w*)\\b")
     private val NEW_JOB_RE = Regex("(?i)\\b(now|new job|switched( jobs?)?( to)?|changed jobs?|started (working|a (new )?job)|got (a )?(new )?job|just got hired|got hired)\\b")
 
     private fun applyNote(n: DiscordBotAi.Note, id: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>, correcting: Boolean): String? {
