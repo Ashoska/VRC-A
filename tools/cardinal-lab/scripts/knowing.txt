@@ -1,9 +1,9 @@
-# Getting to know people: new notes start tentative "(?)"; two people backing one confirms it; a slot full of
-# confirmed notes isn't pushed out by a new one; "yeah" to Cardinal checking an unsure note confirms it.
+# Getting to know people: a note said with a laugh starts tentative "(?)"; two people backing one confirms it; a slot
+# full of confirmed notes isn't pushed out by a new one; "yeah" to Cardinal checking an unsure note confirms it.
 @set ambient=0 context=10
 @channel general main hangout — anything goes
 [general]
-alice: i'm a nurse btw, night shifts are killing me
+alice: i'm a nurse lol, night shifts are killing me
 dave: oof night shifts
 alice: yeah they're rough
 > quiet

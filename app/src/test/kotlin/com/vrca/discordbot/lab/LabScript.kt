@@ -235,7 +235,7 @@ internal class LabScript(private val d: LabDriver) {
                 re(spec.removePrefix("server").trim().removePrefix("contains").trim()).containsMatchIn(all) to all.take(200)
             }
             "self" -> {
-                val s = PersonalityStore.load(d.ctx).traits.joinToString(" | ") { "${it.text} (${it.strength})" }
+                val s = PersonalityStore.load(d.ctx).traits.joinToString(" | ") { "${it.text}${if (!it.sure) " ?" else ""} (${it.strength})" }
                 val body = spec.removePrefix("self").trim()
                 val neg = body.startsWith("not-contains")
                 val hit = re(body.removePrefix("not-contains").removePrefix("contains").trim()).containsMatchIn(s)

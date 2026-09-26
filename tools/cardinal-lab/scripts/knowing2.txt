@@ -1,0 +1,49 @@
+# Their own word about themselves: a plain statement is confirmed at once; a new job replaces the old one; "i don't
+# play X anymore" drops it; "no pets" / "too young to work" mark the slot none; karma moves with how they treat him.
+@set ambient=0 context=10
+@channel general main hangout — anything goes
+[general]
+frank: i work as a firefighter, station 12
+dave: respect
+frank: it's a lot of night calls
+> quiet
+> expect card frank contains (?i)firefighter
+> expect card frank not-contains (?i)firefighter \(\?\)
+# A new job replaces the old one.
+> teach card henry work: nurse
+henry: honestly i work at a bank now
+dave: nice
+henry: way less stress than the hospital was
+> quiet
+> expect card henry contains (?i)bank
+> expect card henry not-contains (?i)nurse
+# Their own denial drops the note.
+> teach card ivy plays: Valorant
+ivy: i don't play valorant anymore, it got boring
+dave: fair
+ivy: mostly just hanging out in vrchat these days
+> quiet
+> expect card ivy not-contains (?i)valorant
+# "Nothing fits" answers.
+jack: i have no pets, my landlord won't allow it
+dave: rip
+jack: someday though
+> quiet
+> expect card jack contains (?i)pets: none
+kim: im too young to work lol
+dave: enjoy it while it lasts
+kim: i will trust me
+> quiet
+> expect card kim contains (?i)work: none \(too young\)
+# Karma: kind words up, real insults down, banter with a laugh doesn't count.
+leo: @Cardinal thanks man you're the best
+> expect reply
+leo: @Cardinal good bot
+> expect reply
+> expect card leo contains (?i)friendly \(karma [5-9]\)
+mia: @Cardinal shut up you're useless
+> expect reply
+> expect card mia contains (?i)karma -
+nate: @Cardinal stfu lmao 💀
+> expect reply
+> expect card nate contains (?i)acquaintance \(karma [0-2]\)
