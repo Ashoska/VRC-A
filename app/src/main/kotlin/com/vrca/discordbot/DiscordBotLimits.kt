@@ -179,4 +179,10 @@ object DiscordBotLimits {
     // ── Traces / observability ────────────────────────────────────────────
     const val TRACE_RING = 60
     const val ACTIVITY_LOG_CAP = 60
+
+    // ── Karma (how he is with each person) ──
+    /** Net karma change allowed per person per UTC day. */
+    const val KARMA_DAY_CAP = 6
+    const val KARMA_MIN = -40
+    const val KARMA_MAX = 60
 }

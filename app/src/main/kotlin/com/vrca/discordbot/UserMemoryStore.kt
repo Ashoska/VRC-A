@@ -44,7 +44,46 @@ object UserMemoryStore {
         val tz: String = "",
         /** Tentative notes: "slot|value" → when first seen. Not in here = confirmed. */
         val unsure: Map<String, Long> = emptyMap(),
+        /** Slots they said nothing fits ("no pets", "too young to work"): slot → short reason ("" = just none). */
+        val none: Map<String, String> = emptyMap(),
+        /** How they've treated Cardinal: kind words / laughs / talking to him raise it, insults lower it. 0 = acquaintance. */
+        val karma: Int = 0,
+        val karmaDay: String = "",     // UTC day of [karmaToday]
+        val karmaToday: Int = 0,       // net change so far that day (capped, so one session can't swing it far)
+        val talkDay: String = "",      // last UTC day Cardinal talked with them (each new day is +1 karma)
     )
+
+    // ── Karma → how he is with them ──
+    private val BONDS = listOf(
+        30 to "close friend", 15 to "friend", 5 to "friendly", -2 to "acquaintance",
+        -7 to "on thin ice (they've been rude; you're a bit short with them)",
+        -19 to "rival (they keep being rude; you're cold with them)",
+        Int.MIN_VALUE to "enemy (they've been nasty to you; you don't like them)",
+    )
+    fun bondOf(karma: Int): String = BONDS.first { karma >= it.first }.second
+    /** What "with them" says: the karma bond (it moves on its own; nobody edits it). */
+    fun withThem(card: Card): String = bondOf(card.karma)
+
+    /**
+     * Move their karma by [delta]; the net change per UTC day is held to ±[DiscordBotLimits.KARMA_DAY_CAP] and the
+     * total to [DiscordBotLimits.KARMA_MIN]..[DiscordBotLimits.KARMA_MAX]. Returns the change actually applied.
+     */
+    fun addKarma(ctx: Context, id: String, name: String, delta: Int, nowMs: Long = System.currentTimeMillis()): Int {
+        if (id.isBlank() || delta == 0) return 0
+        val cur = load(ctx, id) ?: Card(id = id, name = name.take(60))
+        val day = java.time.Instant.ofEpochMilli(nowMs).atZone(java.time.ZoneOffset.UTC).toLocalDate().toString()
+        val today = if (cur.karmaDay == day) cur.karmaToday else 0
+        val cap = DiscordBotLimits.KARMA_DAY_CAP
+        val step = (today + delta).coerceIn(-cap, cap) - today
+        val next = (cur.karma + step).coerceIn(DiscordBotLimits.KARMA_MIN, DiscordBotLimits.KARMA_MAX)
+        val applied = next - cur.karma
+        if (applied == 0 && cur.karmaDay == day) return 0
+        save(ctx, cur.copy(name = cur.name.ifBlank { name.take(60) }, karma = next, karmaDay = day, karmaToday = today + applied))
+        return applied
+    }
+
+    /** Admin: set it outright. */
+    fun setKarma(ctx: Context, id: String, karma: Int) { load(ctx, id)?.let { save(ctx, it.copy(karma = karma.coerceIn(DiscordBotLimits.KARMA_MIN, DiscordBotLimits.KARMA_MAX))) } }
 
     // ── Slots ──────────────────────────────────────────────────────────────
     /** Display order. */
@@ -111,7 +150,7 @@ object UserMemoryStore {
             language = value(o.optString("lang")),
             alsoSpeaks = strList(o.optJSONArray("also")).map { value(it) }.filter { it.isNotBlank() },
             sentiment = o.optString("s"),
-            howToTreat = o.optString("h").ifBlank { o.optString("rel").trim().takeIf { REL_TO_YOU.matches(it) }.orEmpty() },
+            howToTreat = o.optString("h"),
             lastSeenMs = o.optLong("ls", 0L),
             interactions = o.optInt("ic", 0),
             pinned = o.optBoolean("p", false),
@@ -119,6 +158,11 @@ object UserMemoryStore {
             pronouns = o.optString("pro"),
             tz = o.optString("tz"),
             unsure = unsure,
+            karma = o.optInt("kar", 0),
+            karmaDay = o.optString("kd"),
+            karmaToday = o.optInt("kt", 0),
+            talkDay = o.optString("td"),
+            none = HashMap<String, String>().apply { o.optJSONObject("no")?.let { n -> n.keys().forEach { k -> if (k in SLOTS && notes[k].isNullOrEmpty()) put(k, n.optString(k)) } } },
         )
     } catch (_: Exception) { null }
 
@@ -147,6 +191,8 @@ object UserMemoryStore {
             .put("pro", card.pronouns)
             .put("tz", card.tz)
             .put("un", JSONObject().apply { card.unsure.forEach { (k, v) -> put(k, v) } })
+            .put("no", JSONObject().apply { card.none.forEach { (k, v) -> put(k, v) } })
+            .put("kar", card.karma).put("kd", card.karmaDay).put("kt", card.karmaToday).put("td", card.talkDay)
         prefs(ctx).edit().putString(keyOf(card.id), o.toString()).apply()
     }
 
@@ -154,7 +200,11 @@ object UserMemoryStore {
     fun touch(ctx: Context, id: String, name: String) {
         if (id.isBlank()) return
         val cur = load(ctx, id) ?: Card(id = id)
-        save(ctx, cur.copy(name = name.ifBlank { cur.name }, lastSeenMs = System.currentTimeMillis(), interactions = cur.interactions + 1))
+        val now = System.currentTimeMillis()
+        val day = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneOffset.UTC).toLocalDate().toString()
+        save(ctx, cur.copy(name = name.ifBlank { cur.name }, lastSeenMs = now, interactions = cur.interactions + 1, talkDay = day))
+        // Coming back to talk with him on a new day: a little closer each time (a regular becomes a friend over weeks).
+        if (cur.talkDay != day) addKarma(ctx, id, name, 1, now)
     }
 
     /** They wrote something in chat (any message, to anyone). Creates a stub card for a first-timer. */
@@ -201,7 +251,7 @@ object UserMemoryStore {
      * appends (the same thing said twice keeps the shorter wording, the main thing), dropping the oldest
      * past its cap. A like/dislike about the same thing flips the other one out.
      */
-    fun addNote(ctx: Context, id: String, name: String, slot: String, raw: String, confirm: Boolean = false): Boolean {
+    fun addNote(ctx: Context, id: String, name: String, slot: String, raw: String, confirm: Boolean = false, replace: Boolean = false): Boolean {
         if (id.isBlank() || slot !in SLOTS) return false
         var v = value(raw).replace(EXAMPLE, "").trim().trimEnd('.', '!', ',', ':', ';').take(60)
         // "Straftat's game" / "Valorant game" → the name itself (the slot already says it's a game).
@@ -212,15 +262,21 @@ object UserMemoryStore {
         val cur = load(ctx, id) ?: Card(id = id, name = name.take(60))
         val notes = LinkedHashMap(cur.notes)
         val unsure = HashMap(cur.unsure)
-        val list = notes[slot].orEmpty()
+        // "i work at a bank now" / "new job at X": the old ones in this slot are over.
+        val list = if (replace && !cur.pinned) notes[slot].orEmpty().filter { sameValue(it, v) }.also { kept ->
+            notes[slot].orEmpty().filterNot { k -> kept.contains(k) }.forEach { unsure.remove("$slot|${norm(it)}") } } else notes[slot].orEmpty()
         val i = list.indexOfFirst { sameValue(it, v) }
         if (i >= 0) {
             // Known already: said again in a later conversation (or by a second person) = confirmed.
             val key = "$slot|${norm(list[i])}"
             val first = unsure[key] ?: return false
-            if (!confirm && now - first < DiscordBotLimits.CONFIRM_GAP_MS) return false
+            if (!confirm && now - first < DiscordBotLimits.CONFIRM_GAP_MS) {
+                if (list.size == cur.notes[slot].orEmpty().size) return false
+                notes[slot] = list; save(ctx, cur.copy(notes = notes, unsure = unsure)); return true
+            }
             unsure.remove(key)
-            save(ctx, cur.copy(unsure = unsure)); return true
+            notes[slot] = list
+            save(ctx, cur.copy(notes = notes, unsure = unsure)); return true
         }
         val next: List<String> = if (slot in SINGLE) {
             list.forEach { unsure.remove("$slot|${norm(it)}") }   // a real update ("moved to vancouver")
@@ -237,9 +293,36 @@ object UserMemoryStore {
         notes[slot] = next
         val flip = when (slot) { "likes" -> "dislikes"; "dislikes" -> "likes"; else -> null }
         if (flip != null) notes[flip] = notes[flip].orEmpty().filterNot { sameValue(it, v) }
-        save(ctx, cur.copy(name = cur.name.ifBlank { name.take(60) }, notes = notes, unsure = unsure))
+        save(ctx, cur.copy(name = cur.name.ifBlank { name.take(60) }, notes = notes, unsure = unsure, none = cur.none - slot))
         return true
     }
+
+    /**
+     * They said nothing fits a slot ("i have no pets", "too young to work", "i don't play games"): the slot is
+     * marked none so Cardinal knows and stops asking; their word about themselves replaces what was there.
+     * A later real note ("got a cat now") replaces the marker. Returns true when the card changed.
+     */
+    fun setNone(ctx: Context, id: String, name: String, slot: String, reason: String = ""): Boolean {
+        if (id.isBlank() || slot !in SLOTS) return false
+        val cur = load(ctx, id) ?: Card(id = id, name = name.take(60))
+        if (cur.pinned && cur.notes[slot].orEmpty().isNotEmpty()) return false
+        val r = reason.trim().take(30)
+        if (cur.notes[slot].isNullOrEmpty() && cur.none[slot] == r) return false
+        save(ctx, cur.copy(name = cur.name.ifBlank { name.take(60) },
+            notes = LinkedHashMap(cur.notes).apply { remove(slot) },
+            unsure = cur.unsure.filterKeys { !it.startsWith("$slot|") },
+            none = cur.none + (slot to r)))
+        return true
+    }
+
+    fun removeNone(ctx: Context, id: String, slot: String) { load(ctx, id)?.let { if (slot in it.none) save(ctx, it.copy(none = it.none - slot)) } }
+
+    fun noneText(card: Card, slot: String): String? = card.none[slot]?.let { r -> if (r.isBlank()) "none" else "none ($r)" }
+
+    /** "bank teller, cashier (?)" / "none (too young)" / null when nothing's known about the slot. */
+    private fun slotText(card: Card, slot: String): String? =
+        card.notes[slot].orEmpty().takeIf { it.isNotEmpty() }?.joinToString(", ") { v -> v + if (isUnsure(card, slot, v)) " (?)" else "" }
+            ?: noneText(card, slot)
 
     fun isUnsure(card: Card, slot: String, v: String) = "$slot|${norm(v)}" in card.unsure
 
@@ -299,8 +382,8 @@ object UserMemoryStore {
 
     /** Every note of a card as "work: bank teller, cashier · plays: Valorant" (compact, slot order). */
     private fun renderSlots(card: Card, slots: Collection<String>): String =
-        SLOTS.filter { it in slots && card.notes[it].orEmpty().isNotEmpty() }
-            .joinToString(" · ") { s -> (if (s == "about") "" else LABEL[s] + ": ") + card.notes[s]!!.joinToString(", ") { v -> v + if (isUnsure(card, s, v)) " (?)" else "" } }
+        SLOTS.filter { it in slots }.mapNotNull { s -> slotText(card, s)?.let { (if (s == "about") "" else LABEL[s] + ": ") + it } }
+            .joinToString(" · ")
 
     private fun stemmedWords(s: String): Set<String> =
         Regex("[\\p{L}\\p{N}]+").findAll(s.lowercase()).map { discordStem(it.value) }.filter { it.length >= 3 }.toSet()
@@ -310,8 +393,9 @@ object UserMemoryStore {
         if (keywords.isEmpty()) return emptyList()
         val want = keywords.map { discordStem(it) }.toSet()
         return SLOTS.filter { s ->
-            val vals = card.notes[s].orEmpty(); vals.isNotEmpty() &&
-                (vals.any { v -> stemmedWords(v).any { it in want } } || SLOT_CUES[s].orEmpty().any { it in want })
+            val vals = card.notes[s].orEmpty()
+            (vals.isNotEmpty() && vals.any { v -> stemmedWords(v).any { it in want } }) ||
+                ((vals.isNotEmpty() || s in card.none) && SLOT_CUES[s].orEmpty().any { it in want })
         }
     }
 
@@ -385,7 +469,8 @@ object UserMemoryStore {
         }
         val rawRel = value(delta.optString("relationship")).take(80).takeUnless { GENERIC_REL.matches(it) || POISON.containsMatchIn(it) }.orEmpty()
         val incomingRel = rawRel.takeUnless { REL_TO_YOU.matches(it) }.orEmpty()
-        val withThem = cur.howToTreat.ifBlank { rawRel.takeIf { REL_TO_YOU.matches(it) }.orEmpty() }
+        // "friend" / "rival" to Cardinal isn't taken from what someone says: karma decides that.
+        val withThem = cur.howToTreat
         val relationship = if (correcting && incomingRel.isNotBlank() && !cur.pinned) incomingRel else cur.relationship.ifBlank { incomingRel }
         save(ctx, cur.copy(
             name = cur.name.ifBlank { name.take(60) },
@@ -426,6 +511,7 @@ object UserMemoryStore {
         val (header, _) = nameHeader(card, "")
         val sb = StringBuilder(header)
         if (card.relationship.isNotBlank()) sb.append(" — ").append(card.relationship)
+        sb.append("\n  with them: ").append(withThem(card)).append(" (karma ").append(card.karma).append(')')
         val langs = spokenLanguages(card)
         if (langs.isNotEmpty()) sb.append("\n  speaks: ").append(langs.joinToString(", "))
         tzLine(card).takeIf { it.isNotBlank() }?.let { sb.append("\n  time: ").append(it) }
@@ -446,7 +532,7 @@ object UserMemoryStore {
         val sb = StringBuilder(header)
         if (card.relationship.isNotBlank()) sb.append(" — ").append(card.relationship.trim().trimEnd('.'))
         sb.append('.')
-        if (card.howToTreat.isNotBlank()) sb.append(" With them: ").append(card.howToTreat.trim().trimEnd('.')).append('.')
+        sb.append(" With them: ").append(withThem(card)).append('.')
         if (card.avoid.isNotEmpty()) sb.append(" Quietly never do this with them again (don't mention it): ").append(card.avoid.joinToString("; ") { it.trim().trimEnd('.') }).append('.')
         val langs = spokenLanguages(card)
         if (langs.isNotEmpty() && langs.none { it.equals("english", true) })
@@ -521,7 +607,7 @@ object UserMemoryStore {
 
         if (card != null) {
             if (card.relationship.isNotBlank()) sb.append("\n- server role: ").append(card.relationship.trim().trimEnd('.'))
-            if (card.howToTreat.isNotBlank()) sb.append("\n- with them: ").append(card.howToTreat.trim().trimEnd('.'))
+            sb.append("\n- with them: ").append(withThem(card))
             val langs = spokenLanguages(card)
             // English is the default: languages show when there's another one, or they're asking about languages.
             if (langs.isNotEmpty() && (langAsk || langs.any { !it.equals("english", true) })) sb.append("\n- speaks: ").append(langs.joinToString(", "))
@@ -529,8 +615,7 @@ object UserMemoryStore {
             // ("plays JJ's on PC" kept turning up in a food answer when every note looked equally relevant).
             val rel = if (all) SLOTS else relevantSlots(card, keywords)
             val back = ArrayList<String>()
-            for (sl in SLOTS) card.notes[sl].orEmpty().takeIf { it.isNotEmpty() }?.let {
-                val vals = it.joinToString(", ") { v -> v + if (isUnsure(card, sl, v)) " (?)" else "" }
+            for (sl in SLOTS) slotText(card, sl)?.let { vals ->
                 if (sl in rel) sb.append("\n- ").append(LABEL[sl]).append(": ").append(vals)
                 else back.add(LABEL[sl] + " " + vals)
             }
@@ -552,12 +637,11 @@ object UserMemoryStore {
         val slots = if (full) SLOTS else relevantSlots(card, keywords)
         val notes = ArrayList<String>()
         card.relationship.trim().trimEnd('.').takeIf { it.isNotBlank() }?.let { notes.add(if (Regex("(?i)\\b(server|role)\\b").containsMatchIn(it)) it else "server role $it") }
-        if (full && card.howToTreat.isNotBlank()) notes.add("with them: " + card.howToTreat.trim().trimEnd('.'))
+        if (full && card.karma !in -2..4) notes.add("with them: " + withThem(card))
         // Languages ride with the full card ("what languages does X speak?" had nothing to answer from).
         if (full) spokenLanguages(card).takeIf { l -> l.isNotEmpty() && (langAsk || l.any { !it.equals("english", true) }) }
             ?.let { notes.add("speaks " + it.joinToString(", ")) }
-        SLOTS.filter { it in slots }.forEach { sl -> card.notes[sl].orEmpty().takeIf { it.isNotEmpty() }?.let {
-            notes.add((if (sl == "about") "" else LABEL[sl] + " ") + it.joinToString(", ") { v -> v + if (isUnsure(card, sl, v)) " (?)" else "" }) } }
+        SLOTS.filter { it in slots }.forEach { sl -> slotText(card, sl)?.let { notes.add((if (sl == "about") "" else LABEL[sl] + " ") + it) } }
         val basic = header != card.name || hasNick
         if (notes.isEmpty() && !basic) return null
         return PromptLine("- " + header + if (notes.isNotEmpty()) ": " + notes.joinToString("; ") else "", hasNick)
@@ -656,6 +740,8 @@ object UserMemoryStore {
      */
     fun noteFromText(ctx: Context, id: String, name: String, text: String, pin: Boolean = false): Boolean {
         val (slot, v) = guessSlot(text) ?: return false
+        if (slot != "about" && Regex("(?i)^none\\b").containsMatchIn(v))
+            return setNone(ctx, id, name, slot, v.replace(Regex("(?i)^none\\W*"), "").trim('(', ')', ' '))
         val ok = addNote(ctx, id, name, slot, v, confirm = true)
         if (pin) setPinned(ctx, id, true)
         return ok

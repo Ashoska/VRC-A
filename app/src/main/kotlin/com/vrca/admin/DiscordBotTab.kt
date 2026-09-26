@@ -164,6 +164,7 @@ private fun PeopleSection() {
                             Text(card.name.ifBlank { card.id }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                             val line = listOfNotNull(
                                 card.pronouns.ifBlank { null },
+                                UserMemoryStore.bondOf(card.karma).substringBefore(" ("),
                                 UserMemoryStore.tzLine(card, now).substringBefore(',').ifBlank { null },
                                 discordRelTime(card.lastSeenMs, now).ifBlank { null }?.let { "seen $it" },
                                 UserMemoryStore.factLines(card).size.takeIf { it > 0 }?.let { "$it notes" },
@@ -187,11 +188,11 @@ private fun PersonDetail(card: UserMemoryStore.Card, changed: () -> Unit) {
     val now = System.currentTimeMillis()
     var add by remember(card.id) { mutableStateOf("") }
     var rel by remember(card.id) { mutableStateOf(card.relationship) }
-    var treat by remember(card.id) { mutableStateOf(card.howToTreat) }
     var calls by remember(card.id) { mutableStateOf(card.preferredNick) }
     var confirmDelete by remember(card.id) { mutableStateOf(false) }
 
     Header("Identity")
+    Row(verticalAlignment = Alignment.CenterVertically) { Key("with them"); Small("${UserMemoryStore.bondOf(card.karma).substringBefore(" (")} · karma ${card.karma}") }
     Removable("pronouns", card.pronouns) { UserMemoryStore.clearPronouns(ctx, card.id); changed() }
     Removable("time", UserMemoryStore.tzLine(card, now).let { if (it.isBlank()) "" else "$it (${card.tz})" }) { UserMemoryStore.clearTz(ctx, card.id); changed() }
     val langs = UserMemoryStore.spokenLanguages(card)
@@ -209,14 +210,16 @@ private fun PersonDetail(card: UserMemoryStore.Card, changed: () -> Unit) {
     }
 
     Header("Notes")
-    val any = UserMemoryStore.SLOTS.any { card.notes[it].orEmpty().isNotEmpty() }
+    val any = UserMemoryStore.SLOTS.any { card.notes[it].orEmpty().isNotEmpty() || it in card.none }
     if (!any) Small("—")
     UserMemoryStore.SLOTS.forEach { slot ->
         val vals = card.notes[slot].orEmpty()
-        if (vals.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
+        val none = UserMemoryStore.noneText(card, slot)
+        if (vals.isNotEmpty() || none != null) Row(verticalAlignment = Alignment.CenterVertically) {
             Key(UserMemoryStore.LABEL[slot] ?: slot)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 vals.forEach { v -> Chip(if (UserMemoryStore.isUnsure(card, slot, v)) "$v ?" else v) { UserMemoryStore.removeNote(ctx, card.id, slot, v, force = true); changed() } }
+                if (vals.isEmpty() && none != null) Chip(none) { UserMemoryStore.removeNone(ctx, card.id, slot); changed() }
             }
         }
     }
@@ -233,9 +236,8 @@ private fun PersonDetail(card: UserMemoryStore.Card, changed: () -> Unit) {
     Header("Edit")
     OutlinedTextField(value = rel, onValueChange = { rel = it }, label = { Text("role here") }, singleLine = true, modifier = Modifier.fillMaxWidth())
     OutlinedTextField(value = calls, onValueChange = { calls = it }, label = { Text("calls them") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-    OutlinedTextField(value = treat, onValueChange = { treat = it }, label = { Text("with them") }, singleLine = true, modifier = Modifier.fillMaxWidth())
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Button(onClick = { UserMemoryStore.editFields(ctx, card.id, rel, treat, calls); changed() }) { Text("Save") }
+        Button(onClick = { UserMemoryStore.editFields(ctx, card.id, rel, card.howToTreat, calls); changed() }) { Text("Save") }
         TextButton(onClick = { UserMemoryStore.setPinned(ctx, card.id, !card.pinned); changed() }) { Text(if (card.pinned) "Unpin" else "Pin") }
         Spacer(Modifier.weight(1f))
         if (confirmDelete) TextButton(onClick = { UserMemoryStore.delete(ctx, card.id); changed() }) { Text("Confirm delete", color = MaterialTheme.colorScheme.error) }

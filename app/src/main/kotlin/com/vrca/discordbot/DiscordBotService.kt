@@ -134,7 +134,8 @@ class DiscordBotService : Service() {
             else -> null
         }
         // "what's our relationship?", "what am i to you?", "are we friends?": answer from the card, never invent one.
-        private val CURIOUS_ASK = linkedMapOf("work" to "what they do", "game" to "what they play", "from" to "where they're from", "likes" to "what they're into")
+        private val CURIOUS_ASK = linkedMapOf("work" to "what they do", "game" to "what they play", "from" to "where they're from",
+            "likes" to "what they're into", "pet" to "if they have any pets")
         private val OPINION_RE = Regex("(?i)\\b(do you like|you like|thoughts on|what do you think (of|about)|opinion on|fan of|how do you feel about|you into|is \\w+ (good|bad|mid|overrated))\\b")
         private val SAVE_ASK_RE = Regex("(?i)\\b(add|put|save|set|make|note|write|log)\\b.{0,30}\\b(as|to|in|into) my\\b|\\b(set|change|update|make) my \\w+|\\bremember (that|this|me|my)\\b|\\b(note|save) (that|this|it)\\b")
         private val REL_ASK_RE = Regex("(?i)\\b(our relationship|relationship (with|between) (me|us)|what am i to (you|u)|what are we( to each other)?\\b|are (we|me and you|you and i) (friends|besties|close|cool|good|enemies|rivals)|do you (like|hate) me|how do you (see|feel about) me)")
@@ -699,6 +700,8 @@ class DiscordBotService : Service() {
         // (the chat hasn't moved on → still to him), the cheap check only when it's genuinely unclear.
         val follow = if (addressed) Follow.NONE else followUpKind(channelId, authorId, d, rawContent, now)
         val addressedEff = addressed || follow == Follow.FREE
+        // How they treat him moves their karma (kind words up, real insults down; banter with a laugh doesn't count).
+        if (addressedEff || named) noteKarma(authorId, DiscordRest.displayName(author, ""), stripBotMentions(rawContent))
         recordFlow(channelId, FlowMsg(messageId, authorId, false, ref?.optJSONObject("author")?.optString("id"), addressedEff,
             DiscordRest.displayName(author, ""), now, rawContent.lowercase().take(300)))
 
@@ -1036,12 +1039,19 @@ class DiscordBotService : Service() {
                 // "yeah" / "nope" right after Cardinal checked an unsure note: confirm or drop it (free).
                 val lastBot = lines.lastOrNull()?.takeIf { it.turn.isBot }
                 if (lastBot != null) {
-                    if (YES_RE.matches(text.trim())) UserMemoryStore.answerCheck(this, m.authorId, true, lastBot.turn.text)
-                    else if (NO_RE.matches(text.trim())) UserMemoryStore.answerCheck(this, m.authorId, false, lastBot.turn.text)
+                    val checked = when {
+                        YES_RE.matches(text.trim()) -> UserMemoryStore.answerCheck(this, m.authorId, true, lastBot.turn.text)
+                        NO_RE.matches(text.trim()) -> UserMemoryStore.answerCheck(this, m.authorId, false, lastBot.turn.text)
+                        else -> false
+                    }
+                    if (!checked) bareNoneAnswer(m.authorId, m.authorName, text, lastBot.turn.text)
                 }
                 if (LAUGH_RE.containsMatchIn(text)) {
                     val i = lines.indexOfLast { it.authorId != m.authorId }
-                    if (i >= 0 && lines.size - i <= 3) lines[i] = lines[i].copy(laughs = (lines[i].laughs + m.authorName).distinct())
+                    if (i >= 0 && lines.size - i <= 3) {
+                        lines[i] = lines[i].copy(laughs = (lines[i].laughs + m.authorName).distinct())
+                        if (lines[i].turn.isBot) UserMemoryStore.addKarma(this, m.authorId, m.authorName, 1)   // laughed at his line
+                    }
                 }
                 continue
             }
@@ -1056,6 +1066,7 @@ class DiscordBotService : Service() {
                 val t0 = lines.map { it.turn }
                 val n2i = HashMap<String, String>().apply { recent.forEach { if (it.authorId != botId) put(it.authorName.lowercase().trim(), it.authorId) } }
                 for (n in selfStatements(t0)) n2i[n.about.lowercase().trim()]?.let { applyNote(n, it, t0, n2i, false) }
+                ownUpdates(t0, n2i)
                 lastLearnedId[channelId] = maxOf(after, lastId); DiscordBotState.log("learn: skipped $channelId (only filler)")
             }
             else learnPending.merge(channelId, taken, Int::plus)
@@ -1179,10 +1190,16 @@ class DiscordBotService : Service() {
         for ((i, t) in turns.withIndex()) {
             if (t.isBot) continue
             val uid = nameToId[t.name.lowercase().trim()] ?: continue
-            val prevBot = turns.getOrNull(i - 1)?.takeIf { it.isBot }
-            if (prevBot != null && YES_RE.matches(t.text.trim())) UserMemoryStore.answerCheck(this, uid, true, prevBot.text)
-            else if (prevBot != null && NO_RE.matches(t.text.trim())) UserMemoryStore.answerCheck(this, uid, false, prevBot.text)
+            val prevBot = turns.getOrNull(i - 1)?.takeIf { it.isBot } ?: continue
+            val checked = when {
+                YES_RE.matches(t.text.trim()) -> UserMemoryStore.answerCheck(this, uid, true, prevBot.text)
+                NO_RE.matches(t.text.trim()) -> UserMemoryStore.answerCheck(this, uid, false, prevBot.text)
+                else -> false
+            }
+            if (!checked) bareNoneAnswer(uid, t.name, t.text, prevBot.text)
         }
+        // Their own word about themselves: "i'm not a nurse" drops it, "i have no pets" / "too young to work" marks the slot none.
+        ownUpdates(turns, nameToId)
         turns.filter { !it.isBot && !QUESTION_LINE.containsMatchIn(it.text.trim()) && !isJoking(it.text) }
             .groupBy { nameToId[it.name.lowercase().trim()] }
             .forEach { (uid, ls) -> if (uid != null) UserMemoryStore.confirmSaid(this, uid, ls.map { withoutAtYou(it.text) }) }
@@ -1192,6 +1209,9 @@ class DiscordBotService : Service() {
             val shown = turns.indices.any { i -> turns[i].isBot && groundWords(turns[i].text).count { it in tw } >= minOf(2, tw.size) &&
                 (i - 1 downTo 0).firstOrNull { !turns[it].isBot }?.let { p -> groundWords(turns[p].text).count { it in tw } < minOf(2, tw.size) } != false }
             if (shown) PersonalityStore.confirmTrait(this, tr)
+            // Someone else brought it up in a later batch (not complaining about it): the room knows it's his.
+            else if (turns.any { !it.isBot && !COMPLAINT_RE.containsMatchIn(it.text) && groundWords(it.text).count { w -> w in tw } >= minOf(2, tw.size) })
+                PersonalityStore.confirmTrait(this, tr, force = true)
         }
 
         // Stored items the chat said are wrong / unwanted: a person's note or nickname is dropped; one of
@@ -1266,7 +1286,7 @@ class DiscordBotService : Service() {
                 TASTE_NO.containsMatchIn(answer) -> "can't stand $thing" to "dislikes"
                 else -> null
             } ?: continue
-            if (!PersonalityStore.tooVague(trait)) PersonalityStore.noteSelf(this, trait, null, null, kind = kind)
+            if (!PersonalityStore.tooVague(trait)) PersonalityStore.noteSelf(this, trait, null, null, kind = kind, confirm = true)
         }
         // "stop calling me X" / "don't call me X" from the person themselves → retire that name (free).
         if (correcting) for (t in turns) {
@@ -1318,7 +1338,9 @@ class DiscordBotService : Service() {
             if (old != null && !repeat && !PersonalityStore.isSameTrait(old, s.text) && PersonalityStore.replaceTrait(this, old, s.text)) {
                 replacedAny = old; DiscordBotState.log("self: \"${old.take(40)}\" → \"${s.text.take(40)}\""); continue
             }
-            splitTrait(s.text).forEach { PersonalityStore.noteSelf(this, it, null, null, kind = s.kind) }
+            // Said outright ("i love X" / "i hate X"), or a title two people gave him: confirmed at once. Guessed habits wait.
+            val sure = PersonalityStore.normKind(s.kind, s.text) in setOf("likes", "dislikes") || (titled != null && s.text == titled)
+            splitTrait(s.text).forEach { PersonalityStore.noteSelf(this, it, null, null, kind = s.kind, confirm = sure) }
         }
         // The bit the room was riffing on, as it stands now. A bit people are complaining about is toned down, not evolved.
         val bitDisputed = bitFocus.isNotBlank() && (disputed.any { PersonalityStore.isSameTrait(it, bitFocus) || it.equals(bitFocus, true) } ||
@@ -1554,6 +1576,107 @@ class DiscordBotService : Service() {
     private fun namesThemIn(text: String, names: Set<String>): Boolean = text.lowercase().let { low ->
         names.any { nm -> Regex("(^|[^\\p{L}\\p{N}])" + Regex.escape(nm) + "([^\\p{L}\\p{N}]|$)").containsMatchIn(low) } }
 
+    // ── Karma ──
+    private val KIND_RE = Regex("(?i)\\b(thanks|thank you|thank u|thx|tysm|ty|ily|love (you|u|ya)|luv (u|you)|good bot|best bot|" +
+        "you'?re (the best|so funny|funny|hilarious|great|awesome|cool|smart|a legend|goated|amazing|so real|right)|" +
+        "ur (the best|so funny|funny|great|awesome|cool|a legend|goated)|you (rock|slay|ate)|(w|based) cardinal|well said|i like you|missed you|" +
+        "proud of you|good (job|one)|nice one)\\b|❤️|🫶|🥰")
+    private val MEAN_RE = Regex("(?i)\\b(shut up|stfu|stupid|dumb|idiot|moron|useless|annoying|i hate you|hate u|you suck|u suck|trash|bad bot|" +
+        "worst bot|l cardinal|kys|go away|nobody asked|no one asked|fuck (you|off|u)|screw you|piss off|clanker)\\b")
+    private val MEAN_NEGATED = Regex("(?i)\\b(not|don'?t|dont|never|isn'?t|aren'?t)\\s+(\\w+\\s+)?(stupid|dumb|useless|annoying|trash|hate)\\b")
+
+    /** Free: kind words to him +2 (+1 with a laugh), a real insult −2 (banter with a laugh: nothing), a serious stop −1. */
+    private fun noteKarma(id: String, name: String, text: String) {
+        val joking = isJoking(text)
+        val atHim = Regex("(?i)\\b(you|u|ur|your|you'?re|cardinal|bot)\\b").containsMatchIn(text) || text.trim().split(Regex("\\s+")).size <= 3
+        val d = when {
+            MEAN_RE.containsMatchIn(text) && !MEAN_NEGATED.containsMatchIn(text) && atHim -> if (joking) 0 else -2
+            KIND_RE.containsMatchIn(text) -> if (joking) 1 else 2
+            isStopRequest(text) -> -1
+            else -> 0
+        }
+        if (d == 0) return
+        val a = UserMemoryStore.addKarma(this, id, name, d)
+        if (a != 0) DiscordBotState.log("karma ${name.ifBlank { id }} ${if (a > 0) "+" else ""}$a")
+    }
+
+    // ── "Nothing fits" answers + their own denials ──
+    private val NONE_EXCEPT = Regex("(?i)\\b(besides|except|other than|apart from|but (i|my))\\b")
+    private val NONE_ANSWER: List<Triple<Regex, String, String>> = listOf(
+        Triple(Regex("(?i)\\bi (?:don'?t|dont|do not) (?:have|own) (?:any |a )?(?:pets?|animals?)\\b|\\bi have no (?:pets?|animals?)\\b|\\bno pets?\\b|\\bnot allowed (?:to have )?(?:any )?pets\\b"), "pet", ""),
+        Triple(Regex("(?i)\\btoo young (?:to|for) (?:work|a job|have a job|get a job|be working)\\b"), "work", "too young"),
+        Triple(Regex("(?i)\\bi(?:'m| am|m) (?:currently |still |kinda )?(?:unemployed|jobless|between jobs|out of work)\\b"), "work", "unemployed"),
+        Triple(Regex("(?i)\\bi(?:'m| am|m) retired\\b|\\bi retired\\b"), "work", "retired"),
+        Triple(Regex("(?i)\\bi (?:don'?t|dont|do not) (?:have a job|work)(?! (?:on|at|in|as|for|weekends?|today|tomorrow|tonight|much|there|with|that))\\b|\\bi have no job\\b"), "work", ""),
+        Triple(Regex("(?i)\\bi (?:don'?t|dont|do not) (?:really )?(?:play (?:any |video )?games|game)\\b|\\bi(?:'m| am|m) not (?:really )?(?:a gamer|into (?:video )?games)\\b|\\bi (?:never|barely|rarely) play (?:any |video )?games\\b"), "game", ""),
+        Triple(Regex("(?i)\\bi (?:don'?t|dont|do not) (?:really )?have (?:any |many )?hobbies\\b|\\bi have no hobbies\\b|\\bno hobbies\\b"), "hobby", ""),
+        Triple(Regex("(?i)\\bi(?:'m| am|m) not (?:really )?into anything\\b|\\bi (?:don'?t|dont) (?:really )?like anything\\b"), "likes", ""),
+    )
+    private val STUDENT_RE = Regex("(?i)\\bi(?:'m| am|m) (?:still )?(?:in|at) (?:high ?school|middle school|school|college|uni|university)\\b")
+    // What each slot's denial sounds like ("i'm not a nurse", "i don't play valorant", "i don't have a cat").
+    private val DENY_VERB = mapOf(
+        "work" to "(?:not an?|not the|no longer an?|don'?t work(?: as| at| in| for)?|dont work(?: as| at| in| for)?|never worked(?: as| at| in| for)?)",
+        "game" to "(?:don'?t (?:really )?play|dont (?:really )?play|do not play|never play(?:ed)?|stopped playing|not playing)",
+        "pet" to "(?:don'?t have|dont have|do not have|no longer have|don'?t own|dont own|never had|have no)",
+        "lives" to "(?:don'?t live in|dont live in|do not live in|no longer live in|never lived in)",
+        "from" to "(?:not from|not originally from)",
+        "likes" to "(?:don'?t (?:really )?like|dont (?:really )?like|do not like|don'?t love|dont love|not (?:really )?into|not a fan of|don'?t enjoy|dont enjoy)",
+        "dislikes" to "(?:don'?t hate|dont hate|don'?t mind|dont mind|don'?t dislike|dont dislike)",
+        "hobby" to "(?:don'?t|dont|do not|never|stopped|not into|no longer)",
+        "about" to "(?:i'?m not|im not|i am not)",
+    )
+    private val DENY_OTHER_SUBJECT = Regex("(?i)\\b(you|u|he|she|they|we|ppl|people|nobody|everyone|my \\w+)\\W*$")
+
+    /** "nope" / "none" / "i don't" right after Cardinal asked about a slot ("got any pets?") → that slot is none. */
+    private fun bareNoneAnswer(id: String, name: String, text: String, botLine: String) {
+        if (!BARE_NONE_RE.matches(text.trim()) || '?' !in botLine) return
+        val slot = BOT_ASKS.firstOrNull { it.first.containsMatchIn(botLine) }?.second ?: return
+        if (UserMemoryStore.setNone(this, id, name, slot)) DiscordBotState.log("${name.ifBlank { id }}: $slot none")
+    }
+    private val BARE_NONE_RE = Regex("(?i)\\W*(no+|nope|nah|none|nothing|not really|nah i don'?t|no i don'?t|nope i don'?t|i don'?t|i dont|not at all|never|none lol|nah lol|no lol)\\W*")
+    private val BOT_ASKS = listOf(
+        Regex("(?i)\\b(pets?|cats?|dogs?|animals?)\\b") to "pet",
+        Regex("(?i)\\bhobb(y|ies)\\b") to "hobby",
+        Regex("(?i)\\b(job|work|for a living|what do you do)\\b") to "work",
+        Regex("(?i)\\b(games?|gaming)\\b") to "game",
+        Regex("(?i)\\b(into|for fun)\\b") to "likes",
+    )
+
+    /** Their own lines about themselves (free): a none answer marks the slot, a denial drops the note it names. */
+    private fun ownUpdates(turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>) {
+        for (t in turns) {
+            if (t.isBot || QUESTION_LINE.containsMatchIn(t.text.trim()) || (isJoking(t.text) && !laughOnly(t.text))) continue
+            val id = nameToId[t.name.lowercase().trim()] ?: continue
+            val text = t.text
+            if (!NONE_EXCEPT.containsMatchIn(text)) NONE_ANSWER.forEach { (re, slot, why) ->
+                if (re.containsMatchIn(text) && UserMemoryStore.setNone(this, id, t.name, slot, why)) DiscordBotState.log("${t.name}: $slot none")
+            }
+            if (STUDENT_RE.containsMatchIn(text) && !isJoking(text)) UserMemoryStore.addNote(this, id, t.name, "work", "student", confirm = true)
+            val card = UserMemoryStore.load(this, id) ?: continue
+            for ((slot, vals) in card.notes) for (v in vals) {
+                val verb = DENY_VERB[slot] ?: continue
+                val keys = Regex("[\\p{L}\\p{N}]+").findAll(v.lowercase()).map { it.value }.filter { it.length >= 3 && it !in FACT_STOP }.toList()
+                val hit = keys.any { k ->
+                    Regex("(?i)\\b$verb\\s+(?:(?:an?|the|any|my|a|really|even|in|at|to)\\s+)*(?:[\\p{L}\\p{N}'-]+\\s+){0,2}?" +
+                        Regex.escape(k.removeSuffix("s")) + "\\w*").findAll(text).any { m ->
+                        !DENY_OTHER_SUBJECT.containsMatchIn(text.substring(0, m.range.first).takeLast(14)) } }
+                if (hit && UserMemoryStore.removeNote(this, id, slot, v)) DiscordBotState.log("${t.name}: dropped $slot \"$v\" (they said no)")
+            }
+        }
+    }
+
+    /** A laugh marker on the line, but it isn't nonsense or roleplay aimed at him. */
+    private fun laughOnly(text: String) = JOKE_RE.containsMatchIn(text) && !NONSENSE_RE.containsMatchIn(text) && !BANTER_AT_HIM_RE.containsMatchIn(text)
+
+    /** The clause holding the note's words is a plain statement about themselves ("i'm a nurse", "my dog is called miso"). */
+    private fun directClaim(text: String, vw: Set<String>): Boolean {
+        val clauses = text.split(Regex("[!?,;]|\\.(?!\\p{L})|\\s+(?:and|but|so|then|while)\\s+"))
+        val best = clauses.maxByOrNull { c -> factWords(c).count { it in vw } } ?: return false
+        return DIRECT_CLAIM_RE.containsMatchIn(best) && !Regex("(?i)\\b(you|your|ur|u)\\b").containsMatchIn(best)
+    }
+    private val DIRECT_CLAIM_RE = Regex("(?i)\\b(i'?m|im|i am|i work|i'?m working|i live|i moved|i'?m from|im from|i play|i main|i study|i have|i own|i'?ve got|ive got|i got|i love|i like|i hate|i can'?t stand|i'?m into|im into|i do|my (job|work|pet|cat|dog|hobby|hobbies|main|fav\\w*))\\b")
+    private val NEW_JOB_RE = Regex("(?i)\\b(now|new job|switched( jobs?)?( to)?|changed jobs?|started (working|a (new )?job)|got (a )?(new )?job|just got hired|got hired)\\b")
+
     private fun applyNote(n: DiscordBotAi.Note, id: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>, correcting: Boolean): String? {
         var slot = UserMemoryStore.slotOf(n.type)
         if (slot.isBlank()) return "type"
@@ -1600,7 +1723,8 @@ class DiscordBotService : Service() {
         }
         when {
             QUESTION_LINE.containsMatchIn(text.trim()) -> return "question"
-            isJoking(text) -> return "joke"
+            // Their own line with a laugh on it ("i'm a nurse lol") may still be true: kept, but only as unsure.
+            isJoking(text) && !(own && laughOnly(text)) -> return "joke"
             HYPOTHETICAL_RE.containsMatchIn(text) -> return "what-if"
             slot != "tz" && isRightNow(line, turns) -> return "right now"
             aboutSomeoneElse(text, v) -> return "someone else"
@@ -1668,7 +1792,10 @@ class DiscordBotService : Service() {
                 // Two different people backing it (each saying at least half of it) = confirmed at once; else tentative.
                 val loose = humans.filter { vw.isEmpty() || support(it) * 2 >= vw.size }.filter { ownLine(it) || namesThem(it) }
                     .map { turns[it].name.lowercase().trim() }.toSet()
-                if (!UserMemoryStore.addNote(this, id, n.about, slot, v, confirm = loose.size >= 2)) return "known"
+                // Said plainly about themselves ("i'm a nurse", "i have a dog named miso") = confirmed at once too.
+                val direct = own && !isJoking(text) && directClaim(text, vw)
+                val replace = slot == "work" && own && !isJoking(text) && NEW_JOB_RE.containsMatchIn(text)
+                if (!UserMemoryStore.addNote(this, id, n.about, slot, v, confirm = loose.size >= 2 || direct, replace = replace)) return "known"
                 // Where they live (or are from) tells us their time too, when nothing better is known.
                 if (slot == "lives" || slot == "from") TimezoneGuess.fromPlace(v)?.let { UserMemoryStore.setTz(this, id, n.about, it, overwrite = false) }
             }
@@ -2024,7 +2151,7 @@ class DiscordBotService : Service() {
         // Getting to know them (rationed): an empty basic slot → ask about it once a day at most, only in a casual
         // moment (not while they're asking him something, not in a serious chat, not a first message).
         UserMemoryStore.load(this, ctx.authorId)?.let { card ->
-            val gap = CURIOUS_ASK.keys.firstOrNull { card.notes[it].isNullOrEmpty() }
+            val gap = CURIOUS_ASK.keys.firstOrNull { card.notes[it].isNullOrEmpty() && it !in card.none }
             if (gap != null && card.interactions >= 2 && !built.asking && !built.recall && built.dayAsk == null &&
                 effectiveTone(ctx.channelId, now) == null && now - (curiousAt[ctx.authorId] ?: 0L) >= DiscordBotLimits.CURIOUS_GAP_MS) {
                 curiousAt[ctx.authorId] = now
@@ -2359,6 +2486,7 @@ class DiscordBotService : Service() {
             else -> return
         }
         scope.launch {
+            UserMemoryStore.addKarma(this@DiscordBotService, reactorId, "", if (emoji in POSITIVE_REACTS) 1 else -1)
             val cur = UserMemoryStore.load(this@DiscordBotService, reactorId) ?: UserMemoryStore.Card(id = reactorId)
             // A reaction only fills an empty (or reaction-derived) vibe — never overwrites what was learned.
             if (cur.sentiment.isBlank() || cur.sentiment.contains("(reacted"))

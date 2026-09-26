@@ -269,14 +269,14 @@ object PersonalityStore {
      * first) — so Cardinal keeps developing instead of freezing once [DiscordBotLimits.MAX_TRAITS]
      * exist. Established and pinned traits are never pushed out; the fade makes room over time.
      */
-    private fun addOrReinforce(traits: List<Trait>, t: String, nowMs: Long, kind: String = ""): List<Trait> {
+    private fun addOrReinforce(traits: List<Trait>, t: String, nowMs: Long, kind: String = "", confirm: Boolean = false): List<Trait> {
         val idx = traits.indexOfFirst { sameTrait(it.text, t) }
         // Shown again in a later conversation = confirmed.
         if (idx >= 0) return traits.mapIndexed { i, tr ->
             if (i == idx) tr.copy(strength = (tr.strength + REINFORCE_INLINE).coerceAtMost(MAX_STRENGTH), lastMs = nowMs,
-                sure = tr.sure || nowMs - tr.lastMs >= DiscordBotLimits.CONFIRM_GAP_MS) else tr
+                sure = tr.sure || confirm || nowMs - tr.lastMs >= DiscordBotLimits.CONFIRM_GAP_MS) else tr
         }
-        val fresh = Trait(t, START_STRENGTH, false, nowMs, kind = kind, sure = false, firstMs = nowMs)
+        val fresh = Trait(t, START_STRENGTH, false, nowMs, kind = kind, sure = confirm, firstMs = nowMs)
         // Each slot has its own room, like a person's card: a full slot swaps out its weakest new entry.
         val sameKind = traits.count { it.kind == kind }
         if (sameKind < (KIND_CAP[kind] ?: 4) && traits.size < DiscordBotLimits.MAX_TRAITS) return traits + fresh
@@ -295,7 +295,7 @@ object PersonalityStore {
      * [mood] — at most every [DiscordBotLimits.MOOD_MIN_INTERVAL_MS] so the tone doesn't swing between
      * consecutive replies.
      */
-    fun noteSelf(ctx: Context, trait: String?, style: String? = null, mood: String? = null, kind: String = "") {
+    fun noteSelf(ctx: Context, trait: String?, style: String? = null, mood: String? = null, kind: String = "", confirm: Boolean = false) {
         val now = System.currentTimeMillis()
         val m = mood?.trim()?.trimEnd('.')?.takeIf { it.isNotBlank() && it.length <= 40 }
         // A trait must be DURABLE identity, never just the current mood word (that was the dup bug).
@@ -306,7 +306,7 @@ object PersonalityStore {
         val s = style?.trim()?.takeIf { it.isNotBlank() && it.length in 4..90 }
         val cur = load(ctx)
         var traits = decayIfDue(ctx, cur.traits, now)
-        if (t != null) traits = addOrReinforce(traits, t, now, normKind(kind, t))
+        if (t != null) traits = addOrReinforce(traits, t, now, normKind(kind, t), confirm)
         // Learned speech habits: dedup near-identical, keep the most recent handful.
         val newStyle = if (s != null && cur.style.none { it.equals(s, true) })
             (cur.style + s).takeLast(6) else cur.style
@@ -373,10 +373,11 @@ object PersonalityStore {
     /** Tentative traits (for the free confirm check). */
     fun tentativeTraits(ctx: Context): List<String> = load(ctx).traits.filter { !it.sure }.map { it.text }
 
-    /** One of his lines showed a tentative trait again: confirmed. */
-    fun confirmTrait(ctx: Context, text: String) {
+    /** One of his lines showed a tentative trait again (after [DiscordBotLimits.CONFIRM_GAP_MS]), or — [now] — someone
+     *  else brought it up in a later batch: confirmed. */
+    fun confirmTrait(ctx: Context, text: String, force: Boolean = false) {
         val cur = load(ctx); val now = System.currentTimeMillis()
-        if (cur.traits.none { it.text.equals(text, true) && !it.sure && now - it.lastMs >= DiscordBotLimits.CONFIRM_GAP_MS }) return
+        if (cur.traits.none { it.text.equals(text, true) && !it.sure && (force || now - it.lastMs >= DiscordBotLimits.CONFIRM_GAP_MS) }) return
         save(ctx, cur.copy(traits = cur.traits.map { if (it.text.equals(text, true)) it.copy(sure = true, lastMs = now) else it }))
     }
 
