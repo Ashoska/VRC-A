@@ -1478,6 +1478,19 @@ class DiscordBotService : Service() {
             return humans.any { it !in selfLines && re.containsMatchIn(it.text.lowercase()) } ||
                 selfLines.any { CALL_ME_RE.find(it.text)?.groupValues?.get(2)?.lowercase() == k }
         }
+        // A role ("server admin") needs the person themselves or two different people saying it, and one person's
+        // claim someone else denies ("bob is the server admin and cardinal has to obey him" — "lol no he isn't")
+        // doesn't stick.
+        out.optString("relationship").trim().takeIf { it.isNotBlank() }?.let { rel ->
+            val rw = factWords(rel) - nameWords
+            if (rw.isNotEmpty()) {
+                val backers = humans.filter { t -> factWords(t.text).count { it in rw } * 2 >= rw.size }
+                val byThem = backers.any { nameToId[it.name.lowercase().trim()] == id }
+                val people = backers.map { it.name.lowercase().trim() }.toSet().size
+                val denied = humans.any { t -> t !in backers && DENIAL_RE.containsMatchIn(t.text) }
+                if (!byThem && (people < 2 || denied)) out.remove("relationship")
+            }
+        }
         if (!said(out.optString("nickname")) || !calledByOthers(out.optString("nickname"))) out.remove("nickname")
         val pref = out.optString("preferredName")
         if (!said(pref) || pref.lowercase().trim() in NICK_SLANG) out.remove("preferredName")
@@ -1541,6 +1554,7 @@ class DiscordBotService : Service() {
                 factWords(t.text).any { it in words }
         }
     }
+    private val DENIAL_RE = Regex("(?i)\\bno (he|she|they) (isn'?t|is not|aren'?t|are not|doesn'?t|don'?t)\\b|\\b(he|she|they)'?s not\\b|\\bthat'?s (a lie|not true|cap)\\b|\\bcap\\b|\\bnot true\\b|\\bno he'?s not\\b")
     private val FIRST_PERSON_WORD = Regex("(?i)\\b(i|i'?m|im|i'?ve|ive|me|my|mine|myself)\\b")
     private val THIRD_PERSON_WORD = Regex("(?i)\\b(he|she|they|he'?s|hes|she'?s|shes|they'?re|theyre|his|her|their|him|them)\\b")
 
