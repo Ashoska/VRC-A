@@ -1677,6 +1677,7 @@ class DiscordBotService : Service() {
     // "i'm a nurse", "i actually live in vancouver now", "my dog is called miso" (one filler word may sit after "i").
     private val DIRECT_CLAIM_RE = Regex("(?i)\\b(i'?m|im|i am)\\b|\\bi\\s+(?:(?:actually|really|also|still|now|just|currently|kinda|basically|mostly|finally|totally|honestly|literally|even|do)\\s+)?" +
         "(work|live|moved|play|main|study|have|own|got|love|like|hate|can'?t stand|do)\\b|\\bi'?ve got\\b|\\bive got\\b|\\bmy (job|work|pet|cat|dog|hobby|hobbies|main|fav\\w*)\\b")
+    private val EXTRA_JOB_RE = Regex("(?i)\\b(also|too|as well|second job|2nd job|side job|side gig|another job|part[- ]time|on the side|both|besides)\\b")
     private val NEW_JOB_RE = Regex("(?i)\\b(now|new job|switched( jobs?)?( to)?|changed jobs?|started (working|a (new )?job)|got (a )?(new )?job|just got hired|got hired)\\b")
 
     private fun applyNote(n: DiscordBotAi.Note, id: String, turns: List<DiscordBotAi.Turn>, nameToId: Map<String, String>, correcting: Boolean): String? {
@@ -1796,7 +1797,8 @@ class DiscordBotService : Service() {
                     .map { turns[it].name.lowercase().trim() }.toSet()
                 // Said plainly about themselves ("i'm a nurse", "i have a dog named miso") = confirmed at once too.
                 val direct = own && !isJoking(text) && directClaim(text, vw)
-                val replace = slot == "work" && own && !isJoking(text) && NEW_JOB_RE.containsMatchIn(text)
+                // "i also work at a bar now" / "got a second job" is another job, not a change of job.
+                val replace = slot == "work" && own && !isJoking(text) && NEW_JOB_RE.containsMatchIn(text) && !EXTRA_JOB_RE.containsMatchIn(text)
                 if (!UserMemoryStore.addNote(this, id, n.about, slot, v, confirm = loose.size >= 2 || direct, replace = replace)) return "known"
                 // Where they live (or are from) tells us their time too, when nothing better is known.
                 if (slot == "lives" || slot == "from") TimezoneGuess.fromPlace(v)?.let { UserMemoryStore.setTz(this, id, n.about, it, overwrite = false) }

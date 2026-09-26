@@ -17,6 +17,14 @@ henry: way less stress than the hospital was
 > quiet
 > expect card henry contains (?i)bank
 > expect card henry not-contains (?i)nurse
+# A second job is added next to the first, not swapped in.
+> teach card gus work: nurse
+gus: i also work at a bar now on weekends
+dave: busy life
+gus: yeah it pays the bills
+> quiet
+> expect card gus contains (?i)nurse
+> expect card gus contains (?i)bar
 # Their own denial drops the note.
 > teach card ivy plays: Valorant
 ivy: i don't play valorant anymore, it got boring
