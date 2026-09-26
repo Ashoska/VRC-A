@@ -1,6 +1,16 @@
 package com.vrca.admin
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -187,72 +197,133 @@ private fun PersonDetail(card: UserMemoryStore.Card, changed: () -> Unit) {
     val ctx = LocalContext.current
     val now = System.currentTimeMillis()
     var add by remember(card.id) { mutableStateOf("") }
-    var rel by remember(card.id) { mutableStateOf(card.relationship) }
-    var calls by remember(card.id) { mutableStateOf(card.preferredNick) }
     var confirmDelete by remember(card.id) { mutableStateOf(false) }
 
-    Header("Identity")
-    Row(verticalAlignment = Alignment.CenterVertically) { Key("with them"); Small("${UserMemoryStore.bondOf(card.karma).substringBefore(" (")} · karma ${card.karma}") }
-    Removable("pronouns", card.pronouns, always = true) { UserMemoryStore.clearPronouns(ctx, card.id); changed() }
-    Removable("time", UserMemoryStore.tzLine(card, now).let { if (it.isBlank()) "" else "$it (${card.tz})" }, always = true) { UserMemoryStore.clearTz(ctx, card.id); changed() }
-    Removable("role here", card.relationship, always = true) { UserMemoryStore.editFields(ctx, card.id, "", card.howToTreat, card.preferredNick); changed() }
-    Removable("calls them", card.preferredNick, always = true) { UserMemoryStore.editFields(ctx, card.id, card.relationship, card.howToTreat, ""); changed() }
-    val langs = UserMemoryStore.spokenLanguages(card)
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Key("speaks")
-        if (langs.isEmpty()) Small("—")
-        else FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { langs.forEach { l -> Chip(l) { UserMemoryStore.removeLanguage(ctx, card.id, l); changed() } } }
-    }
-    val nicks = card.nicknames.filterNot { it.equals(card.preferredNick, true) }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Key("nicknames")
-        if (nicks.isEmpty()) Small("—")
-        else FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { nicks.forEach { n -> Chip(n) { UserMemoryStore.removeNick(ctx, card.id, n); changed() } } }
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Small("replied ${card.interactions}×"); discordRelTime(card.lastSeenMs, now).takeIf { it.isNotBlank() }?.let { Small("· last message $it") }
-    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Header("Identity")
+        FieldRow("with them") { Small("${UserMemoryStore.bondOf(card.karma).substringBefore(" (")} · karma ${card.karma}") }
+        FieldRow("pronouns") { ValueOrDash(card.pronouns) { UserMemoryStore.clearPronouns(ctx, card.id); changed() } }
+        FieldRow("time") {
+            ValueOrDash(UserMemoryStore.tzLine(card, now).let { if (it.isBlank()) "" else "$it (${card.tz})" }) { UserMemoryStore.clearTz(ctx, card.id); changed() }
+        }
+        EditableRow("role here", card.relationship) { UserMemoryStore.editFields(ctx, card.id, it, card.howToTreat, card.preferredNick); changed() }
+        EditableRow("calls them", card.preferredNick) { UserMemoryStore.editFields(ctx, card.id, card.relationship, card.howToTreat, it); changed() }
+        FieldRow("speaks") {
+            ChipList(UserMemoryStore.spokenLanguages(card)) { l -> UserMemoryStore.removeLanguage(ctx, card.id, l); changed() }
+        }
+        FieldRow("nicknames") {
+            ChipList(card.nicknames.filterNot { it.equals(card.preferredNick, true) }) { n -> UserMemoryStore.removeNick(ctx, card.id, n); changed() }
+        }
+        Small("replied ${card.interactions}×" + (discordRelTime(card.lastSeenMs, now).takeIf { it.isNotBlank() }?.let { " · last message $it" } ?: ""))
 
-    Header("Notes")
-    UserMemoryStore.SLOTS.forEach { slot ->
-        val vals = card.notes[slot].orEmpty()
-        val none = UserMemoryStore.noneText(card, slot)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.width(76.dp)) {
-                Text(UserMemoryStore.LABEL[slot] ?: slot, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("${vals.size}/${UserMemoryStore.capOf(slot)}", style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
-            }
-            when {
-                vals.isNotEmpty() -> FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    vals.forEach { v -> Chip(if (UserMemoryStore.isUnsure(card, slot, v)) "$v ?" else v) { UserMemoryStore.removeNote(ctx, card.id, slot, v, force = true); changed() } }
+        Header("Notes")
+        UserMemoryStore.SLOTS.forEach { slot ->
+            val vals = card.notes[slot].orEmpty()
+            val none = UserMemoryStore.noneText(card, slot)
+            FieldRow(UserMemoryStore.LABEL[slot] ?: slot, "${vals.size}/${UserMemoryStore.capOf(slot)}") {
+                when {
+                    vals.isNotEmpty() -> ChipList(vals, label = { v -> if (UserMemoryStore.isUnsure(card, slot, v)) "$v ?" else v }) { v ->
+                        UserMemoryStore.removeNote(ctx, card.id, slot, v, force = true); changed()
+                    }
+                    none != null -> ChipList(listOf(none)) { UserMemoryStore.removeNone(ctx, card.id, slot); changed() }
+                    else -> Dash()
                 }
-                none != null -> Chip(none) { UserMemoryStore.removeNone(ctx, card.id, slot); changed() }
-                else -> Small("—")
+            }
+        }
+        CompactInput(add, { add = it }, "slot: value", Icons.Filled.Add) {
+            if (add.isNotBlank()) { UserMemoryStore.noteFromText(ctx, card.id, card.name, add); add = ""; changed() }
+        }
+        if (card.avoid.isNotEmpty()) {
+            Header("Asked to stop")
+            card.avoid.forEach { a -> Removable("", a) { UserMemoryStore.removeAvoid(ctx, card.id, a); changed() } }
+        }
+        if (card.bits.isNotEmpty()) { Header("Bits"); card.bits.forEach { Small("• $it") } }
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(card.id, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+            TextButton(onClick = { UserMemoryStore.setPinned(ctx, card.id, !card.pinned); changed() }) { Text(if (card.pinned) "Unpin" else "Pin") }
+            if (confirmDelete) TextButton(onClick = { UserMemoryStore.delete(ctx, card.id); changed() }) { Text("Confirm", color = MaterialTheme.colorScheme.error) }
+            else TextButton(onClick = { confirmDelete = true }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+        }
+    }
+}
+
+/** "label  content" with the label column fixed and the content taking the rest (so chips wrap instead of squishing). */
+@Composable
+private fun FieldRow(label: String, sub: String? = null, content: @Composable () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Column(Modifier.width(88.dp).padding(top = 5.dp)) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (sub != null) Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+        }
+        Box(Modifier.weight(1f).heightIn(min = 30.dp), contentAlignment = Alignment.CenterStart) { content() }
+    }
+}
+
+@Composable
+private fun Dash() = Small("—")
+
+/** A value with a small ✕, or a dash when empty. */
+@Composable
+private fun ValueOrDash(value: String, onRemove: () -> Unit) {
+    if (value.isBlank()) { Dash(); return }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(value, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f, fill = false))
+        IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
+            Icon(Icons.Filled.Close, "Remove", modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ChipList(items: List<String>, label: (String) -> String = { it }, onRemove: (String) -> Unit) {
+    if (items.isEmpty()) { Dash(); return }
+    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        items.forEach { v -> Chip(label(v)) { onRemove(v) } }
+    }
+}
+
+/** A value you can tap the pencil on to edit in place. */
+@Composable
+private fun EditableRow(label: String, value: String, onSave: (String) -> Unit) {
+    var editing by remember(label, value) { mutableStateOf(false) }
+    var text by remember(label, value) { mutableStateOf(value) }
+    FieldRow(label) {
+        if (editing) CompactInput(text, { text = it }, label, Icons.Filled.Check) { onSave(text.trim()); editing = false }
+        else Row(verticalAlignment = Alignment.CenterVertically) {
+            if (value.isBlank()) Dash() else Text(value, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f, fill = false))
+            IconButton(onClick = { editing = true }, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Filled.Edit, "Edit $label", modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(value = add, onValueChange = { add = it }, label = { Text("slot: value") }, singleLine = true, modifier = Modifier.weight(1f))
-        Button(onClick = { if (add.isNotBlank()) { UserMemoryStore.noteFromText(ctx, card.id, card.name, add); add = ""; changed() } }) { Text("Add") }
-    }
-    if (card.avoid.isNotEmpty()) {
-        Header("Asked to stop")
-        card.avoid.forEach { a -> Removable("", a) { UserMemoryStore.removeAvoid(ctx, card.id, a); changed() } }
-    }
-    if (card.bits.isNotEmpty()) { Header("Bits"); card.bits.forEach { Small("• $it") } }
+}
 
-    Header("Edit")
-    OutlinedTextField(value = rel, onValueChange = { rel = it }, label = { Text("role here") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-    OutlinedTextField(value = calls, onValueChange = { calls = it }, label = { Text("calls them") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Button(onClick = { UserMemoryStore.editFields(ctx, card.id, rel, card.howToTreat, calls); changed() }) { Text("Save") }
-        TextButton(onClick = { UserMemoryStore.setPinned(ctx, card.id, !card.pinned); changed() }) { Text(if (card.pinned) "Unpin" else "Pin") }
-        Spacer(Modifier.weight(1f))
-        if (confirmDelete) TextButton(onClick = { UserMemoryStore.delete(ctx, card.id); changed() }) { Text("Confirm delete", color = MaterialTheme.colorScheme.error) }
-        else TextButton(onClick = { confirmDelete = true }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+/** A slim one-line input with an action icon (instead of a tall outlined field + button). */
+@Composable
+private fun CompactInput(value: String, onChange: (String) -> Unit, placeholder: String, icon: ImageVector, onSubmit: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 12.dp)) {
+            BasicTextField(
+                value = value, onValueChange = onChange, singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onSubmit() }),
+                modifier = Modifier.weight(1f),
+                decorationBox = { inner ->
+                    if (value.isEmpty()) Text(placeholder, style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                    inner()
+                },
+            )
+            IconButton(onClick = onSubmit, modifier = Modifier.size(40.dp)) {
+                Icon(icon, placeholder, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+        }
     }
-    Text(card.id, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 // ── Cardinal ─────────────────────────────────────────────────────────────────
@@ -296,9 +367,8 @@ private fun CardinalSection() {
             }
         }
         if (self.style.isNotEmpty()) { Header("Speech"); self.style.forEach { Small("• $it") } }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(value = teach, onValueChange = { teach = it }, label = { Text("kind: trait") }, singleLine = true, modifier = Modifier.weight(1f))
-            Button(onClick = { if (teach.isNotBlank()) { PersonalityStore.teachTrait(ctx, teach); teach = ""; tick++ } }) { Text("Add") }
+        CompactInput(teach, { teach = it }, "kind: trait", Icons.Filled.Add) {
+            if (teach.isNotBlank()) { PersonalityStore.teachTrait(ctx, teach); teach = ""; tick++ }
         }
         if (confirmReset) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { PersonalityStore.reset(ctx); confirmReset = false; tick++ },
@@ -588,7 +658,8 @@ private fun Removable(key: String, value: String, always: Boolean = false, onRem
 private fun Chip(text: String, onRemove: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f), shape = MaterialTheme.shapes.small) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 8.dp)) {
-            Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface)
+            Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f, fill = false).padding(vertical = 5.dp))
             IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
                 Icon(Icons.Filled.Close, "Remove $text", modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
