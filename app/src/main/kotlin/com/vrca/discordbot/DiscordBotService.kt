@@ -1847,7 +1847,10 @@ class DiscordBotService : Service() {
     }
 
     /** A reply is one chat message: a blank-line second paragraph reads like a speech, so it's joined up. */
+    // Mentions are already off when sending; this also breaks @everyone/@here in the text itself (a zero-width
+    // space) so a mass ping can never happen, whatever the send options.
     private fun oneMessage(text: String): String = text.trim().replace(Regex("\\s*\\n\\s*\\n\\s*"), " ")
+        .replace(Regex("@(everyone|here)\\b"), "@\u200B$1")
 
     // Capitalised words that aren't people.
     private val NOT_NAMES = setOf("i", "im", "ive", "ill", "id", "ok", "okay", "lol", "lmao", "lmfao", "omg", "god", "bro", "bruh",
