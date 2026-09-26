@@ -39,7 +39,7 @@ mo: @Cardinal can you answer in spanish? what's your favourite food
 nia: @Cardinal stop replying to me
 > expect no-reply
 nia: @Cardinal ok actually one thing, what's 3+3
-> expect contains \b6\b|six
+> expect contains (?i)\b6\b|six
 # a bare "@Cardinal" means "answer that": replying to a message, or right after their own question
 pat: which one's better, the dune books or the movies?
 pat ^pat: @Cardinal
