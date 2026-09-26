@@ -167,7 +167,7 @@ private fun PeopleSection() {
                                 UserMemoryStore.bondOf(card.karma).substringBefore(" ("),
                                 UserMemoryStore.tzLine(card, now).substringBefore(',').ifBlank { null },
                                 discordRelTime(card.lastSeenMs, now).ifBlank { null }?.let { "seen $it" },
-                                UserMemoryStore.factLines(card).size.takeIf { it > 0 }?.let { "$it notes" },
+                                UserMemoryStore.factLines(card).size.takeIf { it > 0 }?.let { if (it == 1) "1 note" else "$it notes" },
                             ).joinToString(" · ")
                             if (line.isNotBlank()) Small(line)
                         }
@@ -193,33 +193,42 @@ private fun PersonDetail(card: UserMemoryStore.Card, changed: () -> Unit) {
 
     Header("Identity")
     Row(verticalAlignment = Alignment.CenterVertically) { Key("with them"); Small("${UserMemoryStore.bondOf(card.karma).substringBefore(" (")} · karma ${card.karma}") }
-    Removable("pronouns", card.pronouns) { UserMemoryStore.clearPronouns(ctx, card.id); changed() }
-    Removable("time", UserMemoryStore.tzLine(card, now).let { if (it.isBlank()) "" else "$it (${card.tz})" }) { UserMemoryStore.clearTz(ctx, card.id); changed() }
+    Removable("pronouns", card.pronouns, always = true) { UserMemoryStore.clearPronouns(ctx, card.id); changed() }
+    Removable("time", UserMemoryStore.tzLine(card, now).let { if (it.isBlank()) "" else "$it (${card.tz})" }, always = true) { UserMemoryStore.clearTz(ctx, card.id); changed() }
+    Removable("role here", card.relationship, always = true) { UserMemoryStore.editFields(ctx, card.id, "", card.howToTreat, card.preferredNick); changed() }
+    Removable("calls them", card.preferredNick, always = true) { UserMemoryStore.editFields(ctx, card.id, card.relationship, card.howToTreat, ""); changed() }
     val langs = UserMemoryStore.spokenLanguages(card)
-    if (langs.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Key("speaks")
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { langs.forEach { l -> Chip(l) { UserMemoryStore.removeLanguage(ctx, card.id, l); changed() } } }
+        if (langs.isEmpty()) Small("—")
+        else FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { langs.forEach { l -> Chip(l) { UserMemoryStore.removeLanguage(ctx, card.id, l); changed() } } }
     }
     val nicks = card.nicknames.filterNot { it.equals(card.preferredNick, true) }
-    if (nicks.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Key("nicknames")
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { nicks.forEach { n -> Chip(n) { UserMemoryStore.removeNick(ctx, card.id, n); changed() } } }
+        if (nicks.isEmpty()) Small("—")
+        else FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { nicks.forEach { n -> Chip(n) { UserMemoryStore.removeNick(ctx, card.id, n); changed() } } }
     }
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Small("replied ${card.interactions}×"); discordRelTime(card.lastSeenMs, now).takeIf { it.isNotBlank() }?.let { Small("· last message $it") }
     }
 
     Header("Notes")
-    val any = UserMemoryStore.SLOTS.any { card.notes[it].orEmpty().isNotEmpty() || it in card.none }
-    if (!any) Small("—")
     UserMemoryStore.SLOTS.forEach { slot ->
         val vals = card.notes[slot].orEmpty()
         val none = UserMemoryStore.noneText(card, slot)
-        if (vals.isNotEmpty() || none != null) Row(verticalAlignment = Alignment.CenterVertically) {
-            Key(UserMemoryStore.LABEL[slot] ?: slot)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                vals.forEach { v -> Chip(if (UserMemoryStore.isUnsure(card, slot, v)) "$v ?" else v) { UserMemoryStore.removeNote(ctx, card.id, slot, v, force = true); changed() } }
-                if (vals.isEmpty() && none != null) Chip(none) { UserMemoryStore.removeNone(ctx, card.id, slot); changed() }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.width(76.dp)) {
+                Text(UserMemoryStore.LABEL[slot] ?: slot, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("${vals.size}/${UserMemoryStore.capOf(slot)}", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+            }
+            when {
+                vals.isNotEmpty() -> FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    vals.forEach { v -> Chip(if (UserMemoryStore.isUnsure(card, slot, v)) "$v ?" else v) { UserMemoryStore.removeNote(ctx, card.id, slot, v, force = true); changed() } }
+                }
+                none != null -> Chip(none) { UserMemoryStore.removeNone(ctx, card.id, slot); changed() }
+                else -> Small("—")
             }
         }
     }
@@ -263,12 +272,12 @@ private fun CardinalSection() {
             IconButton(onClick = { tick++ }) { Icon(Icons.Filled.Refresh, "Refresh") }
         }
         if (self.mood.isNotBlank()) Removable("mood", self.mood) {}
-        if (self.traits.isEmpty()) Small("No traits yet")
         kinds.forEach { (k, label) ->
             val list = self.traits.filter { (it.kind.ifBlank { "" }) == k || (k == "" && it.kind !in PersonalityStore.KINDS) }
                 .sortedByDescending { (if (it.pinned) 100 else 0) + it.strength }
-            if (list.isEmpty()) return@forEach
-            Header("$label (${list.size})")
+            if (list.isEmpty() && k == "") return@forEach
+            Header("$label ${list.size}/${PersonalityStore.capOf(k)}")
+            if (list.isEmpty()) Small("—")
             list.forEach { t ->
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { PersonalityStore.setTraitPinned(ctx, t.text, !t.pinned); tick++ }, modifier = Modifier.size(32.dp)) {
@@ -564,10 +573,11 @@ private fun Mono(text: String) = Text(text, style = MaterialTheme.typography.bod
 
 /** "key  value  ✕" — hidden when the value is blank. */
 @Composable
-private fun Removable(key: String, value: String, onRemove: () -> Unit) {
-    if (value.isBlank()) return
+private fun Removable(key: String, value: String, always: Boolean = false, onRemove: () -> Unit) {
+    if (value.isBlank() && !always) return
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         if (key.isNotBlank()) Key(key)
+        if (value.isBlank()) { Small("—"); return@Row }
         Text(value, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
         IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) { Icon(Icons.Filled.Close, "Remove", modifier = Modifier.size(16.dp)) }
     }

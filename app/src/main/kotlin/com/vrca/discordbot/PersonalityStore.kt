@@ -183,6 +183,7 @@ object PersonalityStore {
     /** Cardinal's slots, like a person's card: what he's called, likes, dislikes, how he types, bits, habits. */
     val KINDS = listOf("title", "likes", "dislikes", "speech", "bit", "habit")
     /** Room per slot (how he types gets the most). */
+    fun capOf(kind: String): Int = KIND_CAP[kind] ?: 4
     private val KIND_CAP = mapOf("title" to 3, "likes" to 5, "dislikes" to 5, "speech" to 6, "bit" to 4, "habit" to 4, "" to 3)
     /** "annoyed at bob" / "upset" is a mood, not who he is. */
     private val MOOD_TRAIT = Regex("(?i)^(is |feeling |feels |being )?(annoyed|upset|angry|mad|pissed|frustrated|happy|sad|tired|bored|excited|confused|salty|grumpy|irritated|done with|over it|annoyance)\\b")
