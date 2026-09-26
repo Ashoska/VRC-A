@@ -1495,6 +1495,10 @@ class DiscordBotService : Service() {
                 if (!byThem && (people < 2 || denied)) out.remove("relationship")
             }
         }
+        // "Asked you to stop …" is theirs to ask: only when their own lines ask for it (kim's "no he isn't" isn't bob
+        // asking to stop anything).
+        if (out.has("avoid") && selfLines.none { STOP_ASK_RE.containsMatchIn(it.text) }) out.remove("avoid")
+        if (out.has("notNickname") && selfLines.none { STOP_ASK_RE.containsMatchIn(it.text) }) out.remove("notNickname")
         if (!said(out.optString("nickname")) || !calledByOthers(out.optString("nickname"))) out.remove("nickname")
         val pref = out.optString("preferredName")
         if (!said(pref) || pref.lowercase().trim() in NICK_SLANG) out.remove("preferredName")
@@ -1558,6 +1562,7 @@ class DiscordBotService : Service() {
                 factWords(t.text).any { it in words }
         }
     }
+    private val STOP_ASK_RE = Regex("(?i)\\b(stop|quit|don'?t|do not|dont|no more|never|please not|cut it out|knock it off|hate (it|being|when)|not (a fan|okay|ok) )")
     private val DENIAL_RE = Regex("(?i)\\bno (he|she|they) (isn'?t|is not|aren'?t|are not|doesn'?t|don'?t)\\b|\\b(he|she|they)'?s not\\b|\\bthat'?s (a lie|not true|cap)\\b|\\bcap\\b|\\bnot true\\b|\\bno he'?s not\\b")
     private val FIRST_PERSON_WORD = Regex("(?i)\\b(i|i'?m|im|i'?ve|ive|me|my|mine|myself)\\b")
     private val THIRD_PERSON_WORD = Regex("(?i)\\b(he|she|they|he'?s|hes|she'?s|shes|they'?re|theyre|his|her|their|him|them)\\b")
