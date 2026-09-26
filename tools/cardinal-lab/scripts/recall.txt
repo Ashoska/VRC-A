@@ -1,7 +1,7 @@
 # Knowledge test: does Cardinal answer from what it knows? A lived-in memory, then memory questions
 # with an automatic check for the right fact after each (LIVE only — DRY replies are synthetic).
 # Used for before/after comparisons of prompt changes: same questions, same memory, count the ✓.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 > teach mood chill
 > teach self roasts people affectionately

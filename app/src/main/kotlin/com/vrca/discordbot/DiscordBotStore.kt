@@ -31,6 +31,7 @@ object DiscordBotStore {
     private const val KEY_AMBIENT_PCT = "ambient_percent"
     private const val KEY_AMBIENT_COOLDOWN = "ambient_cooldown_sec"
     private const val KEY_CONTEXT_TURNS = "context_turns"
+    private const val KEY_CONTEXT_DEFAULT_V10 = "context_default_v10"
     private const val KEY_SHADOW = "shadow_mode"
     private const val KEY_MUTED = "muted_channels"
     private const val KEY_ENABLED = "enabled"
@@ -99,6 +100,12 @@ object DiscordBotStore {
         if (p != null && !p.getBoolean(KEY_MODEL_DEFAULT_V2, false)) {
             val e = p.edit().putBoolean(KEY_MODEL_DEFAULT_V2, true)
             if (p.getString(KEY_MODEL, "").orEmpty().trim() == DiscordBotLimits.LEGACY_REPLY_MODEL) e.putString(KEY_MODEL, DEFAULT_MODEL)
+            e.apply()
+        }
+        // The old default (8) was saved by any settings save; move it to the new default once.
+        if (p != null && !p.getBoolean(KEY_CONTEXT_DEFAULT_V10, false)) {
+            val e = p.edit().putBoolean(KEY_CONTEXT_DEFAULT_V10, true)
+            if (p.getInt(KEY_CONTEXT_TURNS, -1) == 8) e.putInt(KEY_CONTEXT_TURNS, DEFAULT_CONTEXT_TURNS)
             e.apply()
         }
         return Config(

@@ -1,6 +1,6 @@
 # Reply edge cases: called by name without an @, talked ABOUT by name, nickname lookups, unknown people,
 # prompt injection, two questions at once, a brand-new person, "ping everyone", recalling what was just said.
-@set ambient=22 context=8
+@set ambient=22 context=10
 @channel general main hangout — anything goes
 > teach card erin lives in Lisbon
 > teach nick erin big d

@@ -1,6 +1,6 @@
 # Memory forms while Cardinal says NOTHING: an inside joke, a channel running bit and the day log all
 # come from chat he never replied to (ambient off, no mentions), then he's asked about them.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 [general]
 bob: guys i just ate soup with a fork for 20 minutes before realising

@@ -1,7 +1,7 @@
 # People: pronouns (set only by the person, shown next to their name, never a fact), the languages they're seen
 # writing (English included), and the device-found junk facts (a question, gibberish, GIF links, trivia, answering
 # for someone else, quoted examples).
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 [general]
 ashoska: hey all, my pronouns are she/her btw
@@ -59,3 +59,21 @@ ashoska: example
 ashoska: 今日はどうですか? @Cardinal
 > expect reply
 > expect contains (今日|調子|元気|絶好調|最高|気分|いい日|まあまあ|悪くない)
+# "A.I" isn't "I": asking to rename Cardinal isn't a fact about the one asking (device: "about: Artificial Igor").
+cornelius: ash could you rename cardinal to A.I which stands for Artificial Igor he said he would like it
+> quiet
+> expect card cornelius not-contains (?i)igor
+# A language said in words goes on their own card (device: "try add that Japanese to my languages" did nothing).
+ashoska: try add that Japanese to my languages
+erin: i also speak german btw
+nah: i dont speak french
+> quiet
+> expect card ashoska contains (?i)japanese
+> expect card erin contains (?i)german
+> expect card nah not-contains (?i)french
+# Asked what languages someone speaks: the languages seen in their own lines are on their card (device: "gibberish").
+> quiet
+ashoska: Cardinal what languages does kiellmann speak?
+> expect reply
+> expect contains (?i)(czech|čeština|česky)
+> expect contains (?i)english

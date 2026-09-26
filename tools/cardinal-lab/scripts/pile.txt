@@ -1,6 +1,6 @@
 # Paraphrase pile (seen on a real card): one topic reworded many times. After a learn pass touching the
 # person, the pile is merged — but genuinely different facts (and other topics) must survive.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 > teach card alice studies AI and machine learning
 > teach card alice can create custom AI engines

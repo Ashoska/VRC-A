@@ -1,6 +1,6 @@
 # Facts about people change: the person corrects one, others dispute one, someone asks not to be called
 # a nickname. Stored memory must follow — and must NOT change when nothing was actually corrected.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 > teach card alice lives in Toronto
 > teach card alice owns a black cat named Miso

@@ -1,6 +1,6 @@
 # Learning edge cases, mostly from a real chat: jokes, what someone is doing right now, slang aimed at
 # someone else, a reworded fact, family facts, what-ifs, sarcasm, a troll, and a user with no display name.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 > teach card alice has a cat named Miso
 [general]

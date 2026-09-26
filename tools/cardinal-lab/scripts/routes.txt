@@ -1,6 +1,6 @@
 # Relationship routes: a trait evolves with the room (poly, then a breakup) instead of Cardinal just
 # refusing; joking complaints don't silence him or delete a trait.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 > teach self married to Shrek
 > teach self married to Shrek

@@ -2,7 +2,7 @@
 # section is populated: personality digest, people cards (incl. a recall), server culture, a channel
 # bit, the rolling summary, a cross-channel pull, an image cue and a Japanese turn.
 # DRY is enough for this one — it's about prompt SIZE and STRUCTURE.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 @channel media pics, clips, screenshots
 > teach mood amused and a little sleepy

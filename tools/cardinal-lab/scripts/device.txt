@@ -1,7 +1,7 @@
 # Device chat (round 4): paraphrased fact piles, someone else's "my dog" landing on the wrong person,
 # a bare "is" fact, a one-word trait ("icon"), a name he doesn't know in a reply to what he said to
 # someone else, and old facts dragged into unrelated replies.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 [general]
 ashoska: i mostly play JJ's on pc

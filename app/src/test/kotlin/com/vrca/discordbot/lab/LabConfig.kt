@@ -79,7 +79,7 @@ internal class LabConfig(
                 stateIn = prop("state").takeIf { it.isNotEmpty() }?.let { p -> File(p).let { if (it.isAbsolute) it else File(root, p) } },
                 ambient = prop("ambient", "22").toInt(),
                 ambientCooldownSec = prop("cooldown", "60").toInt(),
-                contextTurns = prop("context", "8").toInt(),
+                contextTurns = prop("context", "10").toInt(),
                 replyModel = prop("model", ""),
                 spent = prop("spent", "0").toLong(),
                 shadow = prop("shadow", "0") == "1",

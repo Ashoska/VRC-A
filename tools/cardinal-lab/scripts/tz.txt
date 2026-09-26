@@ -1,6 +1,6 @@
 # Timezones: stated ("i'm on EST" → a real zone, shown as the live UTC offset), where they live (city → zone,
 # via the learner), a question isn't a statement, and a time question about someone uses their local time.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 [general]
 alice: i'm on EST btw

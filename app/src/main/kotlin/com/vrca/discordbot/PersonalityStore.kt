@@ -75,7 +75,7 @@ object PersonalityStore {
                 val t = o.optString("t").trim()
                 val pinned = o.optBoolean("p", false)
                 if (t.isBlank() || (!pinned && tooVague(t))) null
-                else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), o.optBoolean("p", false), o.optLong("r", 0L), o.optString("w"), o.optString("k"))
+                else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), o.optBoolean("p", false), o.optLong("r", 0L), o.optString("w"), normKind(o.optString("k"), t))
             }
         }
     } catch (_: Exception) { emptyList() }
@@ -127,6 +127,24 @@ object PersonalityStore {
         return build(s, keep)
     }
 
+    /**
+     * The reply prompt's personality: mood, and EVERY trait (strongest first, titles marked), plus any
+     * admin-taught speech habits / remembered moments. Blank parts are left out.
+     */
+    data class PromptSelf(val mood: String, val traits: String)
+    fun promptSelf(ctx: Context): PromptSelf {
+        val s = load(ctx)
+        val sorted = ranked(s.traits)
+        val lines = ArrayList<String>()
+        for ((label, kinds) in KIND_LABELS) {
+            val g = sorted.filter { it.kind in kinds }.map { it.text.trim().trimEnd('.') }.toMutableList()
+            if ("speech" in kinds) s.style.take(3).forEach { g.add(it.trim().trimEnd('.')) }
+            if (g.isNotEmpty()) lines.add("- " + label.lowercase() + ": " + g.joinToString("; "))
+        }
+        if (s.episodes.isNotEmpty()) lines.add("- remembers: " + s.episodes.takeLast(2).joinToString("; ") { it.trim().trimEnd('.') })
+        return PromptSelf(s.mood.trim().trimEnd('.'), lines.joinToString("\n"))
+    }
+
     private fun ranked(traits: List<Trait>) =
         traits.sortedWith(compareByDescending<Trait> { (if (it.pinned) 100 else 0) + it.strength }.thenByDescending { it.lastMs })
 
@@ -151,8 +169,27 @@ object PersonalityStore {
         return sb.toString()
     }
 
-    private val KIND_LABELS = listOf("Titles" to setOf("title"), "Bits" to setOf("bit"), "Tastes" to setOf("taste"),
-        "Habits" to setOf("habit"), "Traits" to setOf("", "other"))
+    private val KIND_LABELS = listOf("Titles" to setOf("title"), "Likes" to setOf("likes"), "Dislikes" to setOf("dislikes"),
+        "How you type" to setOf("speech"), "Bits" to setOf("bit"), "Habits" to setOf("habit"), "Traits" to setOf("", "other"))
+
+    /** Cardinal's slots, like a person's card: what he's called, likes, dislikes, how he types, bits, habits. */
+    val KINDS = listOf("title", "likes", "dislikes", "speech", "bit", "habit")
+    /** Room per slot (how he types gets the most). */
+    private val KIND_CAP = mapOf("title" to 3, "likes" to 5, "dislikes" to 5, "speech" to 6, "bit" to 4, "habit" to 4, "" to 3)
+    /** "annoyed at bob" / "upset" is a mood, not who he is. */
+    private val MOOD_TRAIT = Regex("(?i)^(is |feeling |feels |being )?(annoyed|upset|angry|mad|pissed|frustrated|happy|sad|tired|bored|excited|confused|salty|grumpy|irritated|done with|over it|annoyance)\\b")
+    private val DISLIKE_RE = Regex("(?i)^(hates?|can'?t stand|dislikes?|despises?|not a fan|refuses|won'?t|avoids?|is against|bans?)\\b")
+    /** A kind name → one of [KINDS] ("taste" splits into likes/dislikes by the wording). "" = no slot. */
+    fun normKind(kind: String, text: String): String = when (kind.trim().lowercase()) {
+        "title", "titles", "role" -> "title"
+        "bit", "bits", "joke" -> "bit"
+        "habit", "habits" -> "habit"
+        "speech", "style", "typing", "talk", "talks", "voice", "how you type" -> "speech"
+        "likes", "like", "loves", "love" -> "likes"
+        "dislikes", "dislike", "hates", "hate" -> "dislikes"
+        "taste", "tastes" -> if (DISLIKE_RE.containsMatchIn(text.trim())) "dislikes" else "likes"
+        else -> ""
+    }
 
     /** One-line mood for the admin dashboard. */
     fun mood(ctx: Context): String = load(ctx).mood
@@ -232,8 +269,11 @@ object PersonalityStore {
             if (i == idx) tr.copy(strength = (tr.strength + REINFORCE_INLINE).coerceAtMost(MAX_STRENGTH), lastMs = nowMs) else tr
         }
         val fresh = Trait(t, START_STRENGTH, false, nowMs, kind = kind)
-        if (traits.size < DiscordBotLimits.MAX_TRAITS) return traits + fresh
+        // Each slot has its own room, like a person's card: a full slot swaps out its weakest new entry.
+        val sameKind = traits.count { it.kind == kind }
+        if (sameKind < (KIND_CAP[kind] ?: 4) && traits.size < DiscordBotLimits.MAX_TRAITS) return traits + fresh
         val victim = traits.withIndex()
+            .filter { (sameKind >= (KIND_CAP[kind] ?: 4)).let { full -> !full || it.value.kind == kind } }
             .filter { !it.value.pinned && it.value.strength <= START_STRENGTH }
             .minWithOrNull(compareBy<IndexedValue<Trait>>({ it.value.strength }, { it.value.lastMs }))
             ?: return traits
@@ -252,12 +292,12 @@ object PersonalityStore {
         // A trait must be DURABLE identity, never just the current mood word (that was the dup bug).
         val t = trait?.trim()?.trimEnd('.')?.takeIf {
             it.isNotBlank() && it.length in 3..80 && !it.equals(m, true) && !it.equals(mood?.trim(), true) &&
-                !GENERIC_SELF.matches(it) && !restatesCore(it) && !tooVague(it)
+                !GENERIC_SELF.matches(it) && !restatesCore(it) && !tooVague(it) && !MOOD_TRAIT.containsMatchIn(it)
         }
         val s = style?.trim()?.takeIf { it.isNotBlank() && it.length in 4..90 }
         val cur = load(ctx)
         var traits = decayIfDue(ctx, cur.traits, now)
-        if (t != null) traits = addOrReinforce(traits, t, now, kind.takeIf { it in setOf("taste", "title", "bit", "habit") }.orEmpty())
+        if (t != null) traits = addOrReinforce(traits, t, now, normKind(kind, t))
         // Learned speech habits: dedup near-identical, keep the most recent handful.
         val newStyle = if (s != null && cur.style.none { it.equals(s, true) })
             (cur.style + s).takeLast(6) else cur.style
@@ -337,11 +377,14 @@ object PersonalityStore {
 
     /** Admin: teach a trait (inject pinned at max strength) — correction, not a persona. */
     fun teachTrait(ctx: Context, text: String) {
-        val t = text.trim(); if (t.isBlank()) return
+        // "likes: pineapple pizza" / "speech: caps when hyped" → that slot; plain text → no slot.
+        val head = text.substringBefore(':', "").trim()
+        val kind = if (head.isNotBlank() && head.length <= 14) normKind(head, text.substringAfter(':')) else ""
+        val t = (if (kind.isNotBlank()) text.substringAfter(':') else text).trim(); if (t.isBlank()) return
         val cur = load(ctx)
         if (cur.traits.any { it.text.equals(t, true) }) { setTraitPinned(ctx, t, true); return }
         save(ctx, cur.copy(
-            traits = (listOf(Trait(t, MAX_STRENGTH, pinned = true, lastMs = System.currentTimeMillis())) + cur.traits)
+            traits = (listOf(Trait(t, MAX_STRENGTH, pinned = true, lastMs = System.currentTimeMillis(), kind = kind)) + cur.traits)
                 .take(DiscordBotLimits.MAX_TRAITS)
         ))
     }

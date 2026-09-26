@@ -2,7 +2,7 @@
 # (production default 22%), addressed questions, reply chains, an image, a cross-channel reference,
 # a Japanese speaker, a "stop", recall questions, nicknames and a react request.
 # DRY: measures routing volume, prompt sizes and cost per message. LIVE: real behaviour end to end.
-@set ambient=22 cooldown=60 context=8
+@set ambient=22 cooldown=60 context=10
 @gap 900
 @channel general main hangout — anything goes
 @channel media pics, clips, screenshots

@@ -1,7 +1,7 @@
 # Conversation following: once Cardinal is talking with someone, their next messages reach him without an
 # @ or a reply — but only while that conversation is live, only for them, never a line meant for someone
 # else, and for several people at once. People he isn't talking with are never checked (no model call).
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 [general]
 alice: @Cardinal what's the best pizza topping

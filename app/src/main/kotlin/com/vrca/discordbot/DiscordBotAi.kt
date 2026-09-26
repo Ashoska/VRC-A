@@ -94,19 +94,9 @@ object DiscordBotAi {
         val bitNow: String = "",                 // the room-riffed bit's new version (only asked when one is in play)
     )
 
-    /**
-     * The fixed core: identity + the voice rules that fixed real misbehaviour (bot-meta, complaining
-     * about pings, fake refusals, invented facts, bouncing questions back, flat hype). Learned
-     * personality layers on top via [ReplyCtx.selfDigest].
-     */
-    // Rules only, no personality: how he talks (sass, length, caps…) comes from his learned traits and mood.
+    /** The fixed core: rules only. How he talks comes from his learned traits and mood. */
     private const val CORE = PersonalityStore.ANCHOR +
-        " You chat here like anyone else. Go along with fun asks (write something, pick, rate, roleplay, jokes about" +
-        " anyone, politicians of any side included) in your own voice, quirks and mood; no lecturing. If they push after" +
-        " you dodged, do it. Answer what you know; don't make up real-world facts. Have real opinions. Play along with" +
-        " jokes about you instead of denying them. Don't complain about pings."
-
-    private val TRAIT_LABEL = Regex("\\b(Titles|Bits|Tastes|Habits|Traits):")
+        " Do fun asks (politicians too). Answer what you know. Play along with jokes about you. Don't invent real-world facts."
 
     private fun endpoint(cfg: DiscordBotStore.Config, model: String): String =
         if (cfg.cfGatewayId.isNotBlank())
@@ -116,88 +106,71 @@ object DiscordBotAi {
 
     /**
      * Everything the reply prompt needs, decided by the caller (the service picks what's relevant;
-     * blank/false = leave that section out entirely).
+     * blank/false = leave that line out entirely).
      */
     data class ReplyCtx(
-        val selfDigest: String,      // compact learned personality (mood + top traits)
-        val channelInfo: String,     // "#general — <topic>": where you are, so you read the register
-        val serverCulture: String,   // server memories relevant to this moment (+ revived topics)
-        val channelBits: String,     // a running bit specific to THIS channel, deployed occasionally
-        val crossRef: String,        // labelled recent messages from a channel the person referenced
-        val answering: String,       // who you're answering + what you know about them (always)
-        val othersPresent: Boolean,  // other people are talking too → don't answer the wrong person
-        val othersBlock: String,     // other people worth knowing about right now
+        val channelLine: String,     // "#general (topic)"
+        val dateLine: String,        // "Sat 26 Sep 2026" (+ ", 14:32 UTC (your timezone)" on a time question)
+        val mood: String,
+        val traits: String,          // every trait, strongest first
+        val talkingTo: String,       // "Talking to: …" + one known thing per line
+        val othersBlock: String,     // "- name …" lines for the other people worth knowing now
         val summary: String,         // earlier in the conversation, beyond the transcript
+        val serverCulture: String,   // server memories relevant to this moment (+ revived topics)
+        val channelBits: String,     // a running bit specific to THIS channel
+        val crossRef: String,        // "#channel:\n- name: text" from a channel they referenced
+        val dayLog: String = "",     // "what happened <day>?" → that day's notes
+        val emojiHint: String,       // custom emoji names (only when he hasn't used one lately)
         val olderBotLines: List<String>, // own recent lines NOT already visible in the transcript
-        val ownLinesVisible: Boolean,    // own lines are in the transcript (anti-repeat rule applies)
-        val emojiHint: String,       // the server's most-used custom emojis (always, when it has any)
-        val langHint: String,        // language to answer in (from the message's script)
-        val namesRule: Boolean,      // nicknames/aliases in play → one-name-at-a-time rule
-        val recall: Boolean,         // they asked what Cardinal knows → answer-from-memory rule
+        val hints: List<String>,     // short situation lines, most important last
+        val langHint: String,        // language to answer in
         val shortHint: Boolean,
-        val dayLog: String = "",     // "what happened <day>?" → that day's log/recap
-        val aboutSelf: Boolean = false,  // they're asking about Cardinal himself (his job/role/what he's known for)
-        val bitCue: String = "",         // one of his bits the message is riffing on → yes-and it
-        val reactingToYou: Boolean = false, // a short reaction ("ohh shit", "no way") to what Cardinal just said
-        val clock: String = "",             // asked the time/date/timezone → the real UTC clock
-        val verdictAsk: Boolean = false,    // "rate me 1-10" / "pick one" / "would you rather" → give an actual answer
-        val nameHint: String = "",          // a name in their message Cardinal doesn't know (and who it most likely is)
-        val pronouns: Map<String, String> = emptyMap(), // lowercased speaker name → the pronouns they asked for
     )
 
     suspend fun reply(cfg: DiscordBotStore.Config, model: String, turns: List<Turn>, c: ReplyCtx): ReplyResult {
         val sys = buildString {
-            append(CORE)
-            // Only what he actually has: the quirks line appears only when there are traits to talk about.
-            if (c.selfDigest.isNotBlank()) append("\n\n[You] ").append(c.selfDigest)
-                .append(if (TRAIT_LABEL.containsMatchIn(c.selfDigest)) " Use them only when they fit; if the chat twists one, go with it." else "")
-                .append(if (c.aboutSelf) " They're asking about you right now: say your role or quirk plainly (its actual name), then add flavour." else "")
-                .append(if (c.bitCue.isNotBlank()) " They're riffing on your bit \"${c.bitCue}\": yes-and where they take it (a new twist is fun), don't shut it down." else "")
-            if (c.channelInfo.isNotBlank()) append("\n\n[Channel] ").append(c.channelInfo)
-            // Who he's talking to first, then background knowledge, then rules.
-            if (c.answering.isNotBlank()) {
-                append("\n\n[Answering] ").append(c.answering)
-                if (c.othersPresent) append(" (others in the chat are background)")
-            }
-            if (c.othersBlock.isNotBlank()) append("\n\n[Others]\n").append(c.othersBlock)
-            if (c.summary.isNotBlank()) append("\n\n[Earlier] ").append(c.summary)
-            if (c.serverCulture.isNotBlank()) append("\n\n[Server memories]\n").append(c.serverCulture)
-            if (c.channelBits.isNotBlank()) append("\n\n[Running bit here, only if it fits] ").append(c.channelBits)
-            if (c.crossRef.isNotBlank()) append("\n\n[Another channel they mentioned]\n").append(c.crossRef)
-            if (c.dayLog.isNotBlank()) append("\n\n[What happened, from your notes — other people's doings unless it says Cardinal]\n").append(c.dayLog)
-            if (c.namesRule) append("\n\n[Names] One name per person; don't swap nicknames.")
-            if (c.recall) append("\n\n[Memory question] Answer from what's above: say plainly what happened (who did what), as if they'd forgotten, not a hint or a vague 'yeah I saw'. If there's nothing, say so. Don't invent.")
-            if (c.langHint.isNotBlank()) append("\n\n[Language] Reply in ").append(c.langHint).append(if (c.langHint == "English") ", whatever language came before." else ", native script, and answer what they actually said.")
-            if (c.emojiHint.isNotBlank())
-                append("\n\n[Emojis] ").append(c.emojiHint).append(" or normal ones; most messages need none.")
-            if (c.olderBotLines.isNotEmpty())
-                append("\n\n[Don't repeat] Recently said: ").append(c.olderBotLines.joinToString(" / ") { "\"" + (if (it.length > 40) it.take(36).trimEnd() + "…" else it) + "\"" })
-            else if (c.ownLinesVisible) append("\n\n[Don't repeat] your earlier lines.")
-            if (c.reactingToYou) append("\n\nTheir message is a reaction to what you just said (surprise, agreement, a laugh), not a greeting: respond to that.")
-            if (c.clock.isNotBlank()) append("\n\n[Clock] ").append(c.clock)
-            if (c.verdictAsk) append("\n\nThey asked you to rate or pick: your reply must include your actual number or choice (even with little to go on, guess from the chat). Roast them while you give it; no dodging or asking for more.")
-            if (c.shortHint) append("\n\nKeep it to one short line.")
-            // A detail question still gets a chat message, not a guide cut off at the token limit.
-            else append("\n\nA few lines at most, like a chat message (no headings or long lists).")
-            // Last before the output line: the model weighs the end of the prompt most, and these are the
-            // "who is who" calls it kept getting wrong ("don't encourage him" about itself).
-            if (c.nameHint.isNotBlank()) append("\n\n[Who] ").append(c.nameHint)
-            append("\n\nReply with just your message, no name prefix.")
+            append(CORE).append('\n')
+            if (c.channelLine.isNotBlank()) append("\nChannel: ").append(c.channelLine)
+            if (c.dateLine.isNotBlank()) append("\nDate: ").append(c.dateLine)
+            if (c.mood.isNotBlank()) append("\nMood: ").append(c.mood)
+            if (c.traits.isNotBlank()) append("\nYou (when it fits):\n").append(c.traits)
+            append("\n\n").append(c.talkingTo)
+            if (c.othersBlock.isNotBlank()) append("\nOthers:\n").append(c.othersBlock)
+            val extra = ArrayList<String>()
+            if (c.summary.isNotBlank()) extra.add("Earlier: " + c.summary)
+            if (c.serverCulture.isNotBlank()) extra.add("Server memories:\n" + c.serverCulture)
+            if (c.channelBits.isNotBlank()) extra.add("Bit here: " + c.channelBits)
+            if (c.crossRef.isNotBlank()) extra.add("From " + c.crossRef)
+            if (c.dayLog.isNotBlank()) extra.add("Your notes (others' doings unless it says Cardinal):\n" + c.dayLog)
+            if (c.emojiHint.isNotBlank()) extra.add("Emojis: " + c.emojiHint)
+            if (c.olderBotLines.isNotEmpty()) extra.add("Said recently: " + c.olderBotLines.joinToString(" / ") {
+                "\"" + (if (it.length > 40) it.take(36).trimEnd() + "…" else it) + "\"" })
+            if (extra.isNotEmpty()) append("\n\n").append(extra.joinToString("\n"))
+            // Situation lines last: the model weighs the end of the prompt most.
+            val tail = ArrayList(c.hints)
+            if (c.langHint.isNotBlank()) tail.add(if (c.langHint == "English") "Reply in English."
+                else "Reply in ${c.langHint}, native script; answer what they said.")
+            tail.add(if (c.shortHint) "One short line." else "A few chat lines, no lists.")
+            // Without this it sometimes echoes the last message back ("cornelius: no im… 💀 cornelius, please").
+            tail.add("Reply with just your message, no name prefix.")
+            append("\n\n").append(tail.joinToString("\n"))
         }
         val messages = JSONArray().put(obj("system", sys))
         // Merge consecutive same-author turns so the transcript reads as fewer, fuller turns.
         for (t in mergeTurns(turns)) {
             if (t.text.isBlank()) continue
-            // Each speaker's own pronouns ride next to their name, so the reply never has to guess.
-            val who = c.pronouns[t.name.lowercase().trim()]?.let { "${t.name} ($it)" } ?: t.name
-            messages.put(obj(if (t.isBot) "assistant" else "user", if (t.isBot) t.text else "$who: ${t.text}"))
+            messages.put(obj(if (t.isBot) "assistant" else "user", if (t.isBot) t.text else "${t.name}: ${t.text}"))
         }
         val maxTok = if (c.shortHint) DiscordBotLimits.SHORT_REPLY_MAX_TOKENS else DiscordBotLimits.REPLY_MAX_TOKENS
         return when (val r = call(cfg, model, messages, maxTok)) {
             is Result.Ok -> {
-                // Defensive: strip any stray tail if the model still emits one out of habit.
+                // Defensive: strip any stray tail / a "Cardinal:" name prefix the model may copy from the chat.
                 val idx = r.text.indexOf(MEM_DELIM)
                 val text = (if (idx >= 0) r.text.substring(0, idx) else r.text).trim()
+                    .replace(Regex("^(?i)\\(replying to [^)]{0,60}\\)\\s*"), "")
+                    .replace(Regex("^(?i)\\**(cardinal|me)\\**(\\s*\\([^)]{0,20}\\))?\\s*:\\s*"), "")
+                    // It sometimes writes extra turns of its own ("… cardinal: 56. cardinal: wait…").
+                    .replace(Regex("(?i)\\s*\\bcardinal\\s*:\\s+"), " ").trim()
                 if (text.isBlank()) ReplyResult.Error("Empty reply") else ReplyResult.Ok(text)
             }
             is Result.Error -> ReplyResult.Error(r.message)
@@ -218,12 +191,14 @@ object DiscordBotAi {
         // Follow-up mode: someone Cardinal was just talking with wrote again without @-ing him.
         if (followWith.isNotBlank()) {
             val (theirs, his) = exchange ?: ("" to turns.lastOrNull { it.isBot }?.text.orEmpty())
-            val sys = "Cardinal (a member of this Discord) was talking with $followWith" +
-                (if (theirs.isNotBlank()) " — $followWith said \"${theirs.take(140)}\" and Cardinal answered \"${his.take(140)}\". " else "; Cardinal's last line to them: \"${his.take(140)}\". ") +
-                "Is $followWith's LAST message a reply to Cardinal? Only if it clearly continues with Cardinal: answers Cardinal's question, " +
-                "reacts to what Cardinal said, or asks Cardinal something. Output only JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<emoji or empty>\"}. " +
-                "Reply (react if it's only 'lol'/'true'/an emoji). Ignore when it answers or continues with someone else, starts a new topic " +
-                "for the room, or you're not sure — most group chat isn't to Cardinal."
+            // The exchange is usually already in RECENT CHAT; quote it only when it scrolled out.
+            val seenHis = his.isNotBlank() && transcript.contains(his.take(60))
+            val sys = "Cardinal was just talking with $followWith" +
+                (if (seenHis) ". " else if (theirs.isNotBlank()) " ($followWith: \"${theirs.take(140)}\" / Cardinal: \"${his.take(140)}\"). "
+                    else " (Cardinal's last line to them: \"${his.take(140)}\"). ") +
+                "Is $followWith's LAST message to Cardinal? Only if it clearly answers Cardinal, reacts to what Cardinal said, or asks Cardinal something. " +
+                "Output only JSON: {\"action\":\"reply|react|ignore\",\"short\":true|false,\"emoji\":\"<emoji or empty>\"}. " +
+                "React if it's only 'lol'/'true'/an emoji. Ignore when it's to someone else, a new topic for the room, or unsure; most group chat isn't to Cardinal."
             val messages = JSONArray().put(obj("system", sys)).put(obj("user", "RECENT CHAT:\n$transcript"))
             return when (val r = call(cfg, DiscordBotLimits.CHEAP_MODEL, messages, 80, DiscordBotLimits.DIRECTOR_TEMPERATURE)) {
                 is Result.Ok -> parsePlan(r.text) ?: run { logIssue("Follow-up check", "unreadable answer: ${r.text.take(60)}"); null }
@@ -377,7 +352,7 @@ object DiscordBotAi {
             append("You keep memory for Cardinal, a member of this Discord (\"Cardinal\" lines are theirs). Read the numbered chat; output only JSON:\n")
             append("{\"sum\":\"<who is talking about what, under 15 words>\",")
             append("\"notes\":[{\"p\":\"<name as shown>\",\"t\":\"<type>\",\"v\":\"<1-6 words, their words>\",\"l\":<line that shows it>}],")
-            append("\"me\":[{\"t\":\"taste|title|bit|habit\",\"v\":\"<3-8 words about Cardinal>\",\"l\":[<lines>]}],")
+            append("\"me\":[{\"t\":\"likes|dislikes|speech|title|bit|habit\",\"v\":\"<3-8 words about Cardinal>\",\"l\":[<lines>]}],")
             append("\"mood\":\"<Cardinal's mood, a word>\"")
             if (fix) append(",\"wrong\":[<numbers of STORED items>]")
             if (bitFocus.isNotBlank()) append(",\"bit\":\"<Cardinal's bit '$bitFocus' as it stands NOW, max 6 words, in the others' words; else same>\"")
@@ -387,11 +362,11 @@ object DiscordBotAi {
                 append("STORED:\n").append(stored).append('\n')
                 append("wrong: numbers of STORED items the chat says are untrue or out of date, or that people really asked Cardinal to stop (teasing isn't asking). Still note anything new.\n")
             }
-            append("Types: from, lives, tz, work (job or study), game, hobby, likes, dislikes, pet, role (their role in this server), nick (a name others call them), about (said about themselves, fits no other type)")
+            append("Types: from, lives, tz, work (job or study), game, hobby, likes, dislikes, pet, role (their job in this server, e.g. mod; not \"friend\"), nick (a name others call them), lang (a language they speak), about (said about themselves, fits no other type)")
             if (fix) append(", notnick (a name they asked not to be called), avoid (what they asked Cardinal to stop)")
             append(".\nA note needs a line where the person says it about themselves or someone says it plainly about them. ")
-            append("Not notes: questions, jokes, what-ifs, what someone is doing right now or will do, family or friends' things, anything about Cardinal. Note lasting things people tell about themselves (home, job, games, likes); most lines have none. At most 4 notes; Cardinal is never p.\n")
-            append("me (at most 2, usually []): a lasting taste/title/bit/habit Cardinal's own lines show, or a title/bit two people give Cardinal; add \"was\":\"<known trait>\" if it changes one.\n")
+            append("Not notes: questions, jokes, what-ifs, what someone is doing right now or will do, family or friends' things, anything about Cardinal. Note lasting things people tell about themselves (home, job, games, likes); At most 6 notes; Cardinal is never p.\n")
+            append("me (at most 2): what Cardinal's own lines show — likes, dislikes, speech (how Cardinal types: caps when hyped, all lowercase, an emoji habit), habit (how Cardinal acts) — or a title/bit people give Cardinal; add \"was\":\"<known trait>\" if it changes one.\n")
             append("If something funny or notable happened: \"moment\":{\"v\":\"<one sentence with names>\",\"l\":[<lines>]} (something people will bring up later), ")
             append("\"joke\":{\"v\":\"<the inside joke, who, why>\",\"l\":[<lines>]} (a running joke several people kept up).")
             if (selfTraits.isNotEmpty() && !fix) append("\nCardinal already: ").append(selfTraits.joinToString("; "))
@@ -451,7 +426,7 @@ object DiscordBotAi {
                 val m = meArr.optJSONObject(i) ?: return@mapNotNull null
                 val v = str(m.optString("v")).replace(Regex("(?i)^(cardinal|they|they'?re|they are|he|he'?s)\\s+"), "").trim()
                 if (v.isBlank() || v.all { it.isDigit() }) null else SelfNote(m.optString("t").trim().lowercase(), v, ints(m.opt("l")), m.optString("was").trim())
-            } + notes.filter { it.about.equals("cardinal", true) }.map { SelfNote("habit", it.value, listOf(it.line), "") }
+            }
             Observation(
                 summary = str(o.optString("sum").ifBlank { o.optString("summary") }).take(DiscordBotLimits.SUMMARY_MAX_CHARS),
                 notes = notes.filterNot { it.about.equals("cardinal", true) },

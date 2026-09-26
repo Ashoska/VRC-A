@@ -53,6 +53,13 @@ object ChannelInfoStore {
         return server + (if (t.isBlank()) "#${info.name}" else "#${info.name} — $t")
     }
 
+    /** "#general (topic)" — no server name (only said when asked). */
+    fun channelLine(channelId: String): String {
+        val info = byId[channelId] ?: return ""
+        val t = info.topic.take(140).trim()
+        return if (t.isBlank()) "#${info.name}" else "#${info.name} ($t)"
+    }
+
     /** Rewrite `<#id>` mentions in [text] to `#name` so the model reads names, not raw ids. */
     fun resolveMentions(text: String): String {
         if (text.isBlank() || !text.contains("<#")) return text

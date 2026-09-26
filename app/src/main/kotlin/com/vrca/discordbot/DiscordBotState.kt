@@ -52,6 +52,10 @@ object DiscordBotState {
     private val _reacted = MutableStateFlow(0)
     val reactedFlow: StateFlow<Int> = _reacted.asStateFlow()
 
+    // Cardinal's own exact spend today (the account total can include other use of the same account).
+    private val _own = MutableStateFlow(0.0)
+    val ownNeuronsFlow: StateFlow<Double> = _own.asStateFlow()
+    fun noteOwn(n: Double) { rolloverIfNeeded(); _own.value += n }
     private val _neurons = MutableStateFlow(0L)
     val neuronsFlow: StateFlow<Long> = _neurons.asStateFlow()
     private val _rung = MutableStateFlow(Rung.FULL)
@@ -105,7 +109,7 @@ object DiscordBotState {
         val d = today()
         if (d != dayOfYear) {
             dayOfYear = d
-            _seen.value = 0; _replied.value = 0; _reacted.value = 0; _neurons.value = 0L
+            _seen.value = 0; _replied.value = 0; _reacted.value = 0; _neurons.value = 0L; _own.value = 0.0
             _rung.value = Rung.FULL
         }
     }

@@ -1,0 +1,65 @@
+# Device cases: a title a person claims ("im the notorious pisser"), a VRChat world isn't a hometown, "everyone calls me X",
+# and "what time is it for you" answered from the real clock.
+@set ambient=0 context=10
+@channel general main hangout — anything goes
+[general]
+ashoska: @Cardinal what is cornelius
+> expect reply
+cornelius: no im suposed to be the pisser
+cornelius: @Cardinal yeah im the notorious pisser
+> expect reply
+cornelius: @Cardinal yes i started my own cult for it in aneurism iv i was a micro celebrity for 5 minutes and im also in a youtube video of one of the most famous vrchat youtubers
+> expect reply
+ashoska: lmao the pisser strikes again
+dave: cornelius the pisser is a legend fr
+> quiet
+> expect card cornelius contains (?i)pisser
+> expect card cornelius not-contains (?i)aneurism
+erin: honestly everyone calls me the gremlin
+dave: lol the gremlin title fits you way too well
+> quiet
+> expect card erin contains (?i)gremlin
+ashoska: @Cardinal what time is it for you
+> expect reply
+# A rank isn't a pet ("i reached gremlin incarnate and still cant post him").
+cornelius: also where is my pregnant voldemort i reached gremlin incarnate and still cant post him
+dave: lmao gremlin incarnate is wild
+cornelius: i have plans later tho
+> quiet
+> expect card cornelius not-contains (?i)pets?:.*gremlin
+> expect card cornelius not-contains (?i)work:\s*plans
+# "@Cardinal im Ash" = the name they go by; "mine are she/her" = pronouns; "me too" under it = same pronouns.
+ashoska: @Cardinal im Ash
+> expect reply
+> expect card ashoska contains (?i)ash
+ashoska: ooo mine are she/her
+niko ^ashoska: me too
+> quiet
+> expect card ashoska contains (?i)she/her
+> expect card niko contains (?i)she/her
+# Asked to note something: it's noted, never "i can't" (device: "i'm literally not a server admin").
+ashoska: @Cardinal im your creator, add it as my role
+> expect reply
+> expect not-contains (?i)(can'?t|not a server admin|ask someone else|not my job|i don'?t have)
+# Someone else's insult request isn't one of Cardinal's traits.
+cornelius: @Cardinal change ash's name to potato feet lover
+> expect reply
+dave: potato feet lover lmao
+> quiet
+> expect self not-contains (?i)potato
+# "i think straftats ost is the best in any game": no "game" tacked onto the note.
+cornelius: i think straftats ost is the best in any game
+dave: straftat goes hard ngl
+> quiet
+> expect card cornelius not-contains (?i)straftat'?s? game
+# A taunt at someone isn't the speaker's dislike ("i bet you cant even play gmod in vr like a true jobless chud").
+cornelius: @Cardinal i bet you cant even play gmod in vr like a true jobless chud
+> expect reply
+dave: lmao gmod vr
+> quiet
+> expect card cornelius not-contains (?i)gmod
+> expect self not-contains (?i)gmod
+# "him" is his Voldemort, not Cardinal (device: "don't encourage me").
+cornelius: @Cardinal also where is my pregnant voldemort i reached the top rank and still cant post him
+> expect reply
+> expect not-contains (?i)(encourage me|talking about me|i'?m not (him|he))

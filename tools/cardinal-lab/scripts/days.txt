@@ -1,7 +1,7 @@
 # Day log: "what happened yesterday / anything funny today?" — including messages Cardinal never replied to.
 # Yesterday is seeded (busy enough to get an end-of-day recap); today is lived through with ambient off,
 # so every moment below happens WITHOUT Cardinal replying, then gets asked about.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 @channel games gaming talk
 > teach day -1 14 general topic alice and bob argue about whether cereal is soup

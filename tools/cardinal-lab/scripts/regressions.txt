@@ -2,7 +2,7 @@
 # channel, stale context from hours ago, his clock/timezone, "don't stop"/"stop by" (not back-off requests), more languages, picks between two things,
 # "call me X", memory poisoning, and someone else
 # "correcting" a fact the person keeps confirming.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 @channel media pics, clips, screenshots
 [media]

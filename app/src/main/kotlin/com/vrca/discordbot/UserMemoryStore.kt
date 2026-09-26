@@ -92,7 +92,7 @@ object UserMemoryStore {
         Card(
             id = id,
             name = o.optString("n"),
-            relationship = o.optString("rel"),
+            relationship = o.optString("rel").takeUnless { REL_TO_YOU.matches(it.trim()) }.orEmpty(),
             notes = notes,
             bits = strList(o.optJSONArray("b")),
             nicknames = strList(o.optJSONArray("nk")),
@@ -100,7 +100,7 @@ object UserMemoryStore {
             language = value(o.optString("lang")),
             alsoSpeaks = strList(o.optJSONArray("also")).map { value(it) }.filter { it.isNotBlank() },
             sentiment = o.optString("s"),
-            howToTreat = o.optString("h"),
+            howToTreat = o.optString("h").ifBlank { o.optString("rel").trim().takeIf { REL_TO_YOU.matches(it) }.orEmpty() },
             lastSeenMs = o.optLong("ls", 0L),
             interactions = o.optInt("ic", 0),
             pinned = o.optBoolean("p", false),
@@ -159,6 +159,8 @@ object UserMemoryStore {
     private val NONE_VALUE = Regex("(?i)^(none|n/?a|null|nil|unknown|not (specified|mentioned|sure|clear|known)|nothing|no|-+|\\?+|same|unchanged)\\.?$")
     private fun value(s: String?): String = s?.trim()?.takeUnless { NONE_VALUE.matches(it) }
         ?.takeIf { v -> v.any { it.isLetterOrDigit() } && !v.startsWith("[") && !v.startsWith("{") }.orEmpty()
+    // How they relate to Cardinal ("friend", "rival") isn't a server role: it goes under "with them".
+    private val REL_TO_YOU = Regex("(?i)^(a |an |the |his |their |cardinal'?s )?(close |good |best |old |new )?(friend|bestie|buddy|pal|homie|bff|mate|acquaintance|rival|enemy|nemesis|frenemy|crush)s?( of (cardinal|yours))?\\.?$")
     private val GENERIC_REL = Regex("(?i)^(a |an |the )?(regular |server |discord |normal )?(member|user|participant|person|chatter|someone|human|guy|people)s?\\.?$")
     private fun cleanNick(s: String, ownNames: Set<String>): String? {
         val t = s.trim()
@@ -188,7 +190,10 @@ object UserMemoryStore {
      */
     fun addNote(ctx: Context, id: String, name: String, slot: String, raw: String): Boolean {
         if (id.isBlank() || slot !in SLOTS) return false
-        val v = value(raw).replace(EXAMPLE, "").trim().trimEnd('.', '!', ',', ':', ';').take(80)
+        var v = value(raw).replace(EXAMPLE, "").trim().trimEnd('.', '!', ',', ':', ';').take(80)
+        // "Straftat's game" / "Valorant game" → the name itself (the slot already says it's a game).
+        if (slot in setOf("game", "hobby", "likes", "dislikes")) v = v.replace(Regex("(?i)^(the )?(video ?)?games? "), "")
+            .replace(Regex("(?i)('s)?\\s+(video ?)?games?$"), "").trim().ifBlank { v }
         if (v.isBlank() || POISON.containsMatchIn(v)) return false
         val cur = load(ctx, id) ?: Card(id = id, name = name.take(60))
         val notes = LinkedHashMap(cur.notes)
@@ -317,7 +322,9 @@ object UserMemoryStore {
             cur.language.isBlank() -> incomingLang to cur.alsoSpeaks
             else -> cur.language to (cur.alsoSpeaks + incomingLang)
         }
-        val incomingRel = value(delta.optString("relationship")).take(80).takeUnless { GENERIC_REL.matches(it) || POISON.containsMatchIn(it) }.orEmpty()
+        val rawRel = value(delta.optString("relationship")).take(80).takeUnless { GENERIC_REL.matches(it) || POISON.containsMatchIn(it) }.orEmpty()
+        val incomingRel = rawRel.takeUnless { REL_TO_YOU.matches(it) }.orEmpty()
+        val withThem = cur.howToTreat.ifBlank { rawRel.takeIf { REL_TO_YOU.matches(it) }.orEmpty() }
         val relationship = if (correcting && incomingRel.isNotBlank() && !cur.pinned) incomingRel else cur.relationship.ifBlank { incomingRel }
         save(ctx, cur.copy(
             name = cur.name.ifBlank { name.take(60) },
@@ -327,6 +334,7 @@ object UserMemoryStore {
             alsoSpeaks = also,
             sentiment = value(delta.optString("sentiment")).take(60).ifBlank { cur.sentiment },
             relationship = relationship,
+            howToTreat = withThem,
             avoid = avoid,
         ))
     }
@@ -416,6 +424,80 @@ object UserMemoryStore {
         if (body.isNotBlank()) sb.append(": ").append(body)
         if (time.isNotBlank()) sb.append(" (time: ").append(time).append(')')
         return PromptLine(sb.toString(), hasNick)
+    }
+
+    // ── compact reply-prompt rendering ──
+    /** `alice "ali" (she/her, UTC-4, 10:32 for her)` — name, what he calls them, pronouns, timezone. */
+    fun personHeader(card: Card?, fallbackName: String, localTime: Boolean, nowMs: Long = System.currentTimeMillis()): Pair<String, Boolean> {
+        if (card == null) return fallbackName to false
+        val real = card.name.ifBlank { fallbackName.ifBlank { card.preferredNick.ifBlank { "them" } } }
+        val nicks = (listOf(card.preferredNick) + card.nicknames).map { it.trim() }
+            .filter { it.isNotBlank() && !it.equals(real, true) }.distinctBy { it.lowercase() }.take(3)
+        val zone = TimezoneGuess.zoneOf(card.tz)
+        val bits = ArrayList<String>()
+        if (card.pronouns.isNotBlank()) bits.add(card.pronouns)
+        if (zone != null) {
+            bits.add(TimezoneGuess.offsetLabel(zone, nowMs))
+            if (localTime) {
+                val t = java.time.Instant.ofEpochMilli(nowMs).atZone(zone)
+                val obj = card.pronouns.split('/').getOrNull(1)?.trim()?.takeIf { it.matches(Regex("[a-zA-Z]{2,6}")) } ?: "them"
+                bits.add(String.format("%02d:%02d for %s", t.hour, t.minute, obj))
+            }
+        }
+        val sb = StringBuilder(real)
+        if (nicks.isNotEmpty()) sb.append(' ').append(nicks.joinToString("/") { "\"$it\"" })
+        if (bits.isNotEmpty()) sb.append(" (").append(bits.joinToString(", ")).append(')')
+        return sb.toString() to nicks.isNotEmpty()
+    }
+
+    /** "Talking to:" — the person he's replying to, with everything he knows about them, one thing per line. */
+    fun talkingTo(ctx: Context, id: String, fallbackName: String, localTime: Boolean, extra: String = "", langAsk: Boolean = false,
+                  keywords: Set<String> = emptySet(), all: Boolean = false): PromptLine {
+        val card = load(ctx, id)
+        val (header, hasNick) = personHeader(card, fallbackName, localTime)
+        val sb = StringBuilder("Talking to: ").append(header)
+        if (extra.isNotBlank()) sb.append(' ').append(extra)
+
+        if (card != null) {
+            if (card.relationship.isNotBlank()) sb.append("\n- server role: ").append(card.relationship.trim().trimEnd('.'))
+            if (card.howToTreat.isNotBlank()) sb.append("\n- with them: ").append(card.howToTreat.trim().trimEnd('.'))
+            val langs = spokenLanguages(card)
+            // English is the default: languages show when there's another one, or they're asking about languages.
+            if (langs.isNotEmpty() && (langAsk || langs.any { !it.equals("english", true) })) sb.append("\n- speaks: ").append(langs.joinToString(", "))
+            // Everything known rides along, but only what fits this message reads as usable: the rest is background
+            // ("plays JJ's on PC" kept turning up in a food answer when every note looked equally relevant).
+            val rel = if (all) SLOTS else relevantSlots(card, keywords)
+            val back = ArrayList<String>()
+            for (sl in SLOTS) card.notes[sl].orEmpty().takeIf { it.isNotEmpty() }?.let {
+                if (sl in rel) sb.append("\n- ").append(LABEL[sl]).append(": ").append(it.joinToString(", "))
+                else back.add(LABEL[sl] + " " + it.joinToString(", "))
+            }
+            if (back.isNotEmpty()) sb.append("\n- background (don't bring up unless asked): ").append(back.joinToString("; "))
+            card.bits.lastOrNull()?.let { sb.append("\n- running bit: ").append(it) }
+            if (card.avoid.isNotEmpty()) sb.append("\n- never (silently): ").append(card.avoid.joinToString("; ") { it.trim().trimEnd('.') })
+        }
+        return PromptLine(sb.toString(), hasNick)
+    }
+
+    /**
+     * One "Others:" line: always who they are (nickname, pronouns, timezone); their notes when [full] (named,
+     * replied to, in the current back-and-forth) or when a note matches the conversation. Null when nothing is known.
+     */
+    fun otherPerson(ctx: Context, id: String, fallbackName: String, keywords: Set<String>, full: Boolean, localTime: Boolean, langAsk: Boolean = false): PromptLine? {
+        val card = load(ctx, id) ?: return null
+        val (header, hasNick) = personHeader(card, fallbackName, localTime)
+        val slots = if (full) SLOTS else relevantSlots(card, keywords)
+        val notes = ArrayList<String>()
+        card.relationship.trim().trimEnd('.').takeIf { it.isNotBlank() }?.let { notes.add(if (Regex("(?i)\\b(server|role)\\b").containsMatchIn(it)) it else "server role $it") }
+        if (full && card.howToTreat.isNotBlank()) notes.add("with them: " + card.howToTreat.trim().trimEnd('.'))
+        // Languages ride with the full card ("what languages does X speak?" had nothing to answer from).
+        if (full) spokenLanguages(card).takeIf { l -> l.isNotEmpty() && (langAsk || l.any { !it.equals("english", true) }) }
+            ?.let { notes.add("speaks " + it.joinToString(", ")) }
+        SLOTS.filter { it in slots }.forEach { sl -> card.notes[sl].orEmpty().takeIf { it.isNotEmpty() }?.let {
+            notes.add((if (sl == "about") "" else LABEL[sl] + " ") + it.joinToString(", ")) } }
+        val basic = header != card.name || hasNick
+        if (notes.isEmpty() && !basic) return null
+        return PromptLine("- " + header + if (notes.isNotEmpty()) ": " + notes.joinToString("; ") else "", hasNick)
     }
 
     /** "Who …?" with nobody named ("who works at a bank?"): the cards whose notes/role best match. */

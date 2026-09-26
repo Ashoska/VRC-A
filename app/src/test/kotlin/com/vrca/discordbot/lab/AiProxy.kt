@@ -89,7 +89,7 @@ internal class AiProxy(private val cfg: LabConfig, private val rec: LabRecorder)
             // By shape, so rewording a prompt doesn't break the lab (old and new wordings both work).
             sys.contains("\"action\":\"reply|react|ignore\"") -> "director"
             sys.contains("\"notes\":[") || sys.contains("\"people\":[") -> "observe"
-            sys.contains("Reply with") && sys.startsWith("You're Cardinal") -> "reply"
+            sys.startsWith("You're Cardinal") && (sys.contains("Reply with") || sys.contains("Talking to:")) -> "reply"
             else -> "other"
         }
     }

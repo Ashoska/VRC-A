@@ -1,7 +1,7 @@
 # Message structure: replies look like a person texting — no name prefix, no quote-wrapping, no markdown
 # headers/lists for chat, short banter stays short, a real how-to can go longer but not an essay, no emoji
 # spam, no raw pings, no ALL CAPS, and it doesn't just echo the message back.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 [general]
 alice: @Cardinal lol you're so dramatic

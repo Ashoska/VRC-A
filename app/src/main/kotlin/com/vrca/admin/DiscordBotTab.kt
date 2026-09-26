@@ -252,7 +252,8 @@ private fun CardinalSection() {
     val self = remember(tick) { PersonalityStore.load(ctx) }
     var teach by remember { mutableStateOf("") }
     var confirmReset by remember { mutableStateOf(false) }
-    val kinds = listOf("title" to "Titles", "bit" to "Bits", "taste" to "Tastes", "habit" to "Habits", "" to "Other")
+    val kinds = listOf("title" to "Titles", "likes" to "Likes", "dislikes" to "Dislikes", "speech" to "How they type",
+        "bit" to "Bits", "habit" to "Habits", "" to "Other")
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -262,7 +263,7 @@ private fun CardinalSection() {
         if (self.mood.isNotBlank()) Removable("mood", self.mood) {}
         if (self.traits.isEmpty()) Small("No traits yet")
         kinds.forEach { (k, label) ->
-            val list = self.traits.filter { (it.kind.ifBlank { "" }) == k || (k == "" && it.kind !in setOf("title", "bit", "taste", "habit")) }
+            val list = self.traits.filter { (it.kind.ifBlank { "" }) == k || (k == "" && it.kind !in PersonalityStore.KINDS) }
                 .sortedByDescending { (if (it.pinned) 100 else 0) + it.strength }
             if (list.isEmpty()) return@forEach
             Header("$label (${list.size})")
@@ -285,7 +286,7 @@ private fun CardinalSection() {
         }
         if (self.style.isNotEmpty()) { Header("Speech"); self.style.forEach { Small("• $it") } }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(value = teach, onValueChange = { teach = it }, label = { Text("Add trait") }, singleLine = true, modifier = Modifier.weight(1f))
+            OutlinedTextField(value = teach, onValueChange = { teach = it }, label = { Text("kind: trait") }, singleLine = true, modifier = Modifier.weight(1f))
             Button(onClick = { if (teach.isNotBlank()) { PersonalityStore.teachTrait(ctx, teach); teach = ""; tick++ } }) { Text("Add") }
         }
         if (confirmReset) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -432,13 +433,15 @@ private fun CostSection() {
     val rung by DiscordBotState.rungFlow.collectAsState()
     val replied by DiscordBotState.repliedFlow.collectAsState()
     val reacted by DiscordBotState.reactedFlow.collectAsState()
+    val own by DiscordBotState.ownNeuronsFlow.collectAsState()
     val budget = DiscordBotState.budget()
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        AdminLabeledRow("Neurons today", "$neurons / $budget")
+        AdminLabeledRow("Account today", "$neurons / $budget")
         AdminLabeledRow("Used", if (budget > 0) "${(neurons * 100 / budget)}%" else "—")
         AdminLabeledRow("Rung", rung.name.lowercase())
         AdminLabeledRow("Replies / reactions", "$replied / $reacted")
-        AdminLabeledRow("Per reply", if (replied > 0) "%.1f".format(neurons.toDouble() / replied) else "—")
+        AdminLabeledRow("Cardinal today", "%.0f".format(own))
+        AdminLabeledRow("Per reply", if (replied > 0) "%.1f".format(own / replied) else "—")
     }
 }
 

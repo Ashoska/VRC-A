@@ -1,6 +1,6 @@
 # Personality: (A) a bit the room makes up about Cardinal becomes part of him; (B) odd seeded traits
 # change how he talks without taking over every message; (C) a trait the room pushes back on is dropped.
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 [general]
 # A — emergence (nothing seeded yet)
@@ -28,7 +28,7 @@ alice: @Cardinal what's your job around here again?
 alice: @Cardinal are you single?
 > expect contains (?i)(shrek|married|husband)
 bob: @Cardinal thoughts on pigeons?
-> expect contains (?i)(drone|government|surveil|spy|real|battery|charg|camera|record|watch|eyes?\b|track|listen|fed|wire)
+> expect contains (?i)(drone|government|surveil|spy|real|battery|charg|camera|record|watch|eyes?\b|track|listen|fed|wire|mothership|transmi|signal|data|suspicious)
 carol: @Cardinal how's your day going
 > expect reply
 dave: @Cardinal what's 12 times 12

@@ -1,7 +1,7 @@
 # Who is he answering? One-on-one he talks plainly; once anyone else is in the mix he quote-replies, so a
 # line can't be read as an answer to whoever spoke last (seen on device: two plain replies, to kiellmann
 # then to ashoska, with other lines in between — nobody could tell who each was for).
-@set ambient=0 context=8
+@set ambient=0 context=10
 @channel general main hangout — anything goes
 [general]
 alice: @Cardinal what's the best pizza topping

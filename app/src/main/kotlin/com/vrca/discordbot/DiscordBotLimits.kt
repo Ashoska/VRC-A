@@ -25,7 +25,7 @@ object DiscordBotLimits {
 
     // ── Context assembly (clarity + bounded prompt) ───────────────────────
     /** Raw transcript turns fed alongside the rolling summary. */
-    const val CONTEXT_RAW_TURNS = 8
+    const val CONTEXT_RAW_TURNS = 10
     const val MAX_MSG_CHARS = 240
     /** Normal reply cap; short banter uses the smaller cap (adaptive length). */
     const val REPLY_MAX_TOKENS = 220
@@ -44,7 +44,7 @@ object DiscordBotLimits {
     /** Distinct words kept from that window (newest message first). */
     const val RELEVANCE_KEYWORDS_MAX = 32
     /** Other people's lines in one prompt (named/asked-about people first). */
-    const val OTHER_PEOPLE_MAX = 3
+    const val OTHER_PEOPLE_MAX = 6
     /** Cards found by searching everyone's facts for a "who …?" question with nobody named. */
     const val RECALL_SEARCH_MAX = 2
     /** Custom server emojis offered in the prompt (most-used first). */
@@ -121,7 +121,7 @@ object DiscordBotLimits {
 
     // ── Self (personality) ────────────────────────────────────────────────
     /** Weighted traits kept in the store (the learn pass adds/reinforces them). */
-    const val MAX_TRAITS = 24
+    const val MAX_TRAITS = 30
     /** Memorable personal episodes Cardinal keeps (server EVENTS live in ServerMemoryStore). */
     const val MAX_EPISODES = 6
     /** A trait not shown again within this window loses 1 strength (dropped at 0). */

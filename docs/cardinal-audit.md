@@ -6,6 +6,54 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 6 — compact reply layout, Cardinal slots, device fixes (LIVE lab)
+
+**Reply prompt, new layout** (`DiscordBotAi.reply`): a 4-rule core ("Do fun asks (politicians too). Answer what you know. Play
+along with jokes about you. Don't invent real-world facts."), then one item per line: `Channel:` (no server name unless asked),
+`Date:` (+ a separate `Time now:` line only on a time question), `Mood:`, `You (when it fits):` (every trait, grouped by slot),
+`Talking to:` (name, nicknames, pronouns, live UTC offset; one known thing per line), `Others:` (up to 6: whole card for anyone
+named, replied to, matched by a "who…?" search or one of the last 2 speakers; everyone else talking gets their name line + only
+notes that match the conversation), then the conditional lines (`Earlier:`, `Server memories:`, `Bit here:`, `From #…`, day notes,
+`Emojis:` only when neither of his last two replies used one, `Said recently:`) and short situation hints last. Transcript: 10
+lines (was 8; a stored 8 migrates once), laugh-only lines folded onto the line they laugh at, his own older lines capped at 100
+chars, no per-line pronouns, his line isn't re-quoted when it's the turn right above. The director's follow-up check no longer
+repeats the exchange that's already in RECENT CHAT.
+
+Measured on the 127-message evening (avg of 3 Round 5 runs → Round 6):
+
+| | Round 5 | Round 6 |
+|---|---|---|
+| reply prompt | 559 tokens | 438 tokens (−22%) |
+| per reply | 5.71 neurons | 4.52 neurons |
+| evening total | 297.1 neurons | 267.9 neurons (−10%) |
+
+What the lab caught while cutting (all put back or fixed): without "Reply with just your message, no name prefix" the model
+sometimes echoed the person's message back → restored; without "politicians" it refused the joke-poem case → "(politicians
+too)"; without "answer what you know" it dodged a known fact ("ask erin yourself") → restored; the drones bit leaked into
+"12 times 12" → `You (when it fits):`; full cards leaked "plays JJ's" into a food answer → `(bring notes up only if they fit)`.
+It also copies a "(replying to X)" tag or writes extra "cardinal:" turns → stripped in code.
+
+**Cardinal slots** (`PersonalityStore.KINDS`): title (3), likes (5), dislikes (5), speech = how he types (6), bit (4), habit (4);
+a full slot swaps out its weakest new entry. Proof per slot (`selfProven`): likes/dislikes need his own line with a like/hate
+word; habit needs 2 of his lines; speech needs 2 of his lines and, for caps/lowercase/emoji claims, lines that actually show it;
+titles need 2 people or his own "i'm the X"; his line doesn't count when it only repeats the line before it (the device's
+"gay homo" habit). "annoyed at X"-style moods are never traits. The learner is asked for these slots and no longer told
+"usually []"; the old "notes about Cardinal → habit" conversion (source of "has a cat named miso" as HIS habit) is gone.
+Admin: `kind: trait` adds to a slot.
+
+**People fixes from device chats**: a person note the learner filed under "Cardinal" but citing someone else's line goes to that
+person; the learner is no longer told "most lines have none" (max 6 notes); "A.I" no longer counts as "I" ("rename cardinal to
+A.I" became Cornelius's "about"); a note whose words sit in the part of a line about Cardinal is dropped; languages: said in
+words ("i speak czech", "add Japanese to my languages") go straight onto the card, a language filed as likes/work is moved or
+dropped, "i dont speak french" never adds French, `speaks:` shows for a non-English speaker or a language question (and for anyone
+asked about); pets must be animals ("reached gremlin incarnate"); from/lives need a real place phrase (a VRChat world isn't a
+hometown); vague work ("plans") dropped; "Straftat's game" → "Straftat"; free rules for "I'm the notorious X" (their notes),
+"everyone calls me X" (nickname), "@Cardinal im Ash" (the name they go by), "mine are she/her" and "me too" under someone's
+pronouns; "friend"/"rival" is how they get on with Cardinal (`with them`), not a server role; "what's our relationship?" and
+"add it as my role" get a hint (answer from the card / say it's noted, never "i can't"). Time questions show the exact minute. A taunt at "you" ("i bet you cant even play gmod in vr") is no longer the speaker's dislike; the he-means-you hint needs the line to follow one of Cardinal's lines or name him (not "my voldemort … post him"); `Talking to:` keeps every note but moves the ones that don't match the message to a "background" line (fixed "plays JJ's" in a food answer).
+**Cost tab**: "Account today" (the whole Cloudflare account, which includes lab runs) vs "Cardinal today" (his own exact spend);
+"Per reply" now uses his own spend.
+
 ## Round 5 — typed memory, evidence-checked learning, timezones, compact prompt (LIVE lab)
 
 **Why.** Cards were a free-text fact pile guarded by a growing wall of regex filters (joke/right-now/bot-talk/
