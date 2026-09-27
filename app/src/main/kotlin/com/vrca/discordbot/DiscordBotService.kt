@@ -1592,7 +1592,14 @@ class DiscordBotService : Service() {
             for ((re, slot) in SELF_STATEMENT) re.findAll(t.text).forEach { m ->
                 var v = m.groupValues[1].trim().trimEnd('.', ',', '!')
                 if (v.isBlank() || v.split(' ').size > 4 || (v.lowercase().split(' ').first() in SELF_STMT_STOP && !(slot == "about" && v.startsWith("the ", true)))) return@forEach
-                val s = if (slot == "game" && INSTRUMENT_RE.containsMatchIn(v)) "hobby" else slot
+                val first = v.lowercase().split(' ').first()
+                if ((slot == "likes" || slot == "dislikes") && first in LIKE_STOP) return@forEach
+                val s = when {
+                    slot == "game" && INSTRUMENT_RE.containsMatchIn(v) -> "hobby"
+                    // "i love cooking" is something they do (into), "i love spaghetti" something they enjoy (likes).
+                    slot == "likes" && first.length > 4 && first.endsWith("ing") -> "hobby"
+                    else -> slot
+                }
                 out.add(DiscordBotAi.Note(t.name, s, v, i + 1))
             }
         }
@@ -1911,6 +1918,7 @@ class DiscordBotService : Service() {
     private val STMT_END = "(?=\\s*(?:[,.!;?]|$|\\s(?:and|but|so|now|since|for|last|this|these|lol|lmao|haha|tho|though|rn|atm|btw|too)\\b))"
     // "i ALSO have a cat", "i actually live in X": a filler word between "i" and the verb.
     private val ADV = "(?:(?:also|really|actually|still|do|just|currently|now)\\s+){0,2}"
+    private val LIKE_ADV = "(?:(?:kinda|kind of|lowkey|absolutely|honestly|fucking|freaking|totally|genuinely|so|sorta)\\s+)?"
     private val SELF_STATEMENT = listOf(
         Regex("(?i)\\bi $ADV(?:work|am working) as an? ([\\p{L}' -]{3,30}?)$STMT_END") to "work",
         Regex("(?i)\\bi $ADV(?:work|am working|'m working|m working) ((?:at|in|for) (?:a |an |the )?[\\p{L}' -]{3,30}?)$STMT_END") to "work",
@@ -1929,7 +1937,19 @@ class DiscordBotService : Service() {
         Regex("(?i)\\bmy ((?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko|pet)'?s name is \\p{L}+)$STMT_END") to "pet",
         Regex("(?i)\\bmy ((?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko|pet) is (?:named|called) \\p{L}+)$STMT_END") to "pet",
         Regex("(?i)\\bi $ADV(?:have|own|got) an? (pet (?:named|name[ds]?|called) \\p{L}+)$STMT_END") to "pet",
+        // "i love spaghetti bolognese" / "i really like cats" / "i'm a big fan of X" / "my favorite food is X" (an -ing
+        // thing they do, "i love cooking", goes to hobby in selfStatements). "i love you/it/that/how…" is skipped there.
+        Regex("(?i)\\bi $ADV$LIKE_ADV(?:love|like|adore|enjoy)\\s+(?!to\\b|play(?:ing)?\\b)([\\p{L}\\p{N}' &-]{3,30}?)$STMT_END") to "likes",
+        Regex("(?i)\\bi(?:'m| am|m) (?:a (?:big |huge )?fan of|obsessed with|addicted to) ([\\p{L}\\p{N}' &-]{3,30}?)$STMT_END") to "likes",
+        Regex("(?i)\\bmy (?:all[- ]time )?fav(?:ou?rite)?(?: (?:food|drink|snack|dish|meal|show|band|singer|artist|movie|film|anime|song|color|colour|thing))? (?:is|are) ([\\p{L}\\p{N}' &-]{3,30}?)$STMT_END") to "likes",
+        Regex("(?i)\\bi $ADV$LIKE_ADV(?:hate|dislike|despise|can'?t stand|cant stand|don'?t like|dont like|do not like)\\s+([\\p{L}\\p{N}' &-]{3,30}?)$STMT_END") to "dislikes",
     )
+    // First words that make "i love X" not a taste: "i love you", "i like how…", "i hate when…", "i love everything".
+    private val LIKE_STOP = setOf("you", "u", "ya", "yall", "y'all", "him", "her", "them", "em", "us", "it", "its", "it's", "that", "this",
+        "these", "those", "how", "when", "what", "where", "why", "who", "which", "being", "having", "getting", "doing", "going",
+        "seeing", "hearing", "knowing", "everything", "everyone", "everybody", "anything", "anyone", "nothing", "something",
+        "someone", "all", "both", "each", "cardinal", "bot", "people", "ur", "ya'll", "our", "his", "their", "myself", "yourself",
+        "me", "one", "ones", "some", "none", "much", "more", "most", "less", "way", "idea", "if", "too", "so", "not")
     private val SELF_STMT_STOP = setOf("my", "the", "a", "an", "it", "this", "that", "here", "there", "some", "with", "on", "by", "your", "his", "her", "their")
     private val INSTRUMENT_RE = Regex("(?i)\\b(drums?|guitar|bass|piano|keys|violin|cello|sax(ophone)?|trumpet|flute|ukulele|synth)\\b")
     private val PLAN_RE = Regex("(?i)\\b(i'?ll|i will|i'?m (?:going to|gonna)|im (?:going to|gonna)|gonna|going to|plan(?:ning)? to|about to|want to|wanna|next i)\\b")

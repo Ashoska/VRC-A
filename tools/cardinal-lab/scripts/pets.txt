@@ -37,3 +37,17 @@ gi: @Cardinal I love to play Rimworld
 gi: @Cardinal i also have a dog called Bean
 > expect reply
 > expect card gi contains dog named Bean
+# Round 8f: "I love spaghetti bolognese" is a like saved the moment it's said (the learner filed it as
+# "lives: pasta lover" and it was dropped); "i love cooking" is into; "i hate mondays" a dislike; "i love you" nothing.
+hu: @Cardinal I love spaghetti bolognese
+> expect reply
+> expect card hu contains likes: spaghetti bolognese
+hu: @Cardinal i really love cooking too
+> expect reply
+> expect card hu contains into: cooking
+hu: @Cardinal i hate mondays
+> expect reply
+> expect card hu contains dislikes: mondays
+hu: @Cardinal i love you cardinal
+> expect reply
+> expect card hu not-contains likes: you

@@ -6,6 +6,16 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 8f — device: "I love spaghetti bolognese" (LIVE lab)
+
+- **Likes and dislikes are saved when they're said.** "I love spaghetti bolognese" wasn't saved. There was no instant rule for "i love X", and the learner filed it as "lives: pasta lover", which was correctly dropped because no line said that. New free per-message rules:
+  - "i (really/kinda/lowkey…) love/like/adore/enjoy X", "i'm a big fan of / obsessed with X" and "my favorite (food/show/…) is X" go to likes.
+  - "i hate / can't stand / don't like X" goes to dislikes.
+  - An "-ing" activity ("i love cooking") goes to into (hobby), not likes.
+  - "i love you / it / that / how… / when… / everything" is skipped.
+  - "love to play / love playing" stays a game.
+- Lab: `pets.txt` 27/27 (4 new checks). No new model calls.
+
 ## Round 8e — device: "I love to play Rimworld" (LIVE lab)
 
 | Device case | Cause | Fix |
