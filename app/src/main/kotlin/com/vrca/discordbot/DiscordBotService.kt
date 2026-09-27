@@ -1725,8 +1725,8 @@ class DiscordBotService : Service() {
         if (slot != "lang" && asLang in LANGUAGES) return "language in the wrong slot"
         // "into: play fortnite" is a game.
         if (slot in setOf("hobby", "likes", "about")) Regex("(?i)^(?:play|plays|playing)\\s+(.{2,40})$").find(v)?.let { slot = "game"; v = it.groupValues[1] }
-        // "into: fortnite" from "i play fortnite": the line says it's a game (a full games slot then keeps it out).
-        if (slot in setOf("hobby", "likes") && turns.any { !it.isBot && Regex("(?i)\\bplay(?:s|ing)?\\s+(?:the\\s+)?" + Regex.escape(v) + "\\b").containsMatchIn(it.text) }) slot = "game"
+        // "into: fortnite" / "work: Rimworld" from "i (love to) play X": the line says it's a game.
+        if (slot in setOf("hobby", "likes", "work", "about") && turns.any { !it.isBot && Regex("(?i)\\bplay(?:s|ing)?\\s+(?:the\\s+)?" + Regex.escape(v) + "\\b").containsMatchIn(it.text) }) slot = "game"
         if (Regex("(?i)\\bcardinal\\b").containsMatchIn(v)) return "about Cardinal"
         if (v.split(Regex("\\s+")).size > (if (slot == "about") 7 else 5)) return "long"
         val vw = factWords(v) - names.flatMap { factWords(it) }.toSet()
@@ -1909,23 +1909,26 @@ class DiscordBotService : Service() {
     // The "I" of an acronym ("A.I", "I.T") isn't first person: "rename cardinal to A.I" isn't about the speaker.
     private val FIRST_PERSON_WORD = Regex("(?i)(?<![\\p{L}\\p{N}.])(i|i'?m|im|i'?ve|ive|me|my|mine|myself)(?![\\p{L}\\p{N}]|\\.\\p{L})")
     private val STMT_END = "(?=\\s*(?:[,.!;?]|$|\\s(?:and|but|so|now|since|for|last|this|these|lol|lmao|haha|tho|though|rn|atm|btw|too)\\b))"
+    // "i ALSO have a cat", "i actually live in X": a filler word between "i" and the verb.
+    private val ADV = "(?:(?:also|really|actually|still|do|just|currently|now)\\s+){0,2}"
     private val SELF_STATEMENT = listOf(
-        Regex("(?i)\\bi (?:work|am working) as an? ([\\p{L}' -]{3,30}?)$STMT_END") to "work",
-        Regex("(?i)\\bi (?:work|am working|'m working|m working) ((?:at|in|for) (?:a |an |the )?[\\p{L}' -]{3,30}?)$STMT_END") to "work",
+        Regex("(?i)\\bi $ADV(?:work|am working) as an? ([\\p{L}' -]{3,30}?)$STMT_END") to "work",
+        Regex("(?i)\\bi $ADV(?:work|am working|'m working|m working) ((?:at|in|for) (?:a |an |the )?[\\p{L}' -]{3,30}?)$STMT_END") to "work",
         Regex("(?i)\\bi(?:'m| am|m) an? ((?:\\p{L}+ )?(?:nurse|teacher|developer|programmer|engineer|artist|student|doctor|firefighter|baker|chef|driver|designer|streamer|mechanic|electrician|accountant|lawyer|cashier|barista|bank teller|teller))$STMT_END") to "work",
-        Regex("(?i)\\bi (?:live|am living|'m living|m living) in ([\\p{L}' -]{3,25}?(?:, ?(?!(?:and|but|so|lol|lmao|haha|tho|btw|rn|atm|too|now|then|ok|okay)\\b)\\p{L}{2,20})?)$STMT_END") to "lives",
+        Regex("(?i)\\bi $ADV(?:live|am living|'m living|m living) in ([\\p{L}' -]{3,25}?(?:, ?(?!(?:and|but|so|lol|lmao|haha|tho|btw|rn|atm|too|now|then|ok|okay)\\b)\\p{L}{2,20})?)$STMT_END") to "lives",
         Regex("(?i)\\b(?:i )?moved to ([\\p{L}' -]{3,25}?(?:, ?(?!(?:and|but|so|lol|lmao|haha|tho|btw|rn|atm|too|now|then|ok|okay)\\b)\\p{L}{2,20})?)$STMT_END") to "lives",
         Regex("(?i)\\bi(?:'m| am|m) (?:originally )?from ([\\p{L}' -]{3,25}?(?:, ?(?!(?:and|but|so|lol|lmao|haha|tho|btw|rn|atm|too|now|then|ok|okay)\\b)\\p{L}{2,20})?)$STMT_END") to "from",
         // A title they claim in the server: "yeah im the notorious pisser", "im supposed to be the pisser".
         Regex("(?i)\\bi(?:'m| am|m) (?:supposed to be |meant to be |known as |basically )?(the (?:notorious|infamous|famous|official|resident|designated|local|legendary|og|server'?s?|one and only) [\\p{L}'-]{3,20}|the [\\p{L}'-]{3,20}(?= of (?:this|the) server))$STMT_END") to "about",
         Regex("(?i)\\bi(?:'m| am|m) (?:supposed to be|meant to be|known as) (the [\\p{L}'-]{3,20})$STMT_END") to "about",
         Regex("(?i)\\b(?:they|people|everyone|everybody|the server|y'?all|yall) (?:all )?calls? me (?:the )?([\\p{L}\\p{N}'-]{2,20}(?: [\\p{L}\\p{N}'-]{2,20})?)$STMT_END") to "nick",
-        Regex("(?i)\\bi play (?:the )?([\\p{L}\\p{N}' +-]{3,25}?)$STMT_END") to "game",
-        Regex("(?i)\\bi (?:have|own|got) an? ((?:\\p{L}+ )?(?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko)(?:,? (?:named|name[ds]?|called)(?: is)? \\p{L}+)?)$STMT_END") to "pet",
+        // "i play X" / "i love to play X" / "i really like playing X" / "i also play X".
+        Regex("(?i)\\bi $ADV(?:(?:love|like|enjoy|mostly|mainly|usually)\\s+(?:to\\s+)?)?(?:play|playing) (?:the )?([\\p{L}\\p{N}' +-]{3,25}?)$STMT_END") to "game",
+        Regex("(?i)\\bi $ADV(?:have|own|got) an? ((?:\\p{L}+ )?(?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko)(?:,? (?:named|name[ds]?|called)(?: is)? \\p{L}+)?)$STMT_END") to "pet",
         // "my cat's name is asuna" / "my pet is called asuna" / "i have a pet named asuna" (no kind → he asks).
         Regex("(?i)\\bmy ((?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko|pet)'?s name is \\p{L}+)$STMT_END") to "pet",
         Regex("(?i)\\bmy ((?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko|pet) is (?:named|called) \\p{L}+)$STMT_END") to "pet",
-        Regex("(?i)\\bi (?:have|own|got) an? (pet (?:named|name[ds]?|called) \\p{L}+)$STMT_END") to "pet",
+        Regex("(?i)\\bi $ADV(?:have|own|got) an? (pet (?:named|name[ds]?|called) \\p{L}+)$STMT_END") to "pet",
     )
     private val SELF_STMT_STOP = setOf("my", "the", "a", "an", "it", "this", "that", "here", "there", "some", "with", "on", "by", "your", "his", "her", "their")
     private val INSTRUMENT_RE = Regex("(?i)\\b(drums?|guitar|bass|piano|keys|violin|cello|sax(ophone)?|trumpet|flute|ukulele|synth)\\b")

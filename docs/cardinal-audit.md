@@ -6,6 +6,15 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 8e — device: "I love to play Rimworld" (LIVE lab)
+
+| Device case | Cause | Fix |
+|---|---|---|
+| "I love to play Rimworld" → nothing until the learn pass, then "work: Rimworld" | the instant rule only knew "i play X"; the learner filed the game as work and the play-line redirect only covered hobby/likes | instant rule accepts "i (love/like/enjoy) (to) play(ing) X"; the redirect also moves work/about notes a play line backs |
+| "i also have a cat called Asuna" only saved at the learn pass | a word between "i" and the verb broke the instant have/live/work rules | `ADV` (also/really/actually/still/do/just/currently/now) allowed there |
+
+Lab: `pets.txt` 19/19 (2 runs), `knowing2` 15/15 (2 runs), `titles` 23/23. No new model calls.
+
 ## Round 8d — device: "Cat name Asuna", save asks (LIVE lab)
 
 | Device case | Cause | Fix |

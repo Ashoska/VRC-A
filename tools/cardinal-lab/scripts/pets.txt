@@ -28,3 +28,12 @@ cy: @Cardinal yeah because i have a Cat name Asuna
 cy: @Cardinal please add it my profile
 > expect reply
 > expect not-contains (?i)memory question
+# Round 8e: "i love to play Rimworld" is a game, saved the moment it's said (was filed under work at the next
+# learn pass); "i also have a dog called Bean" is saved at once too (the "also" blocked the instant rule).
+gi: @Cardinal I love to play Rimworld
+> expect reply
+> expect card gi contains plays: Rimworld
+> expect card gi not-contains work: Rimworld
+gi: @Cardinal i also have a dog called Bean
+> expect reply
+> expect card gi contains dog named Bean
