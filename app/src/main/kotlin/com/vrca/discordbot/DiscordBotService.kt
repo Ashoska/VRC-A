@@ -138,7 +138,7 @@ class DiscordBotService : Service() {
         private val CURIOUS_ASK = linkedMapOf("work" to "what they do", "game" to "what they play", "from" to "where they're from",
             "likes" to "what they're into", "pet" to "if they have any pets")
         private val OPINION_RE = Regex("(?i)\\b(do you like|you like|thoughts on|what do you think (of|about)|opinion on|fan of|how do you feel about|you into|is \\w+ (good|bad|mid|overrated))\\b")
-        private val SAVE_ASK_RE = Regex("(?i)\\b(add|put|save|set|make|note|write|log)\\b.{0,30}\\b(as|to|in|into) my\\b|\\b(set|change|update|make) my \\w+|\\bremember (that|this|me|my)\\b|\\b(note|save) (that|this|it)\\b")
+        private val SAVE_ASK_RE = Regex("(?i)\\b(add|put|save|note|write|log|update)\\b.{0,30}\\b(my|the) (profile|card|notes?|memory|info|page)\\b|\\b(add|put|save|set|make|note|write|log)\\b.{0,30}\\b(as|to|in|into) my\\b|\\b(set|change|update|make) my \\w+|\\bremember (that|this|me|my)\\b|\\b(note|save) (that|this|it)\\b")
         private val REL_ASK_RE = Regex("(?i)\\b(our relationship|relationship (with|between) (me|us)|what am i to (you|u)|what are we( to each other)?\\b|are (we|me and you|you and i) (friends|besties|close|cool|good|enemies|rivals)|do you (like|hate) me|how do you (see|feel about) me)")
         private val TONE_TEXT = mapOf(
             "nice" to "Tone: be nice, no roasts (they asked).",
@@ -1921,11 +1921,11 @@ class DiscordBotService : Service() {
         Regex("(?i)\\bi(?:'m| am|m) (?:supposed to be|meant to be|known as) (the [\\p{L}'-]{3,20})$STMT_END") to "about",
         Regex("(?i)\\b(?:they|people|everyone|everybody|the server|y'?all|yall) (?:all )?calls? me (?:the )?([\\p{L}\\p{N}'-]{2,20}(?: [\\p{L}\\p{N}'-]{2,20})?)$STMT_END") to "nick",
         Regex("(?i)\\bi play (?:the )?([\\p{L}\\p{N}' +-]{3,25}?)$STMT_END") to "game",
-        Regex("(?i)\\bi (?:have|own|got) an? ((?:\\p{L}+ )?(?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko)(?: (?:named|called) \\p{L}+)?)$STMT_END") to "pet",
+        Regex("(?i)\\bi (?:have|own|got) an? ((?:\\p{L}+ )?(?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko)(?:,? (?:named|name[ds]?|called)(?: is)? \\p{L}+)?)$STMT_END") to "pet",
         // "my cat's name is asuna" / "my pet is called asuna" / "i have a pet named asuna" (no kind → he asks).
         Regex("(?i)\\bmy ((?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko|pet)'?s name is \\p{L}+)$STMT_END") to "pet",
         Regex("(?i)\\bmy ((?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko|pet) is (?:named|called) \\p{L}+)$STMT_END") to "pet",
-        Regex("(?i)\\bi (?:have|own|got) an? (pet (?:named|called) \\p{L}+)$STMT_END") to "pet",
+        Regex("(?i)\\bi (?:have|own|got) an? (pet (?:named|name[ds]?|called) \\p{L}+)$STMT_END") to "pet",
     )
     private val SELF_STMT_STOP = setOf("my", "the", "a", "an", "it", "this", "that", "here", "there", "some", "with", "on", "by", "your", "his", "her", "their")
     private val INSTRUMENT_RE = Regex("(?i)\\b(drums?|guitar|bass|piano|keys|violin|cello|sax(ophone)?|trumpet|flute|ukulele|synth)\\b")
@@ -2104,7 +2104,8 @@ class DiscordBotService : Service() {
         // "from your profile") the named card renders FULL (all facts).
         val emphasize = HashSet<String>()
         val named = ArrayList<String>()
-        val selfRecall = SELF_RECALL_RE.containsMatchIn(ctx.userText)
+        // "please add it my profile" is a save ask, not "what do you know about me".
+        val selfRecall = SELF_RECALL_RE.containsMatchIn(ctx.userText) && !SAVE_ASK_RE.containsMatchIn(ctx.userText)
         val isRecall = selfRecall || RECALL_RE.containsMatchIn(ctx.userText) || WHO_Q_RE.containsMatchIn(ctx.userText)
         // "what does bob do for work" is a question too, no "?" needed (it got 2 facts and missed "is a bank teller").
         val asking = isRecall || ctx.userText.contains('?') || QUESTION_RE.containsMatchIn(ctx.userText)
@@ -2211,7 +2212,7 @@ class DiscordBotService : Service() {
         if (SAVE_ASK_RE.containsMatchIn(ctx.userText)) hints.add("They want something about them noted: you do keep notes on people, so say it's noted (never that you can't).")
         if (selfQ && !built.recall) hints.add("They're asking about themselves: answer from what you know about them above.")
         if (petAnswerMsg[ctx.authorId] == ctx.messageId) hints.add("They just told you what kind of animal their pet is.")
-        if (built.recall || built.dayAsk != null || REL_ASK_RE.containsMatchIn(ctx.userText)) hints.add("Memory question: say plainly who did what, from above. Nothing there? Say so.")
+        if (built.recall || built.dayAsk != null || REL_ASK_RE.containsMatchIn(ctx.userText)) hints.add("They're asking what you remember: say plainly who did what, from above. Nothing there? Say so.")
         listOf(slangHint(ctx), effectiveTone(ctx.channelId, now).orEmpty(), nickDoneHint(ctx), serverHint(ctx),
             unknownNameHint(ctx, built).ifBlank { selfRefHint(ctx, built) },
             if (ctx.signOff) "They asked you to sign off: say bye in one short line." else "")

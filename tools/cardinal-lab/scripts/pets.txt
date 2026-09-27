@@ -19,3 +19,12 @@ ash: @Cardinal whete do i lige?
 > expect reply
 > expect contains (?i)wisconsin
 > expect not-contains (?i)\bmy (senior |security |software )
+# Round 8d: "a Cat name Asuna" (no "d") after the card already has just "cat" → the name fills in; "please add it
+# my profile" is a save ask, not a memory question (he echoed the "Memory question:" hint label into the reply).
+> teach card cy pet: cat
+cy: @Cardinal yeah because i have a Cat name Asuna
+> expect reply
+> expect card cy contains cat named Asuna
+cy: @Cardinal please add it my profile
+> expect reply
+> expect not-contains (?i)memory question

@@ -275,7 +275,8 @@ object UserMemoryStore {
         if (slot == "pet" && petNeedsKind(v)) petNameOf(v)?.let { n -> if (list.any { !petNeedsKind(it) && petNameOf(it).equals(n, true) }) return false }
         val i = list.indexOfFirst { sameValue(it, v) }
         // "pet named Asuna" (or a bare "Asuna") and now "cat named Asuna": the kind fills in, same pet.
-        if (i >= 0 && slot == "pet" && petNeedsKind(list[i]) && !petNeedsKind(v)) {
+        // …and "cat" then "cat named Asuna": the name fills in, same pet.
+        if (i >= 0 && slot == "pet" && ((petNeedsKind(list[i]) && !petNeedsKind(v)) || (petNameOf(list[i]) == null && petNameOf(v) != null))) {
             val oldKey = "$slot|${norm(list[i])}"
             unsure.remove(oldKey)?.let { if (!confirm) unsure["$slot|${norm(v)}"] = it }
             notes[slot] = list.toMutableList().also { it[i] = v }
@@ -399,10 +400,18 @@ object UserMemoryStore {
     /** A pet always reads "<kind> named <Name>" (or just the kind): a bare name becomes "pet named X" so he asks
      *  what it is. [line] = the line it came from; the animal named right before the name is its kind. */
     fun petValue(raw: String, line: String = ""): String {
-        val v = raw.trim().replace(Regex("(?i)'?s name is\\b| is (?:named|called)\\b|\\bcalled\\b"), " named")
+        val v = raw.trim().replace(Regex("(?i)'?s name is\\b| is (?:named|called)\\b|,?\\s*\\b(?:called|name[ds]?)(?:\\s+is)?\\b"), " named")
             .replace(Regex("\\s+"), " ").replace(Regex("(?i)^(?:an?|my|the)\\s+"), "").trim()
             .replace(Regex("(?i)\\bnamed (\\p{L})")) { "named " + it.groupValues[1].uppercase() }
-        if (PET_KIND.containsMatchIn(v)) return v
+        val kindHit = PET_KIND.find(v)
+        if (kindHit != null) {
+            // "Cat" → "cat"; "cat" alone while the line says "a cat name(d) Asuna" → "cat named Asuna".
+            val kinded = v.replaceRange(kindHit.range, kindHit.value.lowercase())
+            if (petNameOf(kinded) != null || line.isBlank()) return kinded
+            val n = Regex("(?i)\\b" + Regex.escape(kindHit.groupValues[1]) + "(?:'?s)?,?\\s+(?:is\\s+)?(?:named|name[ds]?|called)(?:\\s+is)?\\s+(\\p{L}+)")
+                .find(line)?.groupValues?.get(1)
+            return if (n != null && !n.equals("is", true)) "$kinded named ${n.replaceFirstChar { it.uppercase() }}" else kinded
+        }
         val petName = v.replace(Regex("(?i)^(?:pets?\\s+)?(?:named\\s+)?"), "").trim()
         if (petName.isBlank() || petName.split(' ').size > 2 || Regex("(?i)^(pets?|animals?|none)$").matches(petName)) return v
         val at = line.indexOf(petName, ignoreCase = true)

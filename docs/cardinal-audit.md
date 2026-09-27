@@ -6,6 +6,15 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 8d — device: "Cat name Asuna", save asks (LIVE lab)
+
+| Device case | Cause | Fix |
+|---|---|---|
+| "i have a Cat name Asuna" → card "pets: cat" | "name" (no "d") wasn't a naming word, so the self-statement stopped at "Cat" and `petValue` returned the bare kind | "name/names/called" normalise to "named"; a kind-only value takes its name from the line; `addNote` upgrades "cat" → "cat named Asuna" in place |
+| "please add it my profile" → reply ended "Memory question: Lady Ashoska Sisko asked to add…" | "my profile" matched `SELF_RECALL_RE` → recall hint; the model echoed its "Memory question:" label | `SAVE_ASK_RE` covers "add … my profile/card/notes"; a save ask is never self-recall; the recall hint has no label |
+
+Lab: `pets.txt` 14/14 (4 new checks), `knowing` 8/8, `titles` 22/22 (one reply lost to a Workers AI HTTP 500). No new model calls.
+
 ## Round 8c — device: pets, "whose job", typos (LIVE lab)
 
 - **Pets are stored with their kind.**
