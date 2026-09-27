@@ -726,6 +726,15 @@ class DiscordBotService : Service() {
         // (the chat hasn't moved on → still to him), the cheap check only when it's genuinely unclear.
         val follow = if (addressed) Follow.NONE else followUpKind(channelId, authorId, d, rawContent, now)
         val addressedEff = addressed || follow == Follow.FREE
+        // What they call him ("shut up cum boy", "you will forever be cum boy"): said to him twice = one of his names,
+        // so "help kill cumboy" is about him, never a note on the speaker's card. Notes already holding it are dropped.
+        val afterHim = flow[channelId]?.let { q -> synchronized(q) { q.lastOrNull()?.isBot } } == true
+        if (addressedEff || repliedToBot || afterHim) botNickFrom(stripBotMentions(rawContent))?.let { nick ->
+            if (PersonalityStore.noteBotNick(this, nick)) {
+                DiscordBotState.log("his nickname: $nick")
+                purgeBotNickNotes(nick)
+            }
+        }
         // How they treat him moves their karma (kind words up, real insults down; banter with a laugh doesn't count).
         if (addressedEff || named) noteKarma(authorId, DiscordRest.displayName(author, ""), stripBotMentions(rawContent))
         recordFlow(channelId, FlowMsg(messageId, authorId, false, ref?.optJSONObject("author")?.optString("id"), addressedEff,
@@ -1699,7 +1708,7 @@ class DiscordBotService : Service() {
     }
 
     /** A laugh marker on the line, but it isn't nonsense or roleplay aimed at him. */
-    private fun laughOnly(text: String) = JOKE_RE.containsMatchIn(text) && !NONSENSE_RE.containsMatchIn(text) && !BANTER_AT_HIM_RE.containsMatchIn(text)
+    private fun laughOnly(text: String) = JOKE_RE.containsMatchIn(text) && !NONSENSE_RE.containsMatchIn(text) && !banterAtHim(text)
 
     /** The clause holding the note's words is a plain statement about themselves ("i'm a nurse", "my dog is called miso"). */
     private fun directClaim(text: String, vw: Set<String>): Boolean {
@@ -1734,7 +1743,7 @@ class DiscordBotService : Service() {
         if (slot in setOf("hobby", "likes", "about")) Regex("(?i)^(?:play|plays|playing)\\s+(.{2,40})$").find(v)?.let { slot = "game"; v = it.groupValues[1] }
         // "into: fortnite" / "work: Rimworld" from "i (love to) play X": the line says it's a game.
         if (slot in setOf("hobby", "likes", "work", "about") && turns.any { !it.isBot && Regex("(?i)\\bplay(?:s|ing)?\\s+(?:the\\s+)?" + Regex.escape(v) + "\\b").containsMatchIn(it.text) }) slot = "game"
-        if (Regex("(?i)\\bcardinal\\b").containsMatchIn(v)) return "about Cardinal"
+        if (Regex("(?i)\\bcardinal\\b").containsMatchIn(v) || PersonalityStore.mentionsBotNick(this, v)) return "about Cardinal"
         if (v.split(Regex("\\s+")).size > (if (slot == "about") 7 else 5)) return "long"
         val vw = factWords(v) - names.flatMap { factWords(it) }.toSet()
         if (vw.isEmpty() && slot !in setOf("nick", "lang", "tz")) return "empty"
@@ -1760,6 +1769,9 @@ class DiscordBotService : Service() {
             UserMemoryStore.removeNote(this, id, slot, v); return "ended"
         }
         when {
+            // Someone else's words pasted in ("…aesthetic of cum, cornelius. i love cum" from cornelius himself,
+            // then "i was pasting what you said"): not the speaker talking about themselves.
+            own && quotingSomeone(idx, turns, names) -> return "quoting someone"
             QUESTION_LINE.containsMatchIn(text.trim()) -> return "question"
             // Their own line with a laugh on it ("i'm a nurse lol") may still be true: kept, but only as unsure.
             isJoking(text) && !(own && laughOnly(text)) -> return "joke"
@@ -1998,6 +2010,53 @@ class DiscordBotService : Service() {
         }
     }
 
+    private val NICK_WORD = "[\\p{L}'-]{2,15}"
+    private val BOT_NICK_RES = listOf(
+        // "shut up cum boy", "hey bestie", "gn gremlin"
+        Regex("(?i)^(?:shut up|stfu|hey|hi|hello|yo|bye|goodnight|gn|thanks|thank you|ty|love you|ily|fuck you|screw you|night)[,!]?\\s+(?:you\\s+)?($NICK_WORD(?:\\s+$NICK_WORD)?)$"),
+        // "you will forever be cum boy", "you'll always be my gremlin"
+        Regex("(?i)\\byou(?:'ll|ll| will)\\s+(?:forever|always|still|now)?\\s*be\\s+(?:a |an |the |my |our )?($NICK_WORD(?:\\s+$NICK_WORD)?)$"),
+        // "you're the cum boy", "you are my gremlin" (an article, so "you're dumb" isn't a name)
+        Regex("(?i)\\byou(?:'re|re| are)\\s+(?:a |an |the |my |our )($NICK_WORD(?:\\s+$NICK_WORD)?)$"),
+    )
+    private val BOT_NICK_STOP = setOf("so", "very", "such", "really", "not", "just", "too", "being", "gonna", "going", "the", "a", "an",
+        "you", "u", "me", "him", "her", "them", "it", "that", "this", "there", "here", "cardinal", "bot", "lol", "lmao", "all",
+        "everyone", "guys", "again", "now", "up", "man", "bro", "dude", "for", "to", "and", "of", "in", "on", "wrong", "right",
+        "joking", "kidding", "welcome", "back", "good", "bad", "fine", "ok", "okay", "sure", "mean", "funny", "weird")
+    private fun botNickFrom(text: String): String? {
+        val t = text.trim().replace(Regex("[\\s.!?~]+$"), "").replace(Regex("\\s+"), " ")
+        if (t.isBlank() || QUESTION_LINE.containsMatchIn(text.trim())) return null
+        for (re in BOT_NICK_RES) {
+            val v = re.find(t)?.groupValues?.get(1)?.trim()?.lowercase() ?: continue
+            val words = v.split(" ")
+            if (words.any { it in BOT_NICK_STOP }) continue
+            if (v.replace(" ", "").length < 4) continue
+            return v
+        }
+        return null
+    }
+    private fun purgeBotNickNotes(nick: String) {
+        val re = PersonalityStore.nickRegex(PersonalityStore.squash(nick))
+        for (c in UserMemoryStore.list(this)) for ((slot, vals) in c.notes) for (v in vals)
+            if (re.containsMatchIn(v)) UserMemoryStore.removeNote(this, c.id, slot, v, force = true)
+    }
+
+    private val PASTE_RE = Regex("(?i)\\b(pasting|pasted|quoting|quoted|copying|copied|copy ?pasted|copy ?pasting|reposting|reposted)\\b")
+    /**
+     * Their own line isn't their own words when it addresses THEM by name (", cornelius." from cornelius)
+     * or one of their next few lines says they were pasting/quoting.
+     */
+    private fun quotingSomeone(idx: Int, turns: List<DiscordBotAi.Turn>, names: Set<String>): Boolean {
+        val text = turns[idx].text
+        val short = names.flatMap { n -> listOf(n) + n.split(Regex("\\s+")).filter { it.length >= 3 } }.toSet()
+        if (short.any { n ->
+                val e = Regex.escape(n)
+                Regex("(?i)(,\\s*$e\\s*(?:[,.!?]|$))|(^\\s*$e\\s*,)").containsMatchIn(text)
+            }) return true
+        val who = turns[idx].name
+        return turns.drop(idx + 1).filter { !it.isBot && it.name == who }.take(3).any { PASTE_RE.containsMatchIn(it.text) }
+    }
+
     private fun aimedAtYou(text: String, vw: Set<String>): Boolean {
         if (vw.isEmpty()) return false
         val clauses = text.split(Regex("[!?,;]|\\.(?!\\p{L})|\\s+(?:and|but|so|then|while)\\s+"))
@@ -2009,7 +2068,7 @@ class DiscordBotService : Service() {
 
     private fun aboutCardinal(text: String, vw: Set<String>): Boolean {
         if (vw.isEmpty()) return false
-        val bot = Regex("(?i)\\b(cardinal|" + Regex.escape(botName.ifBlank { "cardinal" }) + ")\\b")
+        val bot = Regex("(?i)(?<![\\p{L}\\p{N}])(?:" + PersonalityStore.botNamePattern(this, botName) + ")(?![\\p{L}\\p{N}])")
         if (!bot.containsMatchIn(text)) return false
         val clauses = text.split(Regex("[!?,;]|\\.(?!\\p{L})|\\s+(?:and|but|so|then)\\s+"))
         val best = clauses.maxByOrNull { c -> factWords(c).count { it in vw } } ?: return false
@@ -2774,11 +2833,19 @@ class DiscordBotService : Service() {
      * lol") with nothing that makes it serious ("genuinely", "for real", "please", "i mean it").
      */
     private fun isJoking(text: String): Boolean =
-        (JOKE_RE.containsMatchIn(text) || NONSENSE_RE.containsMatchIn(text) || BANTER_AT_HIM_RE.containsMatchIn(text)) &&
+        (JOKE_RE.containsMatchIn(text) || NONSENSE_RE.containsMatchIn(text) || banterAtHim(text)) &&
             !SERIOUS_RE.containsMatchIn(text)
     // "i release my houd dogs to go kill cardinal": roleplay aimed at him is a bit, not a fact about the speaker.
-    private val BANTER_AT_HIM_RE = Regex("(?i)\\b(kill|murder|destroy|nuke|beat up|fight|sic|attack|delete|unplug|shut down|hunt|eat)\\b.{0,40}\\bcardinal\\b|" +
-        "\\bcardinal\\b.{0,40}\\b(dies|is dead|gets? (killed|deleted|unplugged)|only option is to run)\\b")
+    // His names include what people call him ("help kill cumboy" is the same bit as "kill cardinal").
+    @Volatile private var banterRe: Pair<String, Regex>? = null
+    private fun banterAtHim(text: String): Boolean {
+        val names = PersonalityStore.botNamePattern(this, botName)
+        val re = banterRe?.takeIf { it.first == names }?.second ?: Regex(
+            "(?i)\\b(kill|murder|destroy|nuke|beat up|fight|sic|attack|delete|unplug|shut down|hunt|eat)\\b.{0,40}(?<![\\p{L}\\p{N}])(?:$names)(?![\\p{L}\\p{N}])|" +
+                "(?<![\\p{L}\\p{N}])(?:$names)(?![\\p{L}\\p{N}]).{0,40}\\b(dies|is dead|gets? (killed|deleted|unplugged)|only option is to run)\\b"
+        ).also { banterRe = names to it }
+        return re.containsMatchIn(text)
+    }
     // "pluh pluh pluh im a little fishie": a sound repeated three times is a bit, not a statement about themselves.
     private val NONSENSE_RE = Regex("(?i)\\b(\\p{L}{2,8})\\b(?:\\W+\\1\\b){2,}")
 

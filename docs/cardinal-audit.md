@@ -6,6 +6,19 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 8g — device: pasted lines and Cardinal's nicknames (LIVE lab)
+
+- **A pasted line isn't the person's own words.** cornelius pasted someone else's line ("i was talking about the aesthetic of cum, cornelius. i love cum") and it became "into: cum" on his card. A line is now skipped as "quoting someone" when:
+  - it addresses the speaker by their own name (", cornelius." from cornelius himself), or
+  - one of their next 3 lines says they were pasting, quoting or copying ("i was pasting what you said").
+- **What people call Cardinal is Cardinal's.** "cum boy" was said to Cardinal again and again, and "kill Cumboy" / "help kill Cumboy" ended up on a card as a hobby and a job. Names said to Cardinal are counted:
+  - The patterns are "shut up X", "hey X", "you will forever be X", "you're the X".
+  - They only count in a message to Cardinal or right after one of its lines.
+  - Said twice, the phrase becomes one of Cardinal's names ("cum boy", "Cumboy" and "cum-boy" all match).
+  - A note holding it is dropped as "about Cardinal", and notes already on cards that hold it are removed.
+  - "kill <nickname>" counts as banter aimed at Cardinal, the same as "kill cardinal".
+- Lab: new `quotes.txt` 5/5. No new model calls.
+
 ## Round 8f — device: "I love spaghetti bolognese" (LIVE lab)
 
 - **Likes and dislikes are saved when they're said.** "I love spaghetti bolognese" wasn't saved. There was no instant rule for "i love X", and the learner filed it as "lives: pasta lover", which was correctly dropped because no line said that. New free per-message rules:

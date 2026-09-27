@@ -412,6 +412,61 @@ object PersonalityStore {
 
     fun reset(ctx: Context) {
         cachedDigest = null
+        botNickCache = null
         prefs(ctx).edit().clear().apply()
+    }
+
+    // ── What people call Cardinal ("shut up cum boy", "you will forever be cum boy") ──
+    // Counted per phrase; one that's been said to him twice is a name for HIM, so a note holding it
+    // ("kill cumboy") is about Cardinal, not the speaker. Stored squashed (no spaces) so "cum boy" = "Cumboy".
+    private const val KEY_BOT_NICKS = "bot_nicks"
+    private const val BOT_NICK_MIN = 2
+    @Volatile private var botNickCache: Map<String, Int>? = null
+
+    private fun botNickCounts(ctx: Context): Map<String, Int> = botNickCache ?: run {
+        val m = HashMap<String, Int>()
+        try { val o = JSONObject(prefs(ctx).getString(KEY_BOT_NICKS, "{}") ?: "{}"); o.keys().forEach { k -> m[k] = o.optInt(k) } } catch (_: Exception) {}
+        botNickCache = m; m
+    }
+
+    fun squash(s: String): String = s.lowercase().replace(Regex("[^\\p{L}\\p{N}]"), "")
+
+    /** Returns true the moment this phrase becomes one of his names (said to him [BOT_NICK_MIN] times). */
+    @Synchronized
+    fun noteBotNick(ctx: Context, nick: String): Boolean {
+        val k = squash(nick)
+        if (k.length < 4) return false
+        val m = HashMap(botNickCounts(ctx))
+        val n = (m[k] ?: 0) + 1
+        m[k] = n
+        // Keep the 40 most-said.
+        val kept = m.entries.sortedByDescending { it.value }.take(40).associate { it.key to it.value }
+        botNickCache = kept
+        prefs(ctx).edit().putString(KEY_BOT_NICKS, JSONObject(kept).toString()).apply()
+        return n == BOT_NICK_MIN
+    }
+
+    fun botNicks(ctx: Context): Set<String> = botNickCounts(ctx).filterValues { it >= BOT_NICK_MIN }.keys
+
+    /** Does [text] use one of his names ("help kill Cumboy", "cum boy is back")? */
+    fun mentionsBotNick(ctx: Context, text: String): Boolean {
+        val nicks = botNicks(ctx)
+        if (nicks.isEmpty()) return false
+        return nicks.any { nickRegex(it).containsMatchIn(text) }
+    }
+
+    private val nickRegexCache = java.util.concurrent.ConcurrentHashMap<String, Regex>()
+    /** "cumboy" matches "cum boy", "Cumboy", "cum-boy" as whole words. */
+    fun nickRegex(squashed: String): Regex = nickRegexCache.getOrPut(squashed) {
+        Regex("(?i)(?<![\\p{L}\\p{N}])" + squashed.map { Regex.escape(it.toString()) }.joinToString("[\\s'-]*") + "(?![\\p{L}\\p{N}])")
+    }
+
+    /** A regex alternative for all his names (cardinal + learned nicknames), for "kill X" style checks. */
+    fun botNamePattern(ctx: Context, botName: String): String {
+        val parts = LinkedHashSet<String>()
+        parts.add("cardinal")
+        if (botName.isNotBlank()) parts.add(Regex.escape(botName.lowercase()))
+        botNicks(ctx).forEach { n -> parts.add(n.map { Regex.escape(it.toString()) }.joinToString("[\\s'-]*")) }
+        return parts.joinToString("|")
     }
 }
