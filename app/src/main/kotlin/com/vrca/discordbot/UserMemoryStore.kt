@@ -167,7 +167,7 @@ object UserMemoryStore {
             karmaToday = o.optInt("kt", 0),
             talkDay = o.optString("td"),
             none = HashMap<String, String>().apply { o.optJSONObject("no")?.let { n -> n.keys().forEach { k -> if (k in SLOTS && notes[k].isNullOrEmpty()) put(k, n.optString(k)) } } },
-        ).withPlaceTz()
+        ).withPlaceTz().withPetKinds()
     } catch (_: Exception) { null }
 
     private fun strList(a: JSONArray?): List<String> =
@@ -262,6 +262,7 @@ object UserMemoryStore {
         // "Straftat's game" / "Valorant game" → the name itself (the slot already says it's a game).
         if (slot in setOf("game", "hobby", "likes", "dislikes")) v = v.replace(Regex("(?i)^(the )?(video ?)?games? "), "")
             .replace(Regex("(?i)('s)?\\s+(video ?)?games?$"), "").trim().ifBlank { v }
+        if (slot == "pet") v = petValue(v)
         if (v.isBlank() || POISON.containsMatchIn(v)) return false
         val now = System.currentTimeMillis()
         val cur = load(ctx, id) ?: Card(id = id, name = name.take(60))
@@ -270,7 +271,16 @@ object UserMemoryStore {
         // "i work at a bank now" / "new job at X": the old ones in this slot are over.
         val list = if (replace && !cur.pinned) notes[slot].orEmpty().filter { sameValue(it, v) }.also { kept ->
             notes[slot].orEmpty().filterNot { k -> kept.contains(k) }.forEach { unsure.remove("$slot|${norm(it)}") } } else notes[slot].orEmpty()
+        // "pet named Mochi" when "hamster named Mochi" is already known: nothing new.
+        if (slot == "pet" && petNeedsKind(v)) petNameOf(v)?.let { n -> if (list.any { !petNeedsKind(it) && petNameOf(it).equals(n, true) }) return false }
         val i = list.indexOfFirst { sameValue(it, v) }
+        // "pet named Asuna" (or a bare "Asuna") and now "cat named Asuna": the kind fills in, same pet.
+        if (i >= 0 && slot == "pet" && petNeedsKind(list[i]) && !petNeedsKind(v)) {
+            val oldKey = "$slot|${norm(list[i])}"
+            unsure.remove(oldKey)?.let { if (!confirm) unsure["$slot|${norm(v)}"] = it }
+            notes[slot] = list.toMutableList().also { it[i] = v }
+            save(ctx, cur.copy(notes = notes, unsure = unsure)); return true
+        }
         if (i >= 0) {
             // Known already: said again in a later conversation (or by a second person) = confirmed.
             val key = "$slot|${norm(list[i])}"
@@ -383,9 +393,55 @@ object UserMemoryStore {
         save(ctx, cur.copy(tz = tz, tzAuto = false, name = cur.name.ifBlank { name.take(60) }))
     }
 
+    // A specific kind of animal ("pet"/"pets" alone doesn't say which).
+    private val PET_KIND = Regex("(?i)\\b(cat|kitten|kitty|dog|puppy|pup|doggo|bird|parrot|budgie|cockatiel|snake|rabbit|bunny|hamster|ferret|lizard|gecko|fish|turtle|tortoise|horse|pony|guinea pig|rat|mouse|chinchilla|hedgehog|axolotl|spider|tarantula|frog|goat|chicken|duck|cow|pig|iguana|bearded dragon)(s|es)?\\b")
+
+    /** A pet always reads "<kind> named <Name>" (or just the kind): a bare name becomes "pet named X" so he asks
+     *  what it is. [line] = the line it came from; the animal named right before the name is its kind. */
+    fun petValue(raw: String, line: String = ""): String {
+        val v = raw.trim().replace(Regex("(?i)'?s name is\\b| is (?:named|called)\\b|\\bcalled\\b"), " named")
+            .replace(Regex("\\s+"), " ").replace(Regex("(?i)^(?:an?|my|the)\\s+"), "").trim()
+            .replace(Regex("(?i)\\bnamed (\\p{L})")) { "named " + it.groupValues[1].uppercase() }
+        if (PET_KIND.containsMatchIn(v)) return v
+        val petName = v.replace(Regex("(?i)^(?:pets?\\s+)?(?:named\\s+)?"), "").trim()
+        if (petName.isBlank() || petName.split(' ').size > 2 || Regex("(?i)^(pets?|animals?|none)$").matches(petName)) return v
+        val at = line.indexOf(petName, ignoreCase = true)
+        val kinds = PET_KIND.findAll(line).toList()
+        val kind = (if (at >= 0) kinds.lastOrNull { it.range.first < at } else null) ?: kinds.firstOrNull()
+        return "${kind?.groupValues?.get(1)?.lowercase() ?: "pet"} named ${petName.replaceFirstChar { it.uppercase() }}"
+    }
+    private fun petNameOf(v: String): String? = Regex("(?i)\\bnamed\\s+(\\p{L}+)").find(v)?.groupValues?.get(1)
+        fun petNeedsKind(v: String): Boolean = !PET_KIND.containsMatchIn(v)
+    fun petKindIn(text: String): String? = PET_KIND.find(text)?.groupValues?.get(1)?.lowercase()
+    /** Their pets whose kind isn't known yet: "pet named Asuna" → "Asuna". */
+    fun petsMissingKind(card: Card): List<String> = card.notes["pet"].orEmpty().filter { petNeedsKind(it) }
+        .map { it.replace(Regex("(?i)^pets?\\s+(?:named\\s+)?"), "").trim() }.filter { it.isNotBlank() }
+    /** "she's a cat" / "asuna is a dog": fill in the kind of a pet known only by name. */
+    fun setPetKind(ctx: Context, id: String, petName: String, kind: String): Boolean {
+        val card = load(ctx, id) ?: return false
+        val list = card.notes["pet"].orEmpty()
+        val i = list.indexOfFirst { petNeedsKind(it) && it.contains(petName, ignoreCase = true) }
+        if (i < 0) return false
+        val v = "$kind named $petName"
+        val unsure = HashMap(card.unsure)
+        unsure.remove("pet|${norm(list[i])}")?.let { unsure["pet|${norm(v)}"] = it }
+        save(ctx, card.copy(notes = LinkedHashMap(card.notes).apply { put("pet", list.toMutableList().also { it[i] = v }) }, unsure = unsure))
+        return true
+    }
+
     /** The zone of where they live, else where they're from ("wisconsin" → America/Chicago). */
     fun placeTz(notes: Map<String, List<String>>): String? =
         notes["lives"]?.firstNotNullOfOrNull { TimezoneGuess.fromPlace(it) } ?: notes["from"]?.firstNotNullOfOrNull { TimezoneGuess.fromPlace(it) }
+
+    /** Older cards stored a pet as just its name ("Asuna"): make it "pet named Asuna" so the kind gets asked. */
+    private fun Card.withPetKinds(): Card {
+        val list = notes["pet"] ?: return this
+        val fixed = list.map { petValue(it) }
+        if (fixed == list) return this
+        val un = HashMap(unsure)
+        list.zip(fixed).forEach { (a, b) -> if (a != b) un.remove("pet|${norm(a)}")?.let { un["pet|${norm(b)}"] = it } }
+        return copy(notes = LinkedHashMap(notes).apply { put("pet", fixed) }, unsure = un)
+    }
 
     /** No zone of their own → follow where they live/are from (moving updates it; dropping the place clears it). */
     private fun Card.withPlaceTz(): Card {
@@ -628,6 +684,8 @@ object UserMemoryStore {
         if (extra.isNotBlank()) sb.append(' ').append(extra)
 
         if (card != null) {
+            // "work: security engineer" under a bare header read as his own job ("my security engineer memory").
+            if (SLOTS.any { slotText(card, it) != null }) sb.append(" (notes are about them, not you)")
             if (card.relationship.isNotBlank()) sb.append("\n- server role: ").append(card.relationship.trim().trimEnd('.'))
             sb.append("\n- with them: ").append(withThem(card))
             val langs = spokenLanguages(card)

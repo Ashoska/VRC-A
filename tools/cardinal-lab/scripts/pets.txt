@@ -1,0 +1,21 @@
+# Device cases (Round 8c): a pet is stored with its kind; a name-only pet gets asked about; the kind answer fills it
+# in (and "he's a hamster" isn't about Cardinal); "whete do i lige?" (typos) opens their notes; their job isn't Cardinal's.
+@set ambient=0 context=10
+@channel general main hangout
+[general]
+> teach card ash work: senior security software engineer
+> teach card ash lives: wisconsin
+ash: @Cardinal I have a cat called Asuna
+> expect reply
+> expect card ash contains cat named Asuna
+bo: @Cardinal my pet's name is Mochi
+> expect reply
+> expect card bo contains pet named Mochi
+> expect contains (?i)(what|kind|type|is mochi)
+bo: @Cardinal he's a hamster
+> expect reply
+> expect card bo contains hamster named Mochi
+ash: @Cardinal whete do i lige?
+> expect reply
+> expect contains (?i)wisconsin
+> expect not-contains (?i)\bmy (senior |security |software )

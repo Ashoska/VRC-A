@@ -6,6 +6,21 @@ measured before/after. The original findings are kept unchanged underneath for r
 markers: 🧪 reproduced by running the real bot in the **Cardinal Lab** (`tools/cardinal-lab/`, script
 named in brackets); 📖 from reading the code; ❓ needed a LIVE run.
 
+## Round 8c — device: pets, "whose job", typos (LIVE lab)
+
+- **Pets are stored with their kind.**
+  - A pet is saved as "cat named Asuna", not just "Asuna". The kind comes from the line: the animal named right before the name.
+  - A pet given without a kind ("my pet's name is Mochi") is saved as "pet named Mochi", and Cardinal asks what kind of animal it is (at most once per 10 minutes per pet).
+  - The answer ("he's a hamster") fills it in as "hamster named Mochi". It isn't read as being about Cardinal, and the later "pet named Mochi" duplicate is dropped.
+  - Older name-only pets are converted to "pet named X" when loaded.
+- **"Whose job".** "Talking to:" now says "(notes are about them, not you)". Cardinal had answered "are we testing my security engineer memory" about the user's job.
+- **Questions about themselves open their notes.** A question with "do i / am i / my …" ("whete do i lige?", typos and all) shows their whole card, not just the notes whose words match. The typo meant nothing matched and Cardinal answered "no idea, somewhere with cheese?". A short hint says to answer from their notes.
+- **A pet's name isn't an unknown person.** "Asuna" got "someone you don't know, not you". Words after "named/called" and words from their own notes are skipped.
+
+- **"I play X" stays a game.** A learner note like "into: fortnite" whose line says "i play fortnite" is treated as a game, so a full games slot keeps it out instead of it landing under hobbies.
+
+Lab: `pets.txt` 10/10 (twice); knowing 8/8, knowing2 15/15, titles 23/23, people 25/25, tz 12/12, device 81/81.
+
 ## Round 8b — device: "lives in Wisconsin" gave no time zone, a cat wasn't saved (LIVE lab)
 
 - **Plain statements save at once.** A one-off "I have a cat called Asuna" or "i live in wisconsin" used to wait for a learn pass. In a quiet channel (fewer than 3 new messages) none came, so nothing was saved. The free self-statement rules now run on each message as it arrives, through the same checks, at no model cost.

@@ -88,6 +88,7 @@ class DiscordBotService : Service() {
         // Someone asking Cardinal to recall a person / event / memory (drives full-card injection).
         private val RECALL_RE = Regex("(?i)(who is|who'?s |what do you know|know about|tell me about|info(rmation)? (on|about)|(^|\\b(you|u|hey|yo|cardinal|do you|dyou)\\W+)remember (when|that|the|how|what|who)|do you (know|remember)|did (you|u) (see|hear|catch) (what|that|the|about)|(you|u) hear about|about (him|her|them|me)\\b|from your (profile|memory|notes)|in your (profile|memory))")
         // Questions about the asker themself ("what do you remember about me", "what do i do again").
+        private val SELF_Q_RE = Regex("(?i)\\b(do|did|am|was|have|can|should|would) i\\b|\\bmy \\p{L}+")
         private val SELF_RECALL_RE = Regex("(?i)(about me\\b|know about me|my (profile|info|memory)|remember me|who am i|what am i like|" +
             "where (do i live|am i from)|what('?s| is) my (job|name|cat|dog|pet|game|hobby|work|thing|deal)\\b|" +
             "what do i do( again| for (a )?living| for work)?\\s*(lol|lmao|haha)?\\s*\\??\\s*$)")
@@ -314,6 +315,9 @@ class DiscordBotService : Service() {
     private val backoffUntil = ConcurrentHashMap<String, Long>()         // channel -> back-off deadline
     private val backoffStopMsg = ConcurrentHashMap<String, String>()     // channel -> id of the "stop" message
     private val nickSetAt = ConcurrentHashMap<String, Pair<Long, String>>()
+    private val petAnswerMsg = ConcurrentHashMap<String, String>()   // person → the message that told him a pet's kind ("he's a hamster" isn't about him)
+    private val petAskAt = ConcurrentHashMap<String, Long>()   // "person|pet" → when he was last told to ask its kind
+    private val PET_ASK_GAP_MS = 10 * 60_000L
     private val curiousAt = ConcurrentHashMap<String, Long>()   // person → when he was last nudged to ask about them
     private val pronounSetAt = ConcurrentHashMap<String, Pair<Long, String>>()
     private val seenWriteAt = ConcurrentHashMap<String, Long>()
@@ -669,6 +673,18 @@ class DiscordBotService : Service() {
             val n2i = mapOf(nm.lowercase().trim() to authorId)
             selfStatements(one).forEach { n -> applyNote(n, authorId, one, n2i, false)?.let { DiscordBotState.log("note ${n.type} \"${n.value}\" skipped: $it") } }
             ownUpdates(one, n2i)
+            // "she's a cat" / "asuna is a dog": the kind of a pet he only knew by name (after he asked, or naming it).
+            UserMemoryStore.load(this, authorId)?.let { c ->
+                val kind = UserMemoryStore.petKindIn(rawContent) ?: return@let
+                val names = UserMemoryStore.petsMissingKind(c)
+                val asked = lastExchangeWith(channelId, authorId)?.second.orEmpty()
+                val pet = names.firstOrNull { rawContent.contains(it, ignoreCase = true) }
+                    ?: names.firstOrNull { asked.contains(it, ignoreCase = true) && rawContent.trim().split(Regex("\\s+")).size <= 8 }
+                if (pet != null && !QUESTION_LINE.containsMatchIn(rawContent.trim()) && UserMemoryStore.setPetKind(this, authorId, pet, kind)) {
+                    petAnswerMsg[authorId] = messageId
+                    DiscordBotState.log("pet kind: $pet = $kind")
+                }
+            }
         }
         if (statedPronouns == null && !CALL_ME_NOT_RE.containsMatchIn(rawContent)) CALL_ME_RE.find(rawContent)?.groupValues?.get(2)?.let { nick ->
             if (nick.lowercase() !in CALL_ME_STOP) {
@@ -1709,6 +1725,8 @@ class DiscordBotService : Service() {
         if (slot != "lang" && asLang in LANGUAGES) return "language in the wrong slot"
         // "into: play fortnite" is a game.
         if (slot in setOf("hobby", "likes", "about")) Regex("(?i)^(?:play|plays|playing)\\s+(.{2,40})$").find(v)?.let { slot = "game"; v = it.groupValues[1] }
+        // "into: fortnite" from "i play fortnite": the line says it's a game (a full games slot then keeps it out).
+        if (slot in setOf("hobby", "likes") && turns.any { !it.isBot && Regex("(?i)\\bplay(?:s|ing)?\\s+(?:the\\s+)?" + Regex.escape(v) + "\\b").containsMatchIn(it.text) }) slot = "game"
         if (Regex("(?i)\\bcardinal\\b").containsMatchIn(v)) return "about Cardinal"
         if (v.split(Regex("\\s+")).size > (if (slot == "about") 7 else 5)) return "long"
         val vw = factWords(v) - names.flatMap { factWords(it) }.toSet()
@@ -1809,7 +1827,9 @@ class DiscordBotService : Service() {
                 val direct = own && !isJoking(text) && directClaim(text, vw)
                 // "i also work at a bar now" / "got a second job" is another job, not a change of job.
                 val replace = slot == "work" && own && !isJoking(text) && NEW_JOB_RE.containsMatchIn(text) && !EXTRA_JOB_RE.containsMatchIn(text)
-                if (!UserMemoryStore.addNote(this, id, n.about, slot, v, confirm = loose.size >= 2 || direct, replace = replace)) return "known"
+                // A pet is stored with its kind ("cat named Asuna"), taken from the line when only the name was filed.
+                val stored = if (slot == "pet") UserMemoryStore.petValue(v, text) else v
+                if (!UserMemoryStore.addNote(this, id, n.about, slot, stored, confirm = loose.size >= 2 || direct, replace = replace)) return "known"
                 // (Where they live / are from sets their time zone too, unless they said one — UserMemoryStore.save.)
             }
         }
@@ -1902,6 +1922,10 @@ class DiscordBotService : Service() {
         Regex("(?i)\\b(?:they|people|everyone|everybody|the server|y'?all|yall) (?:all )?calls? me (?:the )?([\\p{L}\\p{N}'-]{2,20}(?: [\\p{L}\\p{N}'-]{2,20})?)$STMT_END") to "nick",
         Regex("(?i)\\bi play (?:the )?([\\p{L}\\p{N}' +-]{3,25}?)$STMT_END") to "game",
         Regex("(?i)\\bi (?:have|own|got) an? ((?:\\p{L}+ )?(?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko)(?: (?:named|called) \\p{L}+)?)$STMT_END") to "pet",
+        // "my cat's name is asuna" / "my pet is called asuna" / "i have a pet named asuna" (no kind → he asks).
+        Regex("(?i)\\bmy ((?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko|pet)'?s name is \\p{L}+)$STMT_END") to "pet",
+        Regex("(?i)\\bmy ((?:cat|dog|kitten|puppy|parrot|bird|snake|rabbit|bunny|hamster|ferret|lizard|gecko|pet) is (?:named|called) \\p{L}+)$STMT_END") to "pet",
+        Regex("(?i)\\bi (?:have|own|got) an? (pet (?:named|called) \\p{L}+)$STMT_END") to "pet",
     )
     private val SELF_STMT_STOP = setOf("my", "the", "a", "an", "it", "this", "that", "here", "there", "some", "with", "on", "by", "your", "his", "her", "their")
     private val INSTRUMENT_RE = Regex("(?i)\\b(drums?|guitar|bass|piano|keys|violin|cello|sax(ophone)?|trumpet|flute|ukulele|synth)\\b")
@@ -2121,12 +2145,14 @@ class DiscordBotService : Service() {
     ): DiscordBotAi.ReplyCtx {
         val now = System.currentTimeMillis()
         val selfRecall = built.recall && SELF_RECALL_RE.containsMatchIn(ctx.userText)
+        // "where do i live?" / "whete do i lige?" (typos and all): a question about themselves opens their whole card.
+        val selfQ = '?' in ctx.userText && SELF_Q_RE.containsMatchIn(ctx.userText)
         val answerKeys = (keywordList(ctx.userText) + (ctx.refTurn?.text?.let { keywordList(it) } ?: emptyList())).toHashSet()
         val timeAsk = TIME_ASK_RE.containsMatchIn(ctx.userText)
         val fresh = { m: Map<String, Pair<Long, String>> -> m[ctx.authorId]?.takeIf { now - it.first < NICK_NOTE_MS }?.second }
         val langAsk = Regex("(?i)\\b(languages?|speaks?|speaking|fluent)\\b").containsMatchIn(ctx.userText)
         val talking = UserMemoryStore.talkingTo(this, ctx.authorId, ctx.authorName, localTime = timeAsk, langAsk = langAsk,
-            keywords = answerKeys, all = selfRecall || built.recall,
+            keywords = answerKeys, all = selfRecall || built.recall || selfQ,
             extra = listOfNotNull(fresh(nickSetAt)?.let { "(now called $it, saved)" }, fresh(pronounSetAt)?.let { "(pronouns just set)" }).joinToString(" "))
 
         // Others: whole card for anyone named, the person whose message they replied to, a "who …?" match and the
@@ -2163,6 +2189,14 @@ class DiscordBotService : Service() {
         if (VERDICT_ASK_RE.containsMatchIn(ctx.userText)) hints.add("They want a rating/pick: give your actual number or choice, no dodging.")
         // Getting to know them (rationed): an empty basic slot → ask about it once a day at most, only in a casual
         // moment (not while they're asking him something, not in a serious chat, not a first message).
+        // A pet known only by name: ask what it is (not the same pet twice within PET_ASK_GAP_MS).
+        UserMemoryStore.load(this, ctx.authorId)?.let { card ->
+            val pet = UserMemoryStore.petsMissingKind(card).firstOrNull() ?: return@let
+            if (now - (petAskAt["${ctx.authorId}|$pet"] ?: 0L) >= PET_ASK_GAP_MS) {
+                petAskAt["${ctx.authorId}|$pet"] = now
+                hints.add("Ask them what kind of animal their pet $pet is.")
+            }
+        }
         UserMemoryStore.load(this, ctx.authorId)?.let { card ->
             val gap = CURIOUS_ASK.keys.firstOrNull { card.notes[it].isNullOrEmpty() && it !in card.none }
             if (gap != null && card.interactions >= 2 && !built.asking && !built.recall && built.dayAsk == null &&
@@ -2175,6 +2209,8 @@ class DiscordBotService : Service() {
         if (OPINION_RE.containsMatchIn(ctx.userText) && !VERDICT_ASK_RE.containsMatchIn(ctx.userText))
             hints.add("Say plainly if you like it or not.")
         if (SAVE_ASK_RE.containsMatchIn(ctx.userText)) hints.add("They want something about them noted: you do keep notes on people, so say it's noted (never that you can't).")
+        if (selfQ && !built.recall) hints.add("They're asking about themselves: answer from what you know about them above.")
+        if (petAnswerMsg[ctx.authorId] == ctx.messageId) hints.add("They just told you what kind of animal their pet is.")
         if (built.recall || built.dayAsk != null || REL_ASK_RE.containsMatchIn(ctx.userText)) hints.add("Memory question: say plainly who did what, from above. Nothing there? Say so.")
         listOf(slangHint(ctx), effectiveTone(ctx.channelId, now).orEmpty(), nickDoneHint(ctx), serverHint(ctx),
             unknownNameHint(ctx, built).ifBlank { selfRefHint(ctx, built) },
@@ -2236,6 +2272,7 @@ class DiscordBotService : Service() {
      *  next to talking TO him; without a nudge the model picked that up and said "don't encourage him"
      *  about itself. Only when a recent human line uses he/him/his or his name. Free. */
     private fun selfRefHint(ctx: MsgCtx, built: Built): String {
+        if (petAnswerMsg[ctx.authorId] == ctx.messageId) return ""
         val recent = built.turns.filter { !it.isBot }.takeLast(4)
         val re = Regex("(?i)\\b(he|him|his|he'?s|hes)\\b")
         val line = recent.lastOrNull { re.containsMatchIn(it.text) } ?: return ""
@@ -2284,6 +2321,9 @@ class DiscordBotService : Service() {
         val words = Regex("[\\p{L}']+").findAll(ctx.userText).toList()
         val known = (built.nameToId.keys + UserMemoryStore.nameEntries(this).map { it.key } + listOf(botName))
             .map { it.lowercase().trim() }.filter { it.length >= 2 }
+        // Words from their own notes (their pet "Asuna", their town) aren't unknown people.
+        val ownNoteWords = UserMemoryStore.load(this, ctx.authorId)?.let { c -> UserMemoryStore.factLines(c) }.orEmpty()
+            .flatMap { Regex("[\\p{L}']+").findAll(it.substringAfter(':')).map { w -> w.value.lowercase() }.toList() }.toSet()
         val candidates = words.filterIndexed { i, m ->
             val w = m.value
             if (i == 0 || w.length < 3 || !w[0].isUpperCase() || w.drop(1).any { it.isUpperCase() }) return@filterIndexed false
@@ -2292,8 +2332,10 @@ class DiscordBotService : Service() {
             // "update my Nickname", "the Server": a noun after a determiner/possessive, not a name.
             if (Regex("(?i)\\b(my|your|his|her|their|our|the|a|an|this|that|these|those|some|any)\\s*$")
                     .containsMatchIn(ctx.userText.substring(0, m.range.first))) return@filterIndexed false
+            // "a cat called Asuna": a name they're giving something, not a person in the chat.
+            if (Regex("(?i)\\b(named|called|name is|name's)\\s*$").containsMatchIn(ctx.userText.substring(0, m.range.first))) return@filterIndexed false
             val lw = w.lowercase().trim('\'')
-            lw !in NOT_NAMES && known.none { k -> k == lw || k.split(Regex("[^\\p{L}\\p{N}]+")).any { it == lw } }
+            lw !in NOT_NAMES && lw !in ownNoteWords && known.none { k -> k == lw || k.split(Regex("[^\\p{L}\\p{N}]+")).any { it == lw } }
         }.map { it.value }.distinct()
         val n = candidates.firstOrNull() ?: return ""
         val refFlow = ctx.refId?.let { rid -> flow[ctx.channelId]?.let { q -> synchronized(q) { q.firstOrNull { it.id == rid } } } }
