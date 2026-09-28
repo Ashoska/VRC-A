@@ -123,6 +123,19 @@ class UiLabTest {
         var left = settleMs
         // Real time too: network replies (VRChat, Firestore) arrive on background threads.
         while (left > 0) { Thread.sleep(50); looper.idleFor(Duration.ofMillis(50)); left -= 50 }
+        if (System.getProperty("uilab.ui.firestore") == "real") {
+            val uid = FirebaseAuth.getInstance().currentUser?.uid
+            val task = FirebaseFirestore.getInstance().collection("config").document("app")
+                .get(com.google.firebase.firestore.Source.SERVER)
+            var waited = 0
+            while (!task.isComplete && waited < 10_000) { Thread.sleep(50); looper.idleFor(Duration.ofMillis(50)); waited += 50 }
+            val cfg = when {
+                !task.isComplete -> "timed out"
+                task.isSuccessful -> "${task.result?.data?.keys?.size} fields"
+                else -> "error: ${task.exception?.message}"
+            }
+            println("[uilab] firestore: signed in=${uid != null}, config/app $cfg")
+        }
         run {
             val root = act.window.decorView
             val bmp = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888)

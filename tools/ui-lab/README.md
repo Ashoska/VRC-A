@@ -12,6 +12,14 @@ About 15-20 s per shot with a warm Gradle daemon, including recompiling an edite
   so normal test runs skip it.
 - `UiLabApp` swaps in a fake Firebase project pointed at a dead emulator port before the app starts,
   so nothing can reach production.
-- It draws with a fresh, logged-out state: default presets, everything off.
-- Not rendered: the Discord WebView, notifications, OSC and the real VRChat data. Fonts are
+- **VRChat alt:** `tools/ui-lab/vrc-login.sh` logs the alt in. The password is an API credential
+  on the environment for `api.vrchat.cloud`, added by the agent proxy, so it's never on this
+  machine. Then `vrc-login.sh <code>` finishes the login with the emailed code. Cookies stay in
+  git-ignored `ui-shots/.vrc/`. Every shot is then signed in as the alt, with its real presence;
+  `--no-vrchat` skips that. `vrc-login.sh status` checks the session.
+- **`--firestore`:** uses the real Firebase project with a fixed lab device id per variant
+  (`sha256("uilab:<flavor>")`), so runs never pile up new user docs. Without it, Firebase is
+  offline.
+- Presets and toggles start fresh on every shot (defaults, everything off).
+- Not rendered: the Discord WebView, notifications, OSC, and the live VRChat connection (pipeline websocket), so friends counts don't show. Fonts are
   Robolectric's, close to the device.
