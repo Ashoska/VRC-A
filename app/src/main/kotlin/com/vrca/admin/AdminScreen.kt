@@ -241,7 +241,7 @@ fun AdminScreen() {
         }
     }
 
-    LaunchedEffect(myUid) { refreshOwnerGate() }
+    LaunchedEffect(myUid) { refreshOwnerGate(); if (AdminLabAccess.forceOwner) isOwner = true }
 
     // Gate loading screen
     if (!ownerChecked) {
@@ -955,4 +955,10 @@ internal fun formatTimestamp(ts: com.google.firebase.Timestamp?): String {
 
     val abs = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(ms))
     return "$abs ($rel)"
+}
+
+/** UI Lab only (tools/ui-lab): opens the admin panel without the owner account so its screens can be
+ *  rendered. Nothing in the app ever sets it. */
+internal object AdminLabAccess {
+    @Volatile var forceOwner = false
 }

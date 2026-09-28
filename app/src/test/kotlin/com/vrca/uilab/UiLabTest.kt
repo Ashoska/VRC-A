@@ -1,11 +1,6 @@
 package com.vrca.uilab
 
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.os.Looper
 import org.robolectric.Robolectric
-import org.robolectric.Shadows.shadowOf
-import java.time.Duration
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.lifecycle.ViewModelProvider
@@ -14,7 +9,6 @@ import com.google.firebase.FirebaseOptions
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.vrca.app.VrcaApplication
-import com.vrca.ui.screen.VrcaScreen
 import com.vrca.ui.theme.ThemeMode
 import com.vrca.ui.theme.VrcaTheme
 import com.vrca.ui.viewmodel.VrcaViewModel
@@ -27,6 +21,7 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
 import java.io.File
+import java.time.Duration
 
 /**
  * The UI Lab's app. By default Firebase is a FAKE project pointed at a dead emulator port, so
@@ -103,7 +98,7 @@ class UiLabTest {
         val qualifiers = System.getProperty("uilab.ui.qualifiers")
             ?: if (com.vrca.BuildConfig.IS_HEADSET_BUILD) "w1024dp-h640dp-land-xhdpi" else "w411dp-h891dp-port-xxhdpi"
         RuntimeEnvironment.setQualifiers(qualifiers)
-        val out = File(System.getProperty("uilab.ui.out") ?: "${System.getProperty("ui.lab.root")}/ui-shots/shot.png")
+        val outDir = File(System.getProperty("uilab.ui.outdir") ?: "${System.getProperty("ui.lab.root")}/ui-shots")
         val settleMs = (System.getProperty("uilab.ui.settle") ?: "1500").toLong()
 
         val app = RuntimeEnvironment.getApplication() as VrcaApplication
@@ -116,33 +111,68 @@ class UiLabTest {
             com.vrca.vrchat.VrchatPipelineState.isConnected = p != null
         }
 
-        val controller = Robolectric.buildActivity(ComponentActivity::class.java).setup()
-        val act = controller.get()
-        act.setContent { VrcaTheme(themeMode = ThemeMode.Dark) { VrcaScreen(chatboxViewModel = vm) } }
-        val looper = shadowOf(Looper.getMainLooper())
-        var left = settleMs
-        // Real time too: network replies (VRChat, Firestore) arrive on background threads.
-        while (left > 0) { Thread.sleep(50); looper.idleFor(Duration.ofMillis(50)); left -= 50 }
+        // Robolectric's default is a frame every 1 ms; with animations running that's 16x too much work.
+        org.robolectric.shadows.ShadowChoreographer.setPaused(true)
+        org.robolectric.shadows.ShadowChoreographer.setFrameDelay(Duration.ofMillis(16))
+        val act = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+        val driver = UiLabDriver(act, app, vm, outDir)
+        act.setContent { VrcaTheme(themeMode = ThemeMode.Dark) { UiLabScenes.Root(driver) } }
+        driver.settle(settleMs)
+
         if (System.getProperty("uilab.ui.firestore") == "real") {
             val uid = FirebaseAuth.getInstance().currentUser?.uid
-            val task = FirebaseFirestore.getInstance().collection("config").document("app")
-                .get(com.google.firebase.firestore.Source.SERVER)
-            var waited = 0
-            while (!task.isComplete && waited < 10_000) { Thread.sleep(50); looper.idleFor(Duration.ofMillis(50)); waited += 50 }
-            val cfg = when {
-                !task.isComplete -> "timed out"
-                task.isSuccessful -> "${task.result?.data?.keys?.size} fields"
-                else -> "error: ${task.exception?.message}"
+            println("[uilab] firestore: signed in=${uid != null}")
+        }
+
+        val port = System.getProperty("uilab.ui.serve")?.toIntOrNull()
+        if (port != null) serve(driver, port) else {
+            val script = System.getProperty("uilab.ui.script")?.let { f -> File(f).readText() }
+                ?: System.getProperty("uilab.ui.do") ?: "shot home"
+            driver.run(script).forEach { println("[uilab] $it") }
+        }
+        println("[uilab] $qualifiers, done in ${System.currentTimeMillis() - t0} ms")
+    }
+
+    /** Live mode: POST commands to http://127.0.0.1:<port>/run, get the results back. The app keeps
+     *  running between requests, so a new state or screen is ~1 s, not a rebuild. */
+    private fun serve(driver: UiLabDriver, port: Int) {
+        val queue = java.util.concurrent.LinkedBlockingQueue<Pair<String, java.util.concurrent.CompletableFuture<String>>>()
+        val stopFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+        val server = java.net.ServerSocket(port, 50, java.net.InetAddress.getByName("127.0.0.1"))
+        Thread {
+            while (!server.isClosed) {
+                val sock = runCatching { server.accept() }.getOrNull() ?: break
+                Thread {
+                    sock.use { so ->
+                        val input = java.io.BufferedInputStream(so.getInputStream())
+                        fun readLine(): String {
+                            val sb = StringBuilder()
+                            while (true) { val c = input.read(); if (c < 0 || c == '\n'.code) break; if (c != '\r'.code) sb.append(c.toChar()) }
+                            return sb.toString()
+                        }
+                        val request = readLine()
+                        var len = 0
+                        while (true) { val h = readLine(); if (h.isEmpty()) break; if (h.lowercase().startsWith("content-length:")) len = h.substringAfter(':').trim().toInt() }
+                        val body = ByteArray(len).also { var off = 0; while (off < len) { val n = input.read(it, off, len - off); if (n < 0) break; off += n } }
+                            .toString(Charsets.UTF_8)
+                        val res = if (request.contains("/quit")) { stopFlag.set(true); "bye" } else {
+                            val fut = java.util.concurrent.CompletableFuture<String>()
+                            queue.put(body to fut)
+                            runCatching { fut.get(10, java.util.concurrent.TimeUnit.MINUTES) }.getOrElse { "ERROR ${it.message}" }
+                        }
+                        val bytes = res.toByteArray()
+                        so.getOutputStream().write("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())
+                        so.getOutputStream().write(bytes); so.getOutputStream().flush()
+                    }
+                }.start()
             }
-            println("[uilab] firestore: signed in=${uid != null}, config/app $cfg")
+        }.apply { isDaemon = true }.start()
+        println("[uilab] serving on http://127.0.0.1:$port (POST /run, GET /quit)")
+        while (!stopFlag.get()) {
+            val job = queue.poll(50, java.util.concurrent.TimeUnit.MILLISECONDS)
+            if (job == null) { driver.settle(50); continue }
+            job.second.complete(driver.run(job.first).joinToString("\n"))
         }
-        run {
-            val root = act.window.decorView
-            val bmp = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888)
-            root.draw(Canvas(bmp))
-            out.parentFile?.mkdirs()
-            out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-            println("[uilab] $qualifiers → ${out.absolutePath} (${bmp.width}x${bmp.height}) in ${System.currentTimeMillis() - t0} ms")
-        }
+        server.close()
     }
 }
