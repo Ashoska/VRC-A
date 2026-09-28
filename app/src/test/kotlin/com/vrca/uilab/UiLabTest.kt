@@ -29,28 +29,61 @@ import org.robolectric.annotation.LooperMode
 import java.io.File
 
 /**
- * Offline app for the UI Lab: swaps in a FAKE Firebase project pointed at a dead emulator port
- * before the real [VrcaApplication.onCreate] runs, so nothing the app does can reach production.
+ * The UI Lab's app. By default Firebase is a FAKE project pointed at a dead emulator port, so
+ * nothing reaches production. With `--firestore` it uses the real project under a fixed lab
+ * device id (one doc per build variant, never a new one per run). With a VRChat session from
+ * tools/ui-lab/vrc-login.sh, the alt is signed in before the app starts.
  */
 class UiLabApp : VrcaApplication() {
     override fun onCreate() {
         // Robolectric has no external storage volume by default; the headset log reader asks for one.
         org.robolectric.shadows.ShadowEnvironment.addExternalDir("sdcard")
-        FirebaseApp.getApps(this).forEach { runCatching { it.delete() } }
-        FirebaseApp.initializeApp(
-            this,
-            FirebaseOptions.Builder()
-                .setApplicationId("1:000000000000:android:0000000000000000")
-                .setProjectId("vrca-uilab-offline")
-                .setApiKey("uilab-offline")
-                .build()
-        )
-        FirebaseFirestore.getInstance().useEmulator("127.0.0.1", 1)
-        FirebaseAuth.getInstance().useEmulator("127.0.0.1", 1)
+        // EncryptedSharedPreferences (VRChat session store) needs an AndroidKeyStore.
+        com.vrca.discordbot.lab.FakeAndroidKeyStore.install()
+        val root = System.getProperty("ui.lab.root") ?: "."
+        val realFirestore = System.getProperty("uilab.ui.firestore") == "real"
+        if (realFirestore) {
+            val flavor = com.vrca.BuildConfig.FLAVOR
+            getSharedPreferences("vrca_remote", MODE_PRIVATE).edit()
+                .putString("device_id_hash", sha256("uilab:$flavor")).commit()
+            if (FirebaseApp.getApps(this).isEmpty()) {
+                FirebaseOptions.fromResource(this)?.let { FirebaseApp.initializeApp(this, it) }
+            }
+        } else {
+            FirebaseApp.getApps(this).forEach { runCatching { it.delete() } }
+            FirebaseApp.initializeApp(
+                this,
+                FirebaseOptions.Builder()
+                    .setApplicationId("1:000000000000:android:0000000000000000")
+                    .setProjectId("vrca-uilab-offline")
+                    .setApiKey("uilab-offline")
+                    .build()
+            )
+            FirebaseFirestore.getInstance().useEmulator("127.0.0.1", 1)
+            FirebaseAuth.getInstance().useEmulator("127.0.0.1", 1)
+        }
+        if (System.getProperty("uilab.ui.vrchat") != "off") seedVrchatSession(File("$root/ui-shots/.vrc/session.json"))
         super.onCreate()
         // The app's crash handler kills the process (exit 10); in the lab just log background crashes.
         Thread.setDefaultUncaughtExceptionHandler { t, e -> println("[uilab] background crash on ${t.name}: $e") }
     }
+
+    private fun seedVrchatSession(f: File) {
+        if (!f.isFile) return
+        val j = org.json.JSONObject(f.readText())
+        val auth = j.optString("auth"); val uid = j.optString("userId")
+        if (auth.isBlank() || uid.isBlank()) return
+        val m = com.vrca.vrchat.VrchatAuthManager::class.java.getDeclaredMethod(
+            "saveSession", android.content.Context::class.java, String::class.java, String::class.java,
+            String::class.java, String::class.java
+        ).apply { isAccessible = true }
+        m.invoke(com.vrca.vrchat.VrchatAuthManager, this, auth, j.optString("twoFactorAuth").ifBlank { null },
+            uid, j.optString("displayName"))
+        println("[uilab] VRChat alt signed in: ${j.optString("displayName")}")
+    }
+
+    private fun sha256(s: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
 }
 
 /**
@@ -75,13 +108,21 @@ class UiLabTest {
 
         val app = RuntimeEnvironment.getApplication() as VrcaApplication
         val vm = ViewModelProvider(app, VrcaViewModel.Factory)[VrcaViewModel::class.java]
+        // Real VRChat presence for the signed-in alt (what the pipeline service would publish).
+        if (com.vrca.vrchat.VrchatAuthManager.isLoggedIn(app)) {
+            val p = kotlinx.coroutines.runBlocking { com.vrca.vrchat.VrchatAuthManager.fetchPresence(app) }
+            println("[uilab] presence: ${p?.let { "${it.displayName} · ${it.state} · ${it.location}" } ?: "fetch failed"}")
+            if (p != null) com.vrca.vrchat.VrchatPipelineState.presence = p
+            com.vrca.vrchat.VrchatPipelineState.isConnected = p != null
+        }
 
         val controller = Robolectric.buildActivity(ComponentActivity::class.java).setup()
         val act = controller.get()
         act.setContent { VrcaTheme(themeMode = ThemeMode.Dark) { VrcaScreen(chatboxViewModel = vm) } }
         val looper = shadowOf(Looper.getMainLooper())
         var left = settleMs
-        while (left > 0) { looper.idleFor(Duration.ofMillis(50)); left -= 50 }
+        // Real time too: network replies (VRChat, Firestore) arrive on background threads.
+        while (left > 0) { Thread.sleep(50); looper.idleFor(Duration.ofMillis(50)); left -= 50 }
         run {
             val root = act.window.decorView
             val bmp = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888)
