@@ -189,8 +189,21 @@ android {
     // -PcardinalLab; normal `test` runs exclude it, and nothing here touches any APK.
     testOptions {
         unitTests {
-            includeAndroidResources = project.hasProperty('cardinalLab')
+            includeAndroidResources = project.hasProperty('cardinalLab') || project.hasProperty('uiLab')
             all { t ->
+                // UI Lab (tools/ui-lab): renders real screens to PNGs on the JVM. Only with -PuiLab.
+                if (!project.hasProperty('uiLab')) {
+                    t.exclude '**/uilab/**'
+                } else {
+                    t.outputs.upToDateWhen { false }
+                    t.maxHeapSize = '2g'
+                    t.testLogging { showStandardStreams = true; events 'passed', 'failed', 'skipped' }
+                    t.systemProperty 'ui.lab', '1'
+                    t.systemProperty 'ui.lab.root', rootProject.projectDir.absolutePath
+                    project.properties.each { k, v ->
+                        if (k.startsWith('ui.')) t.systemProperty("uilab.$k", v.toString())
+                    }
+                }
                 if (!project.hasProperty('cardinalLab')) {
                     t.exclude '**/discordbot/lab/**'
                 } else {

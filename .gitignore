@@ -43,3 +43,4 @@ lab-runs/
 # Python bytecode from the lab tools
 __pycache__/
 *.pyc
+ui-shots/

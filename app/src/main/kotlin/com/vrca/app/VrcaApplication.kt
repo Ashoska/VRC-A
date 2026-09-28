@@ -30,7 +30,7 @@ import kotlin.system.exitProcess
  * consumer and Firestore sync loops alive while the app is backgrounded and the
  * Activity is destroyed — they are torn down only by [AppShutdown] on a real swipe.
  */
-class VrcaApplication : Application(), ViewModelStoreOwner {
+open class VrcaApplication : Application(), ViewModelStoreOwner {
 
     companion object {
         const val CRASH_PREFS_FILE = "vrca_crash"
