@@ -82,17 +82,23 @@ tools/cardinal-lab/lab.sh run tools/cardinal-lab/scripts/hangout.txt
 - Never show backend names ("Firebase"/"Firestore") in public-build UI text.
 - No em dashes in onboarding/login UI copy.
 
-## Git & PR Conventions
-- **CRITICAL: push ALL work to `claude/vrc-a-android-app-NUpaN`.** Commit on the local `VRC-A-Official` working branch, then push to the remote `claude/vrc-a-android-app-NUpaN` branch (e.g. `git push -u origin VRC-A-Official:claude/vrc-a-android-app-NUpaN`). **Do NOT push to `VRC-A-Official` directly: the remote consistently returns HTTP 503 on that branch.** Do NOT push to `main` or any other branch. Only deviate if the user explicitly names a different target branch in this turn.
+## Git & PR Conventions (land every task in VRC-A-Official)
+`VRC-A-Official` is the main branch (repo default). Work never stays on a side branch: every finished task is merged into it, so the next chat starts from the latest code and branches can't drift into conflicts.
+1. **Branch:** work on the branch the session assigns (a `claude/...` branch). Only if none is assigned, use `claude/vrc-a-android-app-NUpaN`. Never push directly to `VRC-A-Official` (the remote refuses it) or to `main`.
+2. **Start of a task:** fetch `VRC-A-Official` and merge it into the working branch first, so you build on the latest code.
+3. **End of a task:** compile public, admin and headset. Then open a PR from the working branch into `VRC-A-Official` (short description of what changed and why), and **merge it yourself** once the compile is clean and GitHub reports no conflicts. Don't wait for CI to finish (it only builds release APKs); do fix it if it fails afterwards.
+4. **Conflicts:** merge `VRC-A-Official` into the working branch and resolve there (never rebase or force-push shared history). If another chat added notes to CLAUDE.md, move them into the matching `docs/systems/` file and keep CLAUDE.md as the map.
+5. **Don't merge** if the user says to hold, the work is half-done, or a build is failing.
 - Commit messages: short, imperative ("Fix NowPlaying pause detection").
-- Include a brief description in the PR body of what changed and why.
-- Do NOT open pull requests automatically; the user merges the work themselves.
+- **The avatar Worker auto-deploys from `claude/vrc-a-android-app-NUpaN`** (Cloudflare Workers Builds watches `cloudflare/avatar-db/` there). Never delete or rename that branch; after Worker changes merge, make sure that branch also has them (merge `VRC-A-Official` into it) or the Worker won't deploy.
 
 ## Autonomous Permissions
-Claude may do all of the following without asking: read/create/edit/delete repository files; run build, test and lint commands; commit and push; open PRs with descriptions (when asked) and merge self-contained PRs whose checks pass; create GitHub releases; update Firestore rules when the schema needs it; add dependencies / edit `build.gradle`; fix build errors, lint warnings and test failures; refactor for clarity or performance; add or update comments and docs; update this file and `docs/systems/`.
+Claude may do all of the following without asking: read/create/edit/delete repository files; run build, test and lint commands; commit and push; open PRs into `VRC-A-Official` and merge them (see Git & PR Conventions); create GitHub releases; update Firestore rules when the schema needs it; add dependencies / edit `build.gradle`; fix build errors, lint warnings and test failures; refactor for clarity or performance; add or update comments and docs; update this file and `docs/systems/`.
 
 ## Never
-- Push to `main`, `VRC-A-Official` (it 503s), or any branch other than `claude/vrc-a-android-app-NUpaN` unless the user names one this turn.
+- Push directly to `main` or `VRC-A-Official` (land work through a merged PR instead).
+- Delete or rename `claude/vrc-a-android-app-NUpaN` (the Worker deploys from it).
+- Leave finished work unmerged on a side branch.
 - Remove or weaken the `bannedDevices` Firestore rules.
 - Mix admin-only UI into the public build.
 - Break the GitHub Actions CI pipeline without replacing it with something better.
