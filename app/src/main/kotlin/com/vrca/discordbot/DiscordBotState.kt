@@ -52,6 +52,10 @@ object DiscordBotState {
     private val _reacted = MutableStateFlow(0)
     val reactedFlow: StateFlow<Int> = _reacted.asStateFlow()
 
+    // Cardinal's own exact spend today (the account total can include other use of the same account).
+    private val _own = MutableStateFlow(0.0)
+    val ownNeuronsFlow: StateFlow<Double> = _own.asStateFlow()
+    fun noteOwn(n: Double) { rolloverIfNeeded(); _own.value += n }
     private val _neurons = MutableStateFlow(0L)
     val neuronsFlow: StateFlow<Long> = _neurons.asStateFlow()
     private val _rung = MutableStateFlow(Rung.FULL)
@@ -62,6 +66,25 @@ object DiscordBotState {
 
     private val ts = SimpleDateFormat("HH:mm:ss", Locale.US)
     @Volatile private var dayOfYear = today()
+
+    // Admin-configurable budget + which saver rungs are active (set from DiscordBotStore.Config at start).
+    @Volatile private var dailyBudget: Long = DiscordBotLimits.DAILY_NEURON_BUDGET
+    @Volatile private var trimEnabled: Boolean = true
+    @Volatile private var cheapEnabled: Boolean = true
+    @Volatile private var reactOnlyEnabled: Boolean = true
+    @Volatile private var hardStopEnabled: Boolean = true
+
+    /** Push the admin's budget + ladder config so [computeRung] reflects it live. */
+    fun configureLadder(
+        budget: Long, trim: Boolean, cheap: Boolean, reactOnly: Boolean, hardStop: Boolean,
+    ) {
+        dailyBudget = budget.coerceAtLeast(100L)
+        trimEnabled = trim; cheapEnabled = cheap; reactOnlyEnabled = reactOnly; hardStopEnabled = hardStop
+        _rung.value = computeRung(_neurons.value)
+    }
+
+    /** For the Cost/Controls UI: the budget the ladder is currently computed against. */
+    fun budget(): Long = dailyBudget
 
     @Volatile var isRunning: Boolean = false
         private set
@@ -86,7 +109,7 @@ object DiscordBotState {
         val d = today()
         if (d != dayOfYear) {
             dayOfYear = d
-            _seen.value = 0; _replied.value = 0; _reacted.value = 0; _neurons.value = 0L
+            _seen.value = 0; _replied.value = 0; _reacted.value = 0; _neurons.value = 0L; _own.value = 0.0
             _rung.value = Rung.FULL
         }
     }
@@ -102,17 +125,30 @@ object DiscordBotState {
         _rung.value = computeRung(_neurons.value)
     }
 
+    /** Adopt an AUTHORITATIVE day total (persisted estimate or a real Cloudflare usage sync). */
+    fun setNeuronsAbsolute(total: Long) {
+        rolloverIfNeeded()
+        _neurons.value = total.coerceAtLeast(0L)
+        _rung.value = computeRung(_neurons.value)
+    }
+
     fun currentRung(): Rung { rolloverIfNeeded(); return computeRung(_neurons.value) }
 
+    /**
+     * The current degradation rung against the ADMIN's budget, honoring which saver stages are
+     * enabled. A disabled rung is SKIPPED — the previous still-enabled rung persists over its band —
+     * so turning them all off keeps Cardinal at FULL quality right up to the hard stop, and turning
+     * the hard stop off means it never goes SILENT (spends past the budget). It only ever escalates
+     * through ENABLED rungs, so the ladder stays monotonic.
+     */
     private fun computeRung(spent: Long): Rung {
-        val f = spent.toDouble() / DiscordBotLimits.DAILY_NEURON_BUDGET
-        return when {
-            f < DiscordBotLimits.LADDER_FULL_FRAC -> Rung.FULL
-            f < DiscordBotLimits.LADDER_TRIM_FRAC -> Rung.TRIM
-            f < DiscordBotLimits.LADDER_CHEAP_FRAC -> Rung.CHEAP
-            f < 1.0 -> Rung.REACT_ONLY
-            else -> Rung.SILENT
-        }
+        val f = spent.toDouble() / dailyBudget
+        if (f >= 1.0 && hardStopEnabled) return Rung.SILENT
+        var rung = Rung.FULL
+        if (trimEnabled && f >= DiscordBotLimits.LADDER_FULL_FRAC) rung = Rung.TRIM
+        if (cheapEnabled && f >= DiscordBotLimits.LADDER_TRIM_FRAC) rung = Rung.CHEAP
+        if (reactOnlyEnabled && f >= DiscordBotLimits.LADDER_CHEAP_FRAC) rung = Rung.REACT_ONLY
+        return rung
     }
 
     fun addTrace(t: Trace) {

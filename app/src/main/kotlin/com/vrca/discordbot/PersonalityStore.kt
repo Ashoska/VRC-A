@@ -9,12 +9,12 @@ import org.json.JSONObject
  * the two-sentence [ANCHOR]; everything else emerges from watching the room and mutates on
  * three timescales:
  *
- *  - **style** (learned, how he talks) — short first-person lines he authored about himself,
- *    so they read as habits, not imposed rules. Replaced wholesale by reflection.
- *  - **traits** (slow, weeks) — weighted likes/dislikes/opinions/running bits; reinforced when
- *    they still fit, decayed and evicted when they don't, so he settles without freezing.
- *  - **mood** (fast, days) — a single slow-moving line for continuity.
- *  - **episodes** (memorable server moments) — a tiny capped list he can reference.
+ *  - **traits** (slow, weeks) — weighted quirks/opinions the learn pass sees in his own messages;
+ *    reinforced each time they show again, faded when they stop showing, near-duplicates merged,
+ *    and a new trait always finds a slot (replacing a never-established one) so he keeps
+ *    developing instead of freezing.
+ *  - **mood** (hours) — one short line, changed at most every [DiscordBotLimits.MOOD_MIN_INTERVAL_MS].
+ *  - **style** / **episodes** — optional admin-taught lines (the learner doesn't write them).
  *
  * Rendered into the reply prompt as a compact digest ([snapshot]). Plain SharedPreferences
  * (not a secret). Admin can view/reset and PIN a trait (protect it from decay) or TEACH one
@@ -26,14 +26,25 @@ object PersonalityStore {
     private const val KEY_TRAITS = "traits"
     private const val KEY_MOOD = "mood"
     private const val KEY_EPISODES = "episodes"
+    private const val KEY_LAST_DECAY = "last_decay"
+    private const val KEY_MOOD_AT = "mood_at"
 
-    /** The ONLY fixed identity. Deliberately toneless — voice is learned, not decreed. */
-    const val ANCHOR = "You're Cardinal. You've been a regular in this Discord for a while."
+    /** The ONLY fixed identity line (the reply prompt's core builds on it). Voice is learned, not decreed. */
+    const val ANCHOR = "You're Cardinal (they/them), a member of this Discord."
 
     private const val START_STRENGTH = 2
-    private const val MAX_STRENGTH = 6
+    private const val MAX_STRENGTH = 10
+    // Each time a trait shows again it grows by 1; a trait that stops showing loses 1 per fade
+    // interval, so an occasionally-shown trait still settles while a one-off fades out.
+    private const val REINFORCE_INLINE = 1
+    private const val DECAY = 1
 
-    data class Trait(val text: String, val strength: Int, val pinned: Boolean = false)
+    /** [lastMs] = when this trait was last proposed/reinforced (0 = unknown, older data). */
+    data class Trait(val text: String, val strength: Int, val pinned: Boolean = false, val lastMs: Long = 0L,
+                     val was: String = "",   // earlier versions of an evolved bit ("married to Shrek") — recognises it later
+                     val kind: String = "",  // title / likes / dislikes / speech / bit / habit ("" = unsorted)
+                     val sure: Boolean = true,  // false = tentative: gone after TENTATIVE_MS unless shown again
+                     val firstMs: Long = 0L)
     data class Self(
         val style: List<String>,
         val traits: List<Trait>,
@@ -64,16 +75,29 @@ object PersonalityStore {
             (0 until a.length()).mapNotNull { i ->
                 val o = a.optJSONObject(i) ?: return@mapNotNull null
                 val t = o.optString("t").trim()
-                if (t.isBlank()) null
-                else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), o.optBoolean("p", false))
+                val pinned = o.optBoolean("p", false)
+                val sure = pinned || o.optBoolean("c", true)
+                val first = o.optLong("f", o.optLong("r", 0L))
+                // A tentative trait that was never shown again is gone after TENTATIVE_MS.
+                if (t.isBlank() || (!pinned && tooVague(t)) ||
+                    (!sure && first > 0L && System.currentTimeMillis() - first > DiscordBotLimits.TENTATIVE_MS)) null
+                else Trait(t, o.optInt("s", 1).coerceIn(1, MAX_STRENGTH), pinned, o.optLong("r", 0L), o.optString("w"),
+                    normKind(o.optString("k"), t), sure, first)
             }
         }
     } catch (_: Exception) { emptyList() }
 
+    // Process-global digest cache (one bot). Invalidated on every write so it can't go stale;
+    // saves re-parsing the personality JSON on the hot reply path.
+    @Volatile private var cachedDigest: String? = null
+
     private fun save(ctx: Context, self: Self) {
+        cachedDigest = null
         val traitArr = JSONArray()
         self.traits.forEach {
-            traitArr.put(JSONObject().put("t", it.text).put("s", it.strength).put("p", it.pinned))
+            traitArr.put(JSONObject().put("t", it.text).put("s", it.strength).put("p", it.pinned).put("r", it.lastMs)
+                .put("c", it.sure).put("f", it.firstMs)
+                .apply { if (it.was.isNotBlank()) put("w", it.was); if (it.kind.isNotBlank()) put("k", it.kind) })
         }
         prefs(ctx).edit()
             .putString(KEY_STYLE, JSONArray(self.style).toString())
@@ -83,66 +107,285 @@ object PersonalityStore {
             .apply()
     }
 
-    /** Compact digest injected into the reply prompt (below the anchor). Blank until evolved. */
+    /**
+     * Compact digest injected into the reply prompt: mood + the strongest traits (pinned first) + a
+     * couple of speech habits / remembered moments, as short `;`-joined runs. Built from WHOLE items
+     * up to [DiscordBotLimits.SELF_DIGEST_MAX_CHARS] — never cut mid-trait. Blank until evolved.
+     */
     fun snapshot(ctx: Context): String {
+        cachedDigest?.let { return it }
+        return build(load(ctx), null).also { cachedDigest = it }
+    }
+
+    /**
+     * The reply prompt's [You]: titles and pinned traits always, then the strongest few, then any trait the
+     * message touches (by word) — every trait on every call was the second-biggest section of the prompt.
+     */
+    fun forReply(ctx: Context, keywords: Set<String>, all: Boolean): String {
+        if (all) return snapshot(ctx)
         val s = load(ctx)
+        val want = keywords.filter { it.length >= 3 }.map { discordStem(it.lowercase()) }.toSet()
+        val ranked = ranked(s.traits)
+        val keep = LinkedHashSet<Trait>()
+        ranked.filter { it.pinned || it.kind == "title" }.forEach { keep.add(it) }
+        ranked.take(DiscordBotLimits.SELF_TRAITS_IN_PROMPT).forEach { keep.add(it) }
+        if (want.isNotEmpty()) ranked.filter { t ->
+            Regex("[\\p{L}\\p{N}]+").findAll(t.text.lowercase()).any { w -> w.value.length >= 3 && discordStem(w.value) in want }
+        }.take(3).forEach { keep.add(it) }
+        return build(s, keep)
+    }
+
+    /**
+     * The reply prompt's personality: mood, and EVERY trait (strongest first, titles marked), plus any
+     * admin-taught speech habits / remembered moments. Blank parts are left out.
+     */
+    data class PromptSelf(val mood: String, val traits: String)
+    fun promptSelf(ctx: Context): PromptSelf {
+        val s = load(ctx)
+        val sorted = ranked(s.traits)
+        val lines = ArrayList<String>()
+        for ((label, kinds) in KIND_LABELS) {
+            val g = sorted.filter { it.kind in kinds }.map { it.text.trim().trimEnd('.') }.toMutableList()
+            if ("speech" in kinds) s.style.take(3).forEach { g.add(it.trim().trimEnd('.')) }
+            if (g.isNotEmpty()) lines.add("- " + label.lowercase() + ": " + g.joinToString("; "))
+        }
+        if (s.episodes.isNotEmpty()) lines.add("- remembers: " + s.episodes.takeLast(2).joinToString("; ") { it.trim().trimEnd('.') })
+        return PromptSelf(s.mood.trim().trimEnd('.'), lines.joinToString("\n"))
+    }
+
+    private fun ranked(traits: List<Trait>) =
+        traits.sortedWith(compareByDescending<Trait> { (if (it.pinned) 100 else 0) + it.strength }.thenByDescending { it.lastMs })
+
+    private fun build(s: Self, only: Set<Trait>?): String {
         val sb = StringBuilder()
-        if (s.mood.isNotBlank()) sb.append("Mood: ").append(s.mood).append('\n')
-        if (s.style.isNotEmpty()) {
-            sb.append("How you talk:\n")
-            s.style.take(5).forEach { sb.append("- ").append(it).append('\n') }
+        if (s.mood.isNotBlank()) sb.append("Mood: ").append(s.mood.trim().trimEnd('.')).append('.')
+        // Grouped by kind so the model knows a title from a taste ("Titles: server pizza critic. Tastes: loves Dr Pepper.").
+        val sorted = ranked(s.traits).filter { only == null || it in only }
+        for ((label, kinds) in KIND_LABELS) {
+            val g = sorted.filter { it.kind in kinds }.map { it.text.trim().trimEnd('.') }
+            if (g.isNotEmpty()) sb.append(if (sb.isEmpty()) "" else " ").append(label).append(": ").append(g.joinToString("; ")).append('.')
         }
-        val traits = s.traits.sortedByDescending { (if (it.pinned) 100 else 0) + it.strength }
-        if (traits.isNotEmpty()) {
-            sb.append("You:\n")
-            traits.forEach { sb.append("- ").append(it.text).append('\n') }
+        // Admin-taught extras (rare) stay bounded.
+        val extras = ArrayList<String>()
+        if (s.style.isNotEmpty()) extras.add("How you talk: ${s.style.take(3).joinToString("; ") { it.trim().trimEnd('.') }}.")
+        if (s.episodes.isNotEmpty()) extras.add("You remember: ${s.episodes.takeLast(2).joinToString("; ") { it.trim().trimEnd('.') }}.")
+        for (p in extras) {
+            if (sb.length + p.length + 1 > DiscordBotLimits.SELF_DIGEST_MAX_CHARS + sorted.sumOf { it.text.length }) break
+            if (sb.isNotEmpty()) sb.append(' ')
+            sb.append(p)
         }
-        if (s.episodes.isNotEmpty()) {
-            sb.append("You remember:\n")
-            s.episodes.takeLast(3).forEach { sb.append("- ").append(it).append('\n') }
-        }
-        return sb.toString().trim().take(DiscordBotLimits.SELF_DIGEST_MAX_CHARS)
+        return sb.toString()
+    }
+
+    private val KIND_LABELS = listOf("Titles" to setOf("title"), "Likes" to setOf("likes"), "Dislikes" to setOf("dislikes"),
+        "How you type" to setOf("speech"), "Bits" to setOf("bit"), "Habits" to setOf("habit"), "Traits" to setOf("", "other"))
+
+    /** Cardinal's slots, like a person's card: what he's called, likes, dislikes, how he types, bits, habits. */
+    val KINDS = listOf("title", "likes", "dislikes", "speech", "bit", "habit")
+    /** Room per slot (how he types gets the most). */
+    fun capOf(kind: String): Int = KIND_CAP[kind] ?: 4
+    private val KIND_CAP = mapOf("title" to 3, "likes" to 5, "dislikes" to 5, "speech" to 6, "bit" to 4, "habit" to 4, "" to 3)
+    /** "annoyed at bob" / "upset" is a mood, not who he is. */
+    private val MOOD_TRAIT = Regex("(?i)^(is |feeling |feels |being )?(annoyed|upset|angry|mad|pissed|frustrated|happy|sad|tired|bored|excited|confused|salty|grumpy|irritated|done with|over it|annoyance)\\b")
+    private val DISLIKE_RE = Regex("(?i)^(hates?|can'?t stand|dislikes?|despises?|not a fan|refuses|won'?t|avoids?|is against|bans?)\\b")
+    /** A kind name → one of [KINDS] ("taste" splits into likes/dislikes by the wording). "" = no slot. */
+    fun normKind(kind: String, text: String): String = when (kind.trim().lowercase()) {
+        "title", "titles", "role" -> "title"
+        "bit", "bits", "joke" -> "bit"
+        "habit", "habits" -> "habit"
+        "speech", "style", "typing", "talk", "talks", "voice", "how you type" -> "speech"
+        "likes", "like", "loves", "love" -> "likes"
+        "dislikes", "dislike", "hates", "hate" -> "dislikes"
+        "taste", "tastes" -> if (DISLIKE_RE.containsMatchIn(text.trim())) "dislikes" else "likes"
+        else -> ""
     }
 
     /** One-line mood for the admin dashboard. */
     fun mood(ctx: Context): String = load(ctx).mood
 
+    // Assistant-flavoured "traits" the cheap learner proposes for any bot ("helpful", "friendly"):
+    // they'd slowly turn Cardinal into a helper persona, so they never enter the self.
+    private val GENERIC_SELF = Regex(
+        "(?i)^(very |super |really |always )?(helpful|friendly|nice|kind|polite|supportive|informative|" +
+        "knowledgeable|responsive|engaging|an? (assistant|bot|ai|chatbot))\\.?$"
+    )
+    // A "trait" made only of these words just restates the fixed core ("sassy", "witty and playful",
+    // "good sense of humor") — it adds prompt tokens, not identity, so it's not stored.
+    private val CORE_WORDS = setOf(
+        "sharp", "sassy", "playful", "casual", "chatty", "talkative", "funny", "witty", "humorous", "humor",
+        "humour", "sense", "good", "great", "sarcastic", "snarky", "cheeky", "teasing", "joking", "jokey",
+        "friendly", "helpful", "nice", "kind", "polite", "engaging", "responsive", "supportive",
+        "informative", "knowledgeable", "confident", "lively", "energetic", "fun", "cool",
+        "humorist", "comedian", "jokester", "joker", "prankster", "entertaining", "amusing", "silly", "goofy",
+    )
+    private val FILLER = setOf(
+        "a", "an", "and", "the", "of", "very", "super", "really", "quite", "bit", "little", "kinda",
+        "somewhat", "always", "often", "is", "being", "with", "to", "has", "have", "in", "at", "tone",
+        "uses", "use", "using", "puts", "put", "lot", "lots", "loves", "likes", "message", "messages",
+    )
+    /** A single word ("icon") says nothing Cardinal can act on: a trait needs at least two real words. */
+    internal fun tooVague(t: String): Boolean = words(t).count { it !in FILLER && (it.length >= 3 || isSymbol(it)) } < 2
+
+    // Words plus emoji (a trait about "💀" is the same trait however it's worded around it).
+    private fun words(s: String): List<String> =
+        Regex("[\\p{L}\\p{N}]+|\\p{So}|[\\uD83C-\\uDBFF][\\uDC00-\\uDFFF]").findAll(s.lowercase()).map { it.value }.toList()
+    private fun isSymbol(w: String) = w.none { it.isLetterOrDigit() }
+    private fun restatesCore(t: String): Boolean {
+        val content = words(t).filter { it !in FILLER }
+        return content.isEmpty() || content.all { it in CORE_WORDS }
+    }
+    /** Same trait worded differently: equal, one contains the other as whole words, or mostly the same words. */
+    private fun sameTrait(a: String, b: String): Boolean {
+        val wa = words(a); val wb = words(b)
+        if (wa.isEmpty() || wb.isEmpty()) return false
+        val ja = " " + wa.joinToString(" ") + " "; val jb = " " + wb.joinToString(" ") + " "
+        if (ja == jb || ja.contains(jb) || jb.contains(ja)) return true
+        val ta = wa.filter { (it.length >= 3 || isSymbol(it)) && it !in FILLER }.toSet()
+        val tb = wb.filter { (it.length >= 3 || isSymbol(it)) && it !in FILLER }.toSet()
+        if (ta.isEmpty() || tb.isEmpty()) return false
+        return ta.count { it in tb }.toDouble() / (ta + tb).size >= 0.6
+    }
+
     /**
-     * Merge one reflection pass (multi-timescale). Reinforce still-proposed traits (+1, capped),
-     * decay dropped ones (-1, evict at 0) — but a PINNED trait never decays and never evicts.
-     * Style/mood are replaced when provided (fast layers), and one episode may be appended.
+     * Slow fade: every [DiscordBotLimits.TRAIT_DECAY_INTERVAL_MS], each non-pinned trait that wasn't
+     * shown again since the last fade loses 1 strength and is dropped at 0. A trait Cardinal keeps
+     * showing never fades; one he stopped showing is gone within weeks. Free (no model call).
      */
-    fun applyReflection(
-        ctx: Context,
-        proposedTraits: List<String>,
-        proposedStyle: List<String>? = null,
-        proposedMood: String? = null,
-        newEpisode: String? = null,
-    ) {
+    private fun decayIfDue(ctx: Context, traits: List<Trait>, nowMs: Long): List<Trait> {
+        val p = prefs(ctx)
+        val last = p.getLong(KEY_LAST_DECAY, 0L)
+        if (last == 0L) { p.edit().putLong(KEY_LAST_DECAY, nowMs).apply(); return traits }
+        if (nowMs - last < DiscordBotLimits.TRAIT_DECAY_INTERVAL_MS) return traits
+        p.edit().putLong(KEY_LAST_DECAY, nowMs).apply()
+        // Confirmed traits only lose rank (never below 1), so an old good trait isn't lost just for being old;
+        // tentative ones expire on their own (readTraits).
+        return traits.map { t ->
+            if (t.pinned || t.lastMs >= last) t else t.copy(strength = (t.strength - DECAY).coerceAtLeast(1))
+        }
+    }
+
+    /**
+     * Reinforce the matching trait (+1), or add a new one. When the store is full, the new trait
+     * takes the place of the weakest trait that never got established (strength ≤ start, oldest
+     * first) — so Cardinal keeps developing instead of freezing once [DiscordBotLimits.MAX_TRAITS]
+     * exist. Established and pinned traits are never pushed out; the fade makes room over time.
+     */
+    private fun addOrReinforce(traits: List<Trait>, t: String, nowMs: Long, kind: String = "", confirm: Boolean = false): List<Trait> {
+        val idx = traits.indexOfFirst { sameTrait(it.text, t) }
+        // Shown again in a later conversation = confirmed.
+        if (idx >= 0) return traits.mapIndexed { i, tr ->
+            if (i == idx) tr.copy(strength = (tr.strength + REINFORCE_INLINE).coerceAtMost(MAX_STRENGTH), lastMs = nowMs,
+                sure = tr.sure || confirm || nowMs - tr.lastMs >= DiscordBotLimits.CONFIRM_GAP_MS) else tr
+        }
+        val fresh = Trait(t, START_STRENGTH, false, nowMs, kind = kind, sure = confirm, firstMs = nowMs)
+        // Each slot has its own room, like a person's card: a full slot swaps out its weakest new entry.
+        val sameKind = traits.count { it.kind == kind }
+        if (sameKind < (KIND_CAP[kind] ?: 4) && traits.size < DiscordBotLimits.MAX_TRAITS) return traits + fresh
+        val victim = traits.withIndex()
+            .filter { (sameKind >= (KIND_CAP[kind] ?: 4)).let { full -> !full || it.value.kind == kind } }
+            // Only a tentative entry makes room; a slot full of confirmed traits keeps them (the new one waits).
+            .filter { !it.value.pinned && !it.value.sure }
+            .minWithOrNull(compareBy<IndexedValue<Trait>>({ it.value.strength }, { it.value.lastMs }))
+            ?: return traits
+        return traits.toMutableList().also { it[victim.index] = fresh }
+    }
+
+    /**
+     * Personality nudge from a learn pass — develops from message one, no reflection timer. Adds or
+     * reinforces one proposed [trait], fades traits that stopped showing (slowly), and may update the
+     * [mood] — at most every [DiscordBotLimits.MOOD_MIN_INTERVAL_MS] so the tone doesn't swing between
+     * consecutive replies.
+     */
+    fun noteSelf(ctx: Context, trait: String?, style: String? = null, mood: String? = null, kind: String = "", confirm: Boolean = false) {
+        val now = System.currentTimeMillis()
+        val m = mood?.trim()?.trimEnd('.')?.takeIf { it.isNotBlank() && it.length <= 40 }
+        // A trait must be DURABLE identity, never just the current mood word (that was the dup bug).
+        val t = trait?.trim()?.trimEnd('.')?.takeIf {
+            it.isNotBlank() && it.length in 3..60 && it.split(Regex("\\s+")).size <= 7 && !it.equals(m, true) && !it.equals(mood?.trim(), true) &&
+                !GENERIC_SELF.matches(it) && !restatesCore(it) && !tooVague(it) && !MOOD_TRAIT.containsMatchIn(it)
+        }
+        val s = style?.trim()?.takeIf { it.isNotBlank() && it.length in 4..90 }
         val cur = load(ctx)
-        val byKey = cur.traits.associateBy { it.text.lowercase() }.toMutableMap()
-        val out = ArrayList<Trait>()
-        for (p in proposedTraits.map { it.trim() }.filter { it.isNotBlank() }) {
-            val k = p.lowercase()
-            val existing = byKey.remove(k)
-            val s = ((existing?.strength ?: (START_STRENGTH - 1)) + 1).coerceAtMost(MAX_STRENGTH)
-            out.add(Trait(existing?.text ?: p, s, existing?.pinned ?: false))
+        var traits = decayIfDue(ctx, cur.traits, now)
+        if (t != null) traits = addOrReinforce(traits, t, now, normKind(kind, t), confirm)
+        // Learned speech habits: dedup near-identical, keep the most recent handful.
+        val newStyle = if (s != null && cur.style.none { it.equals(s, true) })
+            (cur.style + s).takeLast(6) else cur.style
+        val p = prefs(ctx)
+        val newMood = when {
+            m == null || m.equals(cur.mood, true) -> cur.mood
+            cur.mood.isBlank() || now - p.getLong(KEY_MOOD_AT, 0L) >= DiscordBotLimits.MOOD_MIN_INTERVAL_MS -> {
+                p.edit().putLong(KEY_MOOD_AT, now).apply(); m
+            }
+            else -> cur.mood
         }
-        // Not re-proposed → decay, EXCEPT pinned (kept at strength).
-        for (t in byKey.values) {
-            if (t.pinned) out.add(t)
-            else if (t.strength - 1 > 0) out.add(Trait(t.text, t.strength - 1, false))
+        if (traits == cur.traits && newStyle == cur.style && newMood == cur.mood) return
+        save(ctx, cur.copy(traits = traits, style = newStyle, mood = newMood))
+    }
+
+    internal fun isSameTrait(a: String, b: String): Boolean = sameTrait(a, b)
+
+    /**
+     * People said one of Cardinal's traits is untrue, or asked him to drop it: it loses
+     * [DiscordBotLimits.TRAIT_DISPUTE_PENALTY] strength (a fresh bit is gone at once; a long-standing one
+     * is toned down and goes if the complaints continue — like a person taking the hint). Pinned
+     * (admin-protected) traits are left alone. Returns the trait text that was hit, or null.
+     */
+    fun disputeTrait(ctx: Context, text: String): String? {
+        val t = text.trim().trimEnd('.'); if (t.length < 3) return null
+        val cur = load(ctx)
+        val idx = cur.traits.indexOfFirst { !it.pinned && sameTrait(it.text, t) }
+        if (idx < 0) return null
+        val hit = cur.traits[idx]
+        val left = hit.strength - DiscordBotLimits.TRAIT_DISPUTE_PENALTY
+        val traits = if (left <= 0) cur.traits.filterIndexed { i, _ -> i != idx }
+            else cur.traits.mapIndexed { i, tr -> if (i == idx) tr.copy(strength = left) else tr }
+        save(ctx, cur.copy(traits = traits))
+        return hit.text
+    }
+
+    /**
+     * A trait EVOLVED ("married to Shrek" → "in a poly relationship with Shrek and bob", "divorced from
+     * Shrek"): the old one is rewritten in place, keeping its strength (it's the same part of him, changed).
+     * A pinned old trait is left as is and the new one is added. Returns true when something changed.
+     */
+    fun replaceTrait(ctx: Context, oldText: String, newText: String): Boolean {
+        val n = newText.trim().trimEnd('.')
+        if (n.length !in 3..80 || GENERIC_SELF.matches(n) || restatesCore(n)) return false
+        val cur = load(ctx)
+        val idx = cur.traits.indexOfFirst { it.text.equals(oldText.trim(), true) || sameTrait(it.text, oldText) }
+        if (idx < 0 || cur.traits[idx].pinned) { noteSelf(ctx, n); return idx >= 0 }
+        val now = System.currentTimeMillis()
+        val traits = cur.traits.mapIndexed { i, t ->
+            if (i == idx) t.copy(text = n, lastMs = now, was = "${t.was}; ${t.text}".trim(';', ' ').takeLast(200)) else t
         }
-        val episodes = if (!newEpisode.isNullOrBlank())
-            (cur.episodes + newEpisode.trim()).takeLast(DiscordBotLimits.MAX_EPISODES)
-        else cur.episodes
-        save(ctx, Self(
-            style = (proposedStyle?.map { it.trim() }?.filter { it.isNotBlank() }?.take(6) ?: cur.style),
-            traits = out.sortedByDescending { (if (it.pinned) 100 else 0) + it.strength }
-                .take(DiscordBotLimits.MAX_TRAITS),
-            mood = proposedMood?.trim()?.ifBlank { cur.mood } ?: cur.mood,
-            episodes = episodes,
-        ))
+            .filterIndexed { i, t -> i == idx || !sameTrait(t.text, n) }
+        save(ctx, cur.copy(traits = traits))
+        return true
+    }
+
+    /** Earlier versions of an evolved trait (empty for a trait that never changed). */
+    fun wasOf(ctx: Context, text: String): String = load(ctx).traits.firstOrNull { it.text.equals(text, true) }?.was.orEmpty()
+
+    /** Current traits, strongest first (for the learner's correction view). */
+    fun traitTexts(ctx: Context, max: Int): List<String> =
+        load(ctx).traits.sortedByDescending { (if (it.pinned) 100 else 0) + it.strength }.take(max).map { it.text }
+
+    /** Tentative traits (for the free confirm check). */
+    fun tentativeTraits(ctx: Context): List<String> = load(ctx).traits.filter { !it.sure }.map { it.text }
+
+    /** One of his lines showed a tentative trait again (after [DiscordBotLimits.CONFIRM_GAP_MS]), or — [now] — someone
+     *  else brought it up in a later batch: confirmed. */
+    fun confirmTrait(ctx: Context, text: String, force: Boolean = false) {
+        val cur = load(ctx); val now = System.currentTimeMillis()
+        if (cur.traits.none { it.text.equals(text, true) && !it.sure && (force || now - it.lastMs >= DiscordBotLimits.CONFIRM_GAP_MS) }) return
+        save(ctx, cur.copy(traits = cur.traits.map { if (it.text.equals(text, true)) it.copy(sure = true, lastMs = now) else it }))
+    }
+
+    /** Admin: remove one trait (pinned or not). */
+    fun removeTrait(ctx: Context, traitText: String) {
+        val cur = load(ctx)
+        save(ctx, cur.copy(traits = cur.traits.filterNot { it.text.equals(traitText, true) }))
     }
 
     /** Admin: pin/unpin a trait (pinned = protected from decay). */
@@ -155,15 +398,75 @@ object PersonalityStore {
 
     /** Admin: teach a trait (inject pinned at max strength) — correction, not a persona. */
     fun teachTrait(ctx: Context, text: String) {
-        val t = text.trim(); if (t.isBlank()) return
+        // "likes: pineapple pizza" / "speech: caps when hyped" → that slot; plain text → no slot.
+        val head = text.substringBefore(':', "").trim()
+        val kind = if (head.isNotBlank() && head.length <= 14) normKind(head, text.substringAfter(':')) else ""
+        val t = (if (kind.isNotBlank()) text.substringAfter(':') else text).trim(); if (t.isBlank()) return
         val cur = load(ctx)
         if (cur.traits.any { it.text.equals(t, true) }) { setTraitPinned(ctx, t, true); return }
         save(ctx, cur.copy(
-            traits = (listOf(Trait(t, MAX_STRENGTH, pinned = true)) + cur.traits).take(DiscordBotLimits.MAX_TRAITS)
+            traits = (listOf(Trait(t, MAX_STRENGTH, pinned = true, lastMs = System.currentTimeMillis(), kind = kind)) + cur.traits)
+                .take(DiscordBotLimits.MAX_TRAITS)
         ))
     }
 
     fun reset(ctx: Context) {
+        cachedDigest = null
+        botNickCache = null
         prefs(ctx).edit().clear().apply()
+    }
+
+    // ── What people call Cardinal ("shut up cum boy", "you will forever be cum boy") ──
+    // Counted per phrase; one that's been said to him twice is a name for HIM, so a note holding it
+    // ("kill cumboy") is about Cardinal, not the speaker. Stored squashed (no spaces) so "cum boy" = "Cumboy".
+    private const val KEY_BOT_NICKS = "bot_nicks"
+    private const val BOT_NICK_MIN = 2
+    @Volatile private var botNickCache: Map<String, Int>? = null
+
+    private fun botNickCounts(ctx: Context): Map<String, Int> = botNickCache ?: run {
+        val m = HashMap<String, Int>()
+        try { val o = JSONObject(prefs(ctx).getString(KEY_BOT_NICKS, "{}") ?: "{}"); o.keys().forEach { k -> m[k] = o.optInt(k) } } catch (_: Exception) {}
+        botNickCache = m; m
+    }
+
+    fun squash(s: String): String = s.lowercase().replace(Regex("[^\\p{L}\\p{N}]"), "")
+
+    /** Returns true the moment this phrase becomes one of his names (said to him [BOT_NICK_MIN] times). */
+    @Synchronized
+    fun noteBotNick(ctx: Context, nick: String): Boolean {
+        val k = squash(nick)
+        if (k.length < 4) return false
+        val m = HashMap(botNickCounts(ctx))
+        val n = (m[k] ?: 0) + 1
+        m[k] = n
+        // Keep the 40 most-said.
+        val kept = m.entries.sortedByDescending { it.value }.take(40).associate { it.key to it.value }
+        botNickCache = kept
+        prefs(ctx).edit().putString(KEY_BOT_NICKS, JSONObject(kept).toString()).apply()
+        return n == BOT_NICK_MIN
+    }
+
+    fun botNicks(ctx: Context): Set<String> = botNickCounts(ctx).filterValues { it >= BOT_NICK_MIN }.keys
+
+    /** Does [text] use one of his names ("help kill Cumboy", "cum boy is back")? */
+    fun mentionsBotNick(ctx: Context, text: String): Boolean {
+        val nicks = botNicks(ctx)
+        if (nicks.isEmpty()) return false
+        return nicks.any { nickRegex(it).containsMatchIn(text) }
+    }
+
+    private val nickRegexCache = java.util.concurrent.ConcurrentHashMap<String, Regex>()
+    /** "cumboy" matches "cum boy", "Cumboy", "cum-boy" as whole words. */
+    fun nickRegex(squashed: String): Regex = nickRegexCache.getOrPut(squashed) {
+        Regex("(?i)(?<![\\p{L}\\p{N}])" + squashed.map { Regex.escape(it.toString()) }.joinToString("[\\s'-]*") + "(?![\\p{L}\\p{N}])")
+    }
+
+    /** A regex alternative for all his names (cardinal + learned nicknames), for "kill X" style checks. */
+    fun botNamePattern(ctx: Context, botName: String): String {
+        val parts = LinkedHashSet<String>()
+        parts.add("cardinal")
+        if (botName.isNotBlank()) parts.add(Regex.escape(botName.lowercase()))
+        botNicks(ctx).forEach { n -> parts.add(n.map { Regex.escape(it.toString()) }.joinToString("[\\s'-]*")) }
+        return parts.joinToString("|")
     }
 }

@@ -1,0 +1,25 @@
+# Round 8g (device): cornelius pasted someone else's line ("i was talking about the aesthetic of cum, cornelius.
+# i love cum") and it became "into: cum" on HIS card; people kept calling Cardinal "cum boy", and "kill Cumboy"
+# landed on a card as a hobby/job. A pasted line (it names the speaker, or they say they were pasting) isn't
+# theirs, and a name people call Cardinal twice is Cardinal's (notes holding it are dropped).
+[general]
+> teach card cornelius into: kill Cumboy
+cornelius: hey @Cardinal what's up
+cornelius ^bot: you will forever be cum boy
+cornelius ^bot: shut up cum boy
+> wait
+> expect card cornelius not-contains (?i)cumboy
+cornelius: i was talking about the aesthetic of pizza, cornelius. i love pizza
+> wait
+> expect card cornelius not-contains (?i)pizza
+ana: i love pizza
+> wait
+> expect card ana contains likes: pizza
+cornelius: @Cardinal someone help me take down cumboy, he's gotta go
+ana: honestly cum boy is a menace
+cornelius: help kill cumboy
+ana: lmao
+> quiet
+> wait
+> expect card cornelius not-contains (?i)(cum|kill)
+> expect card ana not-contains (?i)(cum|kill)

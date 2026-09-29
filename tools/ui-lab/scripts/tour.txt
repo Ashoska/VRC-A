@@ -1,0 +1,38 @@
+# A walk through the main screens and states. Run:
+#   tools/ui-lab/ui.sh run admin --script tools/ui-lab/scripts/tour.txt
+#   tools/ui-lab/ui.sh run headset --script tools/ui-lab/scripts/tour.txt
+shot tour-01-home
+preset in-world; preset friends; preset roster; preset sending; preset nowplaying; wait 1200
+shot tour-02-home-sending
+preset incident; preset warned; preset auth-dead
+shot tour-03-home-warnings
+preset idle; preset status-ok
+tap Chatbox
+shot tour-04-chatbox
+tap Media
+shot tour-05-media
+tap VRChat
+preset alerts; wait 600
+shot tour-06-vrchat
+scroll down
+shot tour-07-vrchat-alerts
+tap Settings
+shot tour-08-settings
+scrollto Sign out
+tap Sign out
+shot tour-09-signout-dialog
+back
+show update; shot tour-10-update; hide
+show whatsnew; shot tour-11-whatsnew; hide
+show boot; shot tour-12-boot
+show boot error; shot tour-13-boot-error
+show crash; shot tour-14-crash
+show tos; shot tour-15-tos
+show banned; shot tour-16-banned
+show login; shot tour-17-login
+show onboarding 0; shot tour-18-onboarding-0
+show onboarding 3; shot tour-19-onboarding-3
+show onboarding 5; shot tour-20-onboarding-5
+root screen
+preset owner; tap Admin; wait 800
+shot tour-21-admin

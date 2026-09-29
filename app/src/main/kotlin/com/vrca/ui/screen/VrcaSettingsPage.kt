@@ -678,7 +678,7 @@ private fun HelpFaqRow(question: String, answer: String) {
 /** Settings → What's New: the installed version's patch notes, offline, via the
  *  shared rich-content renderer. Media pulls on open, culls on close (upd scope). */
 @Composable
-private fun WhatsNewDialog(onDismiss: () -> Unit) {
+internal fun WhatsNewDialog(onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     val whatsNew = remember {
         com.vrca.richcontent.WhatsNewStore.forVersion(ctx, BuildConfig.VERSION_CODE.toLong())

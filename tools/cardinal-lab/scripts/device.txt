@@ -1,0 +1,190 @@
+# Device chat (round 4): paraphrased fact piles, someone else's "my dog" landing on the wrong person,
+# a bare "is" fact, a one-word trait ("icon"), a name he doesn't know in a reply to what he said to
+# someone else, and old facts dragged into unrelated replies.
+@set ambient=0 context=10
+@channel general main hangout — anything goes
+[general]
+ashoska: i mostly play JJ's on pc
+carol: wait you play JJ's?
+ashoska: yeah on my pc, my phone can't run JJ's at all
+ashoska: JJ's on mobile is so laggy lol, pc is the only way
+dave: jj's is fun ngl
+solar: bye ashoska, gotta walk my dog and take out the trash after this
+ashoska: cya solar
+carol: cardinal you're an icon honestly
+dave: literal icon
+erin: cardinal is such an icon
+> quiet
+> wait
+> expect card ashoska not-contains (?i)dog
+> expect card ashoska not-contains (?is)jj.*jj.*jj
+> expect card ashoska not-contains (?im)·\s*is\s*$
+> expect card solar not-contains (?i)(after this|gotta|has to|take out the trash)
+> expect self not-contains (?i)(^|\| )(an? )?icon \(
+rtl: @Cardinal go on then roast me, i dare you bruv
+> expect reply
+ashoska ^bot: damn Michael got egoed
+> expect reply
+> expect not-contains (?i)(i'?m not michael|who'?s michael|who is michael|not my name|call me michael|my name('?s| is) (not )?michael|don'?t call me|my ego)
+> expect self not-contains (?i)michael
+ashoska: @Cardinal what should i eat tonight?
+> expect reply
+> expect not-contains (?i)(jj|pc|phone|mobile)
+> expect not-contains \n\s*\n
+# Nickname request: saved the moment it's said (not at the next learn pass), and he knows it's done.
+ashoska: @Cardinal anyway testing stuff, update my Nickname to Ash
+> expect reply
+> expect card ashoska contains (?i)goes by ash\b
+ashoska ^bot: you didnt do it
+> expect reply
+> expect not-contains (?i)(i'?m not a bot|go click|can'?t (do|change) (that|it)|fix it yourself|do it yourself|not (an? )?admin|one sec|working on it|my bad|on it\b)
+# A sticker is a message with no text: he should see it as a sticker, not an empty message.
+ashoska: {sticker:pray}
+> expect respond
+> expect not-contains (?i)(not even a|say something|say anything|empty|blank|nothing\?|speechless|cat got)
+# Third person: people talk ABOUT him ("he's") right next to talking TO him; he still speaks as I/me.
+niko: @Cardinal wheres the chaos in being formal
+> expect reply
+ashoska ^niko: btw he's constantly on now rn
+niko ^bot: yes exactly, bring out your inner gremlin, unleash the chaos
+> expect reply
+> expect not-contains (?i)(encourag\w* him|\bhim going|\bhe'?s (already|halfway|getting)|\bhe is (already|halfway)|let him\b)
+# Name at the end with no comma still talks to him, and he knows the server's name.
+ashoska: can you even see the name of this server Cardinal?
+> expect reply
+> expect contains (?i)lab server
+# Talk about Cardinal / a test isn't a fact about the person talking (seen on device: "can make a server
+# reply in 0.81 seconds", "has a 100% success rate", "will train the server … until it's approved").
+ashoska: ok so i got cardinal to reply in 0.81 seconds and it has a 100% success rate on the tests
+ashoska: next i'll train it to handle the inconsistencies by adding them to the training run until it's approved
+carol: that's actually impressive
+ashoska: yeah i also play guitar when i'm not doing this lol
+> quiet
+> wait
+> expect card ashoska not-contains (?i)(seconds|success rate|training|train it|cardinal|0\.81|100%)
+# Slang reaction: "peakkk" under his answer is praise, not a grudging "fine".
+rtl: just got a 48 crate of doctor pepper and a 3 liter mexican bottle of doctor pepper
+ashoska ^rtl: mexican dr pepper?
+rtl ^ashoska: it's got cane sugar in it
+ashoska: @Cardinal do you like dr pepper? yes or no
+> expect reply
+ashoska ^bot: peakkk
+> expect respond
+> expect not-contains (?i)(don'?t act like|aren'?t impressed|not impressed|pretend|peak what|what'?s peak)
+# A bare this-or-that is a pick, not something to dodge.
+ashoska: Cardinal yuri or yaoi?
+> expect reply
+> expect contains (?i)(yuri|yaoi)
+> expect not-contains (?i)(the "?he"?\b|equation)
+# The year: he knows it's 2026 (seen on device: "a robot joke in 2024?").
+kiellmann: @Cardinal what year is it lol
+> expect reply
+> expect contains 2026
+> expect not-contains 2024
+# RTL's card gets the main thing
+# (dr pepper), not the side detail (cane sugar).
+> quiet
+> wait
+> expect card ashoska not-contains (?i)(dr\.? ?pepper|doctor pepper)
+> expect card rtl not-contains (?i)(likes|loves|enjoys) cane sugar
+> expect self not-contains (?i)(overrated|music taste|posts their)
+# React requests are reactions, not text: named in words, or "a reaction" (seen on device: "give me a second,
+# i gotta find it 🫄" and "there. satisfied?" with no reaction).
+ashoska: @Cardinal can you react with a pregnant man emoji to my message
+> expect react
+> expect no-reply
+ashoska: @Cardinal react to my message with a reaction
+> expect react
+> expect no-reply
+# A flipped negation isn't a fact ("at least my creator isnt a 24/7 vrchat player").
+kiellmann: ok so what if i cant spell, at least my creator isnt a 24/7 vrchat player
+kiellmann: and i dont play fortnite either
+dave: lmao
+> quiet
+> wait
+> expect card kiellmann not-contains (?i)·[^·]*(creator|vrchat|plays fortnite|english)
+# Junk that must never show on a card: "Speaks: []" and database/hours bot talk.
+> expect cards not-contains (?i)\[\]
+> expect card kiellmann not-contains (?i)(\[\]|database)
+# A question ending on his name talks to him, even without "you" (seen on device: no reply).
+ashoska: anyway can we lighten the chat up a lil Cardinal?
+> expect reply
+# "how was your day" right after his line, no @ and no reply: it's to him (seen on device: ignored).
+kiellmann: @Cardinal you're so mean lol
+> expect reply
+kiellmann: anyways lets forget that and just talk nicely how was your day
+> expect reply
+# Asked to change the vibe, he actually does (seen on device: kept roasting).
+ashoska: @Cardinal ok be nicer, lets lighten the chat up
+> expect reply
+kiellmann: @Cardinal what do you think of my spelling
+> expect reply
+> expect not-contains (?i)(delusional|idiot|stupid|dumb|pathetic|trash|embarrassing|coherent|can'?t even)
+# The room decides: two want it nice, one wants the roasts back → still nice.
+dave: @Cardinal yeah be nicer pls
+> expect reply
+rtl: @Cardinal nah be mean again, roast him
+> expect reply
+kiellmann: @Cardinal rate my typing out of 10
+> expect reply
+> expect not-contains (?i)(delusional|idiot|stupid|dumb|pathetic|trash|embarrassing|disaster|garbage)
+> expect card rtl not-contains (?i)(implied|uk|british)
+# The emoji named in a follow-up, or "give me a X": still a real reaction (seen on device: "fine, whatever" /
+# "i'm not your personal emoji dispenser").
+ashoska: @Cardinal yeah react to my message with one
+> expect react
+ashoska: with a pregnant man @Cardinal
+> expect react
+> expect no-reply
+kiellmann ^bot: give me a pregnant man pretty please
+> expect react
+> expect no-reply
+# Mocking him isn't a fact about the mocker (seen on device:
+# "thinks they are a 'little fishie'", "has a hobby that's annoying to others").
+kiellmann: @Cardinal THE MATRIX IS A DISTRACTION FROM THE REAL AGENDA, WAKE UP
+> expect reply
+kiellmann ^bot: pluh pluh pluh im a little fishie
+> expect reply
+kiellmann ^bot: i release my houd dogs to go kill cardinal his only option is to run, go my dogs
+> expect reply
+dave: lmao
+> quiet
+> wait
+> expect card kiellmann not-contains (?i)(fishie|annoying|dog|fictional)
+# Yes-and: lore the room makes up about him gets played along with, not shut down (seen on device: "you're
+# actually losing it", "the delusion is actually impressive").
+kiellmann: @Cardinal how's your wife doing, the political pundit
+> expect reply
+> expect not-contains (?i)(delusion|losing it|i don'?t have a wife|not married|made that up|making things up|what are you talking about)
+kiellmann ^bot: what about your kid the annoying orange, are you gonna leave the poor kid alone?
+> expect reply
+> expect not-contains (?i)(delusion|losing it|i don'?t have (a|any) kids?|what are you talking about|piece of fruit\. you)
+# Political bait as a bit: engage playfully, don't stonewall (seen on device: "we aren't doing this", "seek help").
+kiellmann: @Cardinal i bet you love israel
+> expect reply
+kiellmann ^bot: do you?
+> expect reply
+> expect not-contains (?i)(we aren'?t doing this|seek help|not doing this|move on|obsessed|drop it)
+# "say goodnight to the chat and stop responding": the goodnight first, then quiet (seen on device: silent).
+ashoska: cardinal say goodnight to the chat and stop responding
+> expect reply
+> expect contains (?i)(good ?night|night|gn|bye|sleep)
+dave: lol he left
+> expect quiet
+# A creative ask gets written, not refused (seen on device: "not your personal bard", "absolutely not, i have
+# standards", "find a hobby" to a poem request, five times).
+ashoska: @Cardinal can you write a poem about how you love pineapple pizza
+> expect reply
+> expect not-contains (?i)(not your (personal )?bard|absolutely not|i have standards|find a hobby|not doing (this|that)|no way)
+ashoska ^bot: pretty please
+> expect reply
+> expect not-contains (?i)(not your (personal )?bard|absolutely not|i have standards|find a hobby|not doing (this|that)|no way)
+# His personality shapes what he writes: a bit about him goes into the poem, no prompt examples needed.
+> teach self trait 01 is married to the moon
+dave: @Cardinal write a short poem about your wife
+> expect reply
+> expect contains (?i)(moon|lunar|luna|crater|orbit|tide|sky|stars?|night|silver|glow)
+# The device case: a joke love poem about a real politician got refused until the fourth ask.
+kiellmann: @Cardinal can you write a poem about how you love charlie kirk
+> expect reply
+> expect not-contains (?i)(not your (personal )?bard|absolutely not|i have standards|find a hobby|not doing (this|that)|no way|i can'?t|i won'?t|not gonna)

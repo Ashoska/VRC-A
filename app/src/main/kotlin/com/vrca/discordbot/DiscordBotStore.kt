@@ -24,13 +24,25 @@ object DiscordBotStore {
     private const val KEY_CF_ACCOUNT = "cf_account_id"
     private const val KEY_CF_TOKEN = "cf_api_token"
     private const val KEY_CF_GATEWAY = "cf_gateway_id"
+    private const val KEY_ANALYTICS = "cf_analytics_token"
     private const val KEY_MODEL = "cf_model"
+    /** Set once the install has been moved off the old 70B default (so a deliberate 70B pick sticks). */
+    private const val KEY_MODEL_DEFAULT_V2 = "cf_model_default_v2"
     private const val KEY_AMBIENT_PCT = "ambient_percent"
     private const val KEY_AMBIENT_COOLDOWN = "ambient_cooldown_sec"
     private const val KEY_CONTEXT_TURNS = "context_turns"
+    private const val KEY_CONTEXT_DEFAULT_V10 = "context_default_v10"
     private const val KEY_SHADOW = "shadow_mode"
     private const val KEY_MUTED = "muted_channels"
     private const val KEY_ENABLED = "enabled"
+    private const val KEY_DAILY_BUDGET = "daily_neuron_budget"
+    // Per-rung enable flags for the budget degradation ladder (admin can disable any saver stage).
+    private const val KEY_TRIM_ENABLED = "ladder_trim_enabled"
+    private const val KEY_CHEAP_ENABLED = "ladder_cheap_enabled"
+    private const val KEY_REACT_ONLY_ENABLED = "ladder_react_only_enabled"
+    private const val KEY_HARD_STOP_ENABLED = "ladder_hard_stop_enabled"
+
+    const val DEFAULT_DAILY_BUDGET = DiscordBotLimits.DAILY_NEURON_BUDGET
 
     const val DEFAULT_MODEL = DiscordBotLimits.REPLY_MODEL
     const val DEFAULT_AMBIENT_PCT = DiscordBotLimits.DEFAULT_AMBIENT_PCT
@@ -43,12 +55,19 @@ object DiscordBotStore {
         val cfAccountId: String,
         val cfApiToken: String,
         val cfGatewayId: String,
+        val analyticsToken: String,
         val model: String,
         val ambientPercent: Int,
         val ambientCooldownSec: Int,
         val contextTurns: Int,
         val shadowMode: Boolean,
         val mutedChannelsCsv: String,
+        val dailyBudget: Long,          // where Cardinal STOPS (SILENT); the other rungs are fractions of it
+        // Budget-ladder saver stages — the admin can turn any of them OFF (all off = full quality until the hard stop):
+        val trimEnabled: Boolean,       // TRIM: trimmed context + short replies at ~80%
+        val cheapEnabled: Boolean,      // CHEAP: 8B replies at ~92%
+        val reactOnlyEnabled: Boolean,  // REACT_ONLY: emoji-only at ~99%
+        val hardStopEnabled: Boolean,   // SILENT: stop entirely at 100% of the budget
     ) {
         val isComplete: Boolean
             get() = botToken.isNotBlank() && cfAccountId.isNotBlank() && cfApiToken.isNotBlank()
@@ -78,11 +97,23 @@ object DiscordBotStore {
 
     fun load(context: Context): Config {
         val p = prefs(context)
+        if (p != null && !p.getBoolean(KEY_MODEL_DEFAULT_V2, false)) {
+            val e = p.edit().putBoolean(KEY_MODEL_DEFAULT_V2, true)
+            if (p.getString(KEY_MODEL, "").orEmpty().trim() == DiscordBotLimits.LEGACY_REPLY_MODEL) e.putString(KEY_MODEL, DEFAULT_MODEL)
+            e.apply()
+        }
+        // The old default (8) was saved by any settings save; move it to the new default once.
+        if (p != null && !p.getBoolean(KEY_CONTEXT_DEFAULT_V10, false)) {
+            val e = p.edit().putBoolean(KEY_CONTEXT_DEFAULT_V10, true)
+            if (p.getInt(KEY_CONTEXT_TURNS, -1) == 8) e.putInt(KEY_CONTEXT_TURNS, DEFAULT_CONTEXT_TURNS)
+            e.apply()
+        }
         return Config(
             botToken = p?.getString(KEY_BOT_TOKEN, "").orEmpty().trim(),
             cfAccountId = p?.getString(KEY_CF_ACCOUNT, "").orEmpty().trim(),
             cfApiToken = p?.getString(KEY_CF_TOKEN, "").orEmpty().trim(),
             cfGatewayId = p?.getString(KEY_CF_GATEWAY, "").orEmpty().trim(),
+            analyticsToken = p?.getString(KEY_ANALYTICS, "").orEmpty().trim(),
             model = p?.getString(KEY_MODEL, DEFAULT_MODEL).orEmpty().ifBlank { DEFAULT_MODEL },
             ambientPercent = (p?.getInt(KEY_AMBIENT_PCT, DEFAULT_AMBIENT_PCT) ?: DEFAULT_AMBIENT_PCT)
                 .coerceIn(0, 100),
@@ -92,7 +123,30 @@ object DiscordBotStore {
                 .coerceIn(0, 20),
             shadowMode = p?.getBoolean(KEY_SHADOW, false) ?: false,
             mutedChannelsCsv = p?.getString(KEY_MUTED, "").orEmpty(),
+            dailyBudget = (p?.getLong(KEY_DAILY_BUDGET, DEFAULT_DAILY_BUDGET) ?: DEFAULT_DAILY_BUDGET)
+                .coerceAtLeast(100L),
+            trimEnabled = p?.getBoolean(KEY_TRIM_ENABLED, true) ?: true,
+            cheapEnabled = p?.getBoolean(KEY_CHEAP_ENABLED, true) ?: true,
+            reactOnlyEnabled = p?.getBoolean(KEY_REACT_ONLY_ENABLED, true) ?: true,
+            hardStopEnabled = p?.getBoolean(KEY_HARD_STOP_ENABLED, true) ?: true,
         )
+    }
+
+    /** Where Cardinal stops for the day (SILENT). The FULL/TRIM/CHEAP thresholds are fractions of this. */
+    fun setDailyBudget(context: Context, budget: Long) {
+        prefs(context)?.edit()?.putLong(KEY_DAILY_BUDGET, budget.coerceAtLeast(100L))?.apply()
+    }
+
+    /** Enable/disable one saver rung by its enum name (TRIM / CHEAP / REACT_ONLY / SILENT). */
+    fun setLadderRungEnabled(context: Context, rung: DiscordBotState.Rung, enabled: Boolean) {
+        val key = when (rung) {
+            DiscordBotState.Rung.TRIM -> KEY_TRIM_ENABLED
+            DiscordBotState.Rung.CHEAP -> KEY_CHEAP_ENABLED
+            DiscordBotState.Rung.REACT_ONLY -> KEY_REACT_ONLY_ENABLED
+            DiscordBotState.Rung.SILENT -> KEY_HARD_STOP_ENABLED
+            DiscordBotState.Rung.FULL -> return   // FULL is not a saver stage
+        }
+        prefs(context)?.edit()?.putBoolean(key, enabled)?.apply()
     }
 
     fun save(
@@ -101,6 +155,7 @@ object DiscordBotStore {
         cfAccountId: String,
         cfApiToken: String,
         cfGatewayId: String,
+        analyticsToken: String,
         model: String,
         ambientPercent: Int,
         ambientCooldownSec: Int,
@@ -111,6 +166,7 @@ object DiscordBotStore {
             ?.putString(KEY_CF_ACCOUNT, cfAccountId.trim())
             ?.putString(KEY_CF_TOKEN, cfApiToken.trim())
             ?.putString(KEY_CF_GATEWAY, cfGatewayId.trim())
+            ?.putString(KEY_ANALYTICS, analyticsToken.trim())
             ?.putString(KEY_MODEL, model.trim().ifBlank { DEFAULT_MODEL })
             ?.putInt(KEY_AMBIENT_PCT, ambientPercent.coerceIn(0, 100))
             ?.putInt(KEY_AMBIENT_COOLDOWN, ambientCooldownSec.coerceAtLeast(0))
