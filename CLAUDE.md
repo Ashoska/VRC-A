@@ -31,7 +31,7 @@ This file is only the rules plus a **map**. The details of every feature and sys
 | `now-playing.md` | Media detection (Spotify, YouTube, YT Music, Quest browser), ad/live detection, pause detection, `TitleCleaner`, chatbox width calibration, progress bars, Media tab UI |
 | `headset.md` | Quest flavor, monitor-shape framing, 3-column Home, OSCQuery/OSC-in tokens (`VrcaOscQuery`, `{mute}` etc.), headset OSC send target |
 | `roster.md` | Headset instance roster: VRChat log reader (`VrcLogParser`, `InstanceRosterManager`), log-derived presence, member rows (platform/trust/status badges), friend button, roster to admin |
-| `avatar-catalog.md` | Roster clone button + `resolveWornAvatarId`, crowdsourced catalog (`AvatarGlobalDb`), contributions, avatar search (`AvatarSearch`), avatar size tool, increments 1-9 |
+| `avatar-catalog.md` | Roster clone button + `resolveWornAvatarId` (log name+author resolve now primary: VRChat removed the worn image from `/users`), crowdsourced catalog (`AvatarGlobalDb`), contributions, avatar search (`AvatarSearch`), avatar size tool, increments 1-9 |
 | `avatar-catalog-worker.md` | Cloudflare Worker by version (flush, reconcile, fancy-Unicode fold, search index, `iq:` queue), fill worklist, liveness shard-walk bots, author renames, contribution dedup |
 | `vrchat-connection.md` | `VrchatAuthManager` (login, 2FA cookie roll-forward, relogin, REST helpers, instance counts), `VrchatPipelineService` (WebSocket, presence), sign-out + auth-dead OSC gates, login screen |
 | `friends.md` | Friends cache, live bio/name/rank change detection, `pipelineDispatcher`, friends refresh loop, unfriend/friend-add/friend-request dedup, activity suppression |

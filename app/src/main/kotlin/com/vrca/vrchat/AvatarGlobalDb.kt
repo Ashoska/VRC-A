@@ -269,6 +269,20 @@ object AvatarGlobalDb {
     /** Resolve a worn avatar by its image file id (exact, offline, zero network). */
     fun lookup(fileId: String?): Entry? = fileId?.let { map[it] }
 
+    /** OFFLINE exact-name lookup over the locally-cached catalog (`map`, fileId->Entry) — instant,
+     *  ZERO network. Returns every local entry whose fancy-folded name equals [nameFolded]. This
+     *  restores the pre-removal "instant if it's already in our db" speed for NAME-based resolution:
+     *  the old worn-file-id path was an offline `map[fileId]` hit, but name resolution otherwise goes
+     *  through `searchSharded` (an R2 network call). Caller passes an already-folded name (identical to
+     *  VrchatAuthManager.fancyFold, which is byte-identical to `nfkcFold`) and narrows by author +
+     *  confirm-live. `map` is a subset of the full R2 catalog, so a miss/ambiguity falls through to R2. */
+    fun localEntriesByFoldedName(nameFolded: String): List<Entry> {
+        if (nameFolded.isBlank()) return emptyList()
+        val out = ArrayList<Entry>(2)
+        for (e in map.values) if (nfkcFold(e.name) == nameFolded) out.add(e)
+        return out
+    }
+
     // ---- VRChat FALLBACK avatars — NEVER catalog or clone these ---------------
     // A remote player shows VRChat's fallback "Robot" avatar while their REAL avatar is still LOADING,
     // so their worn thumbnail is the Robot's image. If the Robot is in the catalog, resolving that
