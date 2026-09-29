@@ -555,7 +555,10 @@ fun VrcaApp() {
                     val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
                     if (id != downloadId) return
                     val query = DownloadManager.Query().setFilterById(id)
-                    val cursor = dm.query(query)
+                    // dm.query() returns null on some OEM/download-provider states — the old
+                    // unconditional cursor.moveToFirst() then NPE-crashed the app while an update
+                    // download was pending. Null-guard + never let this receiver crash the process.
+                    val cursor = try { dm.query(query) } catch (_: Throwable) { null } ?: return
                     if (cursor.moveToFirst()) {
                         val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
                         val status = cursor.getInt(statusCol)
@@ -605,7 +608,10 @@ fun VrcaApp() {
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                 }
-                                context.startActivity(install)
+                                // A missing FileProvider authority / no installer activity throws —
+                                // surface it instead of crashing the app mid-update.
+                                runCatching { context.startActivity(install) }
+                                    .onFailure { downloadError = "Couldn't open the installer. Tap the download link to install manually." }
                                 downloadDone = true
                             }
                         }
@@ -613,16 +619,20 @@ fun VrcaApp() {
                     cursor.close()
                 }
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                ctx.registerReceiver(
-                    receiver,
-                    IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
-                    android.content.Context.RECEIVER_EXPORTED
-                )
-            } else {
-                ctx.registerReceiver(receiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
-            }
-            onDispose { ctx.unregisterReceiver(receiver) }
+            val registered = runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    ctx.registerReceiver(
+                        receiver,
+                        IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+                        android.content.Context.RECEIVER_EXPORTED
+                    )
+                } else {
+                    ctx.registerReceiver(receiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
+                }
+            }.isSuccess
+            // Only unregister what we registered — an unregister of a never-registered
+            // receiver throws IllegalArgumentException and would crash on dispose.
+            onDispose { if (registered) runCatching { ctx.unregisterReceiver(receiver) } }
         }
     }
 

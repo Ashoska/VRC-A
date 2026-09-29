@@ -274,6 +274,19 @@ const MAX_SHARDS_PER_FLUSH = 120;   // raised 60->120: v24 dropped the index-buc
 // case ~120 shard reads + writes + a lean 300-op index drain + reconcile's bounded reads ≈ ~800
 // subrequests, under Cloudflare's ~1000/invocation limit; shard purges are batched 30/call and only fire
 // on genuine content change (dupe churn = +0 = no purge). Contribution intake ~doubles; no ingest change.
+
+// ---- Self-chaining flush continuation ----------------------------------------------------------
+// The per-invocation ~1000-subrequest ceiling used to cap the drain to ONE cron flush per 2 min, so a
+// contribution backlog crept up faster than it cleared. Instead of one big (ceiling-risking) flush,
+// each flush that still sees pend work fires a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`), which
+// gets a FRESH budget and drains the next chunk — chaining until the queue is empty. A single-flight KV
+// lock keeps the 2-min cron from starting a second chain AND keeps reconcile from overlapping a chain's
+// flush (which is what raced the shared `meta` record → the pendingBatches/lastFlush flicker). Cost: the
+// chain only runs while there's a backlog and idles back to the plain 2-min cron once pend is empty, so
+// steady state is unchanged; a drain burst adds a lock op + meta write per step (negligible KV).
+const FLUSH_LOCK_TTL_MS = 90_000;      // a chain holds this; the cron skips its cycle while it's fresh
+const MAX_CONTINUATION_DEPTH = 30;     // hard cap on chained steps per drain (runaway guard)
+const DEFAULT_SELF_URL = "https://vrca-avatar-db.shadowash321rulse.workers.dev";  // fallback if WORKER_SELF_URL unset
 // Coalesce _manifest.json writes. The LIVE entry count already rides `meta.entries` (which /health
 // max()es against the manifest), so the _manifest.json copy only needs periodic freshening, not a
 // write+purge on every count-moving flush during steady growth. Rewrite it at most every N ms OR once
@@ -732,7 +745,23 @@ export default {
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
-          version: 31,   // FOLD is now maintained SOLELY by the LIVENESS bots' continuous walk — the
+          lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
+          version: 38,   // v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+                         // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
+                         // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
+                         // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
+                         // budget and chains until the queue drains, so the per-invocation ceiling is no
+                         // longer a throughput cap (a backlog clears in one chain, not one chunk per 2-min
+                         // cron). A single-flight KV lock (`flushlock`) makes the cron yield while a chain
+                         // runs AND stops reconcile overlapping a chain's flush → the `meta` read-modify-
+                         // write race (pendingBatches/lastFlush flicker) is gone. Idles to the plain cron
+                         // when pend is empty. Prior (v32): PER-KEY batch drain — a flush that partial-fails on the ~1000-subrequest
+                         // ceiling now clears the batches whose shards persisted and KEEPS only the ones
+                         // touching a genuinely-failed shard (was all-or-nothing, which stranded EVERY
+                         // batch on a single failed shard → "batches stuck at N, flickering"). No cap
+                         // change, so iq/shard throughput is unchanged. `pendingBatches` now reports the
+                         // post-drain remaining count (drops each flush). Prior (v31): FOLD is now
+                         // maintained SOLELY by the LIVENESS bots' continuous walk — the
                          // reconcile's fold re-emit pass is REMOVED (no more full fold re-laps). A
                          // checked-only bump (bot re-verified an UNCHANGED fancy avatar) re-asserts the
                          // entry's union (raw ∪ folded) tokens with the CURRENT foldFancy, no-op-guarded
@@ -751,6 +780,24 @@ export default {
       }
 
       if (req.method === "GET" && url.pathname === "/flush") {
+        // Internal continuation step (fired by fireContinuation with the ADMIN_KEY token). ONLY a
+        // token-bearing request may CHAIN — a plain public /flush stays a single flush exactly as
+        // before, so /flush being public gains no new blast radius (the lock + depth cap bound a chain
+        // to one drain regardless of how it's triggered).
+        const cont = url.searchParams.get("cont");
+        const isChain = !!cont && !!env.ADMIN_KEY && cont === env.ADMIN_KEY;
+        if (isChain) {
+          await chainLockPut(env);   // refresh the single-flight lock so the cron keeps yielding
+          let res = null;
+          try { res = await flushR2(env); } catch (e) { console.log("flush chain err", e); }
+          const depth = parseInt(url.searchParams.get("n") || "1", 10) || 1;
+          if (res && res.pendRemaining > 0 && res.progressed && depth < MAX_CONTINUATION_DEPTH) {
+            fireContinuation(env, ctx, depth + 1);   // more to drain → hand off a fresh budget
+          } else {
+            await chainLockDel(env);   // drained / capped / no progress → release the lock
+          }
+          return json({ chained: true, depth, pendRemaining: res ? res.pendRemaining : -1 });
+        }
         await flushR2(env);
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
         return json({
@@ -780,10 +827,25 @@ export default {
     // reconcile (re-arm + advance the fold lap, enqueues iq: ops) → prune → author-rename, THEN flushR2
     // LAST (now bounded to 60 shards so it completes and drains the iq: ops the earlier tasks queued).
     ctx.waitUntil((async () => {
+      // A continuation chain from a previous cron may still be draining a large backlog. If so, skip
+      // this whole cycle — running reconcile/flush now would overlap the chain's flush and race the
+      // shared `meta` record (the pendingBatches/lastFlush flicker). The chain finishes fast; the cron
+      // just waits one cycle. (A crashed chain self-heals in ≤90s when the lock ages out.)
+      if (await chainBusy(env)) return;
       try { await reconcileIndex(env); } catch (e) { console.log("reconcile err", e); }
       try { await pruneFillWorklist(env); } catch (e) { console.log("prune err", e); }
       try { await propagateAuthorRenames(env); } catch (e) { console.log("arn err", e); }
-      try { await flushR2(env); } catch (e) { console.log("flushR2 err", e); }
+      // Claim the single-flight lock, run one flush, and if pend work remains hand off to a
+      // self-chaining drain (each step a FRESH ~1000-subrequest budget) instead of waiting 2 min for
+      // the next cron. Releases the lock when there's nothing left to chain.
+      await chainLockPut(env);
+      let res = null;
+      try { res = await flushR2(env); } catch (e) { console.log("flushR2 err", e); }
+      if (res && res.pendRemaining > 0 && res.progressed) {
+        fireContinuation(env, ctx, 1);
+      } else {
+        await chainLockDel(env);
+      }
     })());
   },
 };
@@ -1249,6 +1311,33 @@ async function listPrefix(env, prefix, cap = 5000) {
   return out;
 }
 
+// ---- continuation-chain helpers (see the FLUSH_LOCK_TTL_MS block above) --------------------------
+function selfBase(env) { return (env.WORKER_SELF_URL || DEFAULT_SELF_URL).replace(/\/$/, ""); }
+async function chainBusy(env) {
+  try {
+    const v = await env.AVATAR_KV.get("flushlock");
+    if (!v) return false;
+    return (Date.now() - (parseInt(v, 10) || 0)) < FLUSH_LOCK_TTL_MS;
+  } catch (_) { return false; }
+}
+async function chainLockPut(env) { try { await env.AVATAR_KV.put("flushlock", String(Date.now()), { expirationTtl: 120 }); } catch (_) {} }
+async function chainLockDel(env) { try { await env.AVATAR_KV.delete("flushlock"); } catch (_) {} }
+function fireContinuation(env, ctx, depth) {
+  if (!env.ADMIN_KEY) return;   // chaining is gated on the internal token; without it, single-flush only
+  const path = `/flush?cont=${encodeURIComponent(env.ADMIN_KEY)}&n=${depth}`;
+  // PREFER the self service-binding (env.SELF) — a plain fetch() to our own workers.dev hostname is an
+  // unreliable way to self-invoke (Cloudflare loop-guard / edge-cache can drop it, which is why the
+  // chain didn't fire on first deploy). The service binding routes straight to a fresh invocation of
+  // THIS worker (fresh subrequest budget) with no DNS/cache in the path. Global fetch is the fallback.
+  try {
+    if (env.SELF && typeof env.SELF.fetch === "function") {
+      ctx.waitUntil(env.SELF.fetch("https://self" + path).catch(() => {}));
+      return;
+    }
+  } catch (_) {}
+  ctx.waitUntil(fetch(selfBase(env) + path).catch(() => {}));
+}
+
 async function flushR2(env) {
   const prevMeta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   // iq: index-op queue depth (in KEYS, each ≈ up to MAX_INDEX_OPS_PER_FLUSH ops), stamped from the
@@ -1299,6 +1388,17 @@ async function flushR2(env) {
 
   const pendKeys = [];
   const recentBatches = [];   // admin "recent contributions" view (free: built from data already read)
+  // PER-KEY shard sets + the set of shards whose R2 IO FAILED this flush. The KV-clear below deletes a
+  // key ONLY when none of the shards it touched failed — REPLACING the old all-or-nothing "clear only
+  // if EVERY shard wrote OK". A single failed shard write (e.g. brushing the ~1000 subrequest ceiling)
+  // used to strand EVERY batch in the flush → the queue "stuck at N, flickering" churning forever
+  // (re-reading + partially re-writing the same batches every 2 min, thrown away). Now a partial
+  // failure keeps ONLY the batches touching the genuinely-failed shards; the rest drain, so the queue
+  // makes real progress every flush. No cap change → no throughput/iq slowdown.
+  const failedShards = new Set();
+  const pendKeyShards = new Map(), admuKeyShards = new Map(), admrKeyShards = new Map(),
+        admkKeyShards = new Map(), repKeyShards = new Map();
+  const shardsOf = (fids) => { const s = new Set(); for (const fid of fids) if (FILE_RE.test(fid)) s.add(shardPrefix(fid)); return s; };
   // Consume pending USER batches only until MAX_SHARDS_PER_FLUSH distinct shards are queued, then STOP
   // (leave the rest for the next 1-min flush) so a big burst can't blow the subrequest limit and wedge
   // the queue forever. A deferred batch is NOT added to pendKeys, so it isn't deleted → it drains next
@@ -1323,6 +1423,7 @@ async function flushR2(env) {
     const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
     if (!reserve(fids)) break;                                                 // over budget → defer rest
     pendKeys.push(kn);
+    pendKeyShards.set(kn, shardsOf(fids));
     for (const fid of fids) S(shardPrefix(fid)).adds[fid] = batch[fid];
     if (fids.length) recentBatches.push({
       ts: typeof batch.__ts === "number" ? batch.__ts : Date.now(),
@@ -1342,6 +1443,7 @@ async function flushR2(env) {
     const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
     if (!reserve(fids)) break;   // over budget → defer to next flush
     admuKeys.push(kn);
+    admuKeyShards.set(kn, shardsOf(fids));
     for (const fid of fids) S(shardPrefix(fid)).upserts[fid] = batch[fid];
   }
   const admrKeys = [];
@@ -1352,6 +1454,7 @@ async function flushR2(env) {
     const fids = arr.filter((f) => typeof f === "string" && f.startsWith("file_"));
     if (!reserve(fids)) break;   // over budget → defer to next flush
     admrKeys.push(kn);
+    admrKeyShards.set(kn, shardsOf(fids));
     for (const fid of fids) S(shardPrefix(fid)).removes.add(fid);
   }
   const admkKeys = [];
@@ -1362,6 +1465,7 @@ async function flushR2(env) {
     const fids = arr.filter((f) => typeof f === "string" && f.startsWith("file_"));
     if (!reserve(fids)) break;   // over budget → defer to next flush
     admkKeys.push(kn);
+    admkKeyShards.set(kn, shardsOf(fids));
     for (const fid of fids) S(shardPrefix(fid)).checked.add(fid);
   }
   // Reports: rename immediately, remove on quorum; both clear their rep: key. A below-quorum "dead"
@@ -1385,10 +1489,10 @@ async function flushR2(env) {
     let r; try { r = JSON.parse(val); } catch (_) { continue; }
     if (r.status === "renamed" && r.name) {
       if (!reserve([fid])) break;                                   // shard WRITE → budget
-      S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn);
+      S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn); repKeyShards.set(kn, shardsOf([fid]));
     } else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) {
       if (!reserve([fid])) break;                                   // shard WRITE → budget
-      S(shardPrefix(fid)).removes.add(fid); repClear.push(kn);
+      S(shardPrefix(fid)).removes.add(fid); repClear.push(kn); repKeyShards.set(kn, shardsOf([fid]));
     } else if (r.status === "dead" && (Object.keys(repShardCache).length < 30 || shardPrefix(fid) in repShardCache)) {
       // Below quorum: normally waits for a 2nd report or the bot. Drain it here ONLY if the avatar is
       // no longer in the catalog (nothing to remove) — a shard READ, no write, so no budget reserve.
@@ -1418,7 +1522,7 @@ async function flushR2(env) {
       const obj = await env.CATALOG.get(`shard/${sp}.json`);
       cur = obj ? await obj.json() : { v: 1, e: {} };
       if (!cur || typeof cur !== "object" || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
-    } catch (_) { allShardsOk = false; continue; } // read failed -> skip (never wipe), retry next flush
+    } catch (_) { allShardsOk = false; failedShards.add(sp); continue; } // read failed -> skip (never wipe); mark shard so its batches are KEPT, not cleared
     const e = cur.e;
     // Track whether this shard's CONTENT actually changed. A flush where every op is a no-op
     // (harvest re-sending already-known avatars → all adds are dupes; a `checked` bump for an
@@ -1499,7 +1603,7 @@ async function flushR2(env) {
         httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
       });
       wrote = true;
-    } catch (_) { allShardsOk = false; }
+    } catch (_) { allShardsOk = false; failedShards.add(sp); }  // write failed → KEEP this shard's batches (per-key clear below)
     if (wrote) {   // fold the count deltas + index ops ONLY now that the shard actually persisted
       dirtyPrefixes.push(sp);
       if (contentDirty) purgePrefixes.push(sp);   // checked-only writes persist but skip the purge
@@ -1514,56 +1618,61 @@ async function flushR2(env) {
   // purge token is configured.
   if (allShardsOk && purgePrefixes.length > 0) await purgeShards(env, purgePrefixes);
 
-  // FULL incremental SEARCH INDEX (add / rename / remove + avtr presence) — computed above from the
-  // SAME shard reads (no re-fetch). Drain any carried-over ops first, then this flush's, up to the
-  // per-flush cap; the remainder carries forward in an `iq:` queue and drains over the next flushes,
-  // so a big burst never drops and subrequests stay bounded. Only runs when shards wrote OK (so we
-  // index exactly what persisted; a failed apply re-queues everything and re-applies idempotently).
+  // Clear the drained KV keys FIRST — BEFORE the (expensive) index drain. Clearing depends ONLY on the
+  // shard-loop result (allShardsOk / failedShards), so doing it first guarantees a batch whose shards
+  // persisted is deleted even if the index drain below later blows the ~1000-subrequest ceiling and
+  // throws. THIS ORDER IS THE FIX for "nothing drains": the index drain used to run FIRST, and its ~300
+  // index ops (each new-avatar op touches fragment+avtr+index buckets) + the shard ops exceeded the
+  // ceiling, killing the invocation BEFORE this clear ever ran → pend keys never deleted → the whole
+  // queue stuck (verified live: pendCleared=0 every flush). PER-KEY (not all-or-nothing): only keys
+  // touching a genuinely-failed shard are kept for retry; a key with no recorded shards (empty/garbage
+  // batch, moot report) always clears.
+  const keyClears = (kn, map) => { const s = map.get(kn); if (!s) return true; for (const sp of s) if (failedShards.has(sp)) return false; return true; };
+  let pendCleared = 0, repCleared = 0;
+  for (const n of pendKeys) if (keyClears(n, pendKeyShards)) { await env.AVATAR_KV.delete(n); pendCleared++; }
+  for (const n of admuKeys) if (keyClears(n, admuKeyShards)) await env.AVATAR_KV.delete(n);
+  for (const n of admrKeys) if (keyClears(n, admrKeyShards)) await env.AVATAR_KV.delete(n);
+  for (const n of admkKeys) if (keyClears(n, admkKeyShards)) await env.AVATAR_KV.delete(n);
+  for (const n of repClear) if (keyClears(n, repKeyShards)) { await env.AVATAR_KV.delete(n); repCleared++; }
+
+  // FULL incremental SEARCH INDEX (add / rename / remove + avtr presence) — computed above from the SAME
+  // shard reads (no re-fetch). Runs AFTER the clear (above) and is COST-CAPPED + fully WRAPPED so a
+  // subrequest-ceiling throw can never abort the flush: the shards persisted + the batch already
+  // cleared, and any un-applied op stays queued in iq: to drain on a later/lighter flush or chain step.
   if (allShardsOk) {
+   try {
+    // Dynamic budget: the shard read+write loop already spent ~2*prefixes.length subrequests, and each
+    // index op can touch fragment+avtr+index buckets (read+write). Cap the drain so the TOTAL stays well
+    // under the ~1000 ceiling — a heavy new-avatar batch yields most index work to the iq: queue (drained
+    // by the next chain step) instead of blowing the invocation. Falls to 0 for a very shard-heavy flush.
+    const iqCap = Math.max(0, Math.min(MAX_INDEX_OPS_PER_FLUSH, Math.floor((720 - 2 * prefixes.length) / 5)));
     const iqNames = await listPrefix(env, "iq:", 1000);   // own cursor (never crowded out); we drain only a few
-    iqDepthNow = iqNames.length;   // queue depth at flush start (keys) → meta.iqDepth for /health, ticks to 0
+    iqDepthNow = iqNames.length;   // queue depth at flush start (keys) → meta.iqDepth for /health
     let queued = []; const drained = [];
     for (const kn of iqNames) {
-      // Reserve this flush's own NEW contribution ops (indexOps) budget first, then read only enough
-      // BACKLOG keys to fill the rest. This is what makes a freshly-added avatar searchable within a
-      // flush or two instead of queuing behind a large backlog (a fold re-lap can leave hundreds of
-      // iq: keys). Old ops still drain with the remaining budget, so the backlog keeps clearing too.
-      if (indexOps.length + queued.length >= MAX_INDEX_OPS_PER_FLUSH) break;
+      // THIS flush's NEW contribution ops (indexOps) get budget first, then only enough BACKLOG keys to
+      // fill the rest — so a freshly-added avatar is searchable within a flush or two, not stuck behind
+      // the backlog.
+      if (indexOps.length + queued.length >= iqCap) break;
       const val = await env.AVATAR_KV.get(kn); drained.push(kn);
       if (val) try { const a = JSON.parse(val); if (Array.isArray(a)) queued.push(...a); } catch (_) {}
     }
     const all = [...indexOps, ...queued];   // NEW contributions FIRST, then backlog
-    const toApply = all.slice(0, MAX_INDEX_OPS_PER_FLUSH);
+    const toApply = all.slice(0, iqCap);
     let applied = true;
     if (toApply.length) {
-      // NO edge-cache purge on the index buckets (fragments/avtr/index): those carry the 5-min INDEX_TTL,
-      // so a skipped purge self-heals within 5 min — and purges are slow HTTP calls that dominate the
-      // flush's WALL time (the v21 jam). Dropping them lets the flush drain far more index ops per tick
-      // within budget; search freshness lags at most INDEX_TTL, which is fine (clone-shard purges, which
-      // users hit live, are unaffected — those still happen in flushR2's shard-write path).
-      try { await applyIndexOps(env, toApply); }
-      catch (_) { applied = false; }
+      // No edge-cache purge on index buckets (they carry the 5-min INDEX_TTL, self-heal), so this is the
+      // cheap path; clone-shard purges (user-facing) already happened in the shard-write loop.
+      try { await applyIndexOps(env, toApply); } catch (_) { applied = false; }
     }
     for (const kn of drained) await env.AVATAR_KV.delete(kn);
-    const requeue = applied ? all.slice(MAX_INDEX_OPS_PER_FLUSH) : all;   // on failure retry all (idempotent)
+    const requeue = applied ? all.slice(iqCap) : all;   // leftover / on-failure-all → requeue (idempotent)
     for (let i = 0; i < requeue.length; i += MAX_INDEX_OPS_PER_FLUSH)
-      // NO expiry: a search-index op is the ONLY thing that makes an avatar searchable, so it must
-      // NEVER be dropped. The old 7-day TTL silently EXPIRED queued ops whenever the backlog outlived
-      // it (heavy harvesting, or while the full rebuild was down), leaving avatars cloneable-but-
-      // unsearchable forever. The queue self-drains as flushes catch up; the paginated listPrefix read
-      // keeps it from crowding out pend:/rep:, and the full rebuild reconciles fragments/index from the
+      // NO expiry: an index op is the ONLY thing that makes an avatar searchable, so it must NEVER be
+      // dropped. The queue self-drains as flushes catch up; reconcile also reconciles the index from the
       // clone shards, so an un-drained op is at worst redundant, never lost.
-      await env.AVATAR_KV.put("iq:" + crypto.randomUUID(),
-        JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
-  }
-
-  // Clear KV only when every touched shard wrote OK (idempotent retry otherwise — nothing lost).
-  if (allShardsOk) {
-    for (const n of pendKeys) await env.AVATAR_KV.delete(n);
-    for (const n of admuKeys) await env.AVATAR_KV.delete(n);
-    for (const n of admrKeys) await env.AVATAR_KV.delete(n);
-    for (const n of admkKeys) await env.AVATAR_KV.delete(n);
-    for (const n of repClear) await env.AVATAR_KV.delete(n);
+      await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
+   } catch (_) { /* index drain hit the ceiling — batches ALREADY cleared above; iq: self-heals next flush */ }
   }
 
   // Manifest — the WORKER now owns it (search + counts are fully incremental, no Action needed).
@@ -1635,7 +1744,7 @@ async function flushR2(env) {
     }
   }
 
-  await env.AVATAR_KV.put("meta", JSON.stringify({
+  try { await env.AVATAR_KV.put("meta", JSON.stringify({
     ...prevMeta,
     lastFlush: new Date().toISOString(),
     lastAdded: added, lastRemoved: removed,
@@ -1648,17 +1757,18 @@ async function flushR2(env) {
     adoptedRebuild,
     lastCommit: allShardsOk
       ? `R2 +${added} -${removed} (${prefixes.length} shards)`
-      : `R2 partial: some shard IO failed, kept pending (+${added} -${removed})`,
-    pendingBatches: pendNames.length,
-    reports: allShardsOk ? Math.max(0, repNames.length - repClear.length) : repNames.length,
+      : `R2 partial: ${failedShards.size} shard(s) failed, drained the rest (+${added} -${removed})`,
+    pendingBatches: Math.max(0, pendNames.length - pendCleared),   // remaining after THIS flush's per-key drain (drops each flush now)
+    lastDiag: `consumed=${pendKeys.length} cleared=${pendCleared} shards=${prefixes.length} dirty=${dirtyPrefixes.length} failed=${failedShards.size} ok=${allShardsOk}`,   // TEMP flush instrumentation
+    reports: Math.max(0, repNames.length - repCleared),
     iqDepth: iqDepthNow,   // search-index op queue depth (keys) — watch it drain to 0 after a fold/rebuild
     backend: "r2",
-  }));
+  })); } catch (_) { /* ceiling: meta stale ONE cycle (self-corrects next flush); the return below is computed from in-memory state so the chain still gets the right pendRemaining */ }
 
   // Rolling log of the most recent USER contribution batches (newest first) with FULL names, in a
   // DEDICATED key so it never bloats meta/health. Only rewritten when batches were processed this
   // flush → +1 small KV write per flush at most, nothing when idle. Capped at 20 batches.
-  if (recentBatches.length) {
+  if (recentBatches.length) try {
     let prev = []; try { const r = await env.AVATAR_KV.get("recent"); if (r) prev = JSON.parse(r); } catch (_) {}
     prev = Array.isArray(prev) ? prev : [];
     // DEDUP the display log by CONTENT (contributor + the exact avatar set), not timestamp: a
@@ -1676,7 +1786,11 @@ async function flushR2(env) {
       const next = [...fresh.reverse(), ...prev].slice(0, 20);
       await env.AVATAR_KV.put("recent", JSON.stringify(next));
     }
-  }
+  } catch (_) { /* best-effort display log; never let it abort the flush's return below */ }
+  // For the self-chaining continuation: pend batches left after THIS flush's per-key drain, and
+  // whether this step made progress (cleared ≥1). The caller chains another fresh-budget flush while
+  // pend work remains AND progress is being made (so a step that can only re-hit failed shards stops).
+  return { pendRemaining: Math.max(0, pendNames.length - pendCleared), progressed: pendCleared > 0 };
 }
 
 // Purge a list of absolute catalog URLs from Cloudflare's edge cache (batches of 30, the

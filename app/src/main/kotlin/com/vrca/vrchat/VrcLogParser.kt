@@ -292,10 +292,25 @@ object VrcLogParser {
             if (entry == null) {
                 if (avatarName == null) state
                 else state.copy(pendingAvatarByName = state.pendingAvatarByName + (event.displayName to avatarName))
-            } else state.copy(
-                suspended = false,
-                roster = state.roster + (entry.key to entry.value.copy(avatarName = avatarName))
-            )
+            } else {
+                val cur = entry.value
+                // A switch to a DIFFERENT avatar INVALIDATES the captured author — that author
+                // belonged to the PREVIOUS avatar (the `Unpacking Avatar (name by author)` line is
+                // separate from `Switching`). Keeping it would pair the NEW avatar name with the OLD
+                // author, so a cached new avatar (no fresh Unpacking) resolves against the wrong
+                // creator — the "confused with the prior author of what the user was wearing" bug.
+                // Clear it on a name change: the new avatar's Unpacking (if it fires) sets the correct
+                // author; otherwise it stays null and the resolver falls to NAME-ONLY (which serves a
+                // unique exact-name match from our image-verified catalog).
+                val nameChanged = cur.avatarName != avatarName
+                state.copy(
+                    suspended = false,
+                    roster = state.roster + (entry.key to cur.copy(
+                        avatarName = avatarName,
+                        avatarCreator = if (nameChanged) null else cur.avatarCreator
+                    ))
+                )
+            }
         }
         is LogEvent.AvatarUnpack -> {
             // Best-effort author: attach to the entry whose avatarName matches.
