@@ -366,6 +366,10 @@ fun AdminScreen() {
                     // Resume the watcher/sweep WRITES (the latched browsing/selectedUser
                     // intent is preserved, so they pick up exactly where they left off).
                     AdminRuntime.setForeground(true)
+                    // If the OS suspended the process while backgrounded, the catalog sweep
+                    // froze — kick it immediately on return so the shard counter resumes at
+                    // once instead of waiting out the ~2-min freeze watchdog.
+                    BotController.onForeground(ctx)
                 }
                 androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> {
                     isForeground = false

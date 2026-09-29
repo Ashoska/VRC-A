@@ -239,6 +239,13 @@ object InstanceRosterManager {
     private val statusDescCache = ConcurrentHashMap<String, String>()
     private val trustCache = ConcurrentHashMap<String, String>()
     private val enrichInFlight = ConcurrentHashMap.newKeySet<String>()
+    // Locally-confirmed friendships: when the roster's Add-friend button verifies (via
+    // getFriendStatus) that a just-sent request was accepted, it marks the userId here so
+    // the button flips add→unfriend AND the name colour turns friend-yellow, EVEN IF the
+    // `friend-add` pipeline event never reaches the requester (VRChat doesn't always emit
+    // it to the sender). ORed into the isFriend derivation; cleared on instance leave/hop
+    // (by then the real FriendsCacheStore has caught up via the periodic friends refresh).
+    private val locallyFriended = ConcurrentHashMap.newKeySet<String>()
     // avatarName last seen per user → detect a SWITCH to refetch that pic 5s later.
     private val lastAvatarByUser = ConcurrentHashMap<String, String>()
     // Last published roster entries (carry joinedAtMs) for the periodic pfp sweep.
@@ -875,7 +882,7 @@ object InstanceRosterManager {
                 avatarCreator = e.avatarCreator,
                 avatarId = avaId,
                 cloneFileId = if (!isSelfMember) e.userId?.let { avatarCloneFileIdCache[it] } else null,
-                isFriend = e.userId != null && friends.contains(e.userId),
+                isFriend = e.userId != null && (friends.contains(e.userId) || locallyFriended.contains(e.userId)),
                 isSelf = isSelfMember,
                 profilePicUrl = pfp,
                 status = stat,
@@ -969,7 +976,10 @@ object InstanceRosterManager {
                 // the SAME /users/{id} response as the pic, so a catalog hit resolves
                 // the clone id offline right when the pfp loads (no separate DB search).
                 val wornFid = Regex("file_[0-9a-fA-F-]{36}").find(info.wornAvatarThumbUrl)?.value
-                val avaName = _flow.value.members.firstOrNull { it.userId == id }?.avatarName ?: ""
+                val member0 = _flow.value.members.firstOrNull { it.userId == id }
+                val avaName = member0?.avatarName ?: ""
+                val avaAuthor = member0?.avatarCreator ?: ""
+                val nameStable = System.currentTimeMillis() - (avatarNameSince[id] ?: 0L) >= NAME_STABLE_MS
                 var catalogAvatarId: String? = null
                 // Name-optional: resolve from the worn file id whether or not the log gave an avatar name
                 // (impostor'd players have no name but still a file id). This is the INSTANT catalog-hit
@@ -1006,7 +1016,13 @@ object InstanceRosterManager {
                                 // this member UNPINNED so the guarded resolveAvatars pass (equally strict —
                                 // `verifyCatalogHit`/image-fileid match) decides, greying it if it can't
                                 // image-confirm. Matches every other serve path (all require the fileId match).
-                                true -> if (wornFid in conf.fileIds) {
+                                // Serve ONLY when the worn image matches AND the LIVE avatar's name+author
+                                // agree with the LOG. If they disagree (and the log name is stable), the worn
+                                // image was a PREVIOUS avatar's (a stale /users read) — so this image-keyed
+                                // entry is the WRONG avatar; don't pin it, leave it for the guarded resolver
+                                // to re-resolve by name+author (the "shows ǃ ESME, clones Gucci Morty" fix).
+                                true -> if (wornFid in conf.fileIds &&
+                                            !(nameStable && VrchatAuthManager.logConflictsWithLive(conf.name, conf.author, avaName, avaAuthor))) {
                                     val plats = conf.platforms.ifEmpty { hit.platforms }
                                     val gated = gateCloneId(hit.avatarId, plats)  // "" if PC-only on Quest
                                     avatarPlatformsCache[id] = plats
@@ -1019,7 +1035,7 @@ object InstanceRosterManager {
                                         "instant enrich shortcut: local catalog HIT ${hit.avatarId}",
                                         "confirmed live" + (if (gated.isBlank()) " but PC-only → greyed on Quest" else ""),
                                         "result: via catalog (enrich shortcut)"))
-                                }   // else: worn image no longer matches (stale re-key) → let the guarded resolver find the right one
+                                }   // else: worn image no longer matches (stale re-key) OR live-author collision → let the guarded resolver find the right one
                                 false -> {
                                     // Confirmed dead/private → report + grey DECISIVELY (never a clickable robot).
                                     com.vrca.vrchat.AvatarGlobalDb.report(context, wornFid, hit.avatarId, "dead")
@@ -1093,6 +1109,7 @@ object InstanceRosterManager {
         avatarLoadingSince.clear(); avatarSlowRetryAt.clear()
         loadingWatchKeys.clear()
         avatarNameSince.clear()
+        locallyFriended.clear()
         VrchatAuthManager.clearResolveTraces()
         com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
     }
@@ -1284,8 +1301,25 @@ object InstanceRosterManager {
         val friends = friendIds(context)
         val updated = cur.members.map { m ->
             val uid = m.userId
-            val f = uid != null && uid != self && friends.contains(uid)
+            val f = uid != null && uid != self && (friends.contains(uid) || locallyFriended.contains(uid))
             if (m.isFriend != f) m.copy(isFriend = f) else m
+        }
+        if (updated != cur.members) _flow.value = cur.copy(members = updated)
+    }
+
+    /** Called by the roster's Add-friend button once it VERIFIES (via `getFriendStatus`)
+     *  that a just-sent request was accepted — the `friend-add` pipeline event doesn't
+     *  reliably reach the requester, so the button + name colour would otherwise stay in
+     *  the greyed "sent" state forever. Records the confirmed friendship locally and flips
+     *  isFriend on that member immediately (the ~1s publish re-derive keeps it too). */
+    fun markFriended(userId: String?) {
+        val uid = userId?.trim().orEmpty()
+        if (uid.isBlank()) return
+        if (!locallyFriended.add(uid)) return
+        val cur = _flow.value
+        if (cur.status != Status.LIVE) return
+        val updated = cur.members.map { m ->
+            if (m.userId == uid && !m.isFriend) m.copy(isFriend = true) else m
         }
         if (updated != cur.members) _flow.value = cur.copy(members = updated)
     }

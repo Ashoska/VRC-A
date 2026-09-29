@@ -1540,11 +1540,18 @@ object VrchatAuthManager {
     /** Drop the session liveness cache — called on instance leave so it doesn't accumulate across a
      *  long session (kept ACROSS hops so a re-seen avatar isn't re-confirmed). Bounds the memory the
      *  "no robot tap" pre-check holds. */
-    fun clearAvatarLiveCache() { avatarLiveCache.clear(); avatarLivePlatforms.clear(); avatarLiveFileIds.clear() }
+    fun clearAvatarLiveCache() { avatarLiveCache.clear(); avatarLivePlatforms.clear(); avatarLiveFileIds.clear(); avatarLiveName.clear(); avatarLiveAuthor.clear(); staleReported.clear() }
 
     /** Result of a live-confirm: [live]=true (200, wearable), false (403/404, not wearable → grey +
      *  report), null (transient → unknown, retry, do NOT grey/report). */
-    data class AvatarConfirm(val live: Boolean?, val fileIds: Set<String>, val platforms: List<String>)
+    data class AvatarConfirm(val live: Boolean?, val fileIds: Set<String>, val platforms: List<String>, val name: String = "", val author: String = "")
+    // Live name/author parsed from the avatar page — the AUTHORITATIVE values for deciding a
+    // shared-thumbnail collision (vs our possibly-stale stored author) and for flagging a stale entry.
+    private val avatarLiveName = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val avatarLiveAuthor = java.util.concurrent.ConcurrentHashMap<String, String>()
+    // Fire the "stale entry" refresh report AT MOST ONCE per file id per session, so a member repeatedly
+    // switching back to a stale-catalog avatar can't re-send it (cleared on instance leave with the rest).
+    private val staleReported = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
 
     /** Confirm an avatar is still LIVE + PUBLIC before its catalog entry is offered as clonable, so
      *  the clone button NEVER robots on a dead/private avatar (the user's hard requirement). One
@@ -1554,7 +1561,8 @@ object VrchatAuthManager {
     suspend fun confirmAvatarLive(context: Context, avatarId: String): AvatarConfirm =
         withContext(Dispatchers.IO) {
             avatarLiveCache[avatarId]?.let {
-                return@withContext AvatarConfirm(it, avatarLiveFileIds[avatarId] ?: emptySet(), avatarLivePlatforms[avatarId] ?: emptyList())
+                return@withContext AvatarConfirm(it, avatarLiveFileIds[avatarId] ?: emptySet(), avatarLivePlatforms[avatarId] ?: emptyList(),
+                    avatarLiveName[avatarId] ?: "", avatarLiveAuthor[avatarId] ?: "")
             }
             val cookie = getCookieHeader(context) ?: return@withContext AvatarConfirm(null, emptySet(), emptyList())
             try {
@@ -1565,8 +1573,10 @@ object VrchatAuthManager {
                         val j = org.json.JSONObject(body)
                         val ids = setOfNotNull(fileIdOf(j.optString("thumbnailImageUrl", "")), fileIdOf(j.optString("imageUrl", "")))
                         val plats = platformsFromAvatarJson(j)
+                        val liveName = j.optString("name", ""); val liveAuthor = j.optString("authorName", "")
                         avatarLiveCache[avatarId] = true; avatarLiveFileIds[avatarId] = ids; avatarLivePlatforms[avatarId] = plats
-                        AvatarConfirm(true, ids, plats)
+                        avatarLiveName[avatarId] = liveName; avatarLiveAuthor[avatarId] = liveAuthor
+                        AvatarConfirm(true, ids, plats, liveName, liveAuthor)
                     }
                     code == 403 || code == 404 -> { avatarLiveCache[avatarId] = false; AvatarConfirm(false, emptySet(), emptyList()) }
                     else -> AvatarConfirm(null, emptySet(), emptyList())   // transient — do not cache, retry
@@ -1575,13 +1585,6 @@ object VrchatAuthManager {
         }
 
     private enum class HitVerdict { SERVE, DEAD, RETRY, FALLTHROUGH }
-    /** Human-readable verdict for the per-user resolve trace. */
-    private fun verdictLabel(v: HitVerdict): String = when (v) {
-        HitVerdict.SERVE -> "LIVE (200) → serve"
-        HitVerdict.DEAD -> "DEAD/private (403/404) → grey + report"
-        HitVerdict.RETRY -> "transient (429/5xx) → retry, not cached"
-        HitVerdict.FALLTHROUGH -> "live but worn image no longer matches (stale entry) → resolve fresh"
-    }
 
     /** Verify a catalog-HIT avatar is safe to offer as clonable. SERVE = live+public (and, when the
      *  worn file id is known, its image still matches — not a stale re-keyed entry). DEAD = 403/404
@@ -1595,6 +1598,84 @@ object VrchatAuthManager {
             null -> HitVerdict.RETRY to emptyList()
             else -> if (wornFileId == null || wornFileId in c.fileIds) HitVerdict.SERVE to c.platforms
                     else HitVerdict.FALLTHROUGH to emptyList()
+        }
+    }
+
+    /** True when both strings are known and DIFFER (font-folded). Public so the roster's instant enrich
+     *  shortcut can reuse the same comparison. */
+    fun authorMismatch(a: String, b: String): Boolean =
+        a.isNotBlank() && b.isNotBlank() && fancyFold(a) != fancyFold(b)
+
+    /** True when the LIVE avatar page's AUTHOR disagrees with the LOG's author — the reliable signal that
+     *  the WORN IMAGE FILE ID was STALE (a previous avatar's), so the image-keyed catalog HIT is the WRONG
+     *  avatar even though its live thumbnail matches that stale file (the "shows ǃ ESME, clones Gucci
+     *  Morty" case: live Nemorio vs log Taiga). **AUTHOR ONLY — the NAME is deliberately NOT compared**:
+     *  VRChat's LOG name is frequently a truncated / descriptor-stripped form of the full stored name
+     *  ("Ball Python" in the log vs "Ball Python (handpuppet / head puppet)" stored), so a name compare
+     *  false-fired on correct avatars and made the fast enrich-shortcut fall through to the full resolver
+     *  for nearly every avatar. A genuine RENAME never trips this (live+log author both reflect the new
+     *  name); a blank log author (the common "no Unpacking-Avatar line captured" case) can't disambiguate,
+     *  so it returns false and the image-verified HIT is served. `liveName`/`logName` are unused (kept in
+     *  the signature so callers read naturally). */
+    @Suppress("UNUSED_PARAMETER")
+    fun logConflictsWithLive(liveName: String, liveAuthor: String, logName: String, logAuthor: String): Boolean =
+        authorMismatch(liveAuthor, logAuthor)
+
+    /** Decide a catalog image-file-id HIT (local map OR R2 shard). Returns the result to RETURN, or
+     *  null to FALL THROUGH to the fresh image-based resolve paths. Uses the LIVE avatar page (fetched
+     *  by confirmAvatarLive, session-cached) as the source of truth — NOT our possibly-stale stored
+     *  author — so a creator who RENAMED (their avatar or display name) isn't mistaken for a collision:
+     *   - dead/private → report dead + grey.  transient → retry.
+     *   - live but the worn image no longer matches this avatar → fall through (stale mapping).
+     *   - live + image matches, but the LIVE author still disagrees with the log author → genuine
+     *     shared-thumbnail collision (a rip/reskin reusing the thumbnail) → resolve by name+author.
+     *   - live + image matches + author agrees (or unknown) → the RIGHT avatar → serve; and if our
+     *     STORED entry's name/author is stale vs the live page, fire a "renamed" report so the catalog
+     *     self-heals (the rare-case refresh the user asked for). */
+    private suspend fun serveCatalogHit(
+        context: Context, entry: com.vrca.vrchat.AvatarGlobalDb.Entry, wornFileId: String?,
+        logName: String, logAuthor: String, nameStable: Boolean, source: String, step: (String) -> Unit
+    ): WornAvatarResult? {
+        val conf = confirmAvatarLive(context, entry.avatarId)
+        step("  live-confirm (GET /avatars/${entry.avatarId}): " + when (conf.live) {
+            true -> "LIVE (200)"; false -> "DEAD/private (403/404)"; else -> "transient (retry)" })
+        when (conf.live) {
+            false -> {
+                wornFileId?.let { com.vrca.vrchat.AvatarGlobalDb.report(context, it, entry.avatarId, "dead") }
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog entry dead/private ($source, confirmed) — greyed + reported"
+                return WornAvatarResult(null, dead = true, fileId = wornFileId)
+            }
+            null -> { com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog hit, liveness unknown ($source) — retry"; return WornAvatarResult(null) }
+            else -> {
+                // The worn image must still be THIS avatar's (guards a re-keyed/changed thumbnail).
+                if (wornFileId != null && wornFileId !in conf.fileIds) { step("  worn image no longer matches this entry — resolving fresh"); return null }
+                // STALE-WORN-IMAGE guard: the worn file id maps (correctly) to THIS live avatar, but if the
+                // LIVE avatar's name/author disagrees with the LOG (real-time, authoritative), the worn
+                // image was a PREVIOUS avatar's (VRChat's /users currentAvatar lags a switch, or a stale
+                // cache) — so this is the WRONG avatar. Re-resolve by the log name+author (the reliable
+                // signal). Gated on nameStable so a mid-switch stale LOG name can't false-trigger it. This
+                // covers BOTH a different creator (Gucci Morty/Nemorio vs I ESME/Taiga) AND a same-creator
+                // different avatar. A genuine RENAME never trips it (live+log both reflect the new value).
+                if (nameStable && logConflictsWithLive(conf.name, conf.author, logName, logAuthor)) {
+                    step("  live avatar ('${conf.name}' by '${conf.author}') ≠ log ('$logName' by '$logAuthor') — STALE worn image; resolving by name+author")
+                    val byNA = resolveByNameAndAuthor(context, logName, logAuthor)
+                    step("  name+author resolve: ${com.vrca.vrchat.AvatarSearch.Diag.lastReason}")
+                    return byNA ?: WornAvatarResult(null)   // the REAL avatar, or unresolved (retry) — never the wrong one
+                }
+                // Right avatar. If OUR stored NAME is stale vs the live page, flag a "renamed" report so
+                // the catalog self-heals (the Worker applies the name immediately). AUTHOR-only staleness
+                // is left to the bots' authorId rename propagation on their walk — the resolve already
+                // used the LIVE author, so a stale stored author never mis-resolves. Fired AT MOST ONCE
+                // per file id per session (staleReported), so switching back to this avatar never re-sends
+                // it — near-zero cost, and rare (only a genuine rename trips it).
+                val nameStale = conf.name.isNotBlank() && entry.name.isNotBlank() && fancyFold(conf.name) != fancyFold(entry.name)
+                if (nameStale && wornFileId != null && staleReported.add(wornFileId)) {
+                    step("  stored name stale vs live ('${entry.name}'→'${conf.name}') — flagged refresh")
+                    com.vrca.vrchat.AvatarGlobalDb.report(context, wornFileId, entry.avatarId, "renamed", conf.name)
+                }
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog ($source, confirmed live)"
+                return WornAvatarResult(entry.avatarId, conf.platforms.ifEmpty { entry.platforms }, fileId = wornFileId)
+            }
         }
     }
 
@@ -1766,25 +1847,8 @@ object VrchatAuthManager {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "resolved to a VRChat fallback — not cloneable"
                 return@withContext WornAvatarResult(null)
             }
-            // CONFIRM it's still wearable before offering it (no robot-tap on a since-dead/private entry).
-            val (verdict, plats) = verifyCatalogHit(context, hit.avatarId, wornFileId)
-            step("  live-confirm (GET /avatars/${hit.avatarId}): ${verdictLabel(verdict)}")
-            when (verdict) {
-                HitVerdict.SERVE -> {
-                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (confirmed live)"
-                    return@withContext WornAvatarResult(hit.avatarId, plats.ifEmpty { hit.platforms }, fileId = wornFileId)
-                }
-                HitVerdict.DEAD -> {
-                    com.vrca.vrchat.AvatarGlobalDb.report(context, wornFileId!!, hit.avatarId, "dead")
-                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog entry dead/private (confirmed) — greyed + reported"
-                    return@withContext WornAvatarResult(null, dead = true, fileId = wornFileId)
-                }
-                HitVerdict.RETRY -> {
-                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog hit, liveness unknown — retry"
-                    return@withContext WornAvatarResult(null)
-                }
-                HitVerdict.FALLTHROUGH -> { /* stale mapping (image changed) → resolve fresh below */ }
-            }
+            // Confirm live + author (collision vs stale) via the live avatar page; null = fall through.
+            serveCatalogHit(context, hit, wornFileId, avatarName, author, nameStable, "catalog") { s -> step(s) }?.let { return@withContext it }
         }
         // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
         // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
@@ -1808,27 +1872,8 @@ object VrchatAuthManager {
                         com.vrca.vrchat.AvatarSearch.Diag.lastReason = "resolved to a VRChat fallback (shard) — not cloneable"
                         return@withContext WornAvatarResult(null)
                     }
-                    // CONFIRM live+public before offering (the catalog is image-verified at CONTRIBUTION
-                    // time, but avatars go private/deleted later; without this, a since-dead/private entry
-                    // shows clickable → robot). One GET, session-cached — the honest cost of "no robot tap".
-                    val (verdict, plats) = verifyCatalogHit(context, e.avatarId, wornFileId)
-                    step("  live-confirm (GET /avatars/${e.avatarId}): ${verdictLabel(verdict)}")
-                    when (verdict) {
-                        HitVerdict.SERVE -> {
-                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard, confirmed live)"
-                            return@withContext WornAvatarResult(e.avatarId, plats.ifEmpty { e.platforms }, fileId = wornFileId)
-                        }
-                        HitVerdict.DEAD -> {
-                            com.vrca.vrchat.AvatarGlobalDb.report(context, wornFileId!!, e.avatarId, "dead")
-                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog entry dead/private (shard, confirmed) — greyed + reported"
-                            return@withContext WornAvatarResult(null, dead = true, fileId = wornFileId)
-                        }
-                        HitVerdict.RETRY -> {
-                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog shard hit, liveness unknown — retry"
-                            return@withContext WornAvatarResult(null)
-                        }
-                        HitVerdict.FALLTHROUGH -> { /* stale mapping → resolve fresh below */ }
-                    }
+                    // Confirm live + author (collision vs stale) via the live avatar page; null = fall through.
+                    serveCatalogHit(context, e, wornFileId, avatarName, author, nameStable, "shard") { s -> step(s) }?.let { return@withContext it }
                 }
                 com.vrca.vrchat.AvatarGlobalDb.ShardStatus.UNAVAILABLE -> {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog read unavailable — will retry"
@@ -1969,9 +2014,47 @@ object VrchatAuthManager {
      * (untrusted for a name-only guess). Never returns a VRChat fallback/system avatar. Null on
      * 0/ambiguous; sets AvatarSearch.Diag.lastReason to the exact reason (surfaced in the roster trace).
      */
+    /** Fold "fancy"/stylised Unicode (𝗪𝗛𝗜𝗧𝗘, ＦＵＬＬＷＩＤＴＨ, ℌ𝔞𝔯𝔡, etc.) back to plain ASCII, then
+     *  trim + lowercase, for robust matching. VRChat display names VERY commonly use the
+     *  Mathematical-Alphanumeric / fullwidth font glyphs; those are DIFFERENT codepoints from the
+     *  ASCII letters, so a raw `author.lowercase() == "white tiger"` compare (or a token match)
+     *  fails whenever the two sides use different fonts. NFKC maps those decorative glyphs to their
+     *  base letters ("𝗪𝗛𝗜𝗧𝗘 𝗧𝗜𝗚𝗘𝗥" → "white tiger"), so the compare works regardless of styling. */
+    private val SMALLCAPS = mapOf(
+        'ᴀ' to 'a','ʙ' to 'b','ᴄ' to 'c','ᴅ' to 'd','ᴇ' to 'e','ꜰ' to 'f','ɢ' to 'g','ʜ' to 'h','ɪ' to 'i',
+        'ᴊ' to 'j','ᴋ' to 'k','ʟ' to 'l','ᴍ' to 'm','ɴ' to 'n','ᴏ' to 'o','ᴘ' to 'p','ꞯ' to 'q','ʀ' to 'r',
+        'ꜱ' to 's','ᴛ' to 't','ᴜ' to 'u','ᴠ' to 'v','ᴡ' to 'w','ʏ' to 'y','ᴢ' to 'z')
+    // Cross-script LOOK-ALIKES of ASCII Latin letters + decorative letter-punctuation (-> '.', a separator).
+    // MUST match the Worker's CONFUSABLES / AvatarGlobalDb.CONFUSABLES byte-for-byte.
+    private val CONFUSABLES = mapOf(
+        'а' to 'a','А' to 'a','е' to 'e','Е' to 'e','о' to 'o','О' to 'o','с' to 'c','С' to 'c','х' to 'x','Х' to 'x','р' to 'p','Р' to 'p','у' to 'y','У' to 'y',
+        'і' to 'i','І' to 'i','ј' to 'j','Ј' to 'j','ѕ' to 's','Ѕ' to 's','к' to 'k','К' to 'k','м' to 'm','М' to 'm','т' to 't','Т' to 't','н' to 'h','Н' to 'h',
+        'в' to 'b','В' to 'b','є' to 'e','Є' to 'e','ө' to 'o','Ө' to 'o','ғ' to 'f','Ғ' to 'f','ҽ' to 'e','Ҽ' to 'e','ѵ' to 'v','Ԁ' to 'd','ԁ' to 'd','һ' to 'h','Һ' to 'h','ԛ' to 'q','ԝ' to 'w',
+        'α' to 'a','Α' to 'a','β' to 'b','Β' to 'b','ε' to 'e','Ε' to 'e','ι' to 'i','Ι' to 'i','κ' to 'k','Κ' to 'k','ν' to 'v','Ν' to 'n','ο' to 'o','Ο' to 'o',
+        'ρ' to 'p','Ρ' to 'p','τ' to 't','Τ' to 't','υ' to 'u','Υ' to 'y','χ' to 'x','Χ' to 'x','η' to 'n','Η' to 'h','Ζ' to 'z','Μ' to 'm',
+        'ɾ' to 'r','ɳ' to 'n','ɫ' to 'l','ɡ' to 'g','ɐ' to 'a','ɘ' to 'e','ɔ' to 'o','ǝ' to 'e','ɓ' to 'b','ø' to 'o','Ø' to 'o','đ' to 'd','Đ' to 'd','ħ' to 'h','ı' to 'i',
+        'ǃ' to '.','ʚ' to '.','ɞ' to '.','ǀ' to '.','ǁ' to '.','ǂ' to '.','ˎ' to '.','ˊ' to '.','ˋ' to '.','˗' to '.')
+    private fun fancyFold(s: String): String {
+        val n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC)
+        val folded = buildString(n.length) {
+            // Mirror the Worker's foldFancy byte-for-byte: strip zalgo marks -> small-caps/look-alikes ->
+            // per-char accent-fold of accented Latin only (composed non-Latin stays composed).
+            for (c in n) {
+                val t = Character.getType(c)
+                if (t == Character.NON_SPACING_MARK.toInt() || t == Character.COMBINING_SPACING_MARK.toInt() ||
+                    t == Character.ENCLOSING_MARK.toInt()) continue
+                val m = SMALLCAPS[c] ?: CONFUSABLES[c]
+                if (m != null) { append(m); continue }
+                val d = java.text.Normalizer.normalize(c.toString(), java.text.Normalizer.Form.NFKD)
+                if (d.length > 1 && (d[0] in 'a'..'z' || d[0] in 'A'..'Z')) append(d[0]) else append(c)
+            }
+        }
+        return folded.trim().lowercase()
+    }
+
     private suspend fun resolveByNameAndAuthor(context: Context, avatarName: String, author: String): WornAvatarResult? =
         withContext(Dispatchers.IO) {
-            val authorNorm = author.trim().lowercase()
+            val authorNorm = fancyFold(author)
             if (avatarName.isBlank() || avatarName.trim().equals("Robot", true)) {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "name+author: no usable log name"
                 return@withContext null
@@ -1987,13 +2070,39 @@ object VrchatAuthManager {
             //    genuinely ambiguous (>1 distinct avatar after author filtering).
             var totalCatalogHits = 0
             for (v in avatarNameVariants(avatarName)) {
-                val hits = try { com.vrca.vrchat.AvatarGlobalDb.searchSharded(context, v, 40) } catch (e: Exception) { emptyList() }
+                // Search the catalog by NAME **plus** AUTHOR tokens together (both are indexed) so the
+                // author narrows the SEARCH itself, not just a post-filter. VRChat TRUNCATES the log
+                // avatar name (a long name arrives as e.g. "Meow M", whose only usable search token is
+                // "meow" → 40+ unrelated hits); the old code searched name-only, capped at 40, then
+                // post-filtered by author — so the real author-match, if it ranked past the cap, was
+                // never seen and it falsely reported "ambiguous (40 distinct)". AND-intersecting the
+                // author tokens collapses that to the one creator's avatar. When no author was logged,
+                // keep the plain name search + name-unique logic.
+                val query = if (authorNorm.isNotBlank()) "$v $author" else v
+                val hits = try { com.vrca.vrchat.AvatarGlobalDb.searchSharded(context, query, 40) } catch (e: Exception) { emptyList() }
                 totalCatalogHits += hits.size
                 val nonSystem = hits.filter { !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.avatarId, it.fileId) }
-                // Prefer an author-locked match; if the log had no author (or none of the hits match it),
-                // fall back to a name-unique match in our verified catalog.
-                val byAuthor = if (authorNorm.isNotBlank()) nonSystem.filter { it.author.trim().lowercase() == authorNorm }.distinctBy { it.avatarId } else emptyList()
-                val m = if (byAuthor.isNotEmpty()) byAuthor else nonSystem.distinctBy { it.avatarId }
+                // Candidate set: author-narrowed when the log gave an author, else all name-token hits.
+                val cand = if (authorNorm.isNotBlank())
+                    nonSystem.filter { fancyFold(it.author) == authorNorm }.distinctBy { it.avatarId }
+                else
+                    nonSystem.distinctBy { it.avatarId }
+                // The token search is BROAD — searching "raiden shadow" also returns "Mei Raiden Shadow
+                // Dance" and "…shadow.exe", so 3 token hits looked "ambiguous" even though only ONE is
+                // actually NAMED "Raiden Shadow". Prefer a UNIQUE EXACT (fancy-folded) name equality
+                // before falling back to the broad set — this is what picks the real avatar out of its
+                // token-siblings (and resolves the "Meow M" name-only case too). Only if there's no exact
+                // name match at all do we consider the broad token set (and its size decides serve vs
+                // ambiguous). Our catalog is image-verified, so a unique exact-name hit is trustworthy.
+                val nameNorm = fancyFold(avatarName)
+                val exact = cand.filter { fancyFold(it.name) == nameNorm }
+                // Author present → author-locked, so a unique EXACT name wins else the (author-filtered)
+                // candidate set decides. NO author logged → take the risk ONLY on a unique EXACT name:
+                // serve iff exactly ONE avatar is named exactly this; 2+ exact-same-named → ambiguous
+                // (don't guess); NO exact match → don't guess (a looser unique-token guess with no author
+                // is too risky — the user's explicit call). So a fancy-font name resolves iff its plain
+                // exact name is unique in the catalog.
+                val m = if (authorNorm.isNotBlank()) (if (exact.isNotEmpty()) exact else cand) else exact
                 if (m.size == 1) {
                     val e = m[0]
                     // CONFIRM live+public before offering (no worn image to match here — loading player —
@@ -2003,7 +2112,7 @@ object VrchatAuthManager {
                     return@withContext when (verdict) {
                         HitVerdict.SERVE -> {
                             com.vrca.vrchat.AvatarSearch.Diag.lastReason =
-                                if (byAuthor.isNotEmpty()) "name+author: unique catalog match" else "name-only: unique catalog match (no log author)"
+                                if (authorNorm.isNotBlank()) "name+author: unique catalog match" else "name-only: unique catalog match (no log author)"
                             WornAvatarResult(e.avatarId, plats.ifEmpty { e.platforms })
                         }
                         HitVerdict.DEAD -> {
@@ -2015,11 +2124,21 @@ object VrchatAuthManager {
                     }
                 }
                 if (m.size > 1) {
+                    // >1 even after preferring exact-name: either 2+ avatars share the EXACT name (real
+                    // ambiguity) or, with no exact match, 2+ token-siblings and no way to pick — don't guess.
+                    val exactDup = exact.size > 1
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason =
-                        "name${if (authorNorm.isNotBlank()) "+author" else ""}: ambiguous (${m.size} distinct in catalog) — won't guess"
-                    return@withContext null   // ambiguous in our own DB → don't guess
+                        "name${if (authorNorm.isNotBlank()) "+author" else ""}: ambiguous (${m.size}${if (exactDup) " same exact name" else " token matches, no exact name"}) — won't guess"
+                    return@withContext null
                 }
             }
+            // Author present but no catalog match by that author (the AND-narrowed search found nothing /
+            // no exact-author hit). Record an HONEST reason — the old code fell through to the broad
+            // name-only set and reported "ambiguous (40 distinct)" for a name token like "meow" that no
+            // WHITE TIGER avatar was even among. This distinguishes "not in our catalog by <author>" from
+            // real ambiguity so the roster trace is truthful. (avtrdb is still consulted below.)
+            if (authorNorm.isNotBlank())
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "name+author: not in our catalog by '$author'"
 
             // No author to lock an EXTERNAL (avtrdb) match, and our verified catalog had no unique hit →
             // stop. avtrdb is untrusted for a name-only guess (a same-named different avatar → wrong
@@ -2043,7 +2162,7 @@ object VrchatAuthManager {
             if (merged.isNotEmpty())
                 com.vrca.vrchat.AvatarGlobalDb.harvestCandidates(context, merged.values.toList())
             val matches = merged.values.filter {
-                it.author.trim().lowercase() == authorNorm &&
+                fancyFold(it.author) == authorNorm &&
                     !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.id, null)
             }.distinctBy { it.id }
             if (matches.size != 1) {

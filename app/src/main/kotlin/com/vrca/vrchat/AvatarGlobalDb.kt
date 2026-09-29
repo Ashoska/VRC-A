@@ -759,35 +759,89 @@ object AvatarGlobalDb {
      * desc-absent), return as [Entry]s. Empty when R2 search isn't live or nothing matches —
      * the caller then keeps its existing behaviour (whole-map / mirrors).
      */
+    // Small-caps Unicode letters NFKC does NOT fold; mapped to plain ASCII AFTER NFKC. MUST match the
+    // Worker's SMALLCAPS byte-for-byte (else index tokens and query tokens disagree).
+    private val SMALLCAPS = mapOf(
+        'ᴀ' to 'a','ʙ' to 'b','ᴄ' to 'c','ᴅ' to 'd','ᴇ' to 'e','ꜰ' to 'f','ɢ' to 'g','ʜ' to 'h','ɪ' to 'i',
+        'ᴊ' to 'j','ᴋ' to 'k','ʟ' to 'l','ᴍ' to 'm','ɴ' to 'n','ᴏ' to 'o','ᴘ' to 'p','ꞯ' to 'q','ʀ' to 'r',
+        'ꜱ' to 's','ᴛ' to 't','ᴜ' to 'u','ᴠ' to 'v','ᴡ' to 'w','ʏ' to 'y','ᴢ' to 'z')
+    // Cross-script LOOK-ALIKES of ASCII Latin letters + decorative letter-punctuation (-> '.', a separator).
+    // MUST match the Worker's CONFUSABLES byte-for-byte (else index tokens and query tokens disagree).
+    private val CONFUSABLES = mapOf(
+        'а' to 'a','А' to 'a','е' to 'e','Е' to 'e','о' to 'o','О' to 'o','с' to 'c','С' to 'c','х' to 'x','Х' to 'x','р' to 'p','Р' to 'p','у' to 'y','У' to 'y',
+        'і' to 'i','І' to 'i','ј' to 'j','Ј' to 'j','ѕ' to 's','Ѕ' to 's','к' to 'k','К' to 'k','м' to 'm','М' to 'm','т' to 't','Т' to 't','н' to 'h','Н' to 'h',
+        'в' to 'b','В' to 'b','є' to 'e','Є' to 'e','ө' to 'o','Ө' to 'o','ғ' to 'f','Ғ' to 'f','ҽ' to 'e','Ҽ' to 'e','ѵ' to 'v','Ԁ' to 'd','ԁ' to 'd','һ' to 'h','Һ' to 'h','ԛ' to 'q','ԝ' to 'w',
+        'α' to 'a','Α' to 'a','β' to 'b','Β' to 'b','ε' to 'e','Ε' to 'e','ι' to 'i','Ι' to 'i','κ' to 'k','Κ' to 'k','ν' to 'v','Ν' to 'n','ο' to 'o','Ο' to 'o',
+        'ρ' to 'p','Ρ' to 'p','τ' to 't','Τ' to 't','υ' to 'u','Υ' to 'y','χ' to 'x','Χ' to 'x','η' to 'n','Η' to 'h','Ζ' to 'z','Μ' to 'm',
+        'ɾ' to 'r','ɳ' to 'n','ɫ' to 'l','ɡ' to 'g','ɐ' to 'a','ɘ' to 'e','ɔ' to 'o','ǝ' to 'e','ɓ' to 'b','ø' to 'o','Ø' to 'o','đ' to 'd','Đ' to 'd','ħ' to 'h','ı' to 'i',
+        'ǃ' to '.','ʚ' to '.','ɞ' to '.','ǀ' to '.','ǁ' to '.','ǂ' to '.','ˎ' to '.','ˊ' to '.','ˋ' to '.','˗' to '.')
+    // Fold "fancy" Unicode display text (ᵂᴴᴵᵀᴱ/𝗪𝗛𝗜𝗧𝗘/ＷＨＩＴＥ/ᴡʜɪᴛᴇ/νεκο/café → white/neko/cafe) so a query
+    // matches the plain-ASCII tokens the Worker indexes. Mirrors the Worker's foldFancy byte-for-byte.
+    private fun nfkcFold(s: String): String {
+        val n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC)
+        val sb = StringBuilder(n.length)
+        for (c in n) {
+            // 1) strip zalgo / decorative combining marks (they'd fragment tokens)
+            val t = Character.getType(c)
+            if (t == Character.NON_SPACING_MARK.toInt() || t == Character.COMBINING_SPACING_MARK.toInt() ||
+                t == Character.ENCLOSING_MARK.toInt()) continue
+            // 2) small-caps + cross-script look-alikes -> ASCII
+            val m = SMALLCAPS[c] ?: CONFUSABLES[c]
+            if (m != null) { sb.append(m); continue }
+            // 3) accent-fold ONLY accented Latin (café -> cafe); composed non-Latin (Hangul/CJK) decompose
+            //    to a NON-ASCII base, so they stay composed + searchable in their own script.
+            val d = java.text.Normalizer.normalize(c.toString(), java.text.Normalizer.Form.NFKD)
+            if (d.length > 1 && (d[0] in 'a'..'z' || d[0] in 'A'..'Z')) sb.append(d[0]) else sb.append(c)
+        }
+        return sb.toString()
+    }
+    private fun queryTokens(q: String): List<String> =
+        q.trim().lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }.distinct()
+    /** AND-intersect a token list's posting lists (order preserved from the first token). */
+    private suspend fun orderedIntersect(base: String, tokens: List<String>): List<String> = coroutineScope {
+        if (tokens.isEmpty()) return@coroutineScope emptyList()
+        val postings = tokens.map { t -> async { fetchTokenIds(base, t) } }.awaitAll()
+        if (postings.any { it.isEmpty() }) return@coroutineScope emptyList()   // AND — a missing token kills it
+        val ordered = postings[0]
+        if (postings.size == 1) return@coroutineScope ordered
+        val others = postings.drop(1).map { it.toHashSet() }
+        ordered.filter { id -> others.all { it.contains(id) } }
+    }
+    /** The candidate ids for a query as the UNION of its raw tokens AND its NFKC-folded tokens — so it
+     *  matches BOTH the fancy-glyph tokens still in the index AND the folded plain-ASCII ones (fancy
+     *  fonts). Raw first (existing index), then folded-only ids appended (order-preserving, deduped). */
+    private suspend fun unionQueryIds(base: String, query: String): List<String> {
+        val rawTokens = queryTokens(query)
+        val foldedTokens = queryTokens(nfkcFold(query))
+        val out = LinkedHashSet<String>()
+        out.addAll(orderedIntersect(base, rawTokens))
+        if (foldedTokens != rawTokens) out.addAll(orderedIntersect(base, foldedTokens))
+        return out.toList()
+    }
+
     suspend fun searchSharded(context: Context, query: String, limit: Int = 60): List<Entry> = coroutineScope {
         ensureCatalogBase(context)
         if (!r2Serving) return@coroutineScope emptyList()
         val base = catalogBase ?: return@coroutineScope emptyList()
-        val ql = query.trim().lowercase()
-        val tokens = ql.split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }.distinct()
-        if (tokens.isEmpty()) return@coroutineScope emptyList()
-        // Fetch every token's posting list IN PARALLEL, then AND-intersect.
-        val postings = tokens.map { t -> async { fetchTokenIds(base, t) } }.awaitAll()
-        var acc: MutableSet<String>? = null
-        for (ids in postings) {
-            if (ids.isEmpty()) return@coroutineScope emptyList()   // AND — a token with no postings kills it
-            acc = if (acc == null) ids.toMutableSet() else acc.apply { retainAll(ids) }
-            if (acc.isEmpty()) return@coroutineScope emptyList()
-        }
+        val idList0 = unionQueryIds(base, query)
+        if (idList0.isEmpty()) return@coroutineScope emptyList()
         // Cap candidates, then fetch their fragment buckets IN PARALLEL (was one-at-a-time =
         // N network round-trips = "takes ages for 40 avatars"). Grouped by bucket so shared
         // buckets are fetched once.
-        val idList = (acc ?: return@coroutineScope emptyList()).toList().take(100)
+        val idList = idList0.take(100)
         val byBucket = idList.groupBy { fragBucketOf(it) }
         val fetched = byBucket.keys.map { b -> async { b to (fetchFragments(base, b) ?: emptyMap()) } }
             .awaitAll().toMap()
         val out = ArrayList<Entry>(idList.size)
         for ((bucket, ids) in byBucket) { val frags = fetched[bucket] ?: continue; for (id in ids) frags[id]?.let { out.add(it) } }
+        // Rank on the FOLDED query + folded entry fields so a fancy-named avatar still scores by content.
+        val ql = nfkcFold(query).trim().lowercase()
+        val rankTokens = (queryTokens(nfkcFold(query)) + queryTokens(query)).distinct()
         out.sortedByDescending { e ->
-            val name = e.name.lowercase(); val author = e.author.lowercase()
+            val name = nfkcFold(e.name).lowercase(); val author = nfkcFold(e.author).lowercase()
             var s = 0
-            for (t in tokens) s += when { name.contains(t) -> 5; author.contains(t) -> 2; else -> 1 }
-            if (name == ql) s += 20 else if (name.startsWith(tokens.first())) s += 3
+            for (t in rankTokens) s += when { name.contains(t) -> 5; author.contains(t) -> 2; else -> 1 }
+            if (name == ql) s += 20 else if (rankTokens.isNotEmpty() && name.startsWith(rankTokens.first())) s += 3
             s
         }.distinctBy { it.avatarId }.take(limit)
     }
@@ -812,26 +866,14 @@ object AvatarGlobalDb {
 
     /** Compute (or reuse) the ordered AND-intersected candidate id list for a query. The order
      *  is preserved from the first (rarest) token's posting list so pages don't shuffle. */
-    private suspend fun candidatesFor(base: String, query: String): List<String> = coroutineScope {
+    private suspend fun candidatesFor(base: String, query: String): List<String> {
         val key = queryKey(query)
-        synchronized(candidateCache) { candidateCache[key] }?.let { return@coroutineScope it }
-        val tokens = key.split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }.distinct()
-        if (tokens.isEmpty()) return@coroutineScope emptyList<String>().also {
-            synchronized(candidateCache) { candidateCache[key] = it }
-        }
-        val postings = tokens.map { t -> async { fetchTokenIds(base, t) } }.awaitAll()
-        // Order-preserving intersection: keep the first token's order, drop ids missing from any other.
-        val result: List<String> = run {
-            if (postings.any { it.isEmpty() }) return@run emptyList()
-            val ordered = postings[0]
-            if (postings.size == 1) ordered
-            else {
-                val others = postings.drop(1).map { it.toHashSet() }
-                ordered.filter { id -> others.all { it.contains(id) } }
-            }
-        }
+        synchronized(candidateCache) { candidateCache[key] }?.let { return it }
+        // Union raw + NFKC-folded token intersections so the query matches fancy-glyph tokens still in
+        // the index AND the folded plain-ASCII tokens (fancy fonts). See unionQueryIds.
+        val result = unionQueryIds(base, query)
         synchronized(candidateCache) { candidateCache[key] = result }
-        result
+        return result
     }
 
     /**

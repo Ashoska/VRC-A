@@ -48,7 +48,14 @@ const REMOVE_QUORUM = 2; // independent "dead" reports needed before a hard remo
 // served free to EVERYONE who encounters that avatar until it changes. 6h balances max cache warmth
 // against the worst case if a purge ever fails (a stale shard = slightly-old name/author; the
 // file->avatar id mapping is stable, so cloning is unaffected).
-const SHARD_TTL = 21600; // 6h (was 5 min); purge-on-write keeps it fresh
+const SHARD_TTL = 21600; // 6h (was 5 min); purge-on-write keeps it fresh — for the rarely-changing CLONE shards only
+// The SEARCH-INDEX buckets (fragments/ avtr/ index/) change constantly (every contribution, fold ADD,
+// rename) and are read for search freshness, so they get a SHORT TTL — NOT the 6h SHARD_TTL. With 6h,
+// a CDN purge that missed an edge (or a stale re-cache between write and purge) served a stale bucket
+// for up to SIX HOURS, so a freshly-indexed avatar appeared then "disappeared" from plain-text search
+// for hours (the overnight→morning flicker). At 5 min a purge-miss self-heals fast and search stays
+// consistent. Costs a few more R2 Class B (cheap) reads on the search path; clone LOOKUPS are untouched.
+const INDEX_TTL = 300; // 5 min — search-index buckets (fragments/avtr/index)
 
 // The AUTHORITATIVE catalog size lives in _manifest.json (the Action rewrites entryCount every
 // ~20 min). meta.entries in KV only moves on a flush, so between rebuilds — and whenever
@@ -140,13 +147,89 @@ function platMask(platforms) {
   let m = 0; const p = platforms || [];
   if (p.includes("PC")) m |= 1; if (p.includes("Quest")) m |= 2; if (p.includes("iOS")) m |= 4; return m;
 }
+// NFKC-fold before tokenizing so "fancy" Unicode display names — modifier-letter/superscript caps
+// (ᵂᴴᴵᵀᴱ ᵀᴵᴳᴱᴿ), Mathematical-Alphanumeric bold/script (𝗪𝗛𝗜𝗧𝗘), fullwidth (ＷＨＩＴＥ), all VERY common
+// on VRChat — index under their PLAIN-ASCII tokens ("white","tiger") instead of the decorative
+// codepoints. This makes a plain-text search find a fancy-named/authored avatar. The STORED display
+// fields (fragSummary.n/au) stay RAW so the UI still shows the styled name; only the search tokens fold.
+// Unicode "small capital" letters (a common VRChat font NFKC does NOT fold) -> plain ASCII, applied
+// AFTER NFKC so smallcaps names index/search as plain. MUST stay byte-identical to the app maps
+// (AvatarGlobalDb.SMALLCAPS / VrchatAuthManager.SMALLCAPS).
+const SMALLCAPS = { "ᴀ":"a","ʙ":"b","ᴄ":"c","ᴅ":"d","ᴇ":"e","ꜰ":"f","ɢ":"g","ʜ":"h","ɪ":"i","ᴊ":"j","ᴋ":"k","ʟ":"l","ᴍ":"m","ɴ":"n","ᴏ":"o","ᴘ":"p","ꞯ":"q","ʀ":"r","ꜱ":"s","ᴛ":"t","ᴜ":"u","ᴠ":"v","ᴡ":"w","ʏ":"y","ᴢ":"z" };
+const COMBINING_MARK = /\p{M}/u;   // Unicode General_Category Mark (Mn+Mc+Me)
+// Cross-script LOOK-ALIKES of ASCII Latin letters (Cyrillic/Greek/IPA/Latin-extended) that NFKC does NOT
+// fold, plus decorative letter-punctuation mapped to "." (a tokenizer separator, i.e. dropped). VRChat
+// display names constantly spell Latin words in these look-alikes (ᴛᴜғғʟᴇ, νεκο, аԁміn), so a plain-text
+// search can only find them if they fold to ASCII. MUST match the client AvatarGlobalDb.CONFUSABLES /
+// VrchatAuthManager.CONFUSABLES byte-for-byte (else index tokens and query tokens disagree). Genuine
+// non-Latin scripts (kana/CJK/Hangul/Georgian/…) are intentionally NOT here — they are real names,
+// searchable in their own script; the "unconverted" registry surfaces anything still un-folded so the
+// map can be extended incrementally.
+const CONFUSABLES = {
+  "а":"a","А":"a","е":"e","Е":"e","о":"o","О":"o","с":"c","С":"c","х":"x","Х":"x","р":"p","Р":"p","у":"y","У":"y",
+  "і":"i","І":"i","ј":"j","Ј":"j","ѕ":"s","Ѕ":"s","к":"k","К":"k","м":"m","М":"m","т":"t","Т":"t","н":"h","Н":"h",
+  "в":"b","В":"b","є":"e","Є":"e","ө":"o","Ө":"o","ғ":"f","Ғ":"f","ҽ":"e","Ҽ":"e","ѵ":"v","Ԁ":"d","ԁ":"d","һ":"h","Һ":"h","ԛ":"q","ԝ":"w",
+  "α":"a","Α":"a","β":"b","Β":"b","ε":"e","Ε":"e","ι":"i","Ι":"i","κ":"k","Κ":"k","ν":"v","Ν":"n","ο":"o","Ο":"o",
+  "ρ":"p","Ρ":"p","τ":"t","Τ":"t","υ":"u","Υ":"y","χ":"x","Χ":"x","η":"n","Η":"h","Ζ":"z","Μ":"m",
+  "ɾ":"r","ɳ":"n","ɫ":"l","ɡ":"g","ɐ":"a","ɘ":"e","ɔ":"o","ǝ":"e","ɓ":"b","ø":"o","Ø":"o","đ":"d","Đ":"d","ħ":"h","ı":"i",
+  "ǃ":".","ʚ":".","ɞ":".","ǀ":".","ǁ":".","ǂ":".","ˎ":".","ˊ":".","ˋ":".","˗":"."
+};
+function foldFancy(s) {
+  let out = "";
+  for (const ch of String(s).normalize("NFKC")) {
+    // 1) Strip DECORATIVE combining marks NFKC couldn't compose (zalgo / stacked diacritics, e.g.
+    //    sʟᴇᴇͥᴘͫʏᴍͣᴏʟʟɪᴇ). They're SEPARATORS in the /[^\p{L}\p{N}]+/ tokenizer, so left in they FRAGMENT a
+    //    fancy name into junk (slee/ym/ollie); stripped it folds to one clean token (sleepymollie).
+    if (COMBINING_MARK.test(ch)) continue;
+    // 2) Small-caps + cross-script look-alikes -> plain ASCII.
+    const m = SMALLCAPS[ch] || CONFUSABLES[ch];
+    if (m) { out += m; continue; }
+    // 3) Accent-fold ONLY accented LATIN (café -> cafe, Nöel -> Noel): if this single char NFKD-decomposes
+    //    and its base is an ASCII letter, keep the base. Composed non-Latin (Hangul 가, CJK) decompose to a
+    //    NON-ASCII base, so they're left composed + searchable in their own script (not broken into jamo).
+    const d = ch.normalize("NFKD");
+    out += (d.length > 1 && /[A-Za-z]/.test(d[0])) ? d[0] : ch;
+  }
+  return out;
+}
+// A folded string still carrying a non-ASCII LETTER did NOT fully convert to plain text (an unmapped
+// look-alike font, an exotic decoration, or a genuine non-Latin script). Returns the distinct residual
+// letter codepoints, which the reconcile lap tallies into the "unconverted" registry (GET /unconverted)
+// so unfoldable fonts surface and CONFUSABLES can be extended over time.
+function foldResidualCps(e) {
+  const cps = new Set();
+  for (const f of [e.name, e.author]) {
+    if (!f) continue;
+    for (const ch of foldFancy(f)) {
+      const cp = ch.codePointAt(0);
+      if (cp > 127 && /\p{L}/u.test(ch)) cps.add(cp);
+    }
+  }
+  return cps;
+}
 function tokenizeFields(...fields) {
   const set = new Set();
   for (const f of fields) {
     if (!f) continue;
+    // Emit BOTH the RAW-lowercased tokens (fancy codepoints as-is, e.g. "ᵂᴴᴵᵀᴱ") AND the NFKC+smallcaps
+    // FOLDED tokens ("white") as ONE set. Emitting both from a SINGLE tokenizer call is what keeps them
+    // CONSISTENT: buildIndexOp derives add/rem from tokensOf(old) vs tokensOf(new), so every rename /
+    // re-key / remove now touches an entry's raw AND folded tokens TOGETHER. Previously tokenizeFields
+    // folded-only while the reconcile had also left the original raw tokens in the buckets as a SEPARATE
+    // set — so a rem computed from the folded view stripped "white"/"tiger" while orphaning the raw
+    // "ᵂᴴᴵᵀᴱ"/"ᵀᴵᴳᴱᴿ" (the "searchable in fancy font but not plain text" desync). The client union query
+    // (raw ∪ folded query tokens) matches either form, so both search modes work off this union index.
     for (const w of String(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) set.add(w);
+    for (const w of foldFancy(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) set.add(w);
   }
   return set;
+}
+// True when an entry's name/author contain "fancy" Unicode that NFKC folds to different ASCII — i.e.
+// it was indexed (before this fold shipped) under decorative tokens and needs a one-time re-index so
+// its plain-ASCII tokens enter the search index. Cheap string compare, no allocation on the ASCII path.
+function needsFold(e) {
+  const s = (e.name || "") + " " + (e.author || "");
+  return foldFancy(s) !== s;
 }
 const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
 // Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The index-op backlog beyond this cap
@@ -157,7 +240,12 @@ const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
 // at a time across many flushes) stops a hot token/frag/avtr bucket from being read+rewritten once per
 // flush — the hot-bucket write amplification. Grouped, 150 ops touch far fewer than 150 buckets, so the
 // subrequest cost stays well under budget alongside MAX_SHARDS_PER_FLUSH (120) and purges.
-const MAX_INDEX_OPS_PER_FLUSH = 150;
+const MAX_INDEX_OPS_PER_FLUSH = 300;   // raised 150->300: the FOLD_VER re-lap + missing-from-avtr ADDs
+// emit faster than 150/flush drained, so the iq: queue ballooned past 1000 keys and never converged.
+// The bulk of these ops are NO-OP re-adds (tokens already present → cheap R2 Class B reads, no write /
+// no purge via the applyIndexOps guards), and MAX_SHARDS_PER_FLUSH is now 60 (was 180), so the flush
+// has ample wall-time headroom for a bigger index drain. 300/flush out-drains the emission so the
+// backlog shrinks + the search index converges instead of growing unbounded.
 // Bound the CLONE-SHARD writes per flush too. Each distinct shard is 1 R2 read + 1 write, so a burst
 // of big USER contribution batches (a 136-avatar batch spans ~136 shards) could push a single flush
 // past Cloudflare's per-invocation subrequest limit → the invocation dies BEFORE clearing the `pend:`
@@ -172,7 +260,20 @@ const MAX_INDEX_OPS_PER_FLUSH = 150;
 // with the grouped index work (≤150 ops), prune (40 reads), reconcile (8) and rename (8) in the same
 // cron chain the worst case is ~700 subrequests, still comfortably under the ~1000/invocation budget.
 // Admin/bot pushes are separately bounded (WALK_BATCH).
-const MAX_SHARDS_PER_FLUSH = 180;
+// LOWERED 180 -> 60: at 180 the flush was measured taking >60s (GET /flush timed out) under a heavy
+// harvest backlog — each dirty shard is a PUT + a CDN purge (~100-300ms HTTP call), so 180 dirty shards
+// alone is tens of seconds of WALL time (the ~1000 subrequest COUNT budget was fine; wall time was not).
+// A flush that overruns the invocation is KILLED before the cron's later tasks run, so reconcileIndex
+// (the fold re-index) NEVER executed and the iq: queue never drained — the whole pipeline jammed behind
+// one overloaded flush. 60 shards keeps each flush well within budget so it COMPLETES and the downstream
+// reconcile/drain actually run. Contribution intake is slower, which is fine (and desirable) while the
+// passive-harvest inflow is the thing overloading the pipeline.
+const MAX_SHARDS_PER_FLUSH = 120;   // raised 60->120: v24 dropped the index-bucket CDN purges that were the
+// flush's WALL-time hog (the v21 jam), so there's headroom to place ~2x the shards (and thus ~2x the
+// avatars, since small batches already fuse by shard within a flush) per tick. Budget stays safe: worst
+// case ~120 shard reads + writes + a lean 300-op index drain + reconcile's bounded reads ≈ ~800
+// subrequests, under Cloudflare's ~1000/invocation limit; shard purges are batched 30/call and only fire
+// on genuine content change (dupe churn = +0 = no purge). Contribution intake ~doubles; no ingest change.
 // Coalesce _manifest.json writes. The LIVE entry count already rides `meta.entries` (which /health
 // max()es against the manifest), so the _manifest.json copy only needs periodic freshening, not a
 // write+purge on every count-moving flush during steady growth. Rewrite it at most every N ms OR once
@@ -227,6 +328,12 @@ function buildIndexOp(oldE, newE, fileId) {
   if (!oldE) return { id: newE.id, del: false, frag: fragSummary(newE, fileId), add: [...tokensOf(newE)], rem: [], avtr: "a" };
   const relevant = (oldE.name || "") !== (newE.name || "") || (oldE.author || "") !== (newE.author || "") ||
     (oldE.authorId || "") !== (newE.authorId || "") || platMask(oldE.platforms) !== platMask(newE.platforms) ||
+    // desc is tokenized into the index (tokensOf reads e.desc), so a description edit MUST re-index — else
+    // searching a word added to a bio wouldn't find it (and a removed word would still match) until the next
+    // name/author change or fold re-lap. The shard already rewrites on a desc change (entryEquivalent
+    // compares desc), so this only adds the changed-desc token diff (no-op-guarded per token) — bounded by
+    // genuine bio edits, not harvest churn.
+    (oldE.desc || "") !== (newE.desc || "") ||
     // perf rank rides the fragment summary (search badge), so a perf-only change must refresh it too.
     (oldE.perfPc ?? 5) !== (newE.perfPc ?? 5) || (oldE.perfQuest ?? 5) !== (newE.perfQuest ?? 5) ||
     (oldE.perfIos ?? 5) !== (newE.perfIos ?? 5);
@@ -247,8 +354,11 @@ async function applyIndexOps(env, ops) {
     const id = o.id; if (!id || !String(id).startsWith("avtr_")) continue;
     const fp = fragBucketFor(id);
     const fw = (fragWork[fp] ||= { set: {}, del: new Set() });
-    if (o.del) { fw.del.add(id); delete fw.set[id]; }
-    else if (o.frag) { fw.set[id] = o.frag; fw.del.delete(id); }
+    // Collect del + set INDEPENDENTLY (do NOT let one cancel the other here); the apply step below
+    // resolves a same-id conflict as SET-wins, so a re-key (remove old fileId + add new fileId, SAME
+    // avatarId, one flush) keeps the fragment instead of dropping it on op order.
+    if (o.del) fw.del.add(id);
+    if (o.frag) fw.set[id] = o.frag;
     if (o.avtr === "a") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).add.add(id);
     else if (o.avtr === "r") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).rem.add(id);
     for (const t of (o.add || [])) ((idxWork[indexBucketFor(t)] ||= {})[t] ||= { add: new Set(), rem: new Set() }).add.add(id);
@@ -256,7 +366,7 @@ async function applyIndexOps(env, ops) {
   }
   const changed = [];
   const base = env.CATALOG_BASE ? env.CATALOG_BASE.replace(/\/$/, "") : null;
-  const ttl = { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL } };
+  const ttl = { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + INDEX_TTL } };
   // Fragments + avtr share the avatarId prefix.
   for (const p of new Set([...Object.keys(fragWork), ...Object.keys(avtrWork)])) {
     const fw = fragWork[p], aw = avtrWork[p];
@@ -268,10 +378,13 @@ async function applyIndexOps(env, ops) {
       // avatar whose summary is identical, or a delete of an absent id, must not rewrite the bucket).
       // This is the frag/avtr/index equivalent of the shard `dirty` flag — the biggest wasted Class A.
       let dirty = false;
+      // DEL before SET so SET wins a same-id conflict: a re-key's remove(old fileId) + add(new fileId)
+      // for the SAME avatarId both land here; deleting first then setting keeps the fragment. A del whose
+      // id is also being set is skipped entirely (the avatar is alive under the new key).
+      for (const id of fw.del) { if (!(id in fw.set) && id in cur.e) { delete cur.e[id]; dirty = true; } }
       for (const [id, summary] of Object.entries(fw.set)) {
         if (JSON.stringify(cur.e[id]) !== JSON.stringify(summary)) { cur.e[id] = summary; dirty = true; }
       }
-      for (const id of fw.del) { if (id in cur.e) { delete cur.e[id]; dirty = true; } }
       if (dirty) {
         try { await env.CATALOG.put(`fragments/${p}.json`, JSON.stringify({ v: 1, e: cur.e }), ttl);
           if (base) changed.push(base + `/fragments/${p}.json`); } catch (_) {}
@@ -284,9 +397,11 @@ async function applyIndexOps(env, ops) {
       const s = new Set(cur.ids);
       // NO-OP GUARD: only dirty when a membership actually changes (add of an id already present /
       // remove of an absent id rewrote the bucket identically — the reconcile re-add + requeue waste).
+      // REM before ADD so ADD wins a same-id conflict (see the index-token loop below for the full
+      // re-key rationale): a re-keyed avatar stays in the avtr/ presence set.
       let dirty = false;
-      for (const id of aw.add) { if (!s.has(id)) { s.add(id); dirty = true; } }
       for (const id of aw.rem) { if (s.has(id)) { s.delete(id); dirty = true; } }
+      for (const id of aw.add) { if (!s.has(id)) { s.add(id); dirty = true; } }
       if (dirty) {
         try { await env.CATALOG.put(`avtr/${p}.json`, JSON.stringify({ v: 1, ids: Array.from(s) }), ttl);
           if (base) changed.push(base + `/avtr/${p}.json`); } catch (_) {}
@@ -304,9 +419,16 @@ async function applyIndexOps(env, ops) {
     let dirty = false;
     for (const [tok, ch] of Object.entries(toks)) {
       const s = new Set(Array.isArray(cur.t[tok]) ? cur.t[tok] : []);
+      // REM before ADD so ADD wins a same-id conflict. On a RE-KEY (an avatar whose image changed:
+      // remove under the OLD fileId + add under the NEW fileId, SAME avatarId, ONE flush) both a rem and
+      // an add for this avatarId land in this token's posting list. The old add-then-rem order let the
+      // stale rem delete the id the add just inserted, so the (still-alive) avatar VANISHED from search
+      // until the next fold lap re-added it — then the next re-key stripped it again ("appeared then
+      // disappeared"). Applying rem first then add keeps a re-keyed avatar searchable; a genuine delete
+      // (rem only, no add) still removes it.
       let tdirty = false;
-      for (const id of ch.add) { if (!s.has(id)) { s.add(id); tdirty = true; } }
       for (const id of ch.rem) { if (s.has(id)) { s.delete(id); tdirty = true; } }
+      for (const id of ch.add) { if (!s.has(id)) { s.add(id); tdirty = true; } }
       if (!tdirty) continue;
       let ids = Array.from(s);
       if (ids.length > INDEX_HOT_TOKEN_CAP) ids = ids.slice(0, INDEX_HOT_TOKEN_CAP);
@@ -540,6 +662,17 @@ export default {
         });
       }
 
+      // The "unconverted" registry: everything whose fancy name/author didn't fully fold to ASCII, as a
+      // per-codepoint histogram (what to add to CONFUSABLES) + a capped avatar sample. Written by the
+      // reconcile lap; this just serves the R2 file (edge-cached).
+      if (req.method === "GET" && url.pathname === "/unconverted") {
+        if (!env.CATALOG) return json({ ok: false, error: "R2 not configured" }, 503);
+        try {
+          const o = await env.CATALOG.get("unconverted.json");
+          if (!o) return json({ ok: true, pending: true, note: "no lap has completed since the registry shipped" });
+          return new Response(o.body, { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
+        } catch (e) { return json({ ok: false, error: String(e) }, 500); }
+      }
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
         // ONE cheap KV read (no list ops — those have a tight free-tier limit and this is
         // polled every 15s). Counts come from meta (set at flush).
@@ -553,6 +686,7 @@ export default {
           entries: liveEntries,
           pendingBatches: meta.pendingBatches || 0,
           reports: meta.reports || 0,
+          iqDepth: meta.iqDepth || 0,   // search-index op queue depth (keys, ~150 ops each); drains to 0 as fold/rebuild ops apply
           lastFlush: meta.lastFlush || null,
           lastAdded: meta.lastAdded || 0,
           lastRemoved: meta.lastRemoved || 0,
@@ -595,7 +729,24 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 16,   // MAX_SHARDS_PER_FLUSH 120 -> 180: drain pending into processable unfilled faster so fill bots aren't starved (no cost increase — same writes, fewer crons)
+          foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
+          foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
+          unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
+          version: 31,   // FOLD is now maintained SOLELY by the LIVENESS bots' continuous walk — the
+                         // reconcile's fold re-emit pass is REMOVED (no more full fold re-laps). A
+                         // checked-only bump (bot re-verified an UNCHANGED fancy avatar) re-asserts the
+                         // entry's union (raw ∪ folded) tokens with the CURRENT foldFancy, no-op-guarded
+                         // by applyIndexOps — so both token sets stay indexed AND a new CONFUSABLES entry
+                         // is picked up as the walk re-checks each avatar (~one continuous lap, ~15h),
+                         // with NO FOLD_VER bump. Fill bots maintain it via buildIndexOp on the material
+                         // `filled` change; name/author changes already re-index. Prior (v30 = the same
+                         // liveness fold-ensure but still alongside the reconcile fold lap). And (v29):
+                         // applyIndexOps REMS-before-ADDS / SET-before-DEL so a same-flush same-avatarId
+                         // conflict resolves ADD/SET-wins, fixing the RE-KEY strip (an avatar whose image
+                         // changed is remove(old fileId)+add(new fileId) in one flush; the old add-then-
+                         // rem order let the stale rem delete the id the add just inserted → the live
+                         // avatar vanished from search, esp. fancy authors the bots re-key). No FOLD_VER
+                         // bump for either.
         });
       }
 
@@ -623,13 +774,16 @@ export default {
     // re-indexes any entry MISSING from the search index (fragments/avtr/index), healing avatars
     // that were cloneable-but-unsearchable because their index op was dropped in the past. No GitHub.
     // Each task is independent + isolated: one throwing (e.g. a recount KV hiccup) must NOT skip the
-    // others (the worklist prune was intermittently skipped when it ran AFTER a slow/erroring recount).
-    // flushR2 first (drains queues + maintains fillHint), then the cheap prune, then the heavier recount.
+    // others. ORDER MATTERS FOR STARVATION: the CHEAP, critical tasks run FIRST so an overloaded flush
+    // (measured >60s under a harvest backlog) can't consume the whole invocation and skip them — which
+    // is exactly why the fold re-index (reconcileIndex) stopped running and the iq: queue jammed. So:
+    // reconcile (re-arm + advance the fold lap, enqueues iq: ops) → prune → author-rename, THEN flushR2
+    // LAST (now bounded to 60 shards so it completes and drains the iq: ops the earlier tasks queued).
     ctx.waitUntil((async () => {
-      try { await flushR2(env); } catch (e) { console.log("flushR2 err", e); }
-      try { await pruneFillWorklist(env); } catch (e) { console.log("prune err", e); }
       try { await reconcileIndex(env); } catch (e) { console.log("reconcile err", e); }
+      try { await pruneFillWorklist(env); } catch (e) { console.log("prune err", e); }
       try { await propagateAuthorRenames(env); } catch (e) { console.log("arn err", e); }
+      try { await flushR2(env); } catch (e) { console.log("flushR2 err", e); }
     })());
   },
 };
@@ -645,8 +799,15 @@ export default {
 // no reason to keep reading R2 forever. Re-run it any time with GET /admin/reconcile?key=… (resets the
 // cursor) if a future audit ever suspects drift. Bounded per run: RECONCILE_SHARDS_PER_RUN shard reads
 // + one avtr/ read per distinct id-bucket seen (cached within the run).
-const RECONCILE_SHARDS_PER_RUN = 8;   // one-time pass → go a bit faster (~8.5h) then STOP; stays under
-                                      // the subrequest budget alongside flushR2
+const RECONCILE_SHARDS_PER_RUN = 24;  // one-time pass → ~5h for a full lap then STOP. Bumped 8→24 to
+                                      // roll the fancy-Unicode fold re-index out ~3x faster (plain-text
+                                      // search for fancy-named/authored avatars needs the folded tokens
+                                      // in the index). COST-NEUTRAL vs the bill emergency: this only adds
+                                      // Class B shard READS per run; it does NOT touch MAX_INDEX_OPS_PER_FLUSH
+                                      // (the write-rate cap), and the flush drain (75 ops/min) still has
+                                      // spare capacity over the raised emission (~97/min), so the TTL-free
+                                      // iq: queue absorbs any transient backlog. Stays far under the
+                                      // subrequest budget alongside flushR2 (~40 extra reads/run).
 const RC_MAX_ATTEMPTS = 3;            // retry a tainted (read-failed) count pass this many times, then
                                       // give up and keep the incremental count (never adopt a bad one)
 // PERIODIC RE-ARM: the incremental `unfilled`/`entries` counts DRIFT over time (a fill that doesn't
@@ -668,6 +829,26 @@ const RECONCILE_REARM_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days (matches the r
 // the removed GitHub Action (the Worker never recomputed it → a permanent phantom liveness "queued N",
 // staleCount/4 ≈ 73 per bot, that could never drain).
 const STALE_CUTOFF_MS = 30 * 24 * 60 * 60 * 1000;
+// Bump to force a one-time re-index of the WHOLE catalog's fancy-Unicode entries: when meta.foldVer is
+// behind this, the reconcile lap emits an ADD index op for every needsFold() entry so its NFKC-FOLDED
+// (plain-ASCII) tokens enter the search index (the old fancy-glyph tokens stay as harmless orphans).
+// After that lap, plain-text search finds fancy-named/authored avatars. Set on clean lap completion.
+const FOLD_VER = 6;   // bumped 5->6: foldFancy overhaul (strip zalgo marks + CONFUSABLES cross-script
+                      // look-alikes + per-char Latin accent-fold), so re-arm ONE fresh full lap to re-fold
+                      // the whole catalog under the corrected fold + populate the "unconverted" registry.
+                      // Prior note (v4->5, still in force via the foldLapV guard below): the v24 fold lap
+                      // could stamp foldVer WITHOUT covering all 4096 shards (bump landing mid-lap).
+                      // The reset-to-cursor-0 that starts a fresh fold lap was gated on `&& meta.rcDone`, so a
+                      // FOLD_VER bump landing MID-LAP (rcDone=false — the normal case on a deploy during active
+                      // churn) left the carried-over cursor + reconcileScanned untouched; foldPass then rode on
+                      // top of a partial lap that "completed" the instant reconcileScanned crossed 4096 (from
+                      // steps already accumulated) and stamped foldVer having run the fold gate over only a TAIL
+                      // slice of shards. Fancy-authored entries outside that slice (e.g. ᵂᴴᴵᵀᴱ ᵀᴵᴳᴱᴿ's 8 avatars)
+                      // kept their raw tokens but never got the plain folded ones -> unsearchable by plain text,
+                      // and foldPass went dormant so it never retried. The `meta.foldLapV` guard below now forces
+                      // exactly ONE dedicated full 0->4096 lap per FOLD_VER (regardless of rcDone) before foldVer
+                      // is stamped; this bump re-arms that corrected lap. tokenizeFields still emits raw ∪ folded
+                      // so every fancy entry is indexed under BOTH forms as one consistent set.
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   // ONE-TIME migration: zero the frozen legacy staleCount NOW (kills the phantom "queued" immediately)
@@ -685,6 +866,26 @@ async function reconcileIndex(env) {
     } catch (_) {}
     // fall through → run the recount this run (rcDone is now false)
   }
+  // ONE-TIME fold re-index: if foldVer is behind, run a FRESH full lap DEDICATED to this FOLD_VER so the
+  // entry loop emits folded-token ADD ops for every existing fancy entry, over ALL 4096 shards.
+  //
+  // This reset MUST fire regardless of meta.rcDone. The old `&& meta.rcDone` guard meant a FOLD_VER bump
+  // that landed mid-lap (rcDone=false — the normal case on a deploy during churn) did NOT reset the
+  // carried-over cursor + reconcileScanned, so foldPass rode a partial lap that "completed" as soon as
+  // reconcileScanned crossed 4096 (from prior steps) and stamped foldVer having gated only a tail slice of
+  // shards — leaving fancy entries elsewhere (ᵂᴴᴵᵀᴱ ᵀᴵᴳᴱᴿ's avatars) raw-only + unsearchable by plain text,
+  // with foldPass then dormant. `meta.foldLapV` marks the FOLD_VER the CURRENT fresh lap was started for:
+  // the reset fires once (first run where foldLapV is behind), starts a clean 0->4096 lap, and foldVer is
+  // stamped ONLY when a lap whose foldLapV === FOLD_VER completes (see the completion branch) — so a
+  // partial/carried lap can never mark the fold done.
+  if (meta.foldVer !== FOLD_VER && meta.foldLapV !== FOLD_VER) {
+    meta.rcDone = false;
+    meta.rc = 0; meta.reconcileScanned = 0;
+    meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
+    meta.foldLapV = FOLD_VER;   // this fresh lap is dedicated to FOLD_VER; only it may stamp foldVer
+    // fall through → run the lap; foldVer is stamped on clean completion of THIS dedicated lap
+  }
+  const foldPass = meta.foldVer !== FOLD_VER;   // emit folded-token ADDs for fancy entries this lap
   // Re-arm a completed heal once it's older than the interval, so the count is periodically re-truthed.
   if (meta.rcDone) {
     const doneMs = meta.rcDoneAt ? (Date.parse(meta.rcDoneAt) || 0) : 0;
@@ -700,6 +901,7 @@ async function reconcileIndex(env) {
   const rcStaleBefore = Date.now() - STALE_CUTOFF_MS;   // recount stale cutoff for this lap
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
+  const idxCache = {};         // index-bucket -> { token -> Set(ids) } (per-run cache for the fold gate)
   const missing = [];          // ADD index ops for entries not yet indexed
   // Accumulate (across the multi-run lap) EVERY shard prefix that still holds an unfilled avatar. On
   // lap completion this becomes the AUTHORITATIVE fill worklist — the fix for the endless whole-catalog
@@ -710,6 +912,14 @@ async function reconcileIndex(env) {
   // the count, so it looped forever. With the recount (which reads every shard anyway) writing them into
   // the worklist, the bots walk ONLY the worklist and the walk terminates when it drains.
   const fillSeen = new Set(Array.isArray(meta.rcFill) ? meta.rcFill : []);
+  // "UNCONVERTED" registry — accumulate, across the lap, every entry whose folded name/author STILL holds
+  // a non-ASCII letter (an unmapped look-alike font, exotic decoration, or genuine non-Latin script). On
+  // clean lap completion this is written to `unconverted.json` (GET /unconverted): a per-codepoint
+  // histogram (what to add to CONFUSABLES next) + a capped sample of {id,name,author} to eyeball. This is
+  // the "fetch everything that didn't convert" tool — extend CONFUSABLES from the histogram, re-lap, repeat.
+  const unconvHist = Object.assign({}, meta.rcUnconvHist || {});
+  const unconvSample = Array.isArray(meta.rcUnconvSample) ? meta.rcUnconvSample.slice() : [];
+  const UNCONV_SAMPLE_CAP = 400;
   // Recount the AUTHORITATIVE entry + unfilled totals as we read every shard, to correct the running
   // incremental counts that drift with no full rebuild — a drifted `unfilled` makes the FILL bots
   // churn the whole catalog forever on a phantom backlog they can never drain ("queued 247, checked
@@ -737,6 +947,14 @@ async function reconcileIndex(env) {
       entriesSeen++;
       if (e.filled !== true) { unfilledSeen++; shardHasUnfilled = true; }
       if (((e.checked || e.added || 0)) < rcStaleBefore) staleSeen++;   // due for a 30d liveness recheck
+      // Tally anything that didn't fully fold to ASCII (see foldResidualCps / the "unconverted" registry).
+      const resid = foldResidualCps(e);
+      if (resid.size) {
+        for (const cp of resid) unconvHist[cp] = (unconvHist[cp] || 0) + 1;
+        if (unconvSample.length < UNCONV_SAMPLE_CAP)
+          unconvSample.push({ id, n: (e.name || "").slice(0, 48), au: (e.author || "").slice(0, 48),
+            r: Array.from(resid) });
+      }
       const b = fragBucketFor(id);
       if (!(b in avtrCache)) {
         let ids = new Set();
@@ -747,6 +965,14 @@ async function reconcileIndex(env) {
         const op = buildIndexOp(null, e, fid);   // ADD: writes fragment + avtr + tokens
         if (op) { missing.push(op); avtrCache[b].add(id); }   // add to cache so siblings this run aren't re-flagged
       }
+      // NO FOLD RE-EMIT PASS ANYMORE. Fold maintenance (re-asserting a fancy entry's plain/folded
+      // tokens) is now owned entirely by the LIVENESS bots' continuous walk (v30): their `checked` bump
+      // on a fancy avatar re-asserts its union (raw ∪ folded) tokens, no-op-guarded by applyIndexOps. So
+      // a CONFUSABLES addition needs NO FOLD_VER bump and NO full re-lap — liveness picks up the new fold
+      // as it re-checks each avatar (~one continuous liveness lap, ~15h at 4 bots). This reconcile still
+      // does the recount / unconverted registry / fill-worklist + the genuinely-absent index heal above,
+      // just not folding. `foldPass`/`FOLD_VER`/`foldLapV`/`idxCache` are vestigial (kept only so an
+      // in-flight lap settles cleanly). DO NOT bump FOLD_VER to "start a new fold" — liveness handles it.
     }
     if (shardHasUnfilled) fillSeen.add(prefix);   // this shard belongs in the fill worklist
   }
@@ -754,6 +980,8 @@ async function reconcileIndex(env) {
   for (let i = 0; i < missing.length; i += MAX_INDEX_OPS_PER_FLUSH)
     await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(missing.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
   meta.rcFill = Array.from(fillSeen);   // accumulate the fill-shard set across the lap (adopted on completion)
+  meta.rcUnconvHist = unconvHist;       // accumulate the unconverted histogram + sample across the lap
+  meta.rcUnconvSample = unconvSample;
   meta.rc = cursor;
   meta.lastReconcile = new Date().toISOString();
   // reconcileScanned now counts STEPS (shards visited), so completion is exactly one 4096-shard lap —
@@ -776,6 +1004,10 @@ async function reconcileIndex(env) {
     const attempts = (meta.rcAttempts || 0);
     if (clean) {
       meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
+      // Stamp the fold version ONLY when the lap that just completed was the DEDICATED fresh fold lap for
+      // this FOLD_VER (foldLapV set at its start, above). A partial/carried-over lap that happens to cross
+      // 4096 must NOT mark the fold done — that was the v24 bug that left fancy entries un-folded.
+      if (meta.foldLapV === FOLD_VER) meta.foldVer = FOLD_VER;   // fancy-entry fold re-index complete
       meta.entries = meta.rcEntries || 0;
       meta.unfilled = meta.rcUnfilled || 0;
       meta.stale = meta.rcStale || 0;   // adopt the TRUE liveness backlog (drains live via the flush)
@@ -803,12 +1035,30 @@ async function reconcileIndex(env) {
           { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
         if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_worklist.json"]);
       } catch (_) {}
+      // Publish the "unconverted" registry (see foldResidualCps): a per-codepoint histogram of every
+      // non-ASCII letter that survived folding + a capped sample of the avatars. Fetch GET /unconverted
+      // (or /catalog/unconverted.json) to see exactly which fonts still don't convert, extend CONFUSABLES
+      // from the histogram, bump FOLD_VER, and they clear on the next lap.
+      try {
+        const hist = meta.rcUnconvHist || {};
+        let total = 0; for (const k in hist) total += hist[k];
+        const top = Object.entries(hist).map(([cp, n]) => ({ cp: +cp, ch: String.fromCodePoint(+cp), n }))
+          .sort((a, b) => b.n - a.n);
+        meta.unconverted = top.length;   // distinct residual codepoints (surfaced in /health)
+        await env.CATALOG.put("unconverted.json",
+          JSON.stringify({ v: 1, ts: new Date().toISOString(), distinctCodepoints: top.length,
+            totalHits: total, codepoints: top, sample: (meta.rcUnconvSample || []) }),
+          { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=60" } });
+        if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/unconverted.json"]);
+      } catch (_) {}
       meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
       meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];   // reset accumulators for a future re-arm
+      meta.rcUnconvHist = {}; meta.rcUnconvSample = [];
     } else if (attempts < RC_MAX_ATTEMPTS) {
       // Tainted lap → retry a fresh full pass (index repairs already enqueued above are idempotent).
       meta.rcAttempts = attempts + 1;
       meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcFill = [];
+      meta.rcUnconvHist = {}; meta.rcUnconvSample = [];
       // rcDone stays false → the next cron re-walks the whole catalog for a clean count.
     } else {
       // Couldn't get a clean read after the retries → give up and KEEP the incremental count
@@ -817,6 +1067,7 @@ async function reconcileIndex(env) {
       meta.rcAdoptSkipped = (meta.rcReadFail || 0);
       meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
       meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
+      meta.rcUnconvHist = {}; meta.rcUnconvSample = [];
     }
   }
   await env.AVATAR_KV.put("meta", JSON.stringify(meta));
@@ -1000,6 +1251,11 @@ async function listPrefix(env, prefix, cap = 5000) {
 
 async function flushR2(env) {
   const prevMeta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  // iq: index-op queue depth (in KEYS, each ≈ up to MAX_INDEX_OPS_PER_FLUSH ops), stamped from the
+  // drain below so /health can surface it WITHOUT its own list op (that endpoint is polled every 15s
+  // and must stay list-free). Carried forward on a failed flush (drain skipped). Saturates at the
+  // listPrefix cap (1000 keys); at ~150 ops/key that's ~150k queued ops before it stops being exact.
+  let iqDepthNow = prevMeta.iqDepth || 0;
   const pendNames = await listPrefix(env, "pend:");
   const repNames  = await listPrefix(env, "rep:");
   const admuNames = await listPrefix(env, "admu:");
@@ -1013,6 +1269,29 @@ async function flushR2(env) {
   // costs just one KV list per minute.
   if (!pendNames.length && !admuNames.length && !admrNames.length && !admkNames.length &&
       !repNames.length && !hasIndexQueue) return;
+
+  // ONE-TIME iq: COMPACTION. The pre-gating fold laps flooded iq: with ~1400 keys of no-op re-adds
+  // (already-present tokens). They drain only ~1 key/flush (~300 cheap-but-full ops), so ~47h to clear,
+  // and genuine repairs (e.g. a desynced fancy author's avatars) are buried in random UUID order behind
+  // them. They are SAFE to drop: applyIndexOps already no-op-guarded them (nothing pending changes a
+  // bucket), and the re-armed GATED fold lap (FOLD_VER bump) + the reconcile presence-heal re-emit
+  // anything genuinely missing into the now-empty queue, where it drains in a flush or two. Bounded to
+  // IQ_COMPACT_DELETE_BUDGET deletes/flush to stay under the subrequest limit; a meta version flag makes
+  // it run once. While compacting we dedicate the flush to it (skip the normal shard/index work) and
+  // write meta so /health reflects progress — it completes in a handful of 1-min flushes.
+  const IQ_COMPACT_V = 1, IQ_COMPACT_DELETE_BUDGET = 500;
+  if ((prevMeta.iqCompactV || 0) < IQ_COMPACT_V) {
+    const stale = await listPrefix(env, "iq:", IQ_COMPACT_DELETE_BUDGET);
+    for (const kn of stale) await env.AVATAR_KV.delete(kn);
+    const done = (await env.AVATAR_KV.list({ prefix: "iq:", limit: 1 })).keys.length === 0;
+    await env.AVATAR_KV.put("meta", JSON.stringify({
+      ...prevMeta, iqDepth: done ? 0 : (prevMeta.iqDepth || 0),
+      ...(done ? { iqCompactV: IQ_COMPACT_V } : {}),
+      lastFlush: new Date().toISOString(),
+      lastCommit: done ? "iq: compaction done" : `iq: compacting (-${stale.length} keys)`,
+    }));
+    return;   // resume normal flushing next tick (queue now empty; gated lap re-emits only broken)
+  }
 
   // Group every pending op by shard prefix so each shard is read + written ONCE.
   const shardOps = {};
@@ -1189,6 +1468,19 @@ async function flushR2(env) {
       // A recheck that lands on a DUE entry drains the liveness backlog by one.
       if (((e[fid].checked || e[fid].added || 0)) < staleCutoff) sStale--;
       e[fid].checked = nowChecked; dirty = true;
+      // FOLD MAINTENANCE via the LIVENESS sweep (cheapest path). A checked-only bump means a bot
+      // re-verified an UNCHANGED avatar, so buildIndexOp never fires for it — the one path that
+      // previously left old fancy entries' plain (folded) tokens to the separate reconcile lap. If the
+      // entry is fancy (needsFold), re-assert its FULL union (raw ∪ folded) tokens so BOTH token sets
+      // stay indexed. applyIndexOps no-op-guards this per token (a cheap Class B read when already
+      // present, a one-token heal when the fold desynced), so the liveness bots maintain the fold as
+      // they walk — riding the checked write they already do, no new reads/VRChat/APK. The liveness walk
+      // is CONTINUOUS (oldest-swept-first, no 30d due gate), so every fancy avatar is re-asserted ~once
+      // per full lap (~15h at 4 bots) — cost ~1 index read per fancy avatar per lap. This re-assert uses
+      // the CURRENT foldFancy, so a new CONFUSABLES entry is picked up automatically as the walk re-checks
+      // each avatar — NO FOLD_VER bump / re-lap needed. avtr:null/frag:null (both already correct for an
+      // indexed entry) keeps it index-token-only.
+      if (needsFold(e[fid])) sIndexOps.push({ id: e[fid].id, del: false, frag: null, add: [...tokensOf(e[fid])], rem: [], avtr: null });
     }
     for (const fid of ops.removes) if (e[fid]) {
       const prev = e[fid]; delete e[fid]; sRemoved++; dirty = true; contentDirty = true;
@@ -1229,17 +1521,27 @@ async function flushR2(env) {
   // index exactly what persisted; a failed apply re-queues everything and re-applies idempotently).
   if (allShardsOk) {
     const iqNames = await listPrefix(env, "iq:", 1000);   // own cursor (never crowded out); we drain only a few
+    iqDepthNow = iqNames.length;   // queue depth at flush start (keys) → meta.iqDepth for /health, ticks to 0
     let queued = []; const drained = [];
     for (const kn of iqNames) {
-      if (queued.length >= MAX_INDEX_OPS_PER_FLUSH) break;
+      // Reserve this flush's own NEW contribution ops (indexOps) budget first, then read only enough
+      // BACKLOG keys to fill the rest. This is what makes a freshly-added avatar searchable within a
+      // flush or two instead of queuing behind a large backlog (a fold re-lap can leave hundreds of
+      // iq: keys). Old ops still drain with the remaining budget, so the backlog keeps clearing too.
+      if (indexOps.length + queued.length >= MAX_INDEX_OPS_PER_FLUSH) break;
       const val = await env.AVATAR_KV.get(kn); drained.push(kn);
       if (val) try { const a = JSON.parse(val); if (Array.isArray(a)) queued.push(...a); } catch (_) {}
     }
-    const all = [...queued, ...indexOps];
+    const all = [...indexOps, ...queued];   // NEW contributions FIRST, then backlog
     const toApply = all.slice(0, MAX_INDEX_OPS_PER_FLUSH);
     let applied = true;
     if (toApply.length) {
-      try { const urls = await applyIndexOps(env, toApply); if (urls.length) await purgeCatalogUrls(env, urls); }
+      // NO edge-cache purge on the index buckets (fragments/avtr/index): those carry the 5-min INDEX_TTL,
+      // so a skipped purge self-heals within 5 min — and purges are slow HTTP calls that dominate the
+      // flush's WALL time (the v21 jam). Dropping them lets the flush drain far more index ops per tick
+      // within budget; search freshness lags at most INDEX_TTL, which is fine (clone-shard purges, which
+      // users hit live, are unaffected — those still happen in flushR2's shard-write path).
+      try { await applyIndexOps(env, toApply); }
       catch (_) { applied = false; }
     }
     for (const kn of drained) await env.AVATAR_KV.delete(kn);
@@ -1349,6 +1651,7 @@ async function flushR2(env) {
       : `R2 partial: some shard IO failed, kept pending (+${added} -${removed})`,
     pendingBatches: pendNames.length,
     reports: allShardsOk ? Math.max(0, repNames.length - repClear.length) : repNames.length,
+    iqDepth: iqDepthNow,   // search-index op queue depth (keys) — watch it drain to 0 after a fold/rebuild
     backend: "r2",
   }));
 

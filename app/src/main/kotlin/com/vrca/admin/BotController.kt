@@ -35,8 +35,13 @@ object BotController {
     private val _views = MutableStateFlow<List<AvatarCatalogSweep.RoleView>>(emptyList())
     val views: StateFlow<List<AvatarCatalogSweep.RoleView>> = _views
 
-    private val _totalQueued = MutableStateFlow(0)
-    val totalQueued: StateFlow<Int> = _totalQueued
+    // Catalog re-verify coverage: distinct shards visited at least once (Pair = covered/4096), and the
+    // full re-verify LAP time in ms (-1 while still on the first coverage lap). The continuous walk has
+    // no "queued backlog" — coverage + lap time are the meaningful progress signals instead.
+    private val _shardsCovered = MutableStateFlow<Pair<Int, Int>?>(null)
+    val shardsCovered: StateFlow<Pair<Int, Int>?> = _shardsCovered
+    private val _lapAgeMs = MutableStateFlow(-1L)
+    val lapAgeMs: StateFlow<Long> = _lapAgeMs
 
     // Net catalog growth over ~24h (added − removed), from local entryCount snapshots. Pair =
     // (delta, windowHours); null until we have a snapshot. windowHours < 24 while history is short.
@@ -47,16 +52,6 @@ object BotController {
     // Free — read straight from the flush buffer, no network.
     private val _lastPush = MutableStateFlow<Pair<String, Long>?>(null)
     val lastPush: StateFlow<Pair<String, Long>?> = _lastPush
-
-    private val _blitz = MutableStateFlow(false)
-    val blitz: StateFlow<Boolean> = _blitz
-
-    private val _blitzViews = MutableStateFlow<Map<Int, AvatarCatalogSweep.BlitzView>>(emptyMap())
-    val blitzViews: StateFlow<Map<Int, AvatarCatalogSweep.BlitzView>> = _blitzViews
-
-    // Blitz shard coverage (done, total) while a blitz is active — the "shards finished / left" readout.
-    private val _blitzShards = MutableStateFlow<Pair<Int, Int>?>(null)
-    val blitzShards: StateFlow<Pair<Int, Int>?> = _blitzShards
 
     /** Proof-of-life for the sweep loop: true while it has cycled within the last minute
      *  (alive even when idle/caught-up), and how many ms since the last cycle (-1 = never).
@@ -153,6 +148,22 @@ object BotController {
         AvatarCatalogSweep.ensureRunning(app, key, currentManual(prefs))
     }
 
+    /** Call on foreground-return (ON_RESUME). If the process was OS-suspended while
+     *  backgrounded the sweep's cycle heartbeat goes stale (`sweepAlive()` false) — kick it
+     *  IMMEDIATELY instead of waiting out the ~2-min freeze watchdog, so the shard counter
+     *  resumes the instant the admin reopens the app. Also re-asserts the foreground service
+     *  (an OEM may have stopped it) and re-applies the sweep config. Cheap + idempotent. */
+    fun onForeground(context: Context) {
+        val app = context.applicationContext
+        if (!started.get()) { start(app); return }
+        runCatching { com.vrca.keepalive.KeepAliveService.start(app) }
+        applySweepConfig(app)
+        if (AvatarCatalogSweep.running && !silenced(app) && !AvatarCatalogSweep.sweepAlive()) {
+            val key = prefs0(app).getString("avatar_admin_key", "") ?: ""
+            runCatching { AvatarCatalogSweep.kick(app, key, currentManual(prefs0(app))) }
+        }
+    }
+
     /** Idempotent — safe to call on every Bots-tab entry AND on admin app launch. */
     fun start(context: Context) {
         val app = context.applicationContext
@@ -231,10 +242,16 @@ object BotController {
                 // caught-up (pool==0) idle. Cooldown-bounded so it can never churn.
                 if (!silenced(app) && AvatarCatalogSweep.running) {
                     val checked = AvatarCatalogSweep.totalChecked()
-                    val pool = AvatarCatalogSweep.lastTotalBacklog
+                    // The continuous shard-walk ALWAYS has work (it re-verifies every shard
+                    // forever), so its steady-state manifest backlog is ~0 — the old `pool > 0`
+                    // gate then never fired, so a walk frozen while backgrounded (OS-suspended,
+                    // then thawed on foreground) could never self-recover. Treat shard-walk mode
+                    // as always having work so the freeze watchdog can kick it. (`checked` still
+                    // ticks every cycle while progressing, so this only fires on a TRUE freeze.)
+                    val hasWork = AvatarCatalogSweep.lastTotalBacklog > 0 || AvatarGlobalDb.shardWalkLive()
                     val now = System.currentTimeMillis()
                     if (checked != lastCheckedSum) { lastCheckedSum = checked; lastProgressMs = now }
-                    else if (pool > 0 && lastProgressMs > 0L &&
+                    else if (hasWork && lastProgressMs > 0L &&
                              now - lastProgressMs > STUCK_MS && now - lastKickMs > KICK_COOLDOWN_MS) {
                         lastKickMs = now; lastProgressMs = now
                         val key = prefs0(app).getString("avatar_admin_key", "") ?: ""
@@ -243,14 +260,9 @@ object BotController {
                 } else { lastProgressMs = 0L; lastCheckedSum = -1 }
                 // pendingReports now comes from the shared 30s /health poll (L3) — no separate GET here.
                 val vs = withContext(Dispatchers.Default) { AvatarCatalogSweep.roleViews(pendingReports) }
-                val bv = withContext(Dispatchers.Default) { AvatarCatalogSweep.blitzViews() }
                 _views.value = vs
-                // The per-bot queued numbers are SPLIT shares; use the true total backlog for
-                // the "To process" pill so splitting the display doesn't distort the grand total.
-                _totalQueued.value = AvatarCatalogSweep.lastTotalBacklog
-                _blitz.value = AvatarCatalogSweep.blitzActive()
-                _blitzViews.value = bv
-                _blitzShards.value = AvatarCatalogSweep.blitzShardProgress()
+                _shardsCovered.value = withContext(Dispatchers.Default) { AvatarCatalogSweep.shardsCovered(app) to 4096 }
+                _lapAgeMs.value = withContext(Dispatchers.Default) { AvatarCatalogSweep.oldestSweptAgeMs(app) }
                 _sweepAlive.value = AvatarCatalogSweep.sweepAlive()
                 _lastPush.value = AvatarCatalogSweep.lastFlushInfo.takeIf { it.isNotBlank() }
                     ?.let { it to AvatarCatalogSweep.lastFlushAtMs }

@@ -46,7 +46,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.vrca.BuildConfig
 import com.vrca.vrchat.InstanceRosterManager
 
@@ -224,10 +227,28 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
             // Discord shows the presence dot), platform brand glyph bottom-left.
             AvatarWithBadges(m, ctx, rowBg)
             // Name + status line (dot coloured by status; text = status description, else label).
-            Column(Modifier.weight(1f)) {
+            // The WHOLE pair is wrapped in ONE fixed-height column matched to the avatar's height
+            // (34dp) and centered (verticalArrangement = Center) — so the name+status block always
+            // sits vertically centered against the avatar as a unit, AND the fixed column height is
+            // the bulletproof clamp: a name with TALL glyphs (daggers †, Bengali/Thai combining
+            // marks, fancy Unicode) OVERFLOWS the column visually but can NEVER stretch the row (a
+            // fixed-height Column reports its own height and doesn't clip). Two separate per-line
+            // fixed boxes were tried but they shifted independently when tuned; one centered column
+            // is predictable. The lineHeight pins stay on each Text as belt-and-suspenders.
+            Column(
+                modifier = Modifier.weight(1f).height(34.dp),
+                verticalArrangement = Arrangement.Center
+            ) {
                 Text(
                     m.displayName,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        lineHeight = 18.sp,
+                        lineHeightStyle = LineHeightStyle(
+                            alignment = LineHeightStyle.Alignment.Center,
+                            trim = LineHeightStyle.Trim.Both
+                        ),
+                        platformStyle = PlatformTextStyle(includeFontPadding = false)
+                    ),
                     // You = purple (pinned top), friends = yellow, everyone else default.
                     color = when {
                         m.isSelf -> androidx.compose.ui.graphics.Color(0xFFB388FF)
@@ -235,6 +256,7 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                         else -> MaterialTheme.colorScheme.onSurface
                     },
                     maxLines = 1,
+                    softWrap = false,
                     overflow = TextOverflow.Ellipsis
                 )
                 val statusText = m.statusDescription.ifBlank { rosterStatusLabel(m.status) }
@@ -249,9 +271,17 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                         )
                         Text(
                             statusText,
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                lineHeight = 15.sp,
+                                lineHeightStyle = LineHeightStyle(
+                                    alignment = LineHeightStyle.Alignment.Center,
+                                    trim = LineHeightStyle.Trim.Both
+                                ),
+                                platformStyle = PlatformTextStyle(includeFontPadding = false)
+                            ),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
+                            softWrap = false,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
@@ -264,7 +294,14 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    FriendButton(m, ctx, scope)
+                    // key on isFriend so the button is REBUILT the instant the friendship
+                    // flag flips — its local "sent"/"unfriended" state (remember) otherwise
+                    // survives recomposition and can leave the greyed "sent" look stuck even
+                    // though m.isFriend already turned true (the name colour flips but the
+                    // button didn't). Rebuilding forces a clean add⇄unfriend state.
+                    androidx.compose.runtime.key(m.userId, m.isFriend) {
+                        FriendButton(m, ctx, scope)
+                    }
                     CloneButton(m, ctx, scope)
                 }
             }
@@ -337,7 +374,7 @@ private fun FriendButton(
                 painterResource(com.vrca.R.drawable.ic_friend_add),
                 contentDescription = "Cannot add",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                modifier = Modifier.size(15.dp)
+                modifier = Modifier.size(16.dp)
             )
         }
         return
@@ -347,6 +384,24 @@ private fun FriendButton(
     var sent by remember(m.userId) { mutableStateOf(false) }
     val isFriend = m.isFriend && !unfriended
     val justSent = sent && !isFriend
+    // After a request is SENT, VRChat's `friend-add` pipeline event doesn't reliably reach
+    // the requester when the other person accepts — so the button could sit greyed ("sent")
+    // forever. While we're in that state, verify the real friend status directly and, once
+    // accepted, mark it in the roster so the button flips add→unfriend (and the name colour
+    // updates too). Bounded + user-initiated (only runs after a manual send); stops the
+    // instant we become friends or the user unfriends.
+    LaunchedEffect(m.userId, justSent) {
+        val uid = m.userId
+        if (uid == null || !justSent) return@LaunchedEffect
+        for (d in longArrayOf(4000, 8000, 15000, 30000, 60000, 60000)) {
+            kotlinx.coroutines.delay(d)
+            val st = com.vrca.vrchat.VrchatAuthManager.getFriendStatus(ctx, uid)
+            if (st?.isFriend == true) {
+                InstanceRosterManager.markFriended(uid)
+                return@LaunchedEffect
+            }
+        }
+    }
     RosterActionButton(enabled = !busy && !justSent, onClick = {
         if (!busy) {
             busy = true
@@ -383,7 +438,7 @@ private fun FriendButton(
                 contentDescription = if (isFriend) "Unfriend" else "Send friend request",
                 tint = if (justSent) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
                        else MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(15.dp)
+                modifier = Modifier.size(16.dp)
             )
         }
     }
