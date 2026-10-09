@@ -1,0 +1,21 @@
+# Repro: UserMemoryStore.applyDelta drops any fact that is "similar" to an identity field (name,
+# nicknames, preferred name, relationship, sentiment) — and `similar` treats plain SUBSTRING
+# containment as a match. Short names/nicknames and common relationship words therefore silently
+# delete unrelated facts, on EVERY later update of that card (the filter runs over all facts).
+@set ambient=0
+> teach nick alice ali
+> teach card alice lives in Australia
+> expect card alice contains (?i)australia
+> teach card alice really into italian food
+> expect card alice contains (?i)italian
+> teach card al plays Valorant
+> expect card al contains (?i)valorant
+> teach card al listens to metal music
+> expect card al contains (?i)metal
+> teach rel bob friend
+> teach card bob best friends with carol since school
+> expect card bob contains (?i)carol
+> teach card bob regular at the climbing gym
+> teach rel bob regular
+> expect card bob contains (?i)climbing
+> checkpoint cards

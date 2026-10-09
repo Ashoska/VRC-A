@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
  * a real User-Agent on the API.
  */
 object DiscordRest {
-    private const val API = "https://discord.com/api/v10"
+    private val API: String get() = BotEndpoints.discordApi
     private const val UA = "DiscordBot (https://github.com/ashoska/vrc-a, 1.0)"
     private const val MAX_CONTENT = 2000  // Discord's hard message-length limit
 
@@ -57,20 +57,37 @@ object DiscordRest {
                     for (i in 0 until arr.length()) {
                         val m = arr.optJSONObject(i) ?: continue
                         val author = m.optJSONObject("author") ?: continue
-                        val name = author.optString("global_name").ifBlank { author.optString("username") }
-                            .ifBlank { "user" }
+                        val name = displayName(author, "user")
                         out.add(HistMsg(
                             id = m.optString("id"),
                             authorId = author.optString("id"),
                             authorName = name,
                             isBot = author.optBoolean("bot", false),
-                            content = resolveMentions(m.optString("content"), m.optJSONArray("mentions"))
+                            content = withStickers(resolveMentions(m.optString("content"), m.optJSONArray("mentions")), m)
                         ))
                     }
                     out.reversed()   // chronological (oldest first)
                 }
             } catch (_: Exception) { emptyList() }
         }
+
+    /** A Discord user's display name: global_name, else username. Discord sends `global_name: null`
+     *  for users without one, which org.json's optString turns into the string "null" — so that is
+     *  treated as missing (this is what produced a memory card literally named "null"). */
+    fun displayName(u: JSONObject?, fallback: String): String {
+        fun clean(k: String) = u?.optString(k).orEmpty().trim().takeUnless { it.equals("null", true) }.orEmpty()
+        return clean("global_name").ifBlank { clean("username") }.ifBlank { fallback }
+    }
+
+    /** A sticker arrives as a message with no text and a `sticker_items` list; without this Cardinal
+     *  saw an empty message ("not even a hello?"). Appends "(sent a sticker: name)" so it reads like a
+     *  reaction image. Free. */
+    fun withStickers(content: String, m: JSONObject?): String {
+        val items = m?.optJSONArray("sticker_items") ?: return content
+        val names = (0 until items.length()).mapNotNull { items.optJSONObject(it)?.optString("name")?.trim()?.takeIf { n -> n.isNotBlank() && n != "null" } }
+        if (names.isEmpty()) return content
+        return (content.trim() + " " + names.joinToString(" ") { "(sent a sticker: $it)" }).trim()
+    }
 
     /** Replaces inline user mentions (`<@id>` / `<@!id>`) in message text with `@DisplayName`
      *  using the message's own `mentions` array — so the model sees names, not raw ids. Free. */
@@ -80,7 +97,7 @@ object DiscordRest {
         for (i in 0 until mentions.length()) {
             val u = mentions.optJSONObject(i) ?: continue
             val id = u.optString("id"); if (id.isBlank()) continue
-            val name = u.optString("global_name").ifBlank { u.optString("username") }.ifBlank { "user" }
+            val name = displayName(u, "user")
             out = out.replace("<@$id>", "@$name").replace("<@!$id>", "@$name")
         }
         return out
@@ -115,18 +132,21 @@ object DiscordRest {
         } catch (_: Exception) { }
     }
 
+    /** Result of a send: the created message id (for reaction-learning) + an error string. */
+    data class SendOutcome(val messageId: String?, val error: String?)
+
     /**
      * Posts [content] to [channelId], optionally as a reply to [replyToMessageId].
      * `allowed_mentions.parse=[]` blocks the model's output from ever @-pinging
      * everyone/roles/users, and `replied_user=false` avoids pinging on a reply.
-     * @return null on success, else an error string.
+     * Returns the new message id (so the bot can learn from reactions to its OWN posts).
      */
-    suspend fun sendMessage(
+    suspend fun send(
         token: String,
         channelId: String,
         content: String,
         replyToMessageId: String? = null,
-    ): String? = withContext(Dispatchers.IO) {
+    ): SendOutcome = withContext(Dispatchers.IO) {
         try {
             val payload = JSONObject()
                 .put("content", content.take(MAX_CONTENT))
@@ -145,11 +165,14 @@ object DiscordRest {
                 .post(payload.toString().toRequestBody(JSON))
                 .build()
             client.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) null
-                else "send HTTP ${resp.code}: ${resp.body?.string()?.take(160).orEmpty()}"
+                val raw = resp.body?.string().orEmpty()
+                if (resp.isSuccessful) {
+                    val id = try { JSONObject(raw).optString("id").ifBlank { null } } catch (_: Exception) { null }
+                    SendOutcome(id, null)
+                } else SendOutcome(null, "send HTTP ${resp.code}: ${raw.take(160)}")
             }
         } catch (e: Exception) {
-            "${e.javaClass.simpleName}: ${e.message ?: "network error"}"
+            SendOutcome(null, "${e.javaClass.simpleName}: ${e.message ?: "network error"}")
         }
     }
 }

@@ -1,0 +1,53 @@
+# Device cases (Round 8c): a pet is stored with its kind; a name-only pet gets asked about; the kind answer fills it
+# in (and "he's a hamster" isn't about Cardinal); "whete do i lige?" (typos) opens their notes; their job isn't Cardinal's.
+@set ambient=0 context=10
+@channel general main hangout
+[general]
+> teach card ash work: senior security software engineer
+> teach card ash lives: wisconsin
+ash: @Cardinal I have a cat called Asuna
+> expect reply
+> expect card ash contains cat named Asuna
+bo: @Cardinal my pet's name is Mochi
+> expect reply
+> expect card bo contains pet named Mochi
+> expect contains (?i)(what|kind|type|is mochi)
+bo: @Cardinal he's a hamster
+> expect reply
+> expect card bo contains hamster named Mochi
+ash: @Cardinal whete do i lige?
+> expect reply
+> expect contains (?i)wisconsin
+> expect not-contains (?i)\bmy (senior |security |software )
+# Round 8d: "a Cat name Asuna" (no "d") after the card already has just "cat" → the name fills in; "please add it
+# my profile" is a save ask, not a memory question (he echoed the "Memory question:" hint label into the reply).
+> teach card cy pet: cat
+cy: @Cardinal yeah because i have a Cat name Asuna
+> expect reply
+> expect card cy contains cat named Asuna
+cy: @Cardinal please add it my profile
+> expect reply
+> expect not-contains (?i)memory question
+# Round 8e: "i love to play Rimworld" is a game, saved the moment it's said (was filed under work at the next
+# learn pass); "i also have a dog called Bean" is saved at once too (the "also" blocked the instant rule).
+gi: @Cardinal I love to play Rimworld
+> expect reply
+> expect card gi contains plays: Rimworld
+> expect card gi not-contains work: Rimworld
+gi: @Cardinal i also have a dog called Bean
+> expect reply
+> expect card gi contains dog named Bean
+# Round 8f: "I love spaghetti bolognese" is a like saved the moment it's said (the learner filed it as
+# "lives: pasta lover" and it was dropped); "i love cooking" is into; "i hate mondays" a dislike; "i love you" nothing.
+hu: @Cardinal I love spaghetti bolognese
+> expect reply
+> expect card hu contains likes: spaghetti bolognese
+hu: @Cardinal i really love cooking too
+> expect reply
+> expect card hu contains into: cooking
+hu: @Cardinal i hate mondays
+> expect reply
+> expect card hu contains dislikes: mondays
+hu: @Cardinal i love you cardinal
+> expect reply
+> expect card hu not-contains likes: you

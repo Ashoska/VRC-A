@@ -1,0 +1,27 @@
+# Learning coverage: every message counts toward the next learn pass (replied or not), a pass reads
+# everything since the previous one, and the tail is learned once the room goes quiet (45 s).
+# ambient=0 so nothing gets a reply; the chat itself triggers learning.
+@set ambient=0
+@gap 400
+[general]
+alice: ok so update on the apartment hunt
+alice: found a place near the lake, two bedrooms
+bob: nice, how much
+alice: too much lol but the view
+carol: views are worth it
+bob: are they though
+alice: i'm moving in december hopefully
+carol: need help moving? i have a car now
+alice: omg yes please carol
+bob: i'll supervise from australia
+finn: i'll supervise bob
+carol: finn you can carry the heavy stuff
+finn: i have noodle arms
+alice: noodle arms gang
+> expect quiet
+> wait
+# The room goes quiet → the last few messages are learned too (45 s quiet, ≥60 s after the last pass).
+> quiet
+> wait
+> expect summary contains (?i)(apartment|mov|place|lake|help)
+> checkpoint after-pileup

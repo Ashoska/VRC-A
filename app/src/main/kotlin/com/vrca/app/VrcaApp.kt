@@ -872,7 +872,7 @@ fun VrcaApp() {
  * Download action; "Later" exists only for the legacy non-forced path.
  */
 @Composable
-private fun UpdateDialog(
+internal fun UpdateDialog(
     info: ReleaseInfo,
     forced: Boolean,
     downloading: Boolean = false,
@@ -1459,7 +1459,7 @@ private fun BootCheckRow(label: String, state: Int, detail: String = "") {
 }
 
 @Composable
-private fun BootstrapScreen(
+internal fun BootstrapScreen(
     working: Boolean,
     error: String?,
     onRetry: () -> Unit,
@@ -1662,7 +1662,7 @@ private fun BootstrapScreen(
 }
 
 @Composable
-private fun CrashScreen(
+internal fun CrashScreen(
     crashText: String,
     onClear: () -> Unit,
     onContinue: () -> Unit
@@ -1776,7 +1776,7 @@ private suspend fun runPhase2AndStartPipeline(
    ========================================================= */
 
 @Composable
-private fun BannedScreen(reason: String) {
+internal fun BannedScreen(reason: String) {
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier

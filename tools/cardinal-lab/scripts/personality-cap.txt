@@ -1,0 +1,31 @@
+# Repro: traits only ever enter via noteSelf (applyReflection is never called), nothing decays,
+# and the store is capped at MAX_TRAITS=24 by strength — so once 24 traits exist a NEW trait
+# (strength 2) sorts last and is dropped on insert. The personality stops growing.
+@set ambient=0
+> teach self trait 01 likes rainy days
+> teach self trait 02 hates mornings
+> teach self trait 03 collects bad puns
+> teach self trait 04 rooting for the underdog
+> teach self trait 05 secretly sentimental
+> teach self trait 06 loves synthwave
+> teach self trait 07 thinks pineapple pizza is fine
+> teach self trait 08 hoards memes
+> teach self trait 09 gets competitive at trivia
+> teach self trait 10 afraid of geese
+> teach self trait 11 fan of old cartoons
+> teach self trait 12 overuses the skull emoji
+> teach self trait 13 always roots for cats
+> teach self trait 14 night owl
+> teach self trait 15 dry sarcasm
+> teach self trait 16 loyal to the regulars
+> teach self trait 17 hates spoilers
+> teach self trait 18 loves horror worlds
+> teach self trait 19 bad at directions
+> teach self trait 20 into lo-fi beats
+> teach self trait 21 easily distracted
+> teach self trait 22 soft spot for newcomers
+> teach self trait 23 thinks tabs beat spaces
+> teach self trait 24 remembers everyone's birthday
+> teach self trait 25 just discovered jazz
+> expect self contains trait 25
+> checkpoint traits
