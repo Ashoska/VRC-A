@@ -595,7 +595,7 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
  *
  * States:
  *   downloading      → "Downloading voice model… N%"
- *   model not ready  → "Speak to type" + a Download button (first use pulls ~40 MB)
+ *   model not ready  → "Speak to type" + a Download button (first use pulls ~130 MB)
  *   ready + idle     → "Tap the mic to speak" + a mic button (requests RECORD_AUDIO)
  *   listening        → "Listening… tap to stop" + a stop button
  * Dictation forces Live + Scroll on (done in the VM) so a long transcript scrolls
@@ -639,7 +639,7 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     else -> "Tap the mic to speak"
                 }
                 val sub = when {
-                    vm.speechDownloading -> "One-time ~40 MB download, then it's fully offline."
+                    vm.speechDownloading -> "One-time ~130 MB download, then it's fully offline."
                     !vm.speechModelReady -> "Download the offline voice model to dictate hands-free."
                     else -> "Dictation scrolls so it never hits the character limit."
                 }

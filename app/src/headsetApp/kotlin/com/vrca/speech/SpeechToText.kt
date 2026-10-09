@@ -33,11 +33,23 @@ object SpeechToText {
 
     private const val TAG = "SpeechToText"
     private const val SAMPLE_RATE = 16000
-    private const val MODEL_DIR = "vosk-model"
 
-    /** Vosk small English model (~40 MB), fetched on demand — never bundled. */
+    // Versioned model dir: bumping MODEL_URL MUST bump this suffix so an existing
+    // install re-downloads the new model instead of seeing the old one as "ready"
+    // (modelReady only checks am/+conf/ exist, which the old model also had). Stale
+    // model dirs are pruned by cleanupOtherModels() so we don't keep both on disk.
+    private const val MODEL_DIR = "vosk-model-022-lgraph"
+
+    /**
+     * Vosk English model, fetched on demand — never bundled. This is the ~128 MB
+     * "0.22-lgraph" model: the SAME high-accuracy acoustic model as Vosk's 1.8 GB
+     * en-us-0.22, just with a lighter dynamic language graph — far more accurate than
+     * the 40 MB small model while still loading fine in a Quest's RAM and staying a
+     * reasonable one-time download. (To change models, update this URL AND bump
+     * MODEL_DIR's version suffix.)
+     */
     private const val MODEL_URL =
-        "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+        "https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip"
 
     interface Listener {
         /** The current, still-growing utterance (replace the live tail with this). */
@@ -101,7 +113,7 @@ object SpeechToText {
                 deleteTree(dir); dir.mkdirs()
                 unzipFlattened(tmpZip, dir)
                 tmpZip.delete()
-                if (modelReady(ctx)) { onProgress(100); onDone(true, null) }
+                if (modelReady(ctx)) { cleanupOtherModels(ctx); onProgress(100); onDone(true, null) }
                 else { deleteTree(dir); onDone(false, "Model files missing after unzip") }
             } catch (e: Throwable) {
                 Log.e(TAG, "model download failed", e)
@@ -226,5 +238,17 @@ object SpeechToText {
         if (f == null || !f.exists()) return
         f.listFiles()?.forEach { deleteTree(it) }
         f.delete()
+    }
+
+    /** Delete any OTHER downloaded model dir (e.g. the old 40 MB small model, or a
+     *  previous version) so bumping the model never leaves two copies on disk. */
+    private fun cleanupOtherModels(ctx: Context) {
+        runCatching {
+            ctx.filesDir.listFiles()?.forEach { f ->
+                if (f.isDirectory && f.name != MODEL_DIR &&
+                    (f.name == "vosk-model" || f.name.startsWith("vosk-model-"))
+                ) deleteTree(f)
+            }
+        }
     }
 }

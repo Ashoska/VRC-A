@@ -2342,7 +2342,7 @@ class VrcaViewModel(
     // =========================
     // The speak button lives in the Manual Send card. On public/admin builds
     // SpeechToText.SUPPORTED is false so the whole affordance is HIDDEN. On the
-    // headset a one-time ~40 MB model download enables fully-offline recognition
+    // headset a one-time ~130 MB model download enables fully-offline recognition
     // (works on Quest, which has no Google SpeechRecognizer); the recognizer + model
     // live in RAM ONLY while listening and are freed on stop, so idle cost is zero.
     //
@@ -2371,7 +2371,7 @@ class VrcaViewModel(
         speechModelReady = SpeechToText.modelReady(app.applicationContext)
     }
 
-    /** Download the offline voice model (~40 MB) on demand. Safe to call repeatedly. */
+    /** Download the offline voice model (~130 MB) on demand. Safe to call repeatedly. */
     fun downloadSpeechModel() {
         if (!speechSupported || speechDownloading) return
         speechError = null
