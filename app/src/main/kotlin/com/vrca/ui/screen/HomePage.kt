@@ -2,6 +2,8 @@ package com.vrca.ui.screen
 
 import android.content.Context
 import android.os.PowerManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -39,6 +41,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Loop
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
@@ -532,6 +535,10 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
             ) { vm.setManualScrollFlag(it) }
         }
 
+        // Voice-to-text (headset-only; hidden on public/admin). Dictates into the
+        // field above through Live + Scroll so long speech never hits the char cap.
+        SpeechDictationRow(vm = vm, isBanned = isBanned)
+
         // Bring the input back into view as the live preview above grows/shifts
         // while typing (a small delay lets it relayout first).
         LaunchedEffect(vm.messageText.value.text, manualFieldFocused) {
@@ -578,6 +585,114 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
                 modifier = Modifier.weight(1f),
                 enabled = !isBanned
             ) { Text("Clear") }
+        }
+    }
+}
+
+/**
+ * Voice-to-text dictation row inside Manual Send. HEADSET-ONLY — returns nothing when
+ * SpeechToText.SUPPORTED is false (public/admin), so the affordance is hidden there.
+ *
+ * States:
+ *   downloading      → "Downloading voice model… N%"
+ *   model not ready  → "Speak to type" + a Download button (first use pulls ~40 MB)
+ *   ready + idle     → "Tap the mic to speak" + a mic button (requests RECORD_AUDIO)
+ *   listening        → "Listening… tap to stop" + a stop button
+ * Dictation forces Live + Scroll on (done in the VM) so a long transcript scrolls
+ * within the chatbox budget instead of being cut off.
+ */
+@Composable
+private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
+    if (!vm.speechSupported) return
+    val ctx = LocalContext.current
+
+    LaunchedEffect(Unit) { vm.refreshSpeechModelReady() }
+    // Never leave the mic recording when the card/screen goes away.
+    DisposableEffect(Unit) {
+        onDispose { if (vm.speechListening) vm.stopDictation() }
+    }
+
+    val micLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> if (granted) vm.startDictation() }
+
+    fun hasMic(): Boolean =
+        ctx.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = if (vm.speechListening) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                else MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                val label = when {
+                    vm.speechDownloading -> "Downloading voice model… ${vm.speechDownloadPct}%"
+                    !vm.speechModelReady -> "Speak to type"
+                    vm.speechListening -> "Listening… tap to stop"
+                    else -> "Tap the mic to speak"
+                }
+                val sub = when {
+                    vm.speechDownloading -> "One-time ~40 MB download, then it's fully offline."
+                    !vm.speechModelReady -> "Download the offline voice model to dictate hands-free."
+                    else -> "Dictation scrolls so it never hits the character limit."
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(label, style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        sub,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                when {
+                    vm.speechDownloading -> {
+                        // text-only progress (no indicator import); nothing tappable
+                    }
+                    !vm.speechModelReady -> {
+                        Button(
+                            onClick = { vm.downloadSpeechModel() },
+                            enabled = !isBanned
+                        ) { Text("Download") }
+                    }
+                    else -> {
+                        val listening = vm.speechListening
+                        IconButton(
+                            onClick = {
+                                if (listening) {
+                                    vm.stopDictation()
+                                } else if (hasMic()) {
+                                    vm.startDictation()
+                                } else {
+                                    micLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                                }
+                            },
+                            enabled = !isBanned
+                        ) {
+                            Icon(
+                                imageVector = if (listening) Icons.Filled.Stop else Icons.Filled.Mic,
+                                contentDescription = if (listening) "Stop dictation" else "Start dictation",
+                                tint = if (listening) MaterialTheme.colorScheme.error
+                                       else MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
+            }
+            vm.speechError?.let { err ->
+                Text(
+                    err,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
         }
     }
 }
