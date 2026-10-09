@@ -531,36 +531,125 @@ to VRC-A costs almost no extra requests if done that way.
 
 ---
 
-## 10. Concrete VRC-A plan (prioritized, mapped to our code)
+## 10. VRC-A master plan — missing / changing / improving
 
-1. **Web login** → new `VrchatWebLoginScreen` (mirror `DiscordLoginWebView`):
-   load `vrchat.com/home/login`, enable third-party cookies, poll `auth/user`,
-   seed `VrchatAuthManager`'s cookie store (auth + twoFactorAuth + UA). Add a
-   "Sign in on the VRChat website" button beside the existing login; keep the
-   password flow primary; add headless-reauth via the preserved provider cookie
-   jar; surface "re-sign-in" when `authDead` fires for a cookie-only session.
-   Give `exportSessionBundle`/auth-transfer a cookie-only variant. (Headset build
-   benefits most.)
-2. **Chatbox tokens** → extend `VrcaViewModel.resolveTokens`: `{weather}` (new
-   `WeatherFeed` helper, open-meteo + Nominatim, TTL-cached), `{date}/{uptime}/
-   {battery}/{worn}`, `{hr}`/`{bpm}` (new `HypeRateClient` WebSocket). All
-   TTL-cached per §8. Update `TokensHint`.
-3. **Synced lyrics** → `LrcLibLyrics` helper (fetch/parse/binary-search) wired into
-   `buildNowPlayingLines()` as an alternate line behind a "Show lyrics" toggle;
-   throwaway-test the LRC parser per the no-permanent-tests policy.
-4. **Offline speech dictation** (headset) → `SpeechToTextManager` (sherpa-onnx or
-   Vosk), model download into `filesDir`, FGS `microphone`, wake-word/PTT gate,
-   transcript → chatbox via the existing OSC path. Load/release the recognizer
-   with the armed state.
-5. **Avatar-OSC macros** → `OscScriptEngine` + an Automations sub-tab; reuse the
-   chatbox OSC send path and `VrcaOscQuery` params for hue/emission auto-detect.
-6. **Device telemetry panel** (headset) → one `deviceStatus()` call (battery/
-   thermal/RAM/wifi/worn) + a low-battery/on-head gate.
-7. **Foreground-app gate** → `UsageStats`-based "is VRChat foregrounded" to pause
-   non-essential loops.
-8. *(Evaluate as products, not quick wins)* watch-party/WebRTC, in-app music.
-9. Keep `docs/vrc-nexus-teardown.md` (this file) and `CLAUDE.md` updated as any of
-   these land; the old CLAUDE.md "§4.7" log-reader reference maps to §4.7 here.
+The full backlog, in three buckets: **A. Missing** (net-new to add), **B.
+Changing** (fix/correct/decide on existing behaviour), **C. Improving** (polish
+or extend what already works). Items are tagged `[both]`/`[quest]`/`[phone]`,
+effort **S/M/L**, and mapped to our classes. Draws from both the NEXUS gap
+analysis (§7) and VRC-A's own documented limitations/deferred items in CLAUDE.md.
+Complements the existing `docs/account-system-plan.md` and `docs/ui-revamp.md`.
+
+### A. MISSING — features to add
+
+**A1 — Tier 1 (cheap, additive, do first):**
+1. **VRChat web login (Steam/Meta/Viveport/Pico/SSO)** `[both, M]` → new
+   `VrchatWebLoginScreen` mirroring `DiscordLoginWebView`: load
+   `vrchat.com/home/login`, `setAcceptThirdPartyCookies(true)`, poll `auth/user`
+   until `usr_` without `requiresTwoFactorAuth`, seed `VrchatAuthManager`'s cookie
+   store (auth + twoFactorAuth + captured UA). Additive beside the password flow
+   (see B1). Unlocks the password-less SSO audience — biggest win for the headset
+   build. *(This is the item you flagged first; it anchors the plan.)*
+2. **Chatbox content tokens** `[both, S–M]` → extend `VrcaViewModel.resolveTokens`
+   with `{weather}` (new `WeatherFeed`: open-meteo + Nominatim geocode),
+   `{date}`, `{uptime}`, `{battery}`, `{worn}` `[quest]`, and `{hr}`/`{bpm}`
+   (new `HypeRateClient`, `wss://app.hyperate.io`). Every one TTL-cached per §8.
+   Update `TokensHint`.
+3. **Synced lyrics (LRCLIB)** `[both, S]` → `LrcLibLyrics` helper
+   (fetch/parse/binary-search by `positionMs`) wired into `buildNowPlayingLines()`
+   behind a "Show lyrics" toggle; throwaway-test the LRC parser.
+
+**A2 — Tier 2 (medium effort, headset-leaning):**
+4. **Offline speech-to-text dictation → chatbox** `[quest, M–L]` →
+   `SpeechToTextManager` (sherpa-onnx preferred, Vosk fallback), model **downloaded
+   on demand** into `filesDir`, FGS `microphone`, wake-word / push-to-talk gate,
+   transcript → chatbox via the existing OSC path. Recognizer loaded only while
+   armed, released on stop (RAM-bounded). Zero ongoing API cost.
+5. **Avatar-OSC macros** `[both send / quest param-detect, M]` → `OscScriptEngine`
+   + an Automations sub-tab (`set/wait/ramp/random/pulse/input/height/hue/emission/
+   loop/if/parallel`). Reuse the chatbox OSC send path + `VrcaOscQuery` params for
+   hue/emission auto-detect.
+6. **Translate a chatbox line** `[both, S]` → prefer **LibreTranslate** (clean
+   dependency) over the unofficial Google endpoint NEXUS uses. *(Was Tier-4 in the
+   old teardown; still missing.)*
+7. **Alternate now-playing sources** `[both, S–M]` → Spotify Web API OAuth +
+   Last.fm, for users whose Notification Access is denied. *(Old teardown Tier-4;
+   still missing.)*
+8. **Chatbox mini-games** `[both, M]` — optional crowd-pleaser; pure OSC-text, no
+   permissions, low risk.
+
+**A3 — Tier 3 (product bets; higher effort / real risk — decide before building):**
+9. **Watch party (WebRTC) + screen share** `[quest, L]` — needs a signaling
+   backend + TURN (we only have Firestore today). Big new surface; only if it's a
+   product direction. *(Movies via `nepu.io` — skip, piracy; see §9.)*
+10. **In-app music player (NewPipe)** `[both, L]` — popular but carries YouTube-ToS
+    + constant-breakage maintenance risk. Weigh carefully.
+11. **Embedded Discord (Vencord) client** — **do not build**; we already have the
+    lighter, safer Discord RPC. Listed only to mark it explicitly out of scope.
+
+**A4 — Infra / telemetry (cheap, cross-cutting):**
+12. **Device telemetry panel** `[quest, S]` → one `deviceStatus()` call
+    (battery/thermal/RAM/wifi/`worn` via `sys.hmt.mounted`) + a low-battery /
+    on-head feature gate.
+13. **Foreground-app gate** `[quest, S]` → `UsageStatsManager` "is VRChat
+    foregrounded" to pause non-essential loops when the user left VRChat.
+14. **Opt-in crash upload** `[both, S]` → we have a local crash screen; add a tiny
+    opt-in upload (Firestore doc or a minimal endpoint) to surface field crashes.
+15. **Meta Horizon Store build + IAP + submission manifest** `[quest, M]` → only if
+    we distribute the headset variant to the Horizon Store (CLAUDE.md lists the
+    store-submission manifest entries as still deferred). NEXUS proves the Platform
+    SDK path.
+
+### B. CHANGING — fix / correct / decide on existing behaviour
+1. **Make web login additive without weakening "log in once"** `[both, M]`,
+   `VrchatAuthManager` + the `authDead` gate: keep the username/password flow as
+   **primary** (it alone gives silent `autoRelogin`); add a **headless-reauth** that
+   leans on the preserved provider cookie jar; when `authDead` fires for a
+   cookie-only (no-password) session, surface "re-sign-in on the website" instead
+   of attempting `autoRelogin`; give `exportSessionBundle` / the auth-transfer a
+   **cookie-only variant**. (The design decision from this session's login thread.)
+2. **R2/KV cost — the passive-harvest lever** `[backend, decision]`: the remaining
+   un-pulled lever (per CLAUDE.md Increment 7/23) is throttling or disabling the
+   per-user **passive catalog harvest** (search-box + own-library) if the bill is
+   still too high. Decide: keep growth vs cap cost. No code until decided.
+3. **OSC-in phone→Quest** `[phone, M, likely won't-fix]`: our OSCQuery/OSC-in is
+   headset-only today. NEXUS confirms it advertises `OSC_IP 127.0.0.1` → same-device
+   only, so a phone receiving a Quest's OSC needs the phone to advertise its own
+   OSCQuery service on the LAN IP. Decide whether that experimental hop is worth it
+   or stays Quest-only.
+4. **Avatar-resolver ceiling (accept + hold)** `[accepted limitation]`: Quest
+   exposes no remote avatar id and `Unpacking Avatar (… by …)` author lines land
+   only ~14–44% of the time, so the name+author + image-verified crowd catalog **is**
+   the ceiling. No further resolver rework planned — just keep the catalog growing;
+   revisit only if VRChat restores a field (the `buildImageFieldsDiag` watchdog will
+   show it).
+5. **Roster mute/block** `[decided — leave removed]`: removed because VRChat's own
+   in-client mute/block is the reliable path; do not re-add.
+
+### C. IMPROVING — polish / extend what exists
+1. **Monitor-frame the boot + onboarding screens on headset** `[quest, S]` — the
+   M1.5 polish CLAUDE.md flags as not done; frame them for the Quest panel like the
+   rest of the UI.
+2. **Hold the §8 TTL-cache discipline on every new chatbox source** `[both]` — any
+   token added in A2 must cache (weather 10 min, instance 25 s, friend-alerts 30 s,
+   HR live-socket) so a per-tick chatbox never drives per-tick requests.
+3. **Bound roster tail reads** `[quest, S]` — ours is already FileObserver-instant
+   (better than NEXUS's poll); optionally adopt VrcCache's `(size,modified)` tail
+   cache + bounded tail size if our reads aren't already capped.
+4. **Rich-content deferred polish** `[both, S]` — faststart (moov-at-front)
+   transcode + release-retract media cleanup, both noted "still open" in CLAUDE.md.
+5. **Headset fixed-panel resize** `[accepted]` — Horizon OS has no hard "no-resize"
+   API; the width-responsive framing + 3/2/1-column thresholds already degrade
+   gracefully, so leave as-is unless Meta adds an API.
+6. **Discord RPC backend-down** `[accepted]` — a healthy socket while Discord's
+   presence backend is down is client-undetectable; nothing to do.
+
+### Sequencing
+**A1 first** (web login + tokens + lyrics) with **B1** riding alongside A1's web
+login; then **A2** (speech, macros, translate, alt now-playing) and the cheap
+**A4** infra in parallel; **A3** only as deliberate product decisions; **B/C**
+fixes folded in opportunistically. Keep this file + `CLAUDE.md` updated as items
+land (the old CLAUDE.md "§4.7" log-reader reference maps to §4.7 here).
 
 ---
 
