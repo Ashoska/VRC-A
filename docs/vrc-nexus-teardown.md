@@ -1,634 +1,722 @@
-# VRC-NEXUS teardown + VRC-A gap analysis
+# VRC-NEXUS teardown v2 + VRC-A gap analysis & plan
 
-A full reverse-engineering writeup of the competitor APK the user supplied
-(`com.deize.vrcnexus.quest`, "VRC-NEXUS", **version 0.4.8 / code 53**), followed
-by a gap analysis of what VRC-A is missing and what is worth borrowing — scoped
-to things that are **mobile- and Quest-compatible**.
+A complete, from-scratch reverse-engineering of the competitor APK
+(`com.deize.vrcnexus.quest`, "Nexus VRC", **version 1.49.105 / code 454**),
+followed by a gap analysis of what VRC-A is missing, what is worth borrowing,
+and what helps **RAM / request-endpoint efficiency** — then a concrete plan.
 
-This is a facts/techniques document (log formats, public APIs, OSC/OSCQuery
-behaviour, permission models). No third-party source code is copied into the
-repo; the APK and its decompiled output were analysed in a scratch directory and
-were **not** committed. Learn the *technique*, write our own code.
+> **This document fully supersedes the earlier 0.4.8/code-53 teardown.** NEXUS
+> was rewritten from the ground up between the two versions: the old build was a
+> Capacitor/Vue hybrid with a few dumb native plugins; this one is a **native
+> Kotlin app** (Gradle 8.9, Kotlin 2.0.21, Java 17) whose UI is still web but is
+> now driven by a large hand-written native bridge, with a real cloud backend,
+> WebRTC, offline speech, and Meta-Store monetization. Treat nothing in the old
+> doc as current except the VRChat log grammar (unchanged) and the OSC wire
+> format (unchanged).
 
-> TL;DR of the two questions that kicked this off:
-> 1. **Can we detect the user typing/sending in VRChat's OWN in-game chatbox?**
->    **No.** Neither the VRChat logs nor OSC expose in-game chatbox typing or
->    text. NEXUS doesn't do it either — it can't. See §6.
-> 2. **Does OSCQuery let us truly confirm the chatbox landed (vs a blind IP ping)?**
->    **Partly.** OSCQuery/OSC-in confirms *VRChat is running with OSC enabled and
->    reachable* — a far better "our chatbox WILL be received" signal than a ping —
->    but it does **not** echo `/chatbox/input`, so you can't confirm a specific
->    message rendered. And it exposes live avatar state (mute, AFK, movement…).
->    See §6.
+This is a facts/techniques document (architecture, endpoints, permissions,
+log/OSC formats, caching/TTL/RAM techniques). **No third-party source is copied
+into the repo** — the APK was decompiled to a scratch dir and analysed; we learn
+the *technique* and write our own code. Ethics/risk notes are called out in §9.
 
 ---
 
-## 1. What VRC-NEXUS actually is
+## 1. What Nexus VRC is now (architecture)
 
-A **Capacitor hybrid app**: a thin native Android shell (Capacitor/Cordova
-bridge) wrapping a Vue web app, plus a handful of **custom native plugins** that
-do the things a WebView can't (UDP sockets, log-file reading, MediaSession,
-foreground services). All the product logic (UI, VRChat API calls, feature
-wiring) lives in one minified JS bundle; the native plugins are dumb bridges the
-JS calls into.
+A **native Kotlin Android app that hosts a web UI in a WebView** and exposes a
+single fat native bridge object to it. Concretely:
 
-Critically, **NEXUS runs ON the Quest headset itself** (it's a Quest-side APK),
-so it talks to VRChat over `127.0.0.1` — OSC in/out and log files are all local.
-This is the single most important scoping fact for the gap analysis (§9–10):
-NEXUS's cleverest features are "free" only because it shares a device with
-VRChat. It can also target a custom LAN host for chatbox send.
+- **`MainActivity`** builds a `FrameLayout` root, puts a main `WebView` in it
+  that loads the **bundled** web app `file:///android_asset/index.html` (a single
+  ~1.4 MB HTML/CSS/JS file — the entire product UI, "Nexus VRC"), and calls
+  `addJavascriptInterface(new VrcBridge(...), ...)`.
+- **`VrcBridge`** (~2700 lines) is the one bridge: ~110 `@JavascriptInterface`
+  methods the web UI calls to do everything a WebView can't — authenticated
+  VRChat API calls, OSC send/receive, log reading, speech, device telemetry,
+  Meta billing, and launching the services below. The web UI owns product logic
+  and *which* endpoints to hit; the native side is a thin, authenticated
+  do-er. (This is the inverse of VRC-A, which is native Compose end-to-end.)
+- **Native "child window" panels**: Movies, Discord, and Spotify each run in
+  their **own Activity** (`MovieActivity`/`DiscordActivity`/`SpotifyActivity`,
+  each with its own `taskAffinity` so Horizon OS gives it a **separate Quest
+  panel**). In-place, the JS can also **mount/position/unmount** extra native
+  WebViews and a WatchParty `SurfaceView` as children of the main FrameLayout
+  (`mountMovies/mountDiscord/mountSpotify/partyPosition` take x/y/w/h), i.e. the
+  web UI lays out native surfaces by pixel rect over itself and hides them with
+  `setOverlaysHidden`.
+- **A real cloud backend**: `https://api.vrc-nexus.online` (crash upload, Last.fm
+  + Discord-presence relays, avatar-DB proxy fallback), plus a **LiveKit**
+  deployment at `livekit.vrc-nexus.online` (TURN/ICE for the watch party). The
+  old Cloudflare Worker (`vrc-nexus-community-proxy.deizeljkite.workers.dev`)
+  survives only as a fallback host.
+- **Runs ON the Quest** (Quest-side APK) — so OSC, OSCQuery, and VRChat logs are
+  all local (`127.0.0.1` / on-device files). This is still the single most
+  important scoping fact: NEXUS's "free" local-device tricks are free only
+  because it shares a device with VRChat.
 
-Stack: Capacitor 6-ish, Vue 3, `@capacitor/{app,browser,filesystem,preferences}`
-(stock plugins), **no native `.so` libraries at all**. Quality is low/AI-authored
-(the user's own words — "the kid was too lazy to code"): copious duplicated
-try/catch, a demo/mock mode gate, but the ideas are sound.
-
----
-
-## 2. Build facts & permissions (from the decoded manifest)
-
-- `appId` = `com.deize.vrcnexus.quest`, label `VRC-NEXUS`
-- `versionName` 0.4.8 / `versionCode` 53, `targetSdk` 34, `minSdk` 22
-- Permissions:
-  - `INTERNET`
-  - `ACCESS_WIFI_STATE`, **`CHANGE_WIFI_MULTICAST_STATE`** ← required for
-    OSCQuery mDNS discovery (NsdManager) + a WiFi multicast/high-perf lock
-  - `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`
-  - `POST_NOTIFICATIONS`, `WAKE_LOCK`
-  - `READ_MEDIA_IMAGES`, `READ_EXTERNAL_STORAGE` (maxSdk 32),
-    **`MANAGE_EXTERNAL_STORAGE`** ← "All files access", for reading VRChat logs
-  - a private `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` (Capacitor boilerplate)
-  - Notification-listener access is via the `BIND_NOTIFICATION_LISTENER_SERVICE`
-    component permission on `NexusNotificationListener` (granted by the user in
-    Settings, not a `uses-permission`).
-
-Note it does **not** request battery-optimization exemption or any OEM
-allow-list — VRC-A's background-survival stack is far more sophisticated.
+Quality is much higher than the 0.4.8 build but still single-author; lots of
+copy-pasted try/catch, but the ideas and the breadth are serious.
 
 ---
 
-## 3. File-by-file inventory
+## 2. Build facts & manifest
 
-### 3.1 Web assets (`assets/public/…`)
-| File | What it is |
-|---|---|
-| `index.html`, `assets/index-*.css` | Vue app shell + styles |
-| `assets/index-5B-LUbNU.js` (~316 KB) | **The entire app**: UI, VRChat API client, feature logic, OSC message building, chatbox config schema, avatar-DB search, lyrics/translate/weather calls |
-| `assets/web-*.js` (4 files) | Vendor/runtime chunks |
-| `cordova.js`, `cordova_plugins.js`, `native-bridge.js` | Capacitor bridge glue |
-| `capacitor.config.json` | `appId`/`appName`, `androidScheme:https`, `allowMixedContent:true` |
-| `capacitor.plugins.json` | Registers the 4 stock Capacitor plugins |
-| `assets/dexopt/baseline.prof*` | ART baseline profile (perf only) |
-
-### 3.2 Native classes (`classes.dex`, package `com.deize.vrcnexus.quest`)
-| Class | Role |
-|---|---|
-| `MainActivity` | Capacitor `BridgeActivity`; registers the 6 custom plugins |
-| `OscPlugin` + `OscUtil` (+`OscUtil$Msg`) | OSC send/receive, OSC encode/decode, OSCQuery discovery, starts Chatbox/Script services |
-| `ChatboxService` | Foreground service; the **native chatbox compositor + sender loop** |
-| `ScriptService` | Foreground service; the **avatar-OSC automation/macro engine** |
-| `NowPlayingPlugin` (+`$Snapshot`,`$LyricLine`) | MediaSession now-playing + **LRCLIB synced lyrics** |
-| `NexusNotificationListener` | `NotificationListenerService` (media-session source) |
-| `SpotifyBroadcastListener` | `BroadcastReceiver` for Spotify's metadata/playback broadcasts |
-| `VrcCachePlugin` (+`$Doc`,`$Hit`,`$Player`) | **VRChat log-file reader + instance roster scanner** |
-| `VrcUploadPlugin` | Authenticated multipart image upload to the VRChat API |
-| `UpdaterPlugin` | Download APK + launch package installer (self-update) |
-| `BatteryAlertPlugin` + `BatteryAlertService` | Headset low-battery watcher + alert |
-| `R` | Generated resource IDs |
-
----
-
-## 4. Native systems, in depth
-
-### 4.1 OSC transport — `OscUtil`
-A minimal hand-rolled OSC 1.0 codec (no library):
-- `oscString()` — null-terminated, 4-byte-aligned OSC strings.
-- Builders: `msgFloat(addr,f)` `,f`; `msgInt(addr,i)` `,i`; `msgBool(addr,b)`
-  `,T`/`,F`; **`msgChatbox(text)` → address `/chatbox/input`, typetag `,sTF`**
-  (string + **True = send immediately/bypass keyboard** + **False = no
-  notification sound**), text `truncateUtf16`-capped to **144** UTF-16 units.
-- `decodeFirst(bytes,len)` — decodes an inbound packet's address + first arg
-  (handles `f i s T F d`). Used to read VRChat's OSC output.
-- `sendAll(sock, bytes, hosts[], port)` — fan a packet to multiple hosts.
-
-> VRC-A parity note: this is exactly what `VrcaOsc` already does. Same 144 cap,
-> same `,sTF` chatbox typetag. Nothing to learn here except confirmation our
-> wire format is correct.
-
-### 4.2 `OscPlugin` — the bridge the JS drives
-Plugin methods (JS-callable):
-- `send({host,port,data})` — base64 OSC packet out (default port **9000**).
-- `startListen({port})` / `stopListen()` — **bind a UDP receive socket on port
-  9001** (VRChat's OSC OUTPUT port) and stream every packet up to JS as base64
-  via a `notifyListeners("osc", …)` event. Also, natively, it maintains a live
-  `params` map:
-  - `/avatar/change` → clears `params` and kicks an OSCQuery re-scan.
-  - `/avatar/parameters/<name>` → stores the latest value in `params` (keyed by
-    `<name>`).
-- `discoverParams()` — **OSCQuery discovery**: uses Android `NsdManager` (mDNS)
-  to find VRChat's advertised OSCQuery HTTP service, `httpGet`s the JSON tree,
-  and `walkOscQueryJson` recursively collects every `FULL_PATH` under
-  `/avatar/parameters/*` that has a `TYPE` — i.e. it enumerates the current
-  avatar's full parameter list without VRChat sending anything.
-- `noteParams({names})` — JS can seed known param names.
-- `onAvatarChanged()` auto-rescans with backoff (`4s,4s,6s,8s,10s`) after an
-  avatar swap (params churn until VRChat republishes).
-- `localIp()` — first non-loopback IPv4 (for the "send to this IP" UI).
-- `chatboxStart/Stop/Update` and `scriptStart/Stop` — configure + launch the two
-  foreground services below.
-
-So NEXUS has a **live model of the local avatar's OSC parameters**, fed by both
-push (OSC-in on 9001) and pull (OSCQuery). That is the enabling primitive for its
-"mute / AFK / movement / any-param" chatbox lines and its script engine's
-auto-detection.
-
-### 4.3 `ChatboxService` — native chatbox compositor
-A foreground service (channel `nexus_osc_bg`) holding a `PARTIAL_WAKE_LOCK` + a
-WiFi lock, running a 250 ms tick loop that composes a chatbox string from a
-JSON config and sends `/chatbox/input` to all `hosts:port` at most every
-`sendMs` (default 1500, floored to 400) — with a fast path for lyrics (re-send
-when the lyric line changes, min 600 ms apart).
-
-**It appends the exact same invisible-background egg VRC-A uses**:
-`EGG_SUFFIX = ""` (U+0003 + U+001F) — confirming our "minimal
-background / skinny bubble" trick is the shared community approach.
-
-Chatbox **line types** it can compose (`lineFor`):
-| id | Output | Source |
-|---|---|---|
-| `lyrics` | current synced lyric line | LRCLIB (NowPlaying) |
-| `media` | `Title — Artist (m:ss/m:ss)` | MediaSession/Spotify |
-| `time` | 12/24h, optional seconds, optional `My time:` prefix | device clock |
-| `date` | `EEE, MMM d` | device clock |
-| `uptime` | `Up 1h 23m` | service start time |
-| `battery` | `Battery 84% ⚡` | `BATTERY_CHANGED` |
-| `mic` | `🔇 Muted` / `🎤 Mic on` | OSC param `MuteSelf` |
-| `afk` | `💤 AFK` | OSC param `AFK` |
-| `movement` | `🪑 Sitting` / `🧍 Standing` / `🏃 1.4 m/s` | OSC params `Seated`, `VelocityX`, `VelocityZ` |
-| `vrcparam` | `Label: value` for **any** avatar param | OSC params map |
-| `personal` | cycling free-text statuses (interval) | config |
-| `weather` | text (JS fills from open-meteo) | JS |
-| `players` / `instance` | instance size / world+instance | JS (from log roster) |
-| `translate` | a line translated to another language | JS (Google Translate) |
-
-### 4.4 `ScriptService` — avatar-OSC automation / macro engine
-A foreground service (channel `nexus_script_bg`) that runs a JSON "program" of
-blocks against the avatar's OSC parameters — a full little scripting language:
-| block | effect |
-|---|---|
-| `set` | set `/avatar/parameters/<p>` to on/off/int/float |
-| `wait` | sleep N ms |
-| `chatbox` | send `/chatbox/input` text inline |
-| `random` | set a param to a random value in `[min,max]` |
-| `input` | pulse a VRChat action `/input/<Action>` (e.g. Jump), 120 ms |
-| `height` | set/`sweep` `/avatar/eyeheight` |
-| `ramp` | linear `sweep` a param `from→to` over N s (optional ping-pong, ~20 steps/s) |
-| `hue` / `emission` | **auto-detect** hue/emission-ish params by name (`hue,tint,rainbow,chroma,…` / `emiss,glow,bloom,…`, skipping built-ins) and sweep/set them |
-| `loop` | repeat child blocks N times (0 = forever) |
-
-This is avatar *control*, not just chatbox — colour cycling, height sweeps, input
-macros, timed parameter sequences. VRC-A has nothing in this category.
-
-### 4.5 `NowPlayingPlugin` — media + **synced lyrics**
-- Media snapshot from three sources, in order: active `MediaSession`s (via
-  `MediaSessionManager.getActiveSessions` bound to the notification listener) →
-  media-session tokens pulled off active notifications → the Spotify broadcast
-  fallback. Picks the "best" controller (playing > known music pkg > any).
-  Live position extrapolated from `PlaybackState` + `elapsedRealtime`.
-- **Lyrics via LRCLIB** (`https://lrclib.net/api/get` then `/api/search`,
-  free/no-key): fetches `syncedLyrics` (LRC `[mm:ss.xx]` format), parses to a
-  sorted `(timestampMs, text)` list, and **binary-searches the current line by
-  playback position** — updated in the chatbox as fast as every 600 ms. Caches
-  per track; retries failed lookups after an 8 s cooldown.
-
-### 4.6 `SpotifyBroadcastListener`
-`BroadcastReceiver` for Spotify's (legacy but still-emitted) broadcasts
-`com.spotify.music.metadatachanged` / `playbackstatechanged` — reads
-`track/artist/length/playing/playbackPosition`. A no-notification-access
-fallback source; data considered stale after 20 s.
-
-### 4.7 `VrcCachePlugin` — VRChat log reader + instance roster
-The headline native system. VRChat writes a rolling text **output log** while
-running (Quest included, when Logging is set to FULL). NEXUS reads it to
-reconstruct **who is in your current instance** — data the VRChat API does *not*
-expose.
-
-Access strategy (tries all, in order):
-1. Direct file read of `Android/data/<vrcpkg>/files`, `/sdcard/Documents/Logs`,
-   `/sdcard/Documents/VRChat`, `/sdcard/VRChat/Logs` (needs `MANAGE_EXTERNAL_
-   STORAGE` / All-files access). VRChat Quest package is
-   `com.vrchat.VRChatAndroid` (or legacy `com.vrchat.oculus.quest`).
-2. **SAF** `ACTION_OPEN_DOCUMENT_TREE` (initial URI `primary:Documents/Logs`) +
-   `takePersistableUriPermission` — a folder the user grants once, re-resolved
-   from `getPersistedUriPermissions`.
-3. ADB fallback: it literally hands the user the command
-   `adb shell appops set <pkg> MANAGE_EXTERNAL_STORAGE allow` and checks
-   `Settings.Global adb_enabled`.
-
-It tails the newest ~6 log files (last N MB each), then scans lines with these
-**regexes** (the important part — the log grammar):
-```
-world+instance : Joining\s+(wrld_…{36}):(\S+)
-player join     : OnPlayerJoined\s+(.+?)(?:\s+\((usr_…{36})\))?\s*$
-player leave    : OnPlayerLeft\s+(.+?)(?:\s+\((usr_…{36})\))?\s*$
-avatar switch   : Switching\s+(.+?)\s+to avatar\s+(.+?)\s*$
-avatar unpack   : Unpacking Avatar\s+\((.+?)\s+by\s+(.+?)\)\s*$
-bare id scan    : (avtr|wrld|usr)_…{36}
-```
-It joins these into a **per-instance roster**: for each present player it resolves
-`{ name, usr_id, avatarName, avatarCreator, avatar_id }` by correlating
-`OnPlayerJoined`, `Switching … to avatar …`, `Unpacking Avatar (… by …)`, and any
-`usr_`/`avtr_` co-occurrence. A `Joining wrld_…` line resets the roster (new
-instance). `OnPlayerLeft` removes people. Two JS entry points: `scan` (raw id
-frequency counts by type) and `instanceUsers` (the assembled roster + world +
-instance).
-
-This is genuinely powerful: **instance co-occupants (including non-friends) and
-their currently-worn avatars + avatar authors + avatar IDs** — impossible via the
-VRChat API. The scanned `avtr_`/`usr_` IDs then feed the avatar-DB search (§7).
-
-### 4.8 `VrcUploadPlugin`
-Authenticated multipart POST of a base64 PNG to a VRChat API URL (the JS supplies
-the URL, `Cookie`, `User-Agent`, and a `tag` field). Used with `/api/1/file/…`
-for VRChat image assets (e.g. a rendered-image upload path). Confirms the JS
-holds a logged-in VRChat session cookie.
-
-### 4.9 `UpdaterPlugin`
-Downloads an APK to `cacheDir/updates/update.apk` and fires
-`ACTION_VIEW` via `FileProvider` (`application/vnd.android.package-archive`) to
-launch the system installer. Update manifest source:
-`raw.githubusercontent.com/XnotCykoX/vrc-nexus-quest/main/update.json`.
-(VRC-A's forced-update + directed-release system is far more capable.)
-
-### 4.10 `BatteryAlertPlugin` / `BatteryAlertService`
-Foreground service watching `BATTERY_CHANGED`; fires a high-priority
-"Headset battery low" notification when level ≤ threshold (default 20%, clamped
-1–90), with +5% hysteresis and reset-on-charging. On Quest this = **headset**
-battery.
+- `package` **`com.deize.vrcnexus.quest`**, internal code package **`com.nexus.vrc`**,
+  label "Nexus VRC". `versionName` **1.49.105** / `versionCode` **454**.
+- `minSdk` **24**, `targetSdk` **34**. Kotlin 2.0.21 / Gradle 8.9 / Java 17.
+- `usesCleartextTraffic="true"` + an `@xml/network_security_config` (for plain
+  `http://` OSCQuery on the LAN). `allowBackup=true`, fullBackup + dataExtraction
+  rules. `extractNativeLibs=true`.
+- **Meta/Oculus Platform AppID** meta-data `1114160378456702` (native entitlement
+  + billing).
+- **Permissions**: `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE`,
+  **`CHANGE_WIFI_MULTICAST_STATE`** (OSCQuery mDNS + multicast lock),
+  **`MANAGE_EXTERNAL_STORAGE`** (read VRChat logs), `READ_EXTERNAL_STORAGE`
+  (maxSdk 32), `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_SPECIAL_USE` +
+  `FOREGROUND_SERVICE_MICROPHONE` + `FOREGROUND_SERVICE_MEDIA_PROJECTION` +
+  `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, `RECORD_AUDIO`, `CAMERA` (optional
+  feature), `WAKE_LOCK`, `POST_NOTIFICATIONS`,
+  **`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`** (new vs 0.4.8 — they now ask for the
+  battery exemption). Note it does NOT request `PACKAGE_USAGE_STATS` in the
+  manifest (the foreground-app feature checks for it and sends the user to
+  Settings; see §4.14).
+- **Activities** (each a separate Quest panel via `taskAffinity`): `MainActivity`
+  (launcher; default 980×800 dp panel), `MovieActivity` (900×560), `DiscordActivity`
+  (1000×640), `SpotifyActivity` (1000×640).
+- **Services (6)** — notable that each feature owns a **purpose-typed** FGS
+  rather than one mega keep-alive:
+  | Service | FGS type | Purpose |
+  |---|---|---|
+  | `NexusNotificationListener` | (notification listener) | MediaSession/now-playing source |
+  | `ChatboxService` | `specialUse` | the OSC chatbox compositor + sender (survives backgrounding) |
+  | `ScriptService` | `specialUse` | avatar-OSC automation/macros |
+  | `SpeechService` | `microphone` | offline speech-to-text capture |
+  | `MediaProjectionService` | `microphone\|mediaProjection` | screen + internal-audio capture for the watch party |
+  | `MusicPlayerService` | `mediaPlayback` | in-app music player |
 
 ---
 
-## 5. VRChat log line catalog (Quest = same format as PC)
+## 3. Libraries (native + Java)
 
-VRChat's output log format is identical across PC and Quest/Android (Unity
-`Debug.Log`), so PC log knowledge fills the gaps NEXUS didn't bother to parse.
-Requires **Settings → Debug → Logging = FULL** in VRChat. Line prefix is roughly:
-`2026.07.28 12:00:00 Log        -  [Behaviour] …`.
+**Native `.so` (arm64-v8a only):**
+- `libovrplatformloader.so` + `libpsdk_jni.so` — **Meta/Oculus Platform SDK**
+  (entitlement + in-app purchases).
+- `libjingle_peerconnection_so.so` — **WebRTC** (the watch party).
+- `libvosk.so`, `libonnxruntime.so`, `libsherpa-onnx-{jni,cxx-api,c-api}.so` —
+  **offline speech** (Vosk + sherpa-onnx/ONNX Runtime).
+- `libjnidispatch.so` — **JNA**. `libc++_shared.so` — C++ runtime.
 
-NEXUS parses only the six rows marked ✅ below. The rest are the **additional
-signal VRC-A could extract** from the same file (all Quest-available):
-
-| Log line (substring) | Exposes | NEXUS? |
-|---|---|---|
-| `[Behaviour] Joining wrld_<id>:<instanceId>~<tags>` | world id + full instance string incl. access tags & nonce | ✅ (id+instance) |
-| `[Behaviour] Joining or Creating Room: <World Name>` | human world **name** | ❌ |
-| `[Behaviour] Entering Room: <World Name>` | world name (confirm) | ❌ |
-| `[Behaviour] OnPlayerJoined <name> (usr_<id>)` | co-occupant join | ✅ |
-| `[Behaviour] OnPlayerLeft <name> (usr_<id>)` | co-occupant leave | ✅ |
-| `[Behaviour] Switching <name> to avatar <avatarName>` | their worn avatar name | ✅ |
-| `[Behaviour] Unpacking Avatar (<name> by <author>)` | avatar author | ✅ |
-| bare `usr_`/`wrld_`/`avtr_` UUIDs anywhere | id harvesting | ✅ |
-| `[Behaviour] OnLeftRoom` / `Successfully left room` | you left the instance | ❌ |
-| `[Behaviour] Received Notification:<…>` (invite/requestInvite/friendRequest) | incoming VRChat notifications | ❌ |
-| `[Video Playback] / [Video Playback] Attempting to resolve URL '<url>'` | the video/URL currently playing in-world | ❌ |
-| `[String Download] / [Image Download] Attempting to load … '<url>'` | world string/image loads | ❌ |
-| `[Behaviour] Destination fetching…` / `[Behaviour] Portal…` | portal drops/joins | ❌ |
-| `[USharpVideo]/[ProTV]` etc. | world-specific player state | ❌ |
-| `Took screenshot to: <path>` (VRC camera) | photo taken | ❌ |
-| `[API]`/`[Network]` request lines | connectivity/latency, session | ❌ |
-
-**Instance access-type tags** inside the `Joining wrld_…:<instanceId>` string
-(same grammar VRC-A already parses from a location string):
-`~region(us|use|usw|eu|jp)`, `~private(usr_…)` (invite/invite+),
-`~friends(usr_…)` (friends), `~hidden(usr_…)` (friends+),
-`~group(grp_…)~groupAccessType(members|plus|public)`, `~canRequestInvite`,
-and `~nonce(<token>)` (the join token). Public instances have no owner tag.
-
-**What logs do NOT contain** (important negatives): your own or others' **chatbox
-text/typing**, mic mute state, trust rank, voice activity, or OSC values. Those
-come from OSC/OSCQuery (mute/AFK/movement) or the API (rank), not the log. See §6.
+**Java libraries (from package dirs):** `okhttp3`; **`org.schabi.newpipe`
+(NewPipeExtractor)** for YouTube/stream resolution; **`org.webrtc`**;
+**`com.k2fsa.sherpa.onnx`** + `org.vosk`; **`org.mozilla.javascript` (Rhino)** —
+NewPipe needs it to run YouTube's `base.js` for signature/throttling deciphering;
+**`org.jsoup`** (HTML parsing, NewPipe + scraping); **`com.meta`** (Platform SDK);
+`google.protobuf`. The bundled **Vencord** mod (`assets/vencord.user.{js,css}` +
+`vencord-themes.js`) is injected into the Discord panel, not a Java lib.
 
 ---
 
-## 6. OSC & OSCQuery: what's exposed (and the typing answer)
+## 4. Subsystem teardown
 
-VRChat's OSC surface, and precisely what a companion app can and can't observe:
+### 4.1 `VrcBridge` — the native capability surface
+One class, ~110 `@JavascriptInterface` methods, a `newCachedThreadPool` executor,
+and the session store `SharedPreferences("nexus_vrc_session")` (plain, **not**
+encrypted — VRC-A's EncryptedSharedPreferences is better). Groups:
 
-**Sent TO VRChat (`:9000`, we already do all of this):**
-- `/chatbox/input` `,sTF` (text, sendNow, sound) — the chatbox.
-- `/chatbox/typing` `,T/,F` — the typing indicator. **This is something YOU
-  send**, not something VRChat reports; NEXUS sends it too (`Ys("/chatbox/typing",
-  [{type:"b",value:!!e}])`). There is no inbound equivalent.
-- `/avatar/parameters/<p>`, `/input/<Action>`, `/avatar/eyeheight` — avatar/input
-  control (NEXUS's script engine; VRC-A doesn't use these).
+- **Session/API**: `login` (Basic auth — URI-encodes user:pass then base64),
+  `webLogin` (web cookie harvest, §4.2), `verifyTwoFactor` (`POST
+  auth/twofactorauth/{totp|otp|emailotp}/verify`), `logout` (`PUT logout` + wipe),
+  `hasSession`, and the key one: **`apiRequest(method, path, body)`** — a generic
+  authenticated passthrough. `open()` prepends `https://api.vrchat.cloud/api/1/`
+  when `path` isn't absolute, attaches `Cookie` + the stored `User-Agent`
+  (`"NexusVRC/1.0.0 nexus.vrc.app@gmail.com"`), and `captureCookies()` **rolls any
+  `Set-Cookie` forward** on every response (browser-style session keep-alive).
+  So the JS makes *all* VRChat calls through this one method; the endpoint list
+  lives in the web app, not native.
+- **Allow-listed extra fetches**: `netGet`/`netGet(bearer)`/`netPostForm` only
+  permit a fixed host set (`open-meteo`, `nominatim.openstreetmap.org`,
+  `lrclib.net`, `translate.googleapis.com`, `accounts.spotify.com`,
+  `api.spotify.com`) — a clean SSRF/abuse guard for a JS-driven bridge.
+- **OSC**: `oscSend` (one-shot UDP), `startBgChatbox`/`stopBgChatbox`/
+  `updateBgChatbox`/`bgChatboxStatus` (drive ChatboxService), `startBgScript`/
+  `stopBgScript` (ScriptService), `oscListenStart/Stop/Status` (bind UDP 9001),
+  `discoverParams`/`oscParamsSnapshot` (OSCQuery), `pushPresenceContext` (hand the
+  VRChat session token + name/id + world name to ChatboxService so it keeps
+  sending **while the web UI is gone/backgrounded**).
+- **Native panels**: `moviesMount/Position/Unmount/…`, `discordMount/…`,
+  `spotifyMount/…`, `partyStartHost/Join/Position/Leave/SetMuted/ForceMute/Kick/
+  Ban/Unban`, `setOverlaysHidden`, `openBrowser`, `padSetEnabled` (gamepad).
+- **Music**: `resolveMusic`/`prefetchMusic`/`warmMusic` + `musicPlayQueue` and
+  `musicPause/Resume/Next/Prev/Seek/SetVolume/Stop/State`.
+- **Speech / mic**: `speechStatus`, `speechDownloadModel` (progress→JS),
+  `speechStart/Stop/Arm`, `micTest`.
+- **Meta IAP**: `metaIapStatus`, `metaPurchase`, `metaAgeCategory`,
+  `metaPendingPurchases`.
+- **Log cache**: `cacheStatus`, `cacheScan(files, MB)`, `cacheInstanceUsers(MB)`,
+  `cacheDebugInfo`, `cacheRequestAccess`, `cachePickFolder` (SAF), `cacheClearFolder`.
+- **Now-playing**: `nowPlaying`, `nowPlayingRequestAccess`.
+- **Device / perms**: **`getDeviceStatus`** — ONE call returns battery %/charging/
+  temp, storage free/total, thermal status, media volume + muted, Wi-Fi RSSI/bars/
+  Mbps, RAM total/avail/lowMemory, display refresh Hz, device uptime, charge-time,
+  and **`worn`** (headset on-head via the `sys.hmt.mounted` system property).
+  `getForegroundApp` (UsageStats), `openUsageAccessSettings`, `isBatteryUnrestricted`
+  / `requestBatteryUnrestricted`.
+- **OSC-in internals**: `oscListenStart` binds UDP 9001 (SO_REUSEADDR, 5 retries),
+  reads packets into `oscParams` (push) AND batches them to JS via
+  `window.__nexusOscBatch` on a **66 ms coalescing flush** (`OSC_FLUSH_MS`), with
+  the pending map **capped at 400** and keyed by address so repeated updates to one
+  param collapse. It also starts OscQuery's poller + advertise server (§4.3).
 
-**Received FROM VRChat (`:9001` + OSCQuery):**
-- `/avatar/change` — avatar swapped (id in the value).
-- `/avatar/parameters/<p>` — every avatar parameter VRChat publishes, including
-  the built-ins: `MuteSelf`, `AFK`, `VelocityX/Y/Z`, `Grounded`, `Seated`,
-  `Upright`, `InStation`, `Voice`, `Viseme`, `GestureLeft/Right`, `TrackingType`,
-  `IsLocal`, `AngularY`, `Earmuffs`, `ScaleFactor`, etc.
-- **OSCQuery** advertises VRChat's OSC endpoint over mDNS (`_oscjson._tcp` /
-  `_osc._udp`) and serves a JSON tree of every available parameter path + type —
-  so you can enumerate the current avatar's params without waiting for pushes.
+### 4.2 Login — `VrcWebLogin` + `AuthWindow`  *(the headline change)*
+- **`VrcWebLogin`** (the Google/Steam/Meta-capable VRChat login): a full-screen
+  `Dialog` + `WebView` loading **`https://vrchat.com/home/login`** with
+  `setAcceptThirdPartyCookies(true)` (the SSO-redirect enabler), clearing any old
+  `auth`/`twoFactorAuth` first. **It never drives or parses the login** — VRChat's
+  own page does username/password, 2FA, AND "Sign in with Steam/Meta/…". Success
+  is detected by **polling**: every ~1.2 s (and on `onPageFinished`) it reads the
+  `auth` cookie from the WebView's `CookieManager` (must start with `authcookie_`),
+  then does a background `GET auth/user` with that cookie + the WebView UA, and
+  completes only when the body has `"id":"usr_"` **and not** `requiresTwoFactorAuth`.
+  It returns `(authCookie, twoFactorAuthCookie, userAgent)`; `VrcBridge.webLogin`
+  stores them and the UA, then every API call rides those cookies with roll-forward.
+  **No password is ever captured**, and there is no auto-relogin — a truly dead
+  cookie means re-opening the web login (cookie roll-forward is the only cushion).
+- **`AuthWindow`** is a *separate, generic* OAuth redirect-catcher (loads a
+  provider authorize URL, watches `shouldOverrideUrlLoading` for a `redirect_uri`
+  prefix, returns the redirect URL with the `code`). Used for Spotify/third-party,
+  **not** VRChat.
 
-**Answering the two questions directly:**
+### 4.3 OSC + OSCQuery — `OscQuery` + the `VrcBridge` listener
+- **OSC-in**: UDP 9001 listener (§4.1) → `oscParams` live map; `/avatar/change`
+  triggers an OSCQuery rescan; `/avatar/parameters/<p>` stores the value.
+- **OSCQuery PULL (`OscQuery`)**: `startPoller` refreshes every **15 s** —
+  mDNS-discovers VRChat's `_oscjson._tcp`, resolves, GETs the param tree (1.8 s
+  timeout), walks `/avatar/parameters/*` with a `TYPE` into `oscParams`. Avatar-id
+  change clears the map. `onAvatarChanged` does a backoff rescan at 0/3/6/10 s,
+  generation-guarded so a newer swap cancels an older rescan.
+- **OSCQuery ADVERTISE (`startServer`)**: binds an ephemeral `ServerSocket`,
+  registers its own `_oscjson._tcp` service named "VRC-NEXUS" via `NsdManager`
+  with a **MulticastLock**, and serves `HOST_INFO` → `OSC_IP:127.0.0.1,
+  OSC_PORT:<our listen port>`. This is how it *tells VRChat where to send OSC* —
+  but `OSC_IP` is `127.0.0.1`, confirming the whole OSC-in path is **same-device
+  (on-Quest) only**; it does not solve a phone receiving a Quest's OSC.
 
-1. **In-game chatbox typing/sends — NOT observable.** There is no log line and no
-   OSC output for the text a user types in VRChat's own keyboard chatbox, nor for
-   "the user is typing in-game". So the requested feature — *pause our automated
-   chatbox for 20 s when the user types/sends in VRChat's own chatbox* — **cannot
-   be built**; there's no signal to trigger on. NEXUS doesn't attempt it. Our
-   existing manual-send hold (`MANUAL_HOLD_MS`, keyed on OUR app's manual send) is
-   the only version of that behaviour that's possible. An in-game keyboard
-   message and our OSC output simply fight over the chatbox with no arbitration —
-   inherent to every OSC chatbox tool.
+### 4.4 `ChatboxService` — the chatbox compositor (biggest class, ~3500 lines)
+A `specialUse` FGS holding a partial wake lock, a 250 ms fast tick
+(`FAST_TICK_MS`), min-change gate `CHANGE_MIN_MS=600`, default send cadence
+`sendMs=1500` (floored to 400), sending `/chatbox/input` `,sTF` (144 cap) to all
+`hosts:port`, with the **identical invisible-background egg** VRC-A uses:
+`EGG_SUFFIX = "\u0003\u001f"` (U+0003 + U+001F).
 
-2. **"Did the chatbox land?" — OSCQuery gives a real liveness signal, not an
-   echo.** VRChat only advertises its OSCQuery service (and only binds/accepts
-   OSC) while it's running with OSC enabled. So discovering that service =
-   "VRChat is up, OSC is on, our chatbox WILL be received" — strictly better than
-   pinging an IP (which answers even when VRChat is closed or OSC is off). But
-   `/chatbox/input` is never echoed back, so you still can't confirm a *specific
-   message* rendered. The genuinely new capability OSC-in unlocks isn't send
-   confirmation — it's **reading live avatar state** (mute, AFK, movement, any
-   param) to drive chatbox lines and UI.
+- **Dynamic feed line types (14)**: `time`, `date`, `uptime`, `devuptime`,
+  `battery`, `volume`, `worn`, `weather`, `instance`, `media`, `lyrics`,
+  `personal` (cycling free text), `vrcparam` (any OSC avatar param), `app`
+  (foreground app). The network-backed values (weather/instance/alerts/lyrics/
+  media) come from `LiveFeeds` (§4.5), TTL-cached so the tick never hammers an API.
+- **Chatbox mini-games** (rendered as OSC text, playable from in-game input or the
+  app): Flappy Bird, Snake, 2048, Minesweeper, Wordle, Hangman, Tic-Tac-Toe,
+  Rock-Paper-Scissors, Slots, Magic-8-ball. Word lists for Wordle/Hangman are
+  fetched from GitHub and cached up to 7 days.
+- **Background survival**: `pushPresenceContext` persists the VRChat token + self
+  name/id + world name into the service so it keeps composing + sending with the
+  web UI gone; a 10 s `PRESENCE_TICK` loop maintains it. Config + presence persist
+  to `SharedPreferences("nexus_chatbox_bg")`.
 
-**Quest/mobile caveat (critical):** OSC-in and OSCQuery are trivial for NEXUS
-because it runs **on the Quest** (`127.0.0.1`). VRChat sends its OSC output to a
-single configured target (localhost by default) and discovers OSCQuery peers on
-the LAN. For a VRC-A **phone companion** to receive a Quest's OSC output, VRC-A
-would have to advertise its own OSCQuery service so the Quest's VRChat discovers
-it and sends there — plausible on the same LAN but unproven and fiddly. The clean
-path is: **these features light up fully when VRC-A itself runs on the Quest**
-(it's an Android APK — it can). See §10 for how to scope each.
+### 4.5 `LiveFeeds` — native data providers for the chatbox (all TTL-cached)
+Supplies the network-backed chatbox lines, each with a cache window so the 250 ms
+tick costs ~nothing:
+- **`weatherLine`** — open-meteo forecast + `nominatim` geocode (geocode cached
+  24 h, weather **10 min** TTL); WMO code→emoji+label, temp, ↑high/↓low, place.
+- **`instanceLine`** — `GET auth/user` → location → `GET instances/{loc}` → world
+  name + count (`n_users`/`userCount`) + type + region + 18+, **25 s TTL**.
+- **`alertsLine`** — polls `GET auth/user/friends?offline=false&n=100` every **30 s**,
+  diffs against the previous online set → "X is online" / "N friends came online"
+  (optional watch-list filter + hold window).
+- **`lyricsLine`** — LRC parse + binary-search by position (synced lyrics).
+- **`remoteNowPlaying`** — a **friend's** Last.fm (`<backend>/vrc/lastfm?user=`) or
+  Discord presence (`<backend>/discord-presence`) now-playing, via their backend,
+  5 s TTL; local sources are MediaSession (`NowPlaying`) or the in-app music tab.
+- **Backend host selection**: health-check `api.vrc-nexus.online` then the
+  Cloudflare proxy (`/healthz`), cached 5 min.
+
+### 4.6 `ScriptService` — avatar-OSC automation / macros
+A `specialUse` FGS that runs a JSON "program" against avatar OSC params — a small
+scripting language, now richer than 0.4.8: opcodes `set`, `wait`, `chatbox`,
+`random`, `input` (pulse a `/input/<Action>`), `height` (`/avatar/eyeheight`),
+`hue`/`emission` (auto-detect hue/glow-ish params by name and sweep), `ramp`
+(linear sweep), `pulse`, `loop`, **`if`** (+ comparators `eq/gt/lt/ne`), and
+**`parallel`** (concurrent blocks). Avatar *control*, not just chatbox.
+
+### 4.7 `VrcCache` — VRChat log reader + instance roster
+The reference log reader (VRC-A already has its own in `InstanceRosterManager`;
+this confirms the grammar + bounds):
+- **Access order**: direct `File` read of `Android/data/<pkg>/files` (VRChat pkgs
+  `com.vrchat.oculus.quest`, `com.vrchat.VRChatAndroid`) + shared `Documents/Logs`,
+  `Documents/VRChat`, `VRChat/Logs` (needs All-files); then a **SAF tree URI**
+  (`ACTION_OPEN_DOCUMENT_TREE`, persisted + re-resolved from
+  `getPersistedUriPermissions`, walked via `DocumentsContract`); ADB `appops`
+  hint as last resort. VRChat Logging must be FULL (the status message spells this
+  out).
+- **Regex grammar (verbatim)**: `OnPlayerJoined\s+(.+?)(?:\s+\((usr_…{36})\))?\s*$`,
+  `OnPlayerLeft…`, `Joining\s+(wrld_…{36}):(\S+)`,
+  `Switching\s+(.+?)\s+to avatar\s+(.+?)\s*$`,
+  `Unpacking Avatar\s+\((.+?)\s+by\s+(.+?)\)\s*$`, plus bare `usr_`/`avtr_`/`wrld_`
+  scans. Roster assembles `{name, usr_id, avatarName, avatarCreator, avatarId}`;
+  `Joining` resets it, `OnPlayerLeft` removes. It *tries* to capture `avatarId`
+  only from a line carrying **both** a `usr_` and an `avtr_` (PC-style; Quest logs
+  rarely have it — matches our finding that remote avatar IDs aren't in Quest logs).
+- **Efficiency**: `listLogs` cached 4 s; `readTail(file, maxBytes)` seeks to
+  `length-maxBytes` via `RandomAccessFile` (never reads the whole file), cached in
+  an **8-entry LRU keyed by (size,modified)** so an unchanged file re-scans free;
+  roster = newest 6 files × ~4 MB tail. **Pull-based** (JS polls `cacheInstanceUsers`)
+  — no FileObserver, so VRC-A's FileObserver-driven instant roster is actually better.
+
+### 4.8 Speech — `SpeechToText` + `SpeechService`  *(novel, fully offline)*
+On-device dictation → chatbox, zero API cost after a one-time model download:
+- Two engines: **Vosk** ("small" model) and **sherpa-onnx** (online transducer:
+  `encoder/decoder/joiner.onnx` + `tokens.txt`, `modified_beam_search`, 2 CPU
+  threads, 16 kHz, featureDim 80). Model readiness = file presence.
+- **Models downloaded on demand** (`downloadModel`: URL → zip → flatten into
+  `filesDir/vosk-model` or `sherpa-model`, progress streamed to JS) — not bundled,
+  so the APK stays small and RAM is only used while armed; released on `stop()`.
+- **Wake-word gating** ("nexus" default) with a 7 s window + fuzzy Levenshtein
+  match, or push-to-talk ("button mode"). 16 kHz mono, RMS auto-gain. Partial +
+  final transcripts pushed to `window.__nexusSpeech` → the JS drops them in the
+  chatbox. Runs under `SpeechService` (FGS microphone).
+
+### 4.9 Music — `MusicPlayerService` + `MusicResolver`/`MusicCache`/`MusicDownloader` + `NowPlaying`
+An in-app music player: **NewPipeExtractor** resolves a track's audio stream
+(`MusicResolver` → `StreamInfo.audioStreams`; Rhino deciphers YouTube's base.js),
+playback via **`MediaPlayer`** (lighter than ExoPlayer) in a `mediaPlayback` FGS,
+with `MusicCache` a **bounded disk cache that evicts** (resolve checks cache first,
+`prefetchMusic`/`warmMusic` pre-resolve). `NowPlaying` reads the active MediaSession
+via `MediaSessionManager.getActiveSessions` (bound to the notification listener) +
+`PlaybackState` (+ Spotify). Lyrics come from `LiveFeeds` (LRCLIB).
+
+### 4.10 Watch party + movies + screen share  *(entirely new category vs VRC-A)*
+- **`WatchParty` + `PartySignaling` + `PartyAudioPlayer`**: a **raw WebRTC mesh**
+  (`PeerConnection` + `DataChannel`, 48 kHz audio via `AudioTrack` with echo
+  cancellation), NOT the LiveKit client SDK — `PartySignaling` talks to the
+  `api.vrc-nexus.online` backend for room create/join, peer lists
+  (`PeerInfo`), ICE servers (`IceServerInfo`; `livekit.vrc-nexus.online` is the
+  TURN/ICE), and moderation (`BannedInfo`, force-mute/kick/ban). DataChannel
+  carries watch-together sync + control.
+- **Screen share**: `MediaProjectionService` (`mediaProjection`) + `ScreenAudioCapturer`
+  (`AudioPlaybackCaptureConfiguration` to grab internal audio at 48 kHz +
+  `AudioRecord`) feed the party, so you can share a screen + its audio to others.
+- **Movies**: `MovieActivity`/`MoviesWindow` embed **`nepu.io`** (a free movie/TV
+  streaming site) in a WebView, poppable into an overlay and sync-able via the
+  party. (Piracy-adjacent — see §9.)
+
+### 4.11 Discord — embedded Vencord client
+`DiscordActivity` loads `discord.com` in a WebView and **`DiscordSupport` injects
+the bundled Vencord mod** (`assets/vencord.user.js` + `.css`) via
+`evaluateJavascript`; `DiscordUpdater` can pull newer Vencord bundles from
+`raw.githubusercontent.com`; `DiscordNet`/`DiscordFiles` handle fetch + file
+upload. This is a full **modded Discord client in a panel**, not an RPC presence
+pusher (VRC-A's Discord RPC is a different, lighter thing).
+
+### 4.12 HypeRate — heart rate
+The web UI opens `wss://app.hyperate.io/socket/websocket` for a live heart-rate
+feed (HypeRate device/ID) → a `{hr}`/`{bpm}` chatbox value + an in-app display
+(~280 `hr` refs in the JS). Pure additive chatbox content.
+
+### 4.13 Meta IAP — `MetaIap`
+Oculus Platform billing (`getLoggedInUser`, products by SKU, `Purchase`,
+age-category, pending purchases) — the app is monetized through the **Meta Horizon
+Store** (consumables/entitlements). Relevant only to a Horizon-Store build.
+
+### 4.14 Infra — telemetry, foreground-app, mic, ad-block, crash
+- **`NexusApp`** (Application): tracks foreground via an `ActivityLifecycleCallbacks`
+  resumed-counter + window focus → `canStartForegroundService()` gates every FGS
+  start on `isForeground() && isWindowFocused()` (Android 12+ background-start
+  compliance; VRC-A's `startForegroundSafely` mirrors this). Also an
+  uncaught-exception handler that writes crash JSON to `filesDir/crashes/` and
+  uploads up to 25 on next launch to `api.vrc-nexus.online/crash`.
+- **`ForegroundApp`**: `UsageStatsManager` `queryEvents`/`queryUsageStats`
+  (`MOVE_TO_FOREGROUND`) to detect which app is in front (is VRChat foregrounded)
+  — drives the `app` chatbox line and feature pause/resume. Needs the user to grant
+  Usage Access in Settings.
+- **`MicProbe`**: `AudioRecord` RMS level test for the mic UI.
+- **`AdBlocker`**: a large ad/tracker **hostname blocklist** (hundreds of domains,
+  incl. Spotify ad hosts like `ads.spotify.com`) used in the embedded WebViews'
+  `shouldInterceptRequest` to return empty responses — ad-free embedded Discord/
+  Spotify/Movies AND fewer network requests.
 
 ---
 
-## 7. VRChat API + third-party services used by the JS
-
-**VRChat API (`api.vrchat.cloud/api/1`, cookie session held in JS):** `auth/user`
-(login/current user), `auth/twofactorauth/{totp,otp,emailotp}/verify` (2FA),
-`auth/user/friends`, `auth/user/notifications`, `users/{id}`,
-`users/{id}/mutualFriends`, `worlds/{id}`, `worlds/favorites`, `instances/{id}`,
-`avatars/{id}`, `avatars/favorites`, `invite/{id}`,
-`invite/myself/to/{location}` (self-invite), `file/image` + `file/{id}/{ver}/file`
-(image up/download). So NEXUS is a fair VRChat companion: login+2FA, friends,
-presence, world/instance/avatar info, favourites, invites & self-invite.
-
-**Avatar databases (from the log-scanned `avtr_`/`usr_` IDs):**
-`api.avtrdb.com/v2/avatar/search`, `avatarwbvrcxsearch.worldbalancer.com`,
-`avtr.icu`, `avtr.zuxi.dev`, `vrcavatarsearch.nekosunevr.co.uk`, `vrcx.avtr.zip`,
-`vrcx.vrcdb.com`, `paw-api.amelia.fun`, routed through a Cloudflare Worker CORS
-proxy (`vrc-nexus-community-proxy.deizeljkite.workers.dev`). → an **avatar
-finder/database** feature.
-
-**Media/misc:** LRCLIB (lyrics), Spotify Web API OAuth
-(`accounts.spotify.com/authorize` + `api.spotify.com/v1/me/player/currently-
-playing`, a proper now-playing beyond the broadcast), Last.fm
-(`ws.audioscrobbler.com/2.0/`, scrobble/now-playing), open-meteo forecast +
-geocoding (weather line), Google Translate unofficial endpoint (translate line).
+## 5. VRChat API surface (relative paths the JS feeds `apiRequest`)
+`auth/user`, `auth/twofactorauth/{type}/verify`, `auth/user/friends?offline=&n=`,
+`auth/user/notifications`, `users/{id}`, `users?search=`, `avatars/{id}`,
+`avatars?user=me&releaseStatus=all&n=&offset=`, `avatars?userId=`,
+`avatars/favorites`, `worlds/{id}`, `worlds?search=`, `worlds?sort=popularity`,
+`instances/{loc}`, `instances/recent?n=48`, `groups/…`, `favorites?type=avatar|world|friend`,
+`invite/{id}`, `invite/myself/to/{loc}`, `file/…`. (The group-moderation +
+auto-invite endpoints from the 0.4.8 teardown are still reachable via the same
+generic passthrough.) It remains a **full VRChat companion client**, not just a
+chatbox tool.
 
 ---
 
-## 8. Feature matrix — NEXUS vs VRC-A
+## 6. Feature matrix — Nexus VRC vs VRC-A
 
 | Capability | NEXUS | VRC-A |
 |---|---|---|
-| OSC chatbox send (`,sTF`, 144 cap, egg suffix) | ✅ | ✅ |
+| OSC chatbox (`,sTF`, 144 cap, egg) | ✅ | ✅ |
 | Pinned / cycling text | ✅ (`personal`) | ✅ (richer: sub-lines, presets, drag editor) |
-| NowPlaying in chatbox | ✅ | ✅ (much richer: ad detection, title cleaning, YT/YTM handling, progress presets) |
-| **Synced lyrics in chatbox (LRCLIB)** | ✅ | ❌ |
-| Time / date / uptime lines | ✅ | time only |
-| **Battery line + low-battery alert** | ✅ | ❌ |
-| Weather line | ✅ | ❌ |
-| Translate line | ✅ | ❌ |
-| **Live avatar-param lines (mute/AFK/movement/any)** | ✅ | ❌ (no OSC-in) |
-| **OSC-in (:9001) + OSCQuery** | ✅ | ❌ |
-| **Avatar-OSC automation/macros** (set/ramp/hue/input/height/loop) | ✅ | ❌ |
-| **Log-based instance roster + avatar scan** | ✅ | ❌ |
-| **Avatar-database search** | ✅ | ❌ |
-| VRChat login + 2FA, friends, presence, invites, self-invite | ✅ | ✅ (plus WebSocket pipeline, notifications, ban system) |
+| NowPlaying in chatbox | ✅ | ✅ (richer: ad detection, title cleaning, progress presets) |
+| **VRChat WEB login (Steam/Meta/SSO)** | ✅ | ❌ (username/password + 2FA only) |
+| **Synced lyrics (LRCLIB)** | ✅ | ❌ |
+| **Weather / date / uptime / battery / worn lines** | ✅ | time only |
+| **HypeRate heart-rate line** | ✅ | ❌ |
+| **Live avatar-param lines (mute/AFK/movement/any)** | ✅ | ✅ (headset: `{mute}/{afk}/{movement}/{scale}/{param}`) |
+| OSC-in (:9001) + OSCQuery | ✅ | ✅ (headset `VrcaOscQuery`) |
+| **Avatar-OSC automation/macros** | ✅ (`set/ramp/hue/pulse/if/parallel/loop`) | ❌ |
+| **Offline speech-to-text → chatbox** | ✅ (Vosk + sherpa-onnx) | ❌ |
+| **Chatbox mini-games** | ✅ (10) | ❌ |
+| Log-based instance roster | ✅ (pull) | ✅ (FileObserver, instant) |
+| Avatar clone / catalog | basic (DB search) | ✅ (image-verified crowd catalog, resolver) |
+| **In-app music player (NewPipe)** | ✅ | ❌ |
+| **Watch party (WebRTC) + screen share + movies** | ✅ | ❌ |
+| **Embedded Discord (Vencord)** | ✅ | RPC only (lighter, different) |
 | Discord Rich Presence | ❌ | ✅ |
-| Admin/moderation, Firestore sync, directed releases | ❌ | ✅ |
+| **Device telemetry (battery/thermal/RAM/wifi/worn)** | ✅ (one call) | partial |
+| **Foreground-app detection** | ✅ | ❌ |
+| **Ad-blocking (embedded webviews)** | ✅ | n/a |
+| **Meta Horizon Store billing** | ✅ | ❌ |
+| Admin/moderation, Firestore, directed releases, forced updates | ❌ | ✅ |
 | Friend-activity notifications, group events, announcements | ❌ | ✅ |
-| Background survival (OEM killers, watchdog, restore) | minimal | ✅ (extensive) |
-| In-app rich content / update system | basic | ✅ (rich engine) |
+| Background survival (OEM killers, watchdog, restore) | moderate (+battery exemption now) | ✅ (extensive) |
 
-VRC-A is the more mature product on the social/admin/RPC/background axes; NEXUS
-wins purely on the **local-device** features (OSC-in, logs, lyrics, scripting)
-that come free from running on the Quest.
-
----
-
-## 9. What VRC-A is missing — gap analysis
-
-Everything below is technically Quest-compatible; the ⚠️ marks features whose
-*full* value needs VRC-A running **on the Quest** (or an OSCQuery-advertise hop
-from a phone). Ordered by value ÷ effort.
-
-### Tier 1 — high value, low risk, works from a phone today
-1. **Synced lyrics as a NowPlaying option** (LRCLIB). Free, no key, no new
-   permission, pure additive. Fetch `syncedLyrics`, parse LRC, binary-search by
-   `positionMs`, feed one line into the chatbox at the current music-refresh
-   cadence. Reuses our existing NowPlaying position tracking. This is the single
-   best borrow. Gate behind a "Show lyrics" toggle; fall back to the normal music
-   line when no synced lyrics exist. Respect the 144/142 budget.
-2. **Weather + date + uptime chatbox lines.** Trivial. Weather = open-meteo
-   (free, no key; geocode a city the user types, no location permission needed).
-   Date/uptime are local. Slot them into the existing cycle/token system —
-   arguably just new `{weather}`/`{date}`/`{uptime}` dynamic tokens alongside our
-   `{time}/{song}/{world}/{players}`.
-3. **Headset/phone battery**: a `{battery}` token + optional low-battery
-   notification. On Quest this reports the headset; on a phone companion it's the
-   phone (less useful) — so gate the line's usefulness on where it runs, but it's
-   cheap.
-
-### Tier 2 — high value, needs OSC-in (best on-Quest ⚠️)
-4. **OSC-in (:9001) + OSCQuery param model.** The enabling primitive. Add a UDP
-   receive socket + `NsdManager` OSCQuery discovery (needs
-   `CHANGE_WIFI_MULTICAST_STATE` + a multicast lock) to maintain a live
-   avatar-parameter map. Unlocks:
-   - **`{mute}` / `{afk}` / `{movement}` / `{vrcparam:<name>}` chatbox lines** —
-     live mute, AFK, sitting/standing/velocity, or any avatar param, exactly like
-     NEXUS. Genuinely new class of chatbox content for us.
-   - **A real "VRChat is live + OSC on" connection signal** for the send gate /
-     Home connection card (OSCQuery service present) — much better than a ping.
-   - ⚠️ On a phone companion this needs VRC-A to advertise an OSCQuery service so
-     the Quest's VRChat targets it; ship it enabled when running on-device and
-     mark it experimental for phone→Quest.
-5. **Avatar-OSC automation ("OSC macros").** A small block engine (set / wait /
-   ramp / random / input-pulse / eyeheight / hue-emission auto-detect / loop) that
-   sends `/avatar/parameters/*`, `/input/*`, `/avatar/eyeheight`. Distinct product
-   surface from chatbox; big for power users. Medium effort. Reuses the OSCQuery
-   param list from #4 for the hue/emission auto-detect. On-Quest ⚠️ (or LAN send
-   to the Quest's :9000, which we already do for chatbox — so the SEND direction
-   works from a phone; only the auto-detect READ needs OSCQuery).
-
-### Tier 3 — high value but permission-heavy (on-Quest ⚠️)
-6. **Log-based instance roster + avatar scan.** Read VRChat's FULL log to show
-   *who is in your instance right now* (incl. non-friends) with their worn
-   avatars, authors, and `avtr_` IDs — data the API can't give. Requires the log
-   files to be on the **same device** (so this is on-Quest only, or a
-   phone-with-share-hack), plus All-files access (`MANAGE_EXTERNAL_STORAGE`) or a
-   SAF folder grant on `Documents/Logs`, and the user setting VRChat Logging =
-   FULL. Use the §5 grammar. Higher friction, but a marquee feature. Pair with:
-7. **Avatar-database lookup** of scanned/seen `avtr_` IDs (avtrdb et al.) — "what
-   avatar is that / find a public copy". Only worthwhile alongside #6.
-
-### Tier 4 — nice-to-have
-8. **Translate a chatbox line** to another language (unofficial Google Translate
-   endpoint — note it's unofficial/rate-limited; LibreTranslate is a cleaner
-   dependency). 
-9. **Last.fm scrobble / now-playing** source, and **Spotify Web API OAuth**
-   now-playing as an alternative to notification/broadcast reading (helps when
-   notification access is denied).
-
-### Not worth copying
-- NEXUS's updater/self-update (ours is better), its foreground-service and
-  background model (ours is far more robust), its VRChat login/presence (we have
-  a superior WebSocket pipeline), and anything Discord/admin (NEXUS has none).
+VRC-A still wins decisively on the social/admin/RPC/notifications/background and
+avatar-cloning axes. NEXUS's net-new surface is **web login, a pile of chatbox
+content sources (lyrics/weather/HR/speech), avatar scripting, and three big new
+product categories (music, watch-party, embedded Discord)**.
 
 ---
 
-## 10. Recommended concrete changes for VRC-A
+## 7. Gap analysis — what would improve VRC-A / what's missing
 
-1. **Ship synced lyrics now** (Tier 1.1) — a `music_lyrics` local pref +
-   `LrcLibLyrics` helper (fetch/parse/binary-search) wired into
-   `buildNowPlayingLines()` as an alternate line when enabled and available. No
-   Firestore, no new permission, Quest- and phone-compatible. Throwaway-test the
-   LRC parser + line-at-position logic per the no-permanent-tests policy.
-2. **Add `{weather}`, `{date}`, `{uptime}`, `{battery}` dynamic tokens** to the
-   existing token resolver (`resolveTokens`) so they work in Pinned + Cycle for
-   free. Weather via open-meteo with a user-entered city (no location permission).
-3. **Prototype OSC-in + OSCQuery** (Tier 2.4) as an opt-in "Avatar status"
-   feature: new receive socket + NsdManager discovery + a live param map, feeding
-   `{mute}`/`{afk}`/`{movement}`/`{param:Name}` tokens and a stronger "VRChat OSC
-   live" indicator. Ship enabled when VRC-A runs on-device (Quest); flag
-   phone→Quest as experimental (requires OSCQuery advertise). Add
-   `CHANGE_WIFI_MULTICAST_STATE`.
-4. **Consider an "OSC macros" tab** (Tier 2.5) later — the SEND direction already
-   works over our existing LAN chatbox path; only param auto-detect needs #3.
-5. **Log-reader is a bigger bet** (Tier 3.6/3.7): only pursue if we're willing to
-   ask for All-files/SAF access and target the on-Quest install. If we do, reuse
-   the §5 grammar verbatim and surface an "Instance roster" view + avatar lookup.
-6. **Update `docs/ui-revamp.md` / CLAUDE.md** as any of these land, per repo
-   convention.
+Ordered by value ÷ effort. ⚠️ marks features whose full value needs VRC-A running
+**on the Quest** (headset build) or that carry real risk.
 
-**One-line strategic read:** VRC-A already beats NEXUS everywhere that needs a
-backend, Discord, or robustness. The only real gaps are **local-device** tricks
-NEXUS gets free by living on the headset — of those, **synced lyrics** and a few
-**extra chatbox tokens** are pure wins to add immediately, **OSC-in/OSCQuery**
-avatar-state lines are the highest-leverage new capability (best realised by
-running VRC-A on the Quest), and the **log-based instance roster** is the marquee
-feature to weigh against its permission friction. The user's specific
-"pause-on-in-game-typing" idea is **not buildable** — no such signal exists.
+### Tier 1 — high value, low effort, additive, phone + Quest
+1. **VRChat web login (Steam/Meta/Viveport/Pico)** — the headline. Lets the large
+   password-less SSO audience (especially Meta accounts on the headset build) use
+   VRC-A at all. Mechanism (§4.2): a `WebView` on `vrchat.com/home/login` +
+   third-party cookies + poll `auth/user` until `usr_` without
+   `requiresTwoFactorAuth` → seed `VrchatAuthManager`'s existing cookie store
+   (auth + twoFactorAuth + captured UA). **Additive**: keep the password flow as
+   primary (it alone gives silent `autoRelogin`); add web login as a second door;
+   add a headless-reauth-via-provider-session so SSO users approach "log in once"
+   (see the separate login discussion already in this session).
+2. **New chatbox dynamic tokens** — VRC-A already has a token resolver
+   (`{time}/{song}/{world}/{players}/{mute}/{afk}/{movement}/{scale}/{param}`).
+   Slot in `{weather}` (open-meteo + Nominatim, geocode-cached 24 h / weather
+   10 min), `{date}`, `{uptime}`, `{battery}`, `{worn}` (headset), and
+   `{hr}`/`{bpm}` (HypeRate `wss://app.hyperate.io/socket/websocket`). Each must be
+   TTL-cached (see §8).
+3. **Synced lyrics (LRCLIB)** as a NowPlaying option — free, no key, pure additive;
+   fetch `syncedLyrics`, parse LRC, binary-search by `positionMs`, feed one line at
+   the current music cadence. (This was Tier-1 in the old doc and still isn't shipped.)
+
+### Tier 2 — high value, medium effort (Quest-leaning ⚠️)
+4. **Offline speech-to-text dictation → chatbox** (⚠️ mic; best on headset): speak
+   → text in the VRChat chatbox, fully offline. sherpa-onnx (preferred) or Vosk,
+   **model downloaded on demand** into `filesDir`, recognizer loaded only while
+   armed and released on stop (RAM-bounded), wake-word or push-to-talk gate. A
+   genuinely differentiated feature with zero ongoing API cost.
+5. **Avatar-OSC automation / macros** — a small block engine (`set/wait/ramp/
+   random/pulse/input/height/hue/emission/loop/if/parallel`) over
+   `/avatar/parameters/*`, `/input/*`, `/avatar/eyeheight`. VRC-A already has the
+   OSC send path (chatbox) + OSCQuery param discovery (`VrcaOscQuery`) for the
+   hue/emission auto-detect; the SEND side works from a phone too. Distinct power-
+   user surface.
+6. **Chatbox mini-games** (optional crowd-pleaser) — pure OSC-text rendering, no
+   permissions, low risk; good retention/marketing feature.
+
+### Tier 3 — big new categories, high effort (evaluate as products)
+7. **Watch party (WebRTC) + screen share + movies** — a whole surface needing a
+   **signaling backend + TURN** (NEXUS runs its own `api.vrc-nexus.online` +
+   LiveKit/TURN). VRC-A has no backend of this kind (Firestore only). Big bet;
+   only if it's a product direction. Movies via `nepu.io` is piracy-adjacent —
+   skip that part (§9).
+8. **In-app music player (NewPipe)** — popular but carries YouTube-ToS +
+   maintenance risk (NewPipe breaks when YouTube changes); weigh carefully (§9).
+9. **Embedded Discord (Vencord)** — VRC-A already has Discord RPC; a full modded
+   client in a panel is a different, heavier thing with Discord-ToS risk. Likely
+   **not** worth it.
+
+### Infra / telemetry borrows (cheap, useful)
+10. **Device telemetry** — a single `getDeviceStatus`-style call (headset battery,
+    thermal, RAM, Wi-Fi, `worn` via `sys.hmt.mounted`) for a headset status panel
+    + a low-battery / on-head gate for features.
+11. **Foreground-app detection** (UsageStats) — pause/resume VRC-A features based
+    on whether VRChat is actually foregrounded.
+12. **Opt-in crash upload** — VRC-A has a local crash screen; a tiny opt-in upload
+    (like NEXUS → their backend) would surface field crashes. (Firestore or a
+    minimal endpoint.)
+13. **Meta Horizon Store build + IAP** — only if VRC-A's headset variant ships to
+    the Horizon Store; NEXUS proves the Platform SDK path.
 
 ---
 
-## 11. ADDENDUM — complete VRChat API client + full feature map
+## 8. RAM & request-endpoint efficiency findings (what to adopt)
 
-**Correction / honesty note:** §7's first pass under-counted the JS. The native
-code (§4) was decompiled and read in full, but the initial JS scan only pulled a
-partial endpoint list, so it **missed a large part of NEXUS's feature surface** —
-group moderation, an auto-invite growth tool, user/world/avatar search, friend
-requests, notification accept/decline, invite-message slots, VRChat "prints", and
-instance-close. This addendum is the complete client, extracted from the app's
-actual method+path table and its Vue component list. NEXUS is best described not
-as a chatbox tool but as a **full VRChat companion client + group tooling**.
+The user specifically asked what helps **less RAM / fewer request endpoints**.
+NEXUS's patterns worth adopting (several VRC-A already does — noted):
 
-### 11.1 Complete VRChat API client (every call the app can make)
-**Auth / self**
-- `GET /auth/user` — login / current user
-- `POST /auth/twofactorauth/{totp,otp,emailotp}/verify` — 2FA
-- `GET /auth/user/friends?offline=&n=&offset=` — friends (paginated, both passes)
-- `GET /auth/user/notifications?type=all&n=` — notifications
-- `PUT /auth/user/notifications/{id}/accept` — **accept** a notification (friend req / invite)
-- `PUT /auth/user/notifications/{id}/hide` — **decline / hide** a notification
+**Fewer / cheaper requests:**
+- **TTL-cache every VRChat-derived chatbox value.** NEXUS caches the instance line
+  25 s, friend-alerts 30 s, weather 10 min, geocode 24 h, remote now-playing 5 s,
+  backend-host health 5 min. Any new VRC-A dynamic token MUST do the same so a
+  per-tick chatbox never drives per-tick API calls. (VRC-A already fetches the
+  instance count on a lightweight single call; extend that discipline to every new
+  token.)
+- **One generic authenticated passthrough + cookie roll-forward** (`apiRequest` +
+  `captureCookies`) keeps the native layer tiny and keeps the session alive
+  browser-style (fewer re-logins). VRC-A's `captureRolledCookies` is the same idea;
+  keep leaning on it (it's the thing that makes the no-password web-login viable).
+- **OSCQuery PULL (15 s) + OSC-in PUSH for avatar state** = **zero** VRChat API
+  calls for mute/AFK/movement/params. VRC-A's `VrcaOscQuery` already does this on
+  the headset — use it as the source for any `{mute}/{afk}/{movement}` tokens
+  rather than REST.
+- **Byte-offset log tailing + tiny LRU** (`readTail` seeks to `len-maxBytes`, 8-entry
+  cache keyed by size+modified, 4 s list cache) — re-scans of an unchanged log are
+  free. VRC-A's roster is FileObserver-driven (even better — event, not poll);
+  adopt the (size,modified) tail cache + bounded tail size if not already bounded.
+- **On-device processing instead of network** — offline speech = no STT API; local
+  MediaSession now-playing = no polling a service. Prefer on-device wherever a
+  feature could otherwise call out.
+- **Ad/tracker host blocklist** in any embedded WebView (if VRC-A ever embeds one)
+  cuts a large fraction of requests + data.
+- **Batch/coalesce bridge→UI traffic** — the OSC→JS bridge flushes at 66 ms and
+  caps the pending map at 400 keyed by address (dupes collapse). Analogous: debounce
+  any high-rate flow into the UI.
 
-**Users / social**
-- `GET /users/{id}` — profile / presence
-- `GET /users?search=&n=` — **user search**
-- `GET /users/{id}/groups` — a user's groups
-- `GET /users/{id}/mutualFriends`, `/users/{id}/mutuals/friends` — mutual friends
-- `POST /user/{id}/friendRequest` — **send friend request**
-- `GET /message/{id}/{slot}`, `PUT /message/{id}/{slot}/…` — **invite / response message slots** (custom invite messages)
-- `GET /prints/user/{id}`, `DELETE /prints/{id}` — **VRChat "prints"** (photos): list / delete
+**Less RAM:**
+- **Lazy-load heavy engines; release on stop.** The speech recognizer + model load
+  only while armed and are released on `stop()`; the music player uses `MediaPlayer`
+  (lighter) not ExoPlayer. VRC-A already caps Coil (10 MB disk / 12 MB mem),
+  Firestore cache (25 MB), and the Discord WebView cache (64 MB) — keep that
+  discipline for any new heavy component (models, players, WebRTC).
+- **Download models/assets on demand, don't bundle** (speech models, word lists).
+  Keeps both APK size and resident RAM down; VRC-A already does on-demand tutorial
+  images + rich-media.
+- **Bounded caches with eviction everywhere** (music disk cache evicts; tail LRU 8;
+  OSC pending 400; crash upload capped at 25/run).
+- **Purpose-typed foreground services started only when foreground-allowed**
+  (`canStartForegroundService`), rather than one always-on mega service, so RAM/
+  wakelocks are scoped to the active feature. VRC-A's model is heavier here by
+  design (background survival is a VRC-A selling point); no change needed, but the
+  FGS-start gate pattern is already mirrored.
 
-**Worlds**
-- `GET /worlds/{id}` — world info
-- `GET /worlds/favorites?n=&offset=` — favorite worlds
-- `GET /worlds?search=&sort=relevance` — **world search**
-- `GET /worlds?userId=&releaseStatus=public` — a user's public worlds
+**Net:** the single biggest efficiency lesson is **TTL-cache every chatbox data
+source and prefer OSCQuery/on-device over REST** — adding NEXUS's content tokens
+to VRC-A costs almost no extra requests if done that way.
 
-**Avatars**
-- `GET /avatars/{id}` — avatar info
-- `PUT /avatars/{id}/select` — **wear / switch avatar**
-- `GET /avatars/favorites?n=&offset=` — favorite avatars
-- `GET /avatars?user=me&releaseStatus=all&sort=_created_at` — **your own uploaded avatars**
-- Avatar-DB search across `avtrdb / nsvr / paw / vrcdb / vrcwb / prismic` via a Cloudflare proxy
+---
 
-**Instances / invites**
-- `GET /instances/{id}` — instance info
-- `DELETE /instances/{id}?hardClose=true|false` — **close / hard-close an instance**
-- `POST /invite/{userId}` — invite a user to your instance
-- `POST /invite/myself/to/{world}:{instance}` — self-invite
+## 9. Don't-copy / risk list
+- **`nepu.io` movie streaming** — piracy-adjacent; do not embed.
+- **NewPipe YouTube extraction** — YouTube ToS + constant breakage/maintenance;
+  adopt only with eyes open (LRCLIB lyrics are fine and separate).
+- **Vencord-modded Discord client** — Discord ToS risk (client modding); VRC-A's
+  RPC is the safer, lighter path. Skip the full client.
+- **Scraping the VRChat password out of the web-login page** — never; it's covertly
+  harvesting a credential on a page we don't own, fragile, and impossible for SSO
+  users anyway. The cookie-harvest (§4.2) is the clean approach.
+- **Plain SharedPreferences for the session** — VRC-A's EncryptedSharedPreferences
+  is strictly better; keep it.
 
-**Groups — moderation + growth (the big miss)**
-- `GET /groups/{id}` — group info
-- `GET /groups/{id}/members?n=&offset=` — members list
-- `DELETE /groups/{id}/members/{userId}` — **kick member**
-- `GET /groups/{id}/roles` — roles
-- `GET /groups/{id}/bans?n=&offset=`, `POST /groups/{id}/bans`, `DELETE /groups/{id}/bans/{userId}` — **ban / unban**
-- `GET /groups/{id}/auditLogs?n=&offset=` — **audit logs** (moderation history)
-- `GET /groups/{id}/instances` — group instances
-- `GET /groups/{id}/posts?n=`, `POST /groups/{id}/posts` — read / **create** group posts / announcements
-- `POST /groups/{id}/invites {userId, confirmOverrideBlock}` — **invite a user to the group** (the auto-invite primitive)
+---
 
-**Files**
-- `GET /files?tag=&n=` — list files by tag
-- `DELETE /file/{id}` — delete a file
-- `POST /file/image` (native `VrcUpload`) — upload an image
+## 10. VRC-A master plan — missing / changing / improving
 
-### 11.2 Auto-invite to group (the feature the teardown missed)
-Instance Tools → **Scan instance** (reads the roster from VRChat's log, §4.7) →
-**Invite all to group** loops `POST /groups/{id}/invites` over everyone in the
-instance, spaced by a user-set **"Gap between invites"** to respect the rate
-limit. An **"Auto-invite new joiners"** mode keeps the log scan running and
-invites people as they enter. Pure combination of the log roster + the group
-invite endpoint — a group-growth / recruiting tool.
+The full backlog, in three buckets: **A. Missing** (net-new to add), **B.
+Changing** (fix/correct/decide on existing behaviour), **C. Improving** (polish
+or extend what already works). Draws from the full NEXUS inventory (§4–§7) AND
+VRC-A's own documented limitations/deferred items in CLAUDE.md — the goal is that
+**every feature NEXUS has and we don't is listed here.** Complements
+`docs/account-system-plan.md` and `docs/ui-revamp.md`.
 
-### 11.3 Full feature / tab map (Vue components)
-Home · VRChat · **Users** (search + `UserModal`) · **Players** (instance roster
-UI over `CacheReader`) · **Alerts** (notifications + accept/decline) ·
-**Moderation** (group members/roles/bans/audit/kick/close-instance) ·
-**InviteTools** (auto-invite) · **Scripts** (OSC avatar automation, §4.4) ·
-**CacheReader** (log reader, §4.7) · **GroupCalendar** · **MutualNetwork**
-(mutual-friends graph) · **RecentWorlds** + `WorldModal` (world search/favorites) ·
-**VrcInventory** (your avatars/worlds) · **Translator** · **SymbolPicker**
-(emoji/symbols into chatbox) · **MagicChatbox** (the chatbox composer) ·
-Community · Developer · DiscordPrompt · Settings · Help. Plus ~40 language packs
-and ~10 themes (Ember/Emerald/Midnight/Rose/Slate/…).
+**Platform priority (current):** build **headset-first.** Everything ships on
+mobile too, but designed/sized for the Quest panel first, so unless an item is
+tagged `[phone]` or `[both]` treat it as **`[headset-first]`** (mobile follows).
+Tags: `[headset-first]` (Quest now, mobile later) · `[both]` (equally useful now)
+· `[phone]` · `[quest-only]` (physically can't work off-headset). Effort **S/M/L**;
+items mapped to our classes.
 
-### 11.4 Gap-analysis additions (mobile + Quest compatible, VRC-A lacks)
-New candidates surfaced by the corrected pass, on top of §9:
-- ★ **Auto-invite to group** (log roster → `POST /groups/{id}/invites`, rate-gapped
-  + auto-invite-new-joiners). Standout for group owners/recruiters; headset-side
-  (needs the roster), API action works from any device. Ties directly into our
-  planned log reader.
-- **Group moderation suite** — members / roles / bans / kick / audit logs /
-  close-instance / post announcements. A mobile group-mod tool; all API, works on
-  a phone. Sizable but self-contained.
-- **User / world / avatar search + profiles** (`/users?search=`, `/worlds?search=`,
-  own avatars, favorites) — general companion browsing VRC-A doesn't do.
-- **Notification actions** — accept/decline friend requests + invites from the app
-  (`/notifications/{id}/accept|hide`). Small, high-utility.
-- **Invite tooling** — invite a user to your instance, self-invite (VRC-A has
-  self-invite on the admin side), custom invite-message slots.
-- **Mutual-friends network** graph.
-- **Prints** — view/manage VRChat photos.
+**★ Top priorities (what we build toward first):**
+1. **Voice-to-text → chatbox** (A2.4) — the flagship. On-device speech dictation
+   into the VRChat chatbox is a genuine **accessibility win: mute / non-speaking
+   players (and anyone who can't or won't voice-chat) can "talk" by speaking
+   privately into the headset mic, with nothing audible to the instance** — it
+   comes out as chatbox text only. Fully offline, no API cost. This is the one you
+   most want and it's a strong differentiator.
+2. **VRChat web login** (A1.1) — unlocks the Steam/Meta/SSO (password-less)
+   audience, which is most of the headset userbase.
 
-Priority read: **auto-invite + the group-moderation suite** are the genuinely
-differentiated adds here (nobody positions a *mobile* group-mod + recruiting tool),
-and both lean on the same log-reader/account work already planned. Search +
-notification actions are cheap quality-of-life. The rest are optional breadth.
+### A. MISSING — features to add
+
+**A1 — Tier 1 (cheap, additive, do first):**
+1. **VRChat web login (Steam/Meta/Viveport/Pico/SSO)** `[both, headset-first, M]` →
+   new `VrchatWebLoginScreen` mirroring `DiscordLoginWebView`: load
+   `vrchat.com/home/login`, `setAcceptThirdPartyCookies(true)`, poll `auth/user`
+   until `usr_` without `requiresTwoFactorAuth`, seed `VrchatAuthManager`'s cookie
+   store (auth + twoFactorAuth + captured UA). Additive beside the password flow
+   (see B1). Biggest audience unlock for the headset build.
+2. **Chatbox content tokens** `[headset-first, S–M]` → extend
+   `VrcaViewModel.resolveTokens` to cover the rest of NEXUS's 14 feed line-types we
+   lack. We already have time / song / world / players / mute / afk / movement /
+   scale / param; **add** `{weather}` (new `WeatherFeed`: open-meteo + Nominatim
+   geocode), `{date}`, `{uptime}` (session), `{devuptime}` (device uptime),
+   `{battery}`, `{volume}` (media volume), `{worn}` `[quest-only]` (on-head), the
+   `{app}` foreground-app line (ties to A4.13), and `{hr}`/`{bpm}` (new
+   `HypeRateClient`, `wss://app.hyperate.io`). Every one TTL-cached per §8; update
+   `TokensHint`.
+3. **Synced lyrics (LRCLIB)** `[both, S]` → `LrcLibLyrics` helper
+   (fetch/parse/binary-search by `positionMs`) wired into `buildNowPlayingLines()`
+   behind a "Show lyrics" toggle; throwaway-test the LRC parser.
+
+**A2 — Tier 2 (medium effort, headset-leaning):**
+4. **★ Voice-to-text dictation → chatbox** `[headset-first, M–L]` — the top
+   priority (see callout). `SpeechToTextManager` (sherpa-onnx preferred, Vosk
+   fallback), model **downloaded on demand** into `filesDir`, FGS `microphone`,
+   **push-to-talk and/or wake-word gate**, transcript → chatbox via the existing OSC
+   send path. Recognizer loaded only while armed, released on stop (RAM-bounded),
+   zero ongoing API cost. **Accessibility framing is the headline use case**: a
+   silent way for mute/non-speaking users to communicate in-instance. Design notes:
+   a clear "mic is live" indicator, partial-vs-final text (show the committed line),
+   a hold-to-talk button in the overlay for one-handed use, and respect the chatbox
+   144-char budget + our existing minimal-background/egg path.
+5. **Avatar-OSC macros** `[both; param auto-detect headset-only, M]` →
+   `OscScriptEngine` + an Automations sub-tab (`set/wait/ramp/random/pulse/input/
+   height/hue/emission/loop/if/parallel`). Reuse the chatbox OSC send path +
+   `VrcaOscQuery` params for hue/emission auto-detect.
+6. **Translate a chatbox line** `[both, S]` → prefer **LibreTranslate** (clean
+   dependency) over the unofficial Google endpoint NEXUS uses. *(Old teardown
+   Tier-4; still missing. Pairs naturally with voice-to-text for cross-language.)*
+7. **Alternate now-playing sources** `[both, S–M]` → Spotify Web API OAuth +
+   Last.fm, for users whose Notification Access is denied. *(Old teardown Tier-4.)*
+8. **Chatbox mini-games** `[both, M]` — Flappy/Snake/2048/Minesweeper/Wordle/
+   Hangman/TicTacToe/RPS/Slots/8-ball, rendered as OSC text. Optional crowd-pleaser;
+   no permissions, low risk.
+
+**A3 — Tier 3 (product bets; higher effort / real risk — decide before building):**
+9. **Watch party (WebRTC) + screen share** `[headset-first, L]` — raw WebRTC mesh +
+   a signaling backend + TURN (we only have Firestore today). NEXUS runs its own
+   `api.vrc-nexus.online` + TURN for this. Big new surface; only if it's a product
+   direction. *(Movies via `nepu.io` — skip, piracy; see §9.)*
+10. **In-app music player (NewPipe)** `[both, L]` — popular but carries YouTube-ToS
+    + constant-breakage maintenance risk. Weigh carefully.
+11. **Embedded Discord (Vencord) client** — **do not build**; we already have the
+    lighter, safer Discord RPC. Listed only to mark it explicitly out of scope.
+
+**A4 — Infra / telemetry (cheap, cross-cutting):**
+12. **Device telemetry panel** `[quest-only, S]` → one `deviceStatus()` call
+    (battery/thermal/RAM/wifi/`worn` via `sys.hmt.mounted`) + a low-battery /
+    on-head feature gate.
+13. **Foreground-app gate** `[headset-first, S]` → `UsageStatsManager` "is VRChat
+    foregrounded" to pause non-essential loops when the user left VRChat (also feeds
+    the `{app}` chatbox line).
+14. **Opt-in crash upload** `[both, S]` → we have a local crash screen; add a tiny
+    opt-in upload (Firestore doc or a minimal endpoint) to surface field crashes.
+15. **Meta Horizon Store build + IAP + submission manifest** `[quest-only, M]` →
+    only if we distribute the headset variant to the Horizon Store (CLAUDE.md lists
+    the store-submission manifest entries as still deferred). NEXUS proves the
+    Platform SDK (`libovrplatformloader`/`MetaIap`) path.
+
+**A5 — VRChat companion breadth (NEXUS exposes these, we don't; all API-only so
+they work anywhere, headset-first by priority):**
+16. **User + world search & profiles** `[both, M]` → `users?search=`,
+    `worlds?search=`/`worlds?sort=popularity`, profile cards. (We already have
+    avatar search via avtrdb/catalog; user + world browsing are missing.)
+17. **Favorites management** `[both, S–M]` → browse/add VRChat avatar/world/friend
+    favorites (`favorites?type=…`, `avatars/favorites`, `worlds/favorites`).
+18. **In-app notification actions** `[both, S]` → accept/decline incoming **friend
+    requests** + **invites** from inside VRC-A (`notifications/{id}/accept|hide`).
+    We already hold `sendFriendRequest`/`unfriendUser`/invite helpers + notification
+    tap-actions — this is extending them into a proper accept/decline surface.
+19. **Group tools** `[both, L]` → members / roles / bans / kick / audit-log /
+    close-instance / post announcement, and the standout **auto-invite-to-group**
+    (log-roster → `POST groups/{id}/invites`, rate-gapped + auto-invite-new-joiners).
+    A differentiated mobile/headset group-moderation + recruiting tool; sizable but
+    self-contained, and it leans on the log roster we already have.
+20. **Companion odds-and-ends** `[both, S–M each]` → mutual-friends network graph,
+    VRChat **prints** (photos) view/manage, custom **invite-message slots**,
+    **recent instances** (`instances/recent`), and instance **close/hard-close**.
+    *(AdBlocker is **n/a** for us unless we ever embed a browser panel.)*
+
+### B. CHANGING — fix / correct / decide on existing behaviour
+1. **Make web login additive without weakening "log in once"** `[both, M]`,
+   `VrchatAuthManager` + the `authDead` gate: keep the username/password flow as
+   **primary** (it alone gives silent `autoRelogin`); add a **headless-reauth** that
+   leans on the preserved provider cookie jar; when `authDead` fires for a
+   cookie-only (no-password) session, surface "re-sign-in on the website" instead
+   of attempting `autoRelogin`; give `exportSessionBundle` / the auth-transfer a
+   **cookie-only variant**. (The design decision from this session's login thread.)
+2. **R2/KV cost — the passive-harvest lever** `[backend, decision]`: the remaining
+   un-pulled lever (per CLAUDE.md Increment 7/23) is throttling or disabling the
+   per-user **passive catalog harvest** (search-box + own-library) if the bill is
+   still too high. Decide: keep growth vs cap cost. No code until decided.
+3. **OSC-in phone→Quest** `[phone, M, likely won't-fix]`: our OSCQuery/OSC-in is
+   headset-only today. NEXUS confirms it advertises `OSC_IP 127.0.0.1` → same-device
+   only, so a phone receiving a Quest's OSC needs the phone to advertise its own
+   OSCQuery service on the LAN IP. Decide whether that experimental hop is worth it
+   or stays Quest-only.
+4. **Avatar-resolver ceiling (accept + hold)** `[accepted limitation]`: Quest
+   exposes no remote avatar id and `Unpacking Avatar (… by …)` author lines land
+   only ~14–44% of the time, so the name+author + image-verified crowd catalog **is**
+   the ceiling. No further resolver rework planned — just keep the catalog growing;
+   revisit only if VRChat restores a field (the `buildImageFieldsDiag` watchdog will
+   show it).
+5. **Roster mute/block** `[decided — leave removed]`: removed because VRChat's own
+   in-client mute/block is the reliable path; do not re-add.
+
+### C. IMPROVING — polish / extend what exists
+1. **Monitor-frame the boot + onboarding screens on headset** `[quest, S]` — the
+   M1.5 polish CLAUDE.md flags as not done; frame them for the Quest panel like the
+   rest of the UI.
+2. **Hold the §8 TTL-cache discipline on every new chatbox source** `[both]` — any
+   token added in A2 must cache (weather 10 min, instance 25 s, friend-alerts 30 s,
+   HR live-socket) so a per-tick chatbox never drives per-tick requests.
+3. **Bound roster tail reads** `[quest, S]` — ours is already FileObserver-instant
+   (better than NEXUS's poll); optionally adopt VrcCache's `(size,modified)` tail
+   cache + bounded tail size if our reads aren't already capped.
+4. **Rich-content deferred polish** `[both, S]` — faststart (moov-at-front)
+   transcode + release-retract media cleanup, both noted "still open" in CLAUDE.md.
+5. **Headset fixed-panel resize** `[accepted]` — Horizon OS has no hard "no-resize"
+   API; the width-responsive framing + 3/2/1-column thresholds already degrade
+   gracefully, so leave as-is unless Meta adds an API.
+6. **Discord RPC backend-down** `[accepted]` — a healthy socket while Discord's
+   presence backend is down is client-undetectable; nothing to do.
+
+### Sequencing
+Headset-first throughout (mobile follows, sized for the Quest panel). Drive toward
+the two **★ priorities** first: **voice-to-text (A2.4)** and **web login (A1.1)** —
+web login lands quickest (it's M; speech is M–L), so it ships first while speech is
+built, with **B1** (additive-login changes) riding alongside it. In parallel, knock
+out the cheap Tier-1 content (**A1.2 tokens + A1.3 lyrics**) and the **A4** infra.
+Then the rest of **A2** (macros, translate, alt now-playing, games) and **A5**
+companion breadth (search / favorites / notification-actions first; group tools as a
+bigger project). **A3** only as deliberate product decisions; **B/C** fixes folded
+in opportunistically. Keep this file + `CLAUDE.md` updated as items land (the old
+CLAUDE.md "§4.7" log-reader reference maps to §4.7 here).
+
+---
+
+## 11. Strategic read
+NEXUS v1.49 is no longer "a chatbox tool" — it's a sprawling Quest-side VRChat +
+media super-app (login, chatbox with lyrics/weather/HR/speech/games, avatar
+scripting, music, watch-parties, embedded Discord, Store billing) built as a
+native shell around a web UI. VRC-A is the more disciplined, more reliable product
+on everything that needs a backend, Discord RPC, moderation, notifications, and
+background survival, and it has a better avatar-cloning stack. The high-leverage,
+low-risk borrows are **(1) VRChat web login** (unlocks the SSO/Meta audience),
+**(2) a batch of TTL-cached chatbox content tokens** (lyrics, weather, date,
+uptime, battery, heart-rate), and **(3) offline speech dictation** — all additive,
+all cheap on requests/RAM if done with the §8 caching discipline. The big new
+categories (music, watch-party, embedded Discord) are real product decisions, not
+quick wins, and two of them carry ToS/maintenance risk. The "pause on in-game
+typing" idea from before is still not buildable — no such signal exists.
