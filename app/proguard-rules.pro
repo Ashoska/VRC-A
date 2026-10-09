@@ -44,3 +44,17 @@
 -keep,allowobfuscation,allowshrinking class retrofit2.Response
 
 # ================================================================================
+# ===================================================================================
+# Vosk offline speech-to-text + JNA (headset voice-to-text, headsetApp flavor only)
+# -----------------------------------------------------------------------------------
+# Vosk calls into libvosk.so through JNA direct mapping (LibVosk.Native.register), and
+# JNA resolves native methods + Structures reflectively, so R8 must not rename/strip
+# any of it or the native bindings break at runtime (release builds minify).
+-keep class org.vosk.** { *; }
+-keep class com.sun.jna.** { *; }
+-keepclassmembers class * extends com.sun.jna.** { *; }
+-keepclasseswithmembers class * {
+    @com.sun.jna.* <methods>;
+}
+-dontwarn com.sun.jna.**
+-dontwarn org.vosk.**

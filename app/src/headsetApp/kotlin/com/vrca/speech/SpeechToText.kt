@@ -104,8 +104,8 @@ object SpeechToText {
                 if (modelReady(ctx)) { onProgress(100); onDone(true, null) }
                 else { deleteTree(dir); onDone(false, "Model files missing after unzip") }
             } catch (e: Throwable) {
-                Log.w(TAG, "model download failed", e)
-                onDone(false, e.message ?: "download failed")
+                Log.e(TAG, "model download failed", e)
+                onDone(false, describe(e))
             }
         }, "vosk-download").start()
     }
@@ -154,8 +154,8 @@ object SpeechToText {
                 val tail = textOf(rec.finalResult, "text")
                 if (tail.isNotEmpty()) listener.onFinal(tail)
             } catch (e: Throwable) {
-                Log.w(TAG, "recognition error", e)
-                listener.onError(e.message ?: "speech error")
+                Log.e(TAG, "recognition error", e)
+                listener.onError(describe(e))
             } finally {
                 running = false
                 runCatching { audio?.stop() }
@@ -178,6 +178,27 @@ object SpeechToText {
 
     private fun textOf(json: String?, key: String): String =
         try { JSONObject(json ?: "{}").optString(key, "").trim() } catch (_: Exception) { "" }
+
+    /**
+     * Build a human-readable error that names the exception TYPE and walks the cause
+     * chain. A bare `e.message` is ambiguous for native-init failures — an
+     * ExceptionInInitializerError has a null message and a NoClassDefFoundError's
+     * message is just the class name, so the device only ever showed "org.vosk.LibVosk"
+     * with no hint of the real UnsatisfiedLinkError underneath. This surfaces the chain.
+     */
+    private fun describe(t: Throwable): String {
+        val sb = StringBuilder()
+        var cur: Throwable? = t
+        var depth = 0
+        while (cur != null && depth < 5) {
+            if (depth > 0) sb.append(" <- ")
+            sb.append(cur.javaClass.simpleName)
+            cur.message?.takeIf { it.isNotBlank() }?.let { sb.append(": ").append(it) }
+            cur = cur.cause
+            depth++
+        }
+        return sb.toString().ifBlank { "speech error" }
+    }
 
     private fun unzipFlattened(zip: File, dest: File) {
         ZipInputStream(zip.inputStream()).use { zis ->
