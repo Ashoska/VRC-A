@@ -38,6 +38,9 @@ Hands-free dictation into the Manual Send field — built first for **mute playe
 - **Background**: Android silences the mic for backgrounded apps unless a `microphone`-type foreground service was started while the app was on screen. Not built yet (pending decision). Even with it, a game in front that holds the mic (e.g. VRChat voice) may still win the mic.
 - RAM on Quest 3 with VRChat running must be confirmed on device (Parakeet ~1 GB; Canary-1B ~1.9 GB, Omnilingual-1B ~1.7 GB for later packs).
 
+## Testing new models (the process)
+Written down in **`tools/speech-bench/README.md`** with the scripts that produced every number below (pinned test audio: FLEURS + LibriSpeech clean + AMI casual talk + synthetic chatter; side-by-side job queue; scorer with wrong-language check; cut-offs for quality labels, speed and RAM; how to ship a winner). Baseline table to compare new models against: `tools/speech-bench/results-2026-10.txt`. Re-run it when a newer model appears instead of trusting published scores.
+
 ## Engine shoot-out (Oct 2026) — why these models
 Desktop CPU, same audio for every engine; % = words wrong (characters for zh/yue/ja/ko/th).
 - **English, real conversation (AMI headset mics) / with 3 background talkers / clean read speech:** Vosk small 38.4 / 47.3 / 9.6 · Vosk 128 MB lgraph 29.7 / 40.2 / 6.8 (and only ~1× real time — too slow) · Vosk 1.8 GB 26.2 / 33.9 / 5.2 (**5 GB RAM**) · Kroko 22.5 / 7.7 / 5.4 · Moonshine Medium (live) 20.0 / 13.2 / 2.2 · Whisper small 18.6 / 7.6 / 3.3 · **Parakeet EN 14.2 / 4.0 / 1.6** · Granite 1B 13.0 / 2.4 (same subset: Parakeet 15.7 / 3.4) but slower than real time on CPU + 2 GB RAM.
