@@ -2681,11 +2681,8 @@ class VrcaViewModel(
         if (prev.isNotBlank() && !PhraseJoin.endsSentence(prev)) {
             if (pauseBeforeSec >= PhraseJoin.SENTENCE_PAUSE_SEC) {
                 // A real break: close the previous sentence, keep this one's capital.
-                val mark = PhraseJoin.sentenceMark(speechLanguage)
-                if (speechQueue.isNotEmpty()) speechQueue[speechQueue.lastIndex] = speechQueue.last() + mark
-                else {
-                    setFieldBySpeech(messageText.value.text.trimEnd() + mark, local)
-                }
+                if (speechQueue.isNotEmpty()) speechQueue[speechQueue.lastIndex] = PhraseJoin.closeSentence(speechQueue.last(), speechLanguage)
+                else setFieldBySpeech(PhraseJoin.closeSentence(messageText.value.text, speechLanguage), local)
             } else {
                 p = PhraseJoin.continueCase(p, speechLanguage)
             }
@@ -2724,7 +2721,7 @@ class VrcaViewModel(
         if (speechLiveBase == null) {
             var base = messageText.value.text.trim()
             speechLiveContinues = base.isNotBlank() && !PhraseJoin.endsSentence(base) && pauseBeforeSec < PhraseJoin.SENTENCE_PAUSE_SEC
-            if (base.isNotBlank() && !PhraseJoin.endsSentence(base) && !speechLiveContinues) base += PhraseJoin.sentenceMark(speechLanguage)
+            if (base.isNotBlank() && !PhraseJoin.endsSentence(base) && !speechLiveContinues) base = PhraseJoin.closeSentence(base, speechLanguage)
             speechLiveBase = base
         }
         setSpeechLive(liveText(raw), local)

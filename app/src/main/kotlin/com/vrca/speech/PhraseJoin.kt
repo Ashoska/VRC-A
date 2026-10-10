@@ -26,6 +26,19 @@ object PhraseJoin {
     /** The full stop that closes a sentence after a real break. */
     fun sentenceMark(lang: String): String = if (lang in NO_SPACE) "。" else "."
 
+    /**
+     * [text] closed as a sentence after a real break. A comma, semicolon, colon or dash the
+     * model left at the end (its phrase was cut mid-sentence) BECOMES the full stop:
+     * "you lesbian," → "you lesbian.", not "lesbian,." (user-reported). Already ended:
+     * unchanged.
+     */
+    fun closeSentence(text: String, lang: String): String {
+        val t = text.trimEnd()
+        if (t.isEmpty() || endsSentence(t)) return t
+        val body = t.trimEnd { it in ",;:-–—，、；：" || it.isWhitespace() }
+        return if (body.isEmpty()) t else body + sentenceMark(lang)
+    }
+
     /** Whether [text] already ends a sentence. */
     fun endsSentence(text: String): Boolean = text.trimEnd().lastOrNull()?.let { it in ".!?…。！？" } ?: false
 
