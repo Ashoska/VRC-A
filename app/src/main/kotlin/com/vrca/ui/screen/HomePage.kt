@@ -667,7 +667,9 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     // splits itself (maxSpeechDuration).
                     vm.speechListening && vm.speechHearing ->
                         "Hearing you…" to (if (vm.speechLive) "Your words show as you talk." else "Keep talking. Each sentence is added as you finish it.")
-                    vm.speechListening -> "Listening" to "Just talk normally. Tap stop when you're done."
+                    // A command word that was heard but not acted on says why (readable after
+                    // trying it in VRChat).
+                    vm.speechListening -> "Listening" to (vm.speechCommandNote ?: "Just talk normally. Tap stop when you're done.")
                     else -> "Tap the mic to speak" to
                         (if (vm.speechLive) "Talk normally. Your words show as you talk." else "Talk normally. Each sentence shows when you pause.")
                 }

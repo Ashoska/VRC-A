@@ -20,6 +20,7 @@ object SpeechToText {
         /** Listening ended for any reason (Stop, the notification's Stop, an error). */
         fun onStopped() {}
         fun onCommand(command: VoiceCommand) {}
+        fun onCommandRejected(command: VoiceCommand, miss: CommandMiss, heard: String) {}
     }
 
     fun isListening(): Boolean = false

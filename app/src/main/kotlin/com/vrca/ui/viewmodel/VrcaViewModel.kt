@@ -2330,6 +2330,10 @@ class VrcaViewModel(
         private set
     var speechVoicePaused by mutableStateOf(false)
         private set
+    /** Why the last heard command word wasn't acted on ("Heard \"resume\", but …"); kept
+     *  until the next command or session so a miss in VRChat can be read afterwards. */
+    var speechCommandNote by mutableStateOf<String?>(null)
+        private set
     /** "Say it": the command whose word is being recorded, and what the model heard. */
     var speechLearning by mutableStateOf<com.vrca.speech.VoiceCommand?>(null)
         private set
@@ -2447,6 +2451,7 @@ class VrcaViewModel(
             com.vrca.speech.VoiceCommand.CLEAR ->
                 if (messageText.value.text.isNotEmpty() || speechQueue.isNotEmpty()) clearManual(local) else return
         }
+        speechCommandNote = null
         com.vrca.speech.CommandSounds.play(command)
     }
 
@@ -2585,6 +2590,7 @@ class VrcaViewModel(
         SpeechToText.setLive(speechLive)
         SpeechToText.setSensitivity(speechSensitivity)
         speechVoicePaused = false
+        speechCommandNote = null
         applySpeechCommands()
         startSpeechGate()
         // Locked at once (the engine's own onLoading arrives a moment later): a second
@@ -2625,6 +2631,11 @@ class VrcaViewModel(
             }
             override fun onCommand(command: com.vrca.speech.VoiceCommand) {
                 viewModelScope.launch(Dispatchers.Main) { handleSpeechCommand(command, local) }
+            }
+            override fun onCommandRejected(command: com.vrca.speech.VoiceCommand, miss: com.vrca.speech.CommandMiss, heard: String) {
+                viewModelScope.launch(Dispatchers.Main) {
+                    if (speechLearning == null) speechCommandNote = "Heard \"${com.vrca.speech.VoiceCommands.clean(heard)}\", but ${miss.why}."
+                }
             }
             override fun onStopped() {
                 // Also covers the notification's Stop and errors, not just our button.
