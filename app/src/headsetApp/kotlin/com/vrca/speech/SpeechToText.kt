@@ -7,10 +7,15 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
 import com.k2fsa.sherpa.onnx.FeatureConfig
+import com.k2fsa.sherpa.onnx.OfflineCanaryModelConfig
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
+import com.k2fsa.sherpa.onnx.OnlineModelConfig
+import com.k2fsa.sherpa.onnx.OnlineRecognizer
+import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
@@ -59,7 +64,7 @@ object SpeechToText {
     fun start(ctx: Context, langCode: String, listener: Listener): Boolean {
         if (running) return true
         val app = ctx.applicationContext
-        val pack = SpeechCatalog.packForLang(langCode)
+        val pack = SpeechPacks.selectedPack(app, langCode)
         if (pack == null || !SpeechPacks.isLanguageReady(app, langCode)) {
             listener.onError("Voice pack for this language isn't installed yet."); return false
         }
@@ -67,13 +72,13 @@ object SpeechToText {
         val phrases = LinkedBlockingQueue<FloatArray>()
         val captureDone = java.util.concurrent.atomic.AtomicBoolean(false)
         val t = Thread({
-            var rec: OfflineRecognizer? = null
+            var rec: PhraseDecoder? = null
             var vad: Vad? = null
             var audio: AudioRecord? = null
             var decoder: Thread? = null
             try {
                 listener.onLoading(true)
-                rec = OfflineRecognizer(config = recognizerConfig(app, pack))
+                rec = phraseDecoder(app, pack, langCode)
                 vad = Vad(config = VadModelConfig(
                     sileroVadModelConfig = SileroVadModelConfig(
                         model = SpeechPacks.filePath(app, SpeechCatalog.VAD.id, "silero_vad.onnx"),
@@ -94,7 +99,7 @@ object SpeechToText {
                     // so words spoken right before Stop are never lost.
                     while (!captureDone.get() || phrases.isNotEmpty()) {
                         val seg = phrases.poll(200, TimeUnit.MILLISECONDS) ?: continue
-                        val text = runCatching { decode(r, seg) }.getOrElse { Log.w(TAG, "decode", it); "" }
+                        val text = runCatching { r.text(normalize(seg)) }.getOrElse { Log.w(TAG, "decode", it); "" }
                         if (text.isNotEmpty()) listener.onFinal(text)
                     }
                 }, "stt-decode").apply { isDaemon = true; start() }
@@ -146,45 +151,90 @@ object SpeechToText {
         capture = null
     }
 
-    private fun recognizerConfig(ctx: Context, pack: SpeechCatalog.Pack): OfflineRecognizerConfig {
-        fun p(name: String) = SpeechPacks.filePath(ctx, pack.id, name)
+    /** Recognises one finished phrase. One implementation per model family. */
+    private interface PhraseDecoder {
+        fun text(seg: FloatArray): String
+        fun release()
+    }
+
+    private fun phraseDecoder(ctx: Context, pack: SpeechCatalog.Pack, langCode: String): PhraseDecoder {
+        // File names differ per pack (e.g. Parakeet ships int8 decoders, GigaAM fp32),
+        // so resolve them from the catalog by prefix.
+        fun p(prefix: String) = SpeechPacks.filePath(ctx, pack.id, pack.files.first { it.name.startsWith(prefix) }.name)
         return when (pack.kind) {
-            SpeechCatalog.Kind.NEMO_TRANSDUCER -> OfflineRecognizerConfig(
+            SpeechCatalog.Kind.NEMO_TRANSDUCER -> offline(OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
                 modelConfig = OfflineModelConfig(
-                    transducer = OfflineTransducerModelConfig(
-                        encoder = p("encoder.int8.onnx"),
-                        decoder = p("decoder.int8.onnx"),
-                        joiner = p("joiner.int8.onnx"),
-                    ),
-                    tokens = p("tokens.txt"),
-                    numThreads = DECODE_THREADS,
-                    modelType = "nemo_transducer",
+                    transducer = OfflineTransducerModelConfig(encoder = p("encoder"), decoder = p("decoder"), joiner = p("joiner")),
+                    tokens = p("tokens"), numThreads = DECODE_THREADS, modelType = "nemo_transducer",
                 ),
                 decodingMethod = "greedy_search",
-            )
+            ))
+            SpeechCatalog.Kind.CANARY -> offline(OfflineRecognizerConfig(
+                featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 128, dither = 0f),
+                modelConfig = OfflineModelConfig(
+                    // The language is set explicitly, so Canary can never answer in another one.
+                    canary = OfflineCanaryModelConfig(encoder = p("encoder"), decoder = p("decoder"),
+                        srcLang = langCode, tgtLang = langCode, usePnc = true),
+                    tokens = p("tokens"), numThreads = DECODE_THREADS,
+                ),
+                decodingMethod = "greedy_search",
+            ))
+            SpeechCatalog.Kind.ONLINE_TRANSDUCER -> {
+                val rec = OnlineRecognizer(config = OnlineRecognizerConfig(
+                    featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
+                    modelConfig = OnlineModelConfig(
+                        transducer = OnlineTransducerModelConfig(encoder = p("encoder"), decoder = p("decoder"), joiner = p("joiner")),
+                        tokens = p("tokens"), numThreads = DECODE_THREADS,
+                    ),
+                    enableEndpoint = false,
+                    decodingMethod = "greedy_search",
+                ))
+                val tail = FloatArray((SAMPLE_RATE * 0.8f).toInt()) // flush the model's look-ahead
+                object : PhraseDecoder {
+                    override fun text(seg: FloatArray): String {
+                        val s = rec.createStream("")
+                        try {
+                            s.acceptWaveform(seg, SAMPLE_RATE)
+                            s.acceptWaveform(tail, SAMPLE_RATE)
+                            s.inputFinished()
+                            while (rec.isReady(s)) rec.decode(s)
+                            return rec.getResult(s).text.trim()
+                        } finally { s.release() }
+                    }
+                    override fun release() = rec.release()
+                }
+            }
         }
     }
 
-    /** Normalise the phrase's loudness (quiet mics hurt recognition badly), then decode. */
-    private fun decode(rec: OfflineRecognizer, seg: FloatArray): String {
+    private fun offline(config: OfflineRecognizerConfig): PhraseDecoder {
+        val rec = OfflineRecognizer(config = config)
+        return object : PhraseDecoder {
+            override fun text(seg: FloatArray): String {
+                val s = rec.createStream()
+                try {
+                    s.acceptWaveform(seg, SAMPLE_RATE)
+                    rec.decode(s)
+                    return rec.getResult(s).text.trim()
+                } finally { s.release() }
+            }
+            override fun release() = rec.release()
+        }
+    }
+
+    /** Normalise a phrase's loudness (~-24 dBFS): quiet mics hurt recognition badly. */
+    private fun normalize(seg: FloatArray): FloatArray {
         var sum = 0.0
         for (v in seg) sum += v * v
         val rms = sqrt(sum / seg.size.coerceAtLeast(1)).toFloat()
         if (rms > 1e-4f) {
-            val g = (0.063f / rms).coerceAtMost(30f) // ~ -24 dBFS
+            val g = (0.063f / rms).coerceAtMost(30f)
             var peak = 0f
             for (i in seg.indices) { seg[i] *= g; if (kotlin.math.abs(seg[i]) > peak) peak = kotlin.math.abs(seg[i]) }
             if (peak > 0.97f) { val k = 0.97f / peak; for (i in seg.indices) seg[i] *= k }
         }
-        val s = rec.createStream()
-        try {
-            s.acceptWaveform(seg, SAMPLE_RATE)
-            rec.decode(s)
-            return rec.getResult(s).text.trim()
-        } finally {
-            s.release()
-        }
+        return seg
     }
 
     /** Slow automatic gain so a quiet headset mic still triggers the voice detector. */

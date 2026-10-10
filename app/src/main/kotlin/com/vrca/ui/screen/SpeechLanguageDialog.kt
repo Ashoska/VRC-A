@@ -32,15 +32,17 @@ import com.vrca.ui.common.DialogHeader
 import com.vrca.ui.common.VrcaCardDialog
 
 /**
- * Voice-language picker (same look as the timezone picker). Each row shows the language,
- * its measured quality label and its pack's download size (or "Installed"). Picking a
- * language whose pack isn't installed starts the download.
+ * Voice-language picker (same look as the timezone picker). Each language card lists its
+ * tiers best-first — bigger + more accurate vs smaller + lighter — with download size
+ * (or "Installed"), RAM while listening and the measured quality label, so users can
+ * trade accuracy for device space. Picking a tier that isn't installed downloads it.
  */
 @Composable
 internal fun SpeechLanguageDialog(
-    current: String,
+    currentLang: String,
+    currentPackId: String?,
     installedPacks: Set<String>,
-    onSelect: (String) -> Unit,
+    onSelect: (code: String, packId: String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
@@ -66,17 +68,12 @@ internal fun SpeechLanguageDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 langs.forEach { l ->
-                    val pack = SpeechCatalog.packs[l.packId]
-                    val installed = l.packId in installedPacks
-                    LanguageRow(
+                    LanguageCard(
                         lang = l,
-                        selected = l.code == current,
-                        detail = when {
-                            installed -> "Installed"
-                            pack != null -> SpeechPacks.mb(pack.sizeBytes)
-                            else -> ""
-                        } + if (l.code == deviceLang) " · Your device language" else "",
-                        onClick = { onSelect(l.code) }
+                        isDevice = l.code == deviceLang,
+                        selectedPackId = if (l.code == currentLang) l.tier(currentPackId).packId else null,
+                        installedPacks = installedPacks,
+                        onPick = { packId -> onSelect(l.code, packId) },
                     )
                 }
                 if (langs.isEmpty()) {
@@ -85,7 +82,7 @@ internal fun SpeechLanguageDialog(
                 }
             }
             Text(
-                "Runs fully on your headset after the one-time download. More languages are coming.\n" +
+                "Runs fully on your headset after the one-time download. Smaller tiers use less storage and memory but make more mistakes. More languages are coming.\n" +
                     "Models: " + (SpeechCatalog.packs.values.map { it.credit } + SpeechCatalog.VAD.credit).distinct().joinToString(", "),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -95,22 +92,54 @@ internal fun SpeechLanguageDialog(
 }
 
 @Composable
-private fun LanguageRow(lang: SpeechCatalog.Lang, selected: Boolean, detail: String, onClick: () -> Unit) {
-    Surface(
-        shape = MaterialTheme.shapes.medium,
-        color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth().clickable { onClick() }
-    ) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
+private fun LanguageCard(
+    lang: SpeechCatalog.Lang,
+    isDevice: Boolean,
+    selectedPackId: String?,
+    installedPacks: Set<String>,
+    onPick: (String) -> Unit,
+) {
+    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(lang.nativeName, style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    (if (lang.nativeName != lang.englishName) lang.englishName + " · " else "") + detail,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                val sub = listOfNotNull(
+                    lang.englishName.takeIf { it != lang.nativeName },
+                    "your device language".takeIf { isDevice },
+                ).joinToString(" · ")
+                if (sub.isNotEmpty()) Text("  $sub", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            lang.tiers.forEach { t ->
+                val pack = SpeechCatalog.packs[t.packId]
+                TierRow(
+                    tier = t,
+                    detail = listOfNotNull(
+                        if (t.packId in installedPacks) "Installed" else pack?.let { SpeechPacks.mb(it.sizeBytes) },
+                        pack?.let { "~${it.ramMb} MB RAM" },
+                    ).joinToString(" · "),
+                    selected = t.packId == selectedPackId,
+                    onClick = { onPick(t.packId) },
                 )
             }
-            QualityChip(lang.quality)
+        }
+    }
+}
+
+@Composable
+private fun TierRow(tier: SpeechCatalog.Tier, detail: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surface,
+        // A translucent highlight has no matching content colour, so set it explicitly
+        // (otherwise the selected row's text inherits the card's muted colour).
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }
+    ) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(tier.label, style = MaterialTheme.typography.labelLarge)
+            Text("  $detail", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+            QualityChip(tier.quality)
         }
     }
 }

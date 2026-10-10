@@ -2354,6 +2354,9 @@ class VrcaViewModel(
     /** Language the mic dictates in (persisted locally by SpeechPacks). */
     var speechLanguage by mutableStateOf("en")
         private set
+    /** The tier (pack id) chosen for [speechLanguage]. */
+    var speechPackId by mutableStateOf<String?>(null)
+        private set
     /** The selected language's pack (+ voice detector) is installed. */
     var speechModelReady by mutableStateOf(false)
         private set
@@ -2385,21 +2388,23 @@ class VrcaViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             SpeechPacks.cleanupLegacy(ctx)
             val lang = SpeechPacks.selectedLanguage(ctx)
+            val packId = SpeechPacks.selectedPackId(ctx, lang)
             val installed = SpeechPacks.installedPacks(ctx).map { it.id }.toSet()
             val ready = SpeechPacks.isLanguageReady(ctx, lang)
             launch(Dispatchers.Main) {
-                speechLanguage = lang; speechInstalledPacks = installed; speechModelReady = ready
+                speechLanguage = lang; speechPackId = packId; speechInstalledPacks = installed; speechModelReady = ready
             }
         }
     }
 
-    /** Choose the dictation language; installs its pack if needed. */
-    fun selectSpeechLanguage(code: String) {
+    /** Choose the dictation language + tier (pack); installs the pack if needed. */
+    fun selectSpeechLanguage(code: String, packId: String) {
         if (!speechSupported || SpeechCatalog.lang(code) == null || speechDownloading) return
         if (speechListening) stopDictation()
         val ctx = app.applicationContext
-        SpeechPacks.setSelectedLanguage(ctx, code)
+        SpeechPacks.setSelected(ctx, code, packId)
         speechLanguage = code
+        speechPackId = SpeechPacks.selectedPackId(ctx, code)
         speechError = null
         speechModelReady = SpeechPacks.isLanguageReady(ctx, code)
         if (!speechModelReady) downloadSpeechModel()

@@ -1179,7 +1179,7 @@ private fun VoicePacksRows(vm: VrcaViewModel) {
         ) { }
     }
     packs.forEach { p ->
-        val langs = com.vrca.speech.SpeechCatalog.languages.filter { it.packId == p.id }.joinToString(", ") { it.englishName }
+        val langs = com.vrca.speech.SpeechCatalog.languages.filter { l -> l.tiers.any { it.packId == p.id } }.joinToString(", ") { it.englishName }
         SettingsRow(
             icon = Icons.Filled.Mic,
             title = "Voice pack: ${p.title}",

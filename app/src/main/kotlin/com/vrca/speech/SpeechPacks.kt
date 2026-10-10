@@ -43,9 +43,19 @@ object SpeechPacks {
         return pack.files.all { File(dir, it.name).length() == it.size }
     }
 
-    /** Ready to dictate in [langCode]: its pack + the shared voice detector. */
+    /** The tier (pack) the user chose for [langCode]; defaults to its best tier. */
+    fun selectedPackId(ctx: Context, langCode: String): String? {
+        val lang = SpeechCatalog.lang(langCode) ?: return null
+        val saved = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("tier_$langCode", null)
+        return lang.tier(saved).packId
+    }
+
+    fun selectedPack(ctx: Context, langCode: String): SpeechCatalog.Pack? =
+        SpeechCatalog.packFor(langCode, selectedPackId(ctx, langCode))
+
+    /** Ready to dictate in [langCode]: its chosen pack + the shared voice detector. */
     fun isLanguageReady(ctx: Context, langCode: String): Boolean {
-        val pack = SpeechCatalog.packForLang(langCode) ?: return false
+        val pack = selectedPack(ctx, langCode) ?: return false
         return isInstalled(ctx, pack.id) && isInstalled(ctx, SpeechCatalog.VAD.id)
     }
 
@@ -56,8 +66,10 @@ object SpeechPacks {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LANG, null)
             ?.takeIf { SpeechCatalog.lang(it) != null } ?: SpeechCatalog.defaultLanguage()
 
-    fun setSelectedLanguage(ctx: Context, code: String) {
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_LANG, code).apply()
+    /** Select [code] as the dictation language, using tier [packId] for it. */
+    fun setSelected(ctx: Context, code: String, packId: String) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_LANG, code).putString("tier_$code", packId).apply()
     }
 
     /** Remove a language pack; the shared voice detector goes too once no pack is left. */
@@ -76,7 +88,7 @@ object SpeechPacks {
     fun cancelDownload() { cancelRequested = true }
 
     /**
-     * Download + verify everything [langCode] needs on a background thread.
+     * Download + verify everything [langCode]'s chosen tier needs, on a background thread.
      * [onProgress] gets (percent 0..100, verifying) — percent covers all files by bytes.
      * Callbacks arrive on the worker thread.
      */
@@ -86,7 +98,7 @@ object SpeechPacks {
         onProgress: (Int, Boolean) -> Unit,
         onDone: (Boolean, String?) -> Unit,
     ) {
-        val pack = SpeechCatalog.packForLang(langCode) ?: return onDone(false, "Unknown language")
+        val pack = selectedPack(ctx, langCode) ?: return onDone(false, "Unknown language")
         if (!downloading.compareAndSet(false, true)) return onDone(false, "A download is already running")
         cancelRequested = false
         val app = ctx.applicationContext

@@ -657,8 +657,9 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                             color = MaterialTheme.colorScheme.surface,
                             modifier = Modifier.clickable(enabled = !vm.speechListening) { showPicker = true }
                         ) {
+                            val tierLabel = lang?.takeIf { it.tiers.size > 1 }?.tier(vm.speechPackId)?.label
                             Text(
-                                (lang?.nativeName ?: vm.speechLanguage) + " ▾",
+                                (lang?.nativeName ?: vm.speechLanguage) + (tierLabel?.let { " · $it" } ?: "") + " ▾",
                                 style = MaterialTheme.typography.labelMedium,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                             )
@@ -695,9 +696,10 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
     }
     if (showPicker) {
         SpeechLanguageDialog(
-            current = vm.speechLanguage,
+            currentLang = vm.speechLanguage,
+            currentPackId = vm.speechPackId,
             installedPacks = vm.speechInstalledPacks,
-            onSelect = { code -> showPicker = false; vm.selectSpeechLanguage(code) },
+            onSelect = { code, packId -> showPicker = false; vm.selectSpeechLanguage(code, packId) },
             onDismiss = { showPicker = false }
         )
     }
