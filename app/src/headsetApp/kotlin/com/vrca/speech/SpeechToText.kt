@@ -53,10 +53,11 @@ object SpeechToText {
     /** "Hearing you" ends this many 32 ms windows (~0.4 s) after the voice stops. */
     private const val QUIET_WINDOWS = 12
     /** Audio kept before / after the VAD's cut of a phrase (samples). */
-    private const val PRE_ROLL = SAMPLE_RATE / 4L   // 0.25 s
+    // 0.5 s: words starting with a soft consonant ("finally", "forever") were cut at
+    // 0.25 s; never reaches back into the previous phrase (clamped to its end).
+    private const val PRE_ROLL = SAMPLE_RATE / 2L   // 0.5 s
     private const val POST_ROLL = SAMPLE_RATE / 5L  // 0.2 s
     /** Free memory that must remain above Android's low-memory line after loading a model. */
-    private const val MEMORY_MARGIN_MB = 300L
     /** Written without spaces between words (live words join without them). */
     private val NO_SPACE = setOf("zh", "yue", "ja")
     /** Live words: re-read the unfinished phrase at most this often / at least this often. */
@@ -66,7 +67,10 @@ object SpeechToText {
     private const val LIVE_MAX_SEC = 12
     /** Audio kept for re-reads, and how far before the VAD's trigger a phrase starts. */
     private const val RING_SEC = 20
-    private const val PREROLL_MS = 300
+    private const val PREROLL_MS = 500
+    // Live words wait for this much voice (~0.2 s): a cough or hum used to flash a
+    // made-up "okay" before its final took it back.
+    private const val LIVE_MIN_VOICED = 6
 
     interface Listener {
         /**
@@ -102,13 +106,16 @@ object SpeechToText {
         if (pack == null || !SpeechPacks.isLanguageReady(app, langCode)) {
             listener.onError("Voice pack for this language isn't installed yet."); return false
         }
-        // Never squeeze VRChat: refuse a model that wouldn't leave the system comfortably
-        // above its low-memory line (Android starts killing apps below it).
+        // Refuse only a model that can't fit in the memory Android reports as available
+        // (that already counts what it can reclaim). Adding the low-memory line + a margin
+        // on top refused packs that fit fine (user-reported: "pick a lighter tier" with
+        // enough RAM). Under pressure Android reclaims a background app like us first,
+        // never VRChat in front.
         val mem = ActivityManager.MemoryInfo()
         runCatching { (app.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(mem) }
         val freeMb = mem.availMem / (1024 * 1024)
         val needMb = pack.ramMb + 50L
-        if (mem.availMem > 0 && freeMb - needMb < mem.threshold / (1024 * 1024) + MEMORY_MARGIN_MB) {
+        if (mem.availMem > 0 && freeMb < needMb) {
             listener.onError("Not enough free memory for this voice model (needs about $needMb MB, $freeMb MB free). Pick a lighter tier, or close other apps.")
             return false
         }
@@ -197,7 +204,9 @@ object SpeechToText {
                         agreement = null; agreementFor = -1L
                         val stale = seg.epoch != epoch // spoken before Clear
                         val t0 = System.nanoTime()
-                        val text = if (seg.noise || stale) "" else runCatching { r.text(normalize(seg.samples)) }.getOrElse { Log.w(TAG, "decode", it); "" }
+                        val raw = if (seg.noise || stale) "" else runCatching { r.text(normalize(seg.samples)) }.getOrElse { Log.w(TAG, "decode", it); "" }
+                        // Made-up fillers ("okay" from a rustle) count as nothing.
+                        val text = if (raw.isNotEmpty() && SpeechFilter.keep(raw, seg.voiced, seg.minVoiced, langCode in NO_SPACE)) raw else ""
                         val ms = (System.nanoTime() - t0) / 1_000_000
                         if (text.isEmpty() || seg.epoch != epoch) {
                             // Nothing there: take back live words shown for it, if any.
@@ -228,6 +237,7 @@ object SpeechToText {
                 var total = 0L
                 var phraseStart = -1L
                 var lastPartialAt = 0L
+                var lastSegEnd = 0L // VAD end of the last phrase: pre-roll never reaches before it
                 fun drain() {
                     val v = vad ?: return
                     while (!v.empty()) {
@@ -237,17 +247,19 @@ object SpeechToText {
                         // phrases always reach the model. Still queued as "noise" so live
                         // words shown for it get taken back.
                         val dur = s.samples.size / SAMPLE_RATE.toFloat()
-                        val noise = Voicing.voicedWindows(s.samples) < level.minVoiced && dur < level.blipMaxSec
+                        val voicedCount = Voicing.voicedWindows(s.samples)
+                        val noise = voicedCount < level.minVoiced && dur < level.blipMaxSec
                         // A little audio before and after the VAD's cut (still in the ring):
                         // it reacts late and ends early, clipping soft first/last syllables.
                         val segStart = s.start.toLong(); val segEnd = segStart + s.samples.size
-                        val from = maxOf(segStart - PRE_ROLL, total - ring.size, 0L)
+                        val from = maxOf(segStart - PRE_ROLL, lastSegEnd, total - ring.size, 0L)
                         val to = minOf(segEnd + POST_ROLL, total)
                         val padded = if (from <= segStart && to >= segEnd)
                             FloatArray((to - from).toInt()) { ring[((from + it) % ring.size).toInt()] } else s.samples
                         live.finalsQueued.incrementAndGet()
                         live.pending.set(null)
-                        phrases.offer(Segment(padded, segStart, segEnd, noise, epoch))
+                        phrases.offer(Segment(padded, segStart, segEnd, noise, epoch, voicedCount, level.minVoiced))
+                        lastSegEnd = segEnd
                         phraseStart = -1L
                     }
                 }
@@ -282,7 +294,7 @@ object SpeechToText {
                     // little before the VAD noticed you (it reacts late). Not for very long
                     // phrases: the final comes soon (maxSpeechDuration) and re-reads get slow.
                     if (speech && phraseStart < 0) {
-                        phraseStart = (total - n - SAMPLE_RATE * PREROLL_MS / 1000).coerceAtLeast(maxOf(0L, total - ring.size))
+                        phraseStart = (total - n - SAMPLE_RATE * PREROLL_MS / 1000).coerceAtLeast(maxOf(0L, total - ring.size, lastSegEnd))
                         live.cutSec = 0.0
                     }
                     if (!speech && vad?.empty() != false) phraseStart = -1L
@@ -291,7 +303,7 @@ object SpeechToText {
                     val cut = if (phraseStart < 0) 0L else
                         (phraseStart + (live.cutSec * SAMPLE_RATE).toLong()).coerceIn(maxOf(phraseStart, total - ring.size), total)
                     val len = total - cut
-                    if (liveEnabled && phraseStart >= 0 && voicedRun >= Voicing.MIN_VOICED_WINDOWS && phrases.isEmpty() &&
+                    if (liveEnabled && phraseStart >= 0 && voicedRun >= LIVE_MIN_VOICED && phrases.isEmpty() &&
                         len in (SAMPLE_RATE / 2)..(SAMPLE_RATE.toLong() * LIVE_MAX_SEC) &&
                         (total - lastPartialAt) * 1000 / SAMPLE_RATE >= live.intervalMs && live.pending.get() == null
                     ) {
@@ -333,7 +345,10 @@ object SpeechToText {
     /** A VAD phrase: [samples] padded with a little audio before/after (soft first and last
      *  syllables), [start]/[end] = the VAD's own bounds (pauses are measured on those),
      *  noise = too little voice to decode, [epoch] = discardPending() count when queued. */
-    private class Segment(val samples: FloatArray, val start: Long, val end: Long, val noise: Boolean, val epoch: Int)
+    private class Segment(
+        val samples: FloatArray, val start: Long, val end: Long, val noise: Boolean, val epoch: Int,
+        val voiced: Int, val minVoiced: Int, // voiced windows; the sensitivity's bar (SpeechFilter)
+    )
 
     /** The unfinished phrase from [chunkSec] (s after its start) to now, to re-read for live
      *  words; seq = finals queued when copied. */

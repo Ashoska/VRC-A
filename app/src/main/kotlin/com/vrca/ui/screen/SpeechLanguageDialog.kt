@@ -91,6 +91,7 @@ internal fun SpeechLanguageDialog(
                         onQuery = { query = it },
                         focused = focusedLang.code,
                         currentLang = currentLang,
+                        currentReady = currentPackId in installedPacks,
                         deviceLang = deviceLang,
                         installedPacks = installedPacks,
                         onFocus = { focused = it; narrowShowsDetails = true },
@@ -182,6 +183,7 @@ private fun LanguageList(
     onQuery: (String) -> Unit,
     focused: String,
     currentLang: String,
+    currentReady: Boolean,
     deviceLang: String,
     installedPacks: Set<String>,
     onFocus: (String) -> Unit,
@@ -215,7 +217,7 @@ private fun LanguageList(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                         }
                         when {
-                            l.code == currentLang -> Tag("In use", MaterialTheme.colorScheme.primary)
+                            l.code == currentLang && currentReady -> Tag("In use", MaterialTheme.colorScheme.primary)
                             l.tiers.any { it.packId in installedPacks } -> Tag("Installed", MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
@@ -261,7 +263,9 @@ private fun LanguageDetails(
                     tier = t,
                     pack = pack,
                     installed = t.packId in installedPacks,
-                    inUse = t.packId == inUsePackId,
+                    // Only while it's still downloaded: a removed in-use pack must offer
+                    // Download again (it stayed "In use" with no way to reinstall).
+                    inUse = t.packId == inUsePackId && t.packId in installedPacks,
                     onClick = { onPick(t.packId) },
                     onRemove = { onRemove(pack) },
                 )
