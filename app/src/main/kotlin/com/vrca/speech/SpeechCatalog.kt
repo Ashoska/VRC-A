@@ -15,7 +15,7 @@ import kotlin.math.roundToInt
  */
 object SpeechCatalog {
 
-    enum class Quality(val label: String) { GREAT("Great"), GOOD("Good"), OK("OK"), EXPERIMENTAL("Experimental") }
+    enum class Quality(val label: String) { EXCELLENT("Excellent"), GREAT("Great"), GOOD("Good"), OK("OK"), EXPERIMENTAL("Experimental") }
 
     /** How the engine loads a pack (the sherpa-onnx model family). */
     enum class Kind {
@@ -67,10 +67,13 @@ object SpeechCatalog {
      */
     data class Tier(val packId: String, val label: String, val errorPct: Double) {
         val accuracy: Int get() = (100 - errorPct).roundToInt()
+        // From the shown (rounded) accuracy, so badge and number always agree. "Excellent", not
+        // "Perfect": even 98% gets ~2 words in 100 wrong.
         val quality: Quality get() = when {
-            errorPct < 8 -> Quality.GREAT
-            errorPct < 12 -> Quality.GOOD
-            errorPct < 18 -> Quality.OK
+            accuracy >= 98 -> Quality.EXCELLENT
+            accuracy >= 92 -> Quality.GREAT
+            accuracy >= 88 -> Quality.GOOD
+            accuracy >= 82 -> Quality.OK
             else -> Quality.EXPERIMENTAL
         }
     }
