@@ -242,3 +242,25 @@ internal class CaptionPacer(
         repeat(add) { shownAt.addLast(now) }
     }
 }
+
+/**
+ * How long a dictated piece stays up: time to notice the bubble plus time to read it, so a
+ * short "yeah" goes sooner and a long sentence gets longer (user: text disappeared too
+ * fast, and short and long pieces got the same time). Slow on purpose (~10 characters a
+ * second): in VR people glance at a bubble above someone's head, often while moving.
+ * Wide CJK characters count double (each carries more than a Latin letter).
+ */
+object ReadingTime {
+    const val BASE_MS = 6_000L
+    const val PER_CHAR_MS = 100L
+    const val MIN_MS = 8_000L
+    const val MAX_MS = 25_000L
+
+    fun ms(text: String): Long {
+        var units = 0
+        for (c in text) if (!c.isWhitespace()) units += if (isWide(c)) 2 else 1
+        return (BASE_MS + PER_CHAR_MS * units).coerceIn(MIN_MS, MAX_MS)
+    }
+
+    private fun isWide(c: Char) = c in '\u3000'..'\u9fff' || c in '\uac00'..'\ud7af' || c in '\uff00'..'\uffef'
+}
