@@ -270,7 +270,7 @@ class UiLabDriver(
     }
 
     private fun scrollTo(query: String): String {
-        repeat(25) {
+        repeat(60) {
             val q = query.lowercase()
             val n = nodes().firstOrNull { label(it).lowercase().contains(q) }
             if (n != null) {
@@ -285,12 +285,22 @@ class UiLabDriver(
                 anc.config[SemanticsActions.ScrollBy].action?.invoke(0f, b.top - view.top - view.height * 0.2f)
                 settle(150)
             } else {
-                val target = scrollables().maxByOrNull { it.boundsInRoot.height } ?: error("\"$query\" not found")
+                // Not built yet (lazy lists only build rows as they scroll in) or further
+                // down: step through each scroll area that can still go down, TOP window
+                // first and in screen order (a dialog's list before its details pane). Only
+                // scrolling the largest area missed lists next to a bigger pane.
+                val target = scrollables().firstOrNull { canScrollDown(it) } ?: error("\"$query\" not found after scrolling")
                 target.config[SemanticsActions.ScrollBy].action?.invoke(0f, target.boundsInRoot.height * 0.7f)
                 settle(150)
             }
         }
         error("\"$query\" not found after scrolling")
+    }
+
+    /** Whether a scroll area isn't at its end yet (lists without a range count as scrollable). */
+    private fun canScrollDown(n: SemanticsNode): Boolean {
+        val r = n.config.getOrNull(SemanticsProperties.VerticalScrollAxisRange) ?: return true
+        return r.value() < r.maxValue() - 0.5f
     }
 
     /** Where [n] really is, even when scrolled out of view (boundsInRoot clips to zero). */
