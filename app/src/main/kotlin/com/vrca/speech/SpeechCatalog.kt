@@ -385,41 +385,42 @@ object SpeechCatalog {
     ).associateBy { it.id }
 
     /**
-     * Languages offered right now, each with its tiers best-first (bigger + more accurate
-     * first, smaller + lighter after) so users can trade accuracy for device space.
+     * Languages offered right now, each with its tiers biggest-first: Large / Medium / Small
+     * (named by size, the real trade-off; quality shows as the measured accuracy next to
+     * it, so a name never contradicts the quality label as "Best · OK" did).
      * Accuracy + quality come from the shoot-out (docs/systems/voice-to-text.md). Parakeet-25
      * is only used where it never wrote the wrong language; Canary takes the language
      * explicitly, so it can't confuse them.
      */
     val languages: List<Lang> = listOf(
         Lang("en", "English", "English", listOf(
-            Tier("parakeet-en", "Best", 7.8),
-            Tier("canary-180m", "Balanced", 16.7),
-            Tier("kroko-en", "Light", 19.8),
+            Tier("parakeet-en", "Large", 7.8),
+            Tier("canary-180m", "Medium", 16.7),
+            Tier("kroko-en", "Small", 19.8),
         )),
         Lang("es", "Spanish", "Español", listOf(
-            Tier("parakeet-25", "Best", 2.2),
-            Tier("canary-180m", "Balanced", 4.3),
-            Tier("kroko-es", "Light", 5.8),
+            Tier("parakeet-25", "Large", 2.2),
+            Tier("canary-180m", "Medium", 4.3),
+            Tier("kroko-es", "Small", 5.8),
         )),
         Lang("pt", "Portuguese", "Português", listOf(
-            Tier("parakeet-25", "Best", 4.5),
-            Tier("whisper-base", "Light", 15.3),
+            Tier("parakeet-25", "Large", 4.5),
+            Tier("whisper-base", "Small", 15.3),
         )),
         // GigaAM v3 is both the most accurate (6.2% vs Parakeet-25's 10.6%) and the
         // lightest full model; the 29 MB streaming one is the Light tier.
         Lang("ru", "Russian", "Русский", listOf(
-            Tier("gigaam3-ru", "Best", 6.2),
-            Tier("ru-small", "Light", 14.1),
+            Tier("gigaam3-ru", "Large", 6.2),
+            Tier("ru-small", "Small", 14.1),
         )),
         Lang("de", "German", "Deutsch", listOf(
-            Tier("parakeet-25", "Best", 6.0),
-            Tier("canary-180m", "Balanced", 6.5),
-            Tier("kroko-de", "Light", 7.7),
+            Tier("parakeet-25", "Large", 6.0),
+            Tier("canary-180m", "Medium", 6.5),
+            Tier("kroko-de", "Small", 7.7),
         )),
         Lang("fr", "French", "Français", listOf(
-            Tier("canary-180m", "Best", 9.7),
-            Tier("kroko-fr", "Light", 12.9),
+            Tier("canary-180m", "Large", 9.7),
+            Tier("kroko-fr", "Small", 12.9),
         )),
         // Parakeet-25 never answered in the wrong language for these (shoot-out check).
         Lang("it", "Italian", "Italiano", listOf(Tier("parakeet-25", "Standard", 9.0))),
@@ -428,41 +429,41 @@ object SpeechCatalog {
         Lang("uk", "Ukrainian", "Українська", listOf(Tier("parakeet-25", "Standard", 14.2))),
         Lang("nl", "Dutch", "Nederlands", listOf(Tier("parakeet-25", "Standard", 14.7))),
         Lang("zh", "Chinese (Mandarin)", "中文", listOf(
-            Tier("sensevoice", "Best", 8.0),
-            Tier("zh-stream", "Balanced", 14.4),
-            Tier("zh-small", "Light", 17.5),
+            Tier("sensevoice", "Large", 8.0),
+            Tier("zh-stream", "Medium", 14.4),
+            Tier("zh-small", "Small", 17.5),
         )),
         Lang("yue", "Cantonese", "粵語", listOf(
-            Tier("sensevoice", "Best", 5.5),
-            Tier("dolphin-base", "Light", 12.3),
+            Tier("sensevoice", "Large", 5.5),
+            Tier("dolphin-base", "Small", 12.3),
         )),
         Lang("ja", "Japanese", "日本語", listOf(
-            Tier("reazon-ja", "Best", 5.5),
-            Tier("dolphin-base", "Light", 17.6),
+            Tier("reazon-ja", "Large", 5.5),
+            Tier("dolphin-base", "Small", 17.6),
         )),
         Lang("ko", "Korean", "한국어", listOf(
-            Tier("sensevoice", "Best", 7.2),
-            Tier("dolphin-base", "Light", 11.6),
+            Tier("sensevoice", "Large", 7.2),
+            Tier("dolphin-base", "Small", 11.6),
         )),
         Lang("vi", "Vietnamese", "Tiếng Việt", listOf(Tier("zipformer-vi", "Standard", 10.8))),
         Lang("th", "Thai", "ไทย", listOf(
-            Tier("omnilingual-1b", "Best", 9.3),
-            Tier("ml8-stream", "Balanced", 13.3),
-            Tier("dolphin-base", "Light", 14.2),
+            Tier("omnilingual-1b", "Large", 9.3),
+            Tier("ml8-stream", "Medium", 13.3),
+            Tier("dolphin-base", "Small", 14.2),
         )),
         Lang("id", "Indonesian", "Bahasa Indonesia", listOf(
-            Tier("omnilingual-1b", "Best", 9.7),
-            Tier("ml8-stream", "Balanced", 11.6),
-            Tier("dolphin-base", "Light", 16.7),
+            Tier("omnilingual-1b", "Large", 9.7),
+            Tier("ml8-stream", "Medium", 11.6),
+            Tier("dolphin-base", "Small", 16.7),
         )),
         Lang("hi", "Hindi", "हिन्दी", listOf(
-            Tier("omnilingual-1b", "Best", 11.4),
-            Tier("omnilingual-300m", "Light", 22.5),
+            Tier("omnilingual-1b", "Large", 11.4),
+            Tier("omnilingual-300m", "Small", 22.5),
         )),
         Lang("tr", "Turkish", "Türkçe", listOf(Tier("omnilingual-1b", "Standard", 14.9))),
         Lang("fil", "Filipino", "Filipino", listOf(
-            Tier("omnilingual-1b", "Best", 16.5),
-            Tier("omnilingual-300m", "Light", 22.4),
+            Tier("omnilingual-1b", "Large", 16.5),
+            Tier("omnilingual-300m", "Small", 22.4),
         )),
     )
 

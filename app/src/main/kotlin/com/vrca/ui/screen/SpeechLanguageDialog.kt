@@ -33,7 +33,7 @@ import com.vrca.ui.common.VrcaCardDialog
 
 /**
  * Voice-language picker (same look as the timezone picker). Each language card lists its
- * tiers best-first — bigger + more accurate vs smaller + lighter — with download size
+ * tiers Large → Small — bigger + more accurate vs smaller + lighter — with download size
  * (or "Installed"), RAM while listening and the measured quality label, so users can
  * trade accuracy for device space. Picking a tier that isn't installed downloads it.
  */
@@ -82,7 +82,7 @@ internal fun SpeechLanguageDialog(
                 }
             }
             Text(
-                "Runs fully on your headset after the one-time download. Smaller tiers use less storage and memory but make more mistakes. Accuracy = words right on test recordings of read speech; casual talk scores a bit lower.\n" +
+                "Runs fully on your headset after the one-time download. Smaller tiers use less storage and memory but make more mistakes. Accuracy = words right on test recordings of read speech (casual talk scores a bit lower). Compare tiers within a language: each language has its own test sentences.\n" +
                     "Models: " + (SpeechCatalog.packs.values.map { it.credit } + SpeechCatalog.VAD.credit).distinct().joinToString(", "),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
