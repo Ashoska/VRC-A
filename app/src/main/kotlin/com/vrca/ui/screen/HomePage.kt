@@ -595,7 +595,8 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
  *
  * States: not installed → "Install voice to text" (opens the language picker);
  * downloading → progress + Cancel; ready → language chip + mic. Phrase-based: each
- * phrase is added to the field when you pause, and Live + Scroll (forced on by the VM)
+ * phrase is added at the natural breath after it (people just talk; no deliberate
+ * pausing needed), and Live + Scroll (forced on by the VM)
  * keeps long dictation inside the chatbox budget.
  */
 @Composable
@@ -639,9 +640,12 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     }
                     !vm.speechModelReady -> "Voice to text" to "Speak instead of typing. Works offline once installed."
                     vm.speechLoading -> "Loading voice model…" to "This takes a few seconds."
-                    vm.speechListening && vm.speechHearing -> "Hearing you…" to "Pause to add the phrase."
-                    vm.speechListening -> "Listening" to "Pause after each phrase to send it. Tap stop when done."
-                    else -> "Tap the mic to speak" to "Each phrase is added when you pause."
+                    // Copy says "talk normally": phrases end at the natural breath between
+                    // sentences (VAD, 0.5 s), never a deliberate pause; nonstop talk still
+                    // splits itself (maxSpeechDuration).
+                    vm.speechListening && vm.speechHearing -> "Hearing you…" to "Keep talking. Each sentence is added as you finish it."
+                    vm.speechListening -> "Listening" to "Just talk normally. Tap stop when you're done."
+                    else -> "Tap the mic to speak" to "Talk normally. Your words are added sentence by sentence."
                 }
                 Column(Modifier.weight(1f)) {
                     Text(label, style = MaterialTheme.typography.labelLarge)
