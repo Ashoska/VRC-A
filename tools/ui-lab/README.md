@@ -36,7 +36,15 @@ including recompiling edited code; in live mode a command is ~0.4 s (code edits 
 
 **Presets:** in-world, offline, friends, incident, outage-minor, status-ok, alerts, no-alerts, sending,
 idle, warned, banned, auth-dead, logged-out, nowplaying, paused, ad, roster, roster-empty, manual, owner
-(opens the admin panel without the owner account — its data stays empty).
+(opens the admin panel without the owner account — its data stays empty), osc-params (sample VRChat
+avatar params for the dictation Listen trigger).
+
+**Voice to text (headset):** `voice` installs a stand-in English pack (sparse files at the exact sizes
+the app checks, so it counts as installed); `voice-listening`, `voice-hearing`, `voice-loading`,
+`voice-stopping`, `voice-paused` (by a voice command), `voice-trigger` (by the Listen trigger),
+`voice-learning` ("Say it" 2 of 3) and `voice-downloading` add a state on top, each clearing the last.
+The engine itself can't run on the JVM. Expand Manual Send to see the row:
+`ui.sh run headset "preset voice-loading; tap Manual Send; shot v"`.
 
 **Shows:** update, update-optional, whatsnew, confirm, confirm-destructive, timezone (dialogs);
 boot [2|error|done], crash, banned [reason], tos, onboarding <step 0-7>, login [nocancel] (full screens).
