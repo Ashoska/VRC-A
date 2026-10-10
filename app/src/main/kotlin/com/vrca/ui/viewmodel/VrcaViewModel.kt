@@ -153,7 +153,7 @@ class VrcaViewModel(
         // MANUAL_HOLD_MS (20 s).
         private const val SPEECH_HOLD_MS = 8_000L
         private const val SPEECH_SCROLL_GAP_MS = 1_500L
-        // "Say it" records a command word this many times.
+        // "Teach my voice" records a command word this many times.
         const val LEARN_TIMES = 3
 
         private const val META_STABLE_MS = 1_100L
@@ -2331,7 +2331,7 @@ class VrcaViewModel(
      *  until the next command or session so a miss in VRChat can be read afterwards. */
     var speechCommandNote by mutableStateOf<String?>(null)
         private set
-    /** "Say it": the command whose word is being recorded, and what the model heard. */
+    /** "Teach my voice": the command whose word is being recorded, and what the model heard. */
     var speechLearning by mutableStateOf<com.vrca.speech.VoiceCommand?>(null)
         private set
     var speechLearnHeard by mutableStateOf<List<String>>(emptyList())
@@ -2475,7 +2475,7 @@ class VrcaViewModel(
         speechVoicePaused = false
     }
 
-    /** "Say it": record what the model hears for [command]'s word, LEARN_TIMES times.
+    /** "Teach my voice": record what the model hears for [command]'s word, LEARN_TIMES times.
      *  Starts dictation for it if it isn't running (and stops it again after). */
     fun startSpeechLearning(command: com.vrca.speech.VoiceCommand) {
         if (!speechSupported || !speechModelReady || isBanned) return
@@ -2486,12 +2486,15 @@ class VrcaViewModel(
         if (!speechListening) { speechLearnStartedDictation = true; startDictation() }
     }
 
-    /** End "Say it"; [save] keeps what was heard as the command's words. */
+    /** End "Teach my voice"; [save] keeps how the model wrote the word for this voice as hidden
+     *  spellings behind the shown word (it never changes the word itself: one user's "clear"
+     *  came out "Claire", and showing "claire" as the word confused). */
     fun finishSpeechLearning(save: Boolean) {
         val command = speechLearning ?: return
         if (save) {
-            val (words, _) = com.vrca.speech.VoiceCommands.learn(speechLearnHeard)
-            if (words.isNotEmpty()) setSpeechCommandWords(command, words)
+            val shown = com.vrca.speech.VoiceCommands.shown(speechCommandWords[command].orEmpty())
+            val learned = com.vrca.speech.VoiceCommands.learnedSpellings(shown, speechLearnHeard)
+            if (shown.isNotEmpty()) setSpeechCommandWords(command, listOf(shown) + learned)
         }
         speechLearning = null
         speechLearnHeard = emptyList()
@@ -2600,7 +2603,7 @@ class VrcaViewModel(
             override fun onFinal(text: String, pauseBeforeSec: Float, decodeMs: Long) {
                 viewModelScope.launch(Dispatchers.Main) {
                     speechLastDecodeMs = decodeMs
-                    // "Say it": record what the model heard instead of typing it.
+                    // "Teach my voice": record what the model heard instead of typing it.
                     if (speechLearning != null) {
                         if (text.isNotBlank() && speechLearnHeard.size < LEARN_TIMES) speechLearnHeard = speechLearnHeard + text
                         return@launch
