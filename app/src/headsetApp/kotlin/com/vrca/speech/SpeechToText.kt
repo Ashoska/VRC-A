@@ -6,25 +6,28 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
-import org.json.JSONObject
-import org.vosk.Model
-import org.vosk.Recognizer
-import java.io.File
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.zip.ZipInputStream
+import com.k2fsa.sherpa.onnx.FeatureConfig
+import com.k2fsa.sherpa.onnx.OfflineModelConfig
+import com.k2fsa.sherpa.onnx.OfflineRecognizer
+import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
+import com.k2fsa.sherpa.onnx.SileroVadModelConfig
+import com.k2fsa.sherpa.onnx.Vad
+import com.k2fsa.sherpa.onnx.VadModelConfig
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import kotlin.math.sqrt
 
 /**
- * Headset-flavor OFFLINE speech-to-text (Vosk) — the engine behind voice-to-text
- * dictation into the Manual Send chatbox field. On-device: no network/API cost after
- * a one-time model download, and the recognizer + model live in RAM ONLY while
- * listening (released on [stop]), so idle cost is zero. Works on Quest, which has no
- * Google SpeechRecognizer.
+ * Headset OFFLINE voice-to-text engine (sherpa-onnx). Phrase-based: a voice-activity
+ * detector (Silero) cuts the mic stream into phrases at your pauses, and each finished
+ * phrase is recognised by the language's pack (e.g. Parakeet for English) and delivered
+ * via [Listener.onFinal]. So the chatbox only ever receives finished sentences, never
+ * half-guessed words that keep changing.
  *
- * The 144-char chatbox limit is NOT a concern here: the UI routes the growing
- * transcript through Manual Send's Live + Scroll path, which windows the newest lines
- * within the budget and scrolls older ones off — so a long dictation never gets cut.
+ * Two threads: the capture thread never blocks (mic → gain → VAD), and a decode thread
+ * runs recognition per phrase, so no speech is dropped while a phrase is processed.
+ * The recognizer (~1 GB for Parakeet) lives in RAM only while listening.
  *
  * Signature MUST match the publicApp/adminApp stubs (SUPPORTED=false there).
  */
@@ -33,171 +36,173 @@ object SpeechToText {
 
     private const val TAG = "SpeechToText"
     private const val SAMPLE_RATE = 16000
-
-    // Versioned model dir: bumping MODEL_URL MUST bump this suffix so an existing
-    // install re-downloads the new model instead of seeing the old one as "ready"
-    // (modelReady only checks am/+conf/ exist, which the old model also had). Stale
-    // model dirs are pruned by cleanupOtherModels() so we don't keep both on disk.
-    private const val MODEL_DIR = "vosk-model-022-lgraph"
-
-    /**
-     * Vosk English model, fetched on demand — never bundled. This is the ~128 MB
-     * "0.22-lgraph" model: the SAME high-accuracy acoustic model as Vosk's 1.8 GB
-     * en-us-0.22, just with a lighter dynamic language graph — far more accurate than
-     * the 40 MB small model while still loading fine in a Quest's RAM and staying a
-     * reasonable one-time download. (To change models, update this URL AND bump
-     * MODEL_DIR's version suffix.)
-     */
-    private const val MODEL_URL =
-        "https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip"
+    private const val DECODE_THREADS = 2
 
     interface Listener {
-        /** The current, still-growing utterance (replace the live tail with this). */
-        fun onPartial(text: String)
-        /** A finished utterance (append this + a space, start a fresh tail). */
+        /** Unused in phrase mode (kept for API compatibility). */
+        fun onPartial(text: String) {}
+        /** A finished phrase. */
         fun onFinal(text: String)
         fun onError(message: String)
+        /** True while the voice detector hears you speaking. */
+        fun onSpeechActive(active: Boolean) {}
+        /** True while the model loads (a few seconds on first start). */
+        fun onLoading(loading: Boolean) {}
     }
 
     @Volatile private var running = false
-    @Volatile private var worker: Thread? = null
+    @Volatile private var capture: Thread? = null
 
     fun isListening(): Boolean = running
 
-    private fun modelDir(ctx: Context): File = File(ctx.filesDir, MODEL_DIR)
-
-    fun modelReady(ctx: Context): Boolean {
-        val d = modelDir(ctx)
-        return d.isDirectory && File(d, "am").exists() && File(d, "conf").exists()
-    }
-
-    /** Download + unzip the model on a background thread. [onProgress] is 0..100. */
-    fun downloadModel(
-        ctx: Context,
-        onProgress: (Int) -> Unit,
-        onDone: (Boolean, String?) -> Unit,
-    ) {
-        Thread({
-            try {
-                if (modelReady(ctx)) { onProgress(100); onDone(true, null); return@Thread }
-                val tmpZip = File(ctx.cacheDir, "vosk-model.zip")
-                val conn = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 20_000
-                    readTimeout = 60_000
-                    instanceFollowRedirects = true
-                    setRequestProperty("User-Agent", "VRC-A/1.0")
-                }
-                if (conn.responseCode !in 200..299) {
-                    onDone(false, "Download failed (HTTP ${conn.responseCode})"); return@Thread
-                }
-                val total = conn.contentLengthLong
-                conn.inputStream.use { input ->
-                    FileOutputStream(tmpZip).use { out ->
-                        val buf = ByteArray(65_536)
-                        var read = 0L
-                        var lastPct = -1
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n == -1) break
-                            out.write(buf, 0, n)
-                            read += n
-                            if (total > 0) {
-                                val pct = ((read * 95) / total).toInt().coerceIn(0, 95)
-                                if (pct != lastPct) { lastPct = pct; onProgress(pct) }
-                            }
-                        }
-                    }
-                }
-                onProgress(96)
-                val dir = modelDir(ctx)
-                deleteTree(dir); dir.mkdirs()
-                unzipFlattened(tmpZip, dir)
-                tmpZip.delete()
-                if (modelReady(ctx)) { cleanupOtherModels(ctx); onProgress(100); onDone(true, null) }
-                else { deleteTree(dir); onDone(false, "Model files missing after unzip") }
-            } catch (e: Throwable) {
-                Log.e(TAG, "model download failed", e)
-                onDone(false, describe(e))
-            }
-        }, "vosk-download").start()
-    }
-
-    /**
-     * Start streaming recognition. The caller MUST have RECORD_AUDIO granted (the UI
-     * checks). Returns false if it can't start (no model / mic unavailable). Partial +
-     * final results are delivered on the worker thread — the UI must hop to the main
-     * thread itself.
-     */
     @SuppressLint("MissingPermission")
-    fun start(ctx: Context, listener: Listener): Boolean {
+    fun start(ctx: Context, langCode: String, listener: Listener): Boolean {
         if (running) return true
-        if (!modelReady(ctx)) { listener.onError("Voice model not downloaded yet."); return false }
+        val app = ctx.applicationContext
+        val pack = SpeechCatalog.packForLang(langCode)
+        if (pack == null || !SpeechPacks.isLanguageReady(app, langCode)) {
+            listener.onError("Voice pack for this language isn't installed yet."); return false
+        }
         running = true
+        val phrases = LinkedBlockingQueue<FloatArray>()
+        val captureDone = java.util.concurrent.atomic.AtomicBoolean(false)
         val t = Thread({
-            var model: Model? = null
-            var rec: Recognizer? = null
+            var rec: OfflineRecognizer? = null
+            var vad: Vad? = null
             var audio: AudioRecord? = null
+            var decoder: Thread? = null
             try {
-                model = Model(modelDir(ctx).absolutePath)
-                rec = Recognizer(model, SAMPLE_RATE.toFloat())
-                val minBuf = AudioRecord.getMinBufferSize(
-                    SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-                ).coerceAtLeast(SAMPLE_RATE) // ~1s floor
-                audio = AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                    SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minBuf
-                )
-                if (audio.state != AudioRecord.STATE_INITIALIZED) {
-                    listener.onError("Microphone unavailable."); return@Thread
-                }
-                audio.startRecording()
-                val buf = ShortArray(minBuf / 2)
-                while (running) {
-                    val n = audio.read(buf, 0, buf.size)
-                    if (n <= 0) continue
-                    if (rec.acceptWaveForm(buf, n)) {
-                        val text = textOf(rec.result, "text")
+                listener.onLoading(true)
+                rec = OfflineRecognizer(config = recognizerConfig(app, pack))
+                vad = Vad(config = VadModelConfig(
+                    sileroVadModelConfig = SileroVadModelConfig(
+                        model = SpeechPacks.filePath(app, SpeechCatalog.VAD.id, "silero_vad.onnx"),
+                        threshold = 0.5f,
+                        minSilenceDuration = 0.5f, // pause that ends a phrase
+                        minSpeechDuration = 0.25f,
+                        windowSize = 512,
+                        maxSpeechDuration = 15f,  // long monologues are split, never truncated
+                    ),
+                    sampleRate = SAMPLE_RATE,
+                    numThreads = 1,
+                ))
+                listener.onLoading(false)
+
+                val r = rec
+                decoder = Thread({
+                    // Runs until capture has flushed its last phrase AND the queue is drained,
+                    // so words spoken right before Stop are never lost.
+                    while (!captureDone.get() || phrases.isNotEmpty()) {
+                        val seg = phrases.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                        val text = runCatching { decode(r, seg) }.getOrElse { Log.w(TAG, "decode", it); "" }
                         if (text.isNotEmpty()) listener.onFinal(text)
-                    } else {
-                        val partial = textOf(rec.partialResult, "partial")
-                        if (partial.isNotEmpty()) listener.onPartial(partial)
                     }
+                }, "stt-decode").apply { isDaemon = true; start() }
+
+                val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+                audio = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, SAMPLE_RATE * 2))
+                if (audio.state != AudioRecord.STATE_INITIALIZED) { listener.onError("Microphone unavailable."); return@Thread }
+                audio.startRecording()
+
+                val pcm = ShortArray(512) // 32 ms windows
+                val gain = Agc()
+                var wasSpeech = false
+                while (running) {
+                    val n = audio.read(pcm, 0, pcm.size)
+                    if (n <= 0) continue
+                    val f = FloatArray(n) { pcm[it] / 32768f }
+                    gain.apply(f)
+                    vad.acceptWaveform(f)
+                    while (!vad.empty()) { phrases.offer(vad.front().samples); vad.pop() }
+                    val speech = vad.isSpeechDetected()
+                    if (speech != wasSpeech) { wasSpeech = speech; listener.onSpeechActive(speech) }
                 }
-                val tail = textOf(rec.finalResult, "text")
-                if (tail.isNotEmpty()) listener.onFinal(tail)
+                vad.flush() // finish a phrase cut off by Stop
+                while (!vad.empty()) { phrases.offer(vad.front().samples); vad.pop() }
+                if (wasSpeech) listener.onSpeechActive(false)
             } catch (e: Throwable) {
-                Log.e(TAG, "recognition error", e)
+                Log.e(TAG, "dictation error", e)
+                listener.onLoading(false)
                 listener.onError(describe(e))
             } finally {
                 running = false
+                captureDone.set(true)
                 runCatching { audio?.stop() }
                 runCatching { audio?.release() }
-                runCatching { rec?.close() }
-                runCatching { model?.close() }
+                runCatching { decoder?.join(15_000) } // let queued phrases finish
+                runCatching { vad?.release() }
+                runCatching { rec?.release() }
             }
-        }, "vosk-recognize")
+        }, "stt-capture")
         t.isDaemon = true
-        worker = t
+        capture = t
         t.start()
         return true
     }
 
     fun stop() {
         running = false
-        worker?.interrupt()
-        worker = null
+        capture = null
     }
 
-    private fun textOf(json: String?, key: String): String =
-        try { JSONObject(json ?: "{}").optString(key, "").trim() } catch (_: Exception) { "" }
+    private fun recognizerConfig(ctx: Context, pack: SpeechCatalog.Pack): OfflineRecognizerConfig {
+        fun p(name: String) = SpeechPacks.filePath(ctx, pack.id, name)
+        return when (pack.kind) {
+            SpeechCatalog.Kind.NEMO_TRANSDUCER -> OfflineRecognizerConfig(
+                featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
+                modelConfig = OfflineModelConfig(
+                    transducer = OfflineTransducerModelConfig(
+                        encoder = p("encoder.int8.onnx"),
+                        decoder = p("decoder.int8.onnx"),
+                        joiner = p("joiner.int8.onnx"),
+                    ),
+                    tokens = p("tokens.txt"),
+                    numThreads = DECODE_THREADS,
+                    modelType = "nemo_transducer",
+                ),
+                decodingMethod = "greedy_search",
+            )
+        }
+    }
 
-    /**
-     * Build a human-readable error that names the exception TYPE and walks the cause
-     * chain. A bare `e.message` is ambiguous for native-init failures — an
-     * ExceptionInInitializerError has a null message and a NoClassDefFoundError's
-     * message is just the class name, so the device only ever showed "org.vosk.LibVosk"
-     * with no hint of the real UnsatisfiedLinkError underneath. This surfaces the chain.
-     */
+    /** Normalise the phrase's loudness (quiet mics hurt recognition badly), then decode. */
+    private fun decode(rec: OfflineRecognizer, seg: FloatArray): String {
+        var sum = 0.0
+        for (v in seg) sum += v * v
+        val rms = sqrt(sum / seg.size.coerceAtLeast(1)).toFloat()
+        if (rms > 1e-4f) {
+            val g = (0.063f / rms).coerceAtMost(30f) // ~ -24 dBFS
+            var peak = 0f
+            for (i in seg.indices) { seg[i] *= g; if (kotlin.math.abs(seg[i]) > peak) peak = kotlin.math.abs(seg[i]) }
+            if (peak > 0.97f) { val k = 0.97f / peak; for (i in seg.indices) seg[i] *= k }
+        }
+        val s = rec.createStream()
+        try {
+            s.acceptWaveform(seg, SAMPLE_RATE)
+            rec.decode(s)
+            return rec.getResult(s).text.trim()
+        } finally {
+            s.release()
+        }
+    }
+
+    /** Slow automatic gain so a quiet headset mic still triggers the voice detector. */
+    private class Agc {
+        private var level = 0.03f
+        private var gain = 1f
+        fun apply(x: FloatArray) {
+            var sum = 0.0
+            for (v in x) sum += v * v
+            val rms = sqrt(sum / x.size).toFloat()
+            if (rms > 0.002f) level = level * 0.97f + rms * 0.03f // track speech-ish level only
+            val target = (0.063f / level).coerceIn(1f, 8f)
+            gain += (target - gain) * 0.05f
+            for (i in x.indices) x[i] = (x[i] * gain).coerceIn(-1f, 1f)
+        }
+    }
+
+    /** Exception type + cause chain (a bare message hides native-load failures). */
     private fun describe(t: Throwable): String {
         val sb = StringBuilder()
         var cur: Throwable? = t
@@ -206,49 +211,8 @@ object SpeechToText {
             if (depth > 0) sb.append(" <- ")
             sb.append(cur.javaClass.simpleName)
             cur.message?.takeIf { it.isNotBlank() }?.let { sb.append(": ").append(it) }
-            cur = cur.cause
-            depth++
+            cur = cur.cause; depth++
         }
         return sb.toString().ifBlank { "speech error" }
-    }
-
-    private fun unzipFlattened(zip: File, dest: File) {
-        ZipInputStream(zip.inputStream()).use { zis ->
-            var e = zis.nextEntry
-            while (e != null) {
-                var name = e.name.replace('\\', '/')
-                val slash = name.indexOf('/')
-                if (slash >= 0) name = name.substring(slash + 1) // drop the top-level model dir
-                if (name.isNotEmpty() && !name.contains("..")) {
-                    val f = File(dest, name)
-                    if (e.isDirectory) {
-                        f.mkdirs()
-                    } else {
-                        f.parentFile?.mkdirs()
-                        FileOutputStream(f).use { zis.copyTo(it) }
-                    }
-                }
-                zis.closeEntry()
-                e = zis.nextEntry
-            }
-        }
-    }
-
-    private fun deleteTree(f: File?) {
-        if (f == null || !f.exists()) return
-        f.listFiles()?.forEach { deleteTree(it) }
-        f.delete()
-    }
-
-    /** Delete any OTHER downloaded model dir (e.g. the old 40 MB small model, or a
-     *  previous version) so bumping the model never leaves two copies on disk. */
-    private fun cleanupOtherModels(ctx: Context) {
-        runCatching {
-            ctx.filesDir.listFiles()?.forEach { f ->
-                if (f.isDirectory && f.name != MODEL_DIR &&
-                    (f.name == "vosk-model" || f.name.startsWith("vosk-model-"))
-                ) deleteTree(f)
-            }
-        }
     }
 }

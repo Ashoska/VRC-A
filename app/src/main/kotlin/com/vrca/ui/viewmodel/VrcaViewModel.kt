@@ -39,6 +39,8 @@ import com.vrca.ui.common.resolveTimeZone
 import com.vrca.vrchat.VrchatPipelineState
 import com.vrca.ui.conversation.ConversationUiState
 import com.vrca.ui.conversation.Message
+import com.vrca.speech.SpeechCatalog
+import com.vrca.speech.SpeechPacks
 import com.vrca.speech.SpeechToText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -2338,96 +2340,133 @@ class VrcaViewModel(
     }
 
     // =========================
-    // Voice-to-text dictation (Manual Send mic) — headset-only, Vosk offline STT
+    // Voice-to-text dictation (Manual Send mic) — headset-only, offline (sherpa-onnx)
     // =========================
-    // The speak button lives in the Manual Send card. On public/admin builds
-    // SpeechToText.SUPPORTED is false so the whole affordance is HIDDEN. On the
-    // headset a one-time ~130 MB model download enables fully-offline recognition
-    // (works on Quest, which has no Google SpeechRecognizer); the recognizer + model
-    // live in RAM ONLY while listening and are freed on stop, so idle cost is zero.
-    //
-    // The growing transcript is fed into the Manual Send field through the SAME
-    // Live + Scroll path typing uses, so a long dictation scrolls the newest lines
-    // within the 144-char chatbox budget instead of being cut off.
+    // The mic lives in the Manual Send card. On public/admin SpeechToText.SUPPORTED is
+    // false so the whole affordance is HIDDEN. On the headset the user installs a
+    // language pack (downloaded on demand, verified, never bundled — SpeechPacks /
+    // SpeechCatalog), then dictates fully offline. Phrase-based: each phrase arrives
+    // finished when you pause and is APPENDED to the field, riding the SAME Live +
+    // Scroll path typing uses, so long dictation scrolls within the 144-char budget.
+    // Appending to the CURRENT field (not a remembered transcript) means a hold-expiry
+    // that clears the field can never resurrect old text with the next phrase.
     val speechSupported: Boolean = SpeechToText.SUPPORTED
+    /** Language the mic dictates in (persisted locally by SpeechPacks). */
+    var speechLanguage by mutableStateOf("en")
+        private set
+    /** The selected language's pack (+ voice detector) is installed. */
     var speechModelReady by mutableStateOf(false)
         private set
     var speechListening by mutableStateOf(false)
         private set
-    var speechDownloading by mutableStateOf(false)
+    /** Model is loading into RAM after the mic was tapped. */
+    var speechLoading by mutableStateOf(false)
+        private set
+    /** The voice detector currently hears speech. */
+    var speechHearing by mutableStateOf(false)
+        private set
+    /** Language whose pack is downloading, or null. */
+    var speechDownloadingLang by mutableStateOf<String?>(null)
         private set
     var speechDownloadPct by mutableStateOf(0)
         private set
+    var speechVerifying by mutableStateOf(false)
+        private set
     var speechError by mutableStateOf<String?>(null)
         private set
-
-    // The text already committed by FINAL utterances this dictation session. The
-    // live partial is appended to it so the field shows `committed + " " + partial`;
-    // a new final folds the partial in and resets the tail.
-    private var speechCommitted: String = ""
+    /** Installed pack ids (picker "Installed" badges + Settings management). */
+    var speechInstalledPacks by mutableStateOf<Set<String>>(emptySet())
+        private set
+    val speechDownloading: Boolean get() = speechDownloadingLang != null
 
     fun refreshSpeechModelReady() {
         if (!speechSupported) return
-        speechModelReady = SpeechToText.modelReady(app.applicationContext)
+        val ctx = app.applicationContext
+        viewModelScope.launch(Dispatchers.IO) {
+            SpeechPacks.cleanupLegacy(ctx)
+            val lang = SpeechPacks.selectedLanguage(ctx)
+            val installed = SpeechPacks.installedPacks(ctx).map { it.id }.toSet()
+            val ready = SpeechPacks.isLanguageReady(ctx, lang)
+            launch(Dispatchers.Main) {
+                speechLanguage = lang; speechInstalledPacks = installed; speechModelReady = ready
+            }
+        }
     }
 
-    /** Download the offline voice model (~130 MB) on demand. Safe to call repeatedly. */
+    /** Choose the dictation language; installs its pack if needed. */
+    fun selectSpeechLanguage(code: String) {
+        if (!speechSupported || SpeechCatalog.lang(code) == null || speechDownloading) return
+        if (speechListening) stopDictation()
+        val ctx = app.applicationContext
+        SpeechPacks.setSelectedLanguage(ctx, code)
+        speechLanguage = code
+        speechError = null
+        speechModelReady = SpeechPacks.isLanguageReady(ctx, code)
+        if (!speechModelReady) downloadSpeechModel()
+    }
+
+    /** Download + verify the selected language's pack. Safe to call repeatedly. */
     fun downloadSpeechModel() {
         if (!speechSupported || speechDownloading) return
+        val lang = speechLanguage
         speechError = null
-        speechDownloading = true
+        speechDownloadingLang = lang
         speechDownloadPct = 0
-        SpeechToText.downloadModel(
-            app.applicationContext,
-            onProgress = { pct ->
-                viewModelScope.launch(Dispatchers.Main) { speechDownloadPct = pct }
+        speechVerifying = false
+        SpeechPacks.downloadLanguage(
+            app.applicationContext, lang,
+            onProgress = { pct, verifying ->
+                viewModelScope.launch(Dispatchers.Main) { speechDownloadPct = pct; speechVerifying = verifying }
             },
             onDone = { ok, err ->
                 viewModelScope.launch(Dispatchers.Main) {
-                    speechDownloading = false
-                    speechModelReady = ok || SpeechToText.modelReady(app.applicationContext)
-                    if (!ok) speechError = err ?: "Download failed"
+                    speechDownloadingLang = null
+                    speechVerifying = false
+                    if (!ok && err != "Cancelled") speechError = err ?: "Download failed"
+                    refreshSpeechModelReady()
                 }
             },
         )
     }
 
+    fun cancelSpeechDownload() = SpeechPacks.cancelDownload()
+
+    fun deleteSpeechPack(packId: String) {
+        if (speechListening) stopDictation()
+        val ctx = app.applicationContext
+        viewModelScope.launch(Dispatchers.IO) {
+            SpeechPacks.deletePack(ctx, packId)
+            launch(Dispatchers.Main) { refreshSpeechModelReady() }
+        }
+    }
+
     /**
-     * Begin dictation into the Manual Send field. Forces Live + Scroll ON so the
-     * transcript streams to the chatbox and long speech scrolls instead of hitting
-     * the char limit. Caller MUST have RECORD_AUDIO granted (the UI checks/requests).
-     * Not model-ready yet → kick off the download and return (the UI shows progress).
+     * Begin dictation into the Manual Send field. Forces Live + Scroll ON so phrases
+     * stream to the chatbox and long speech scrolls. Caller MUST have RECORD_AUDIO
+     * (the UI checks/requests). Pack missing → start its download instead.
      */
     fun startDictation(local: Boolean = false) {
         if (!speechSupported || isBanned || speechListening) return
-        if (!SpeechToText.modelReady(app.applicationContext)) { downloadSpeechModel(); return }
+        if (!speechModelReady) { downloadSpeechModel(); return }
         speechError = null
-        // Dictation needs the live streaming + scroll path.
         setManualLiveModeFlag(true)
         setManualScrollFlag(true)
-        // Keep whatever's already typed as the committed base.
-        speechCommitted = messageText.value.text.trim()
-        val started = SpeechToText.start(
-            app.applicationContext,
-            object : SpeechToText.Listener {
-                override fun onPartial(text: String) {
-                    viewModelScope.launch(Dispatchers.Main) { applySpeechTranscript(text, local) }
+        val started = SpeechToText.start(app.applicationContext, speechLanguage, object : SpeechToText.Listener {
+            override fun onFinal(text: String) {
+                viewModelScope.launch(Dispatchers.Main) { appendSpeechPhrase(text, local) }
+            }
+            override fun onError(message: String) {
+                viewModelScope.launch(Dispatchers.Main) {
+                    speechError = message; speechListening = false; speechLoading = false; speechHearing = false
                 }
-                override fun onFinal(text: String) {
-                    viewModelScope.launch(Dispatchers.Main) {
-                        speechCommitted = listOf(speechCommitted, text)
-                            .filter { it.isNotBlank() }.joinToString(" ").trim()
-                        applySpeechTranscript("", local)
-                    }
-                }
-                override fun onError(message: String) {
-                    viewModelScope.launch(Dispatchers.Main) {
-                        speechError = message
-                        speechListening = false
-                    }
-                }
-            },
-        )
+            }
+            override fun onSpeechActive(active: Boolean) {
+                viewModelScope.launch(Dispatchers.Main) { speechHearing = active }
+            }
+            override fun onLoading(loading: Boolean) {
+                viewModelScope.launch(Dispatchers.Main) { speechLoading = loading }
+            }
+        })
         speechListening = started
         if (!started && speechError == null) speechError = "Couldn't start the microphone."
     }
@@ -2436,13 +2475,15 @@ class VrcaViewModel(
         if (!speechSupported) return
         SpeechToText.stop()
         speechListening = false
+        speechHearing = false
+        speechLoading = false
     }
 
-    /** Fold the committed text + the current live partial into the Manual Send field
-     *  (routed through onMessageTextChange so Live + Scroll format/scroll it). */
-    private fun applySpeechTranscript(livePartial: String, local: Boolean) {
-        val combined = listOf(speechCommitted, livePartial.trim())
-            .filter { it.isNotBlank() }.joinToString(" ").trim()
+    /** Append a finished phrase to the field (routed through onMessageTextChange so
+     *  Live + Scroll format/scroll it exactly like typing). */
+    private fun appendSpeechPhrase(phrase: String, local: Boolean) {
+        val cur = messageText.value.text.trim()
+        val combined = listOf(cur, phrase.trim()).filter { it.isNotBlank() }.joinToString(" ")
         onMessageTextChange(TextFieldValue(combined, TextRange(combined.length)), local)
     }
 

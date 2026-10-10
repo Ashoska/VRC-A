@@ -590,21 +590,19 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
 }
 
 /**
- * Voice-to-text dictation row inside Manual Send. HEADSET-ONLY — returns nothing when
- * SpeechToText.SUPPORTED is false (public/admin), so the affordance is hidden there.
+ * Voice-to-text row inside Manual Send. HEADSET-ONLY — renders nothing when
+ * SpeechToText.SUPPORTED is false (public/admin).
  *
- * States:
- *   downloading      → "Downloading voice model… N%"
- *   model not ready  → "Speak to type" + a Download button (first use pulls ~130 MB)
- *   ready + idle     → "Tap the mic to speak" + a mic button (requests RECORD_AUDIO)
- *   listening        → "Listening… tap to stop" + a stop button
- * Dictation forces Live + Scroll on (done in the VM) so a long transcript scrolls
- * within the chatbox budget instead of being cut off.
+ * States: not installed → "Install voice to text" (opens the language picker);
+ * downloading → progress + Cancel; ready → language chip + mic. Phrase-based: each
+ * phrase is added to the field when you pause, and Live + Scroll (forced on by the VM)
+ * keeps long dictation inside the chatbox budget.
  */
 @Composable
 private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
     if (!vm.speechSupported) return
     val ctx = LocalContext.current
+    var showPicker by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { vm.refreshSpeechModelReady() }
     // Never leave the mic recording when the card/screen goes away.
@@ -620,6 +618,7 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
         ctx.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
 
+    val lang = com.vrca.speech.SpeechCatalog.lang(vm.speechLanguage)
     Surface(
         shape = MaterialTheme.shapes.small,
         color = if (vm.speechListening) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
@@ -632,68 +631,75 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                val label = when {
-                    vm.speechDownloading -> "Downloading voice model… ${vm.speechDownloadPct}%"
-                    !vm.speechModelReady -> "Speak to type"
-                    vm.speechListening -> "Listening… tap to stop"
-                    else -> "Tap the mic to speak"
-                }
-                val sub = when {
-                    vm.speechDownloading -> "One-time ~130 MB download, then it's fully offline."
-                    !vm.speechModelReady -> "Download the offline voice model to dictate hands-free."
-                    else -> "Dictation scrolls so it never hits the character limit."
+                val (label, sub) = when {
+                    vm.speechDownloading -> {
+                        val name = com.vrca.speech.SpeechCatalog.lang(vm.speechDownloadingLang ?: "")?.englishName ?: ""
+                        (if (vm.speechVerifying) "Verifying $name pack…" else "Downloading $name… ${vm.speechDownloadPct}%") to
+                            "One-time download, then it works fully offline."
+                    }
+                    !vm.speechModelReady -> "Voice to text" to "Speak instead of typing. Works offline once installed."
+                    vm.speechLoading -> "Loading voice model…" to "This takes a few seconds."
+                    vm.speechListening && vm.speechHearing -> "Hearing you…" to "Pause to add the phrase."
+                    vm.speechListening -> "Listening" to "Pause after each phrase to send it. Tap stop when done."
+                    else -> "Tap the mic to speak" to "Each phrase is added when you pause."
                 }
                 Column(Modifier.weight(1f)) {
                     Text(label, style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        sub,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 when {
-                    vm.speechDownloading -> {
-                        // text-only progress (no indicator import); nothing tappable
-                    }
-                    !vm.speechModelReady -> {
-                        Button(
-                            onClick = { vm.downloadSpeechModel() },
-                            enabled = !isBanned
-                        ) { Text("Download") }
-                    }
+                    vm.speechDownloading -> OutlinedButton(onClick = { vm.cancelSpeechDownload() }) { Text("Cancel") }
+                    !vm.speechModelReady -> Button(onClick = { showPicker = true }, enabled = !isBanned) { Text("Install") }
                     else -> {
+                        // Language chip: tap to switch language / install another pack.
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.surface,
+                            modifier = Modifier.clickable(enabled = !vm.speechListening) { showPicker = true }
+                        ) {
+                            Text(
+                                (lang?.nativeName ?: vm.speechLanguage) + " ▾",
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
                         val listening = vm.speechListening
                         IconButton(
                             onClick = {
-                                if (listening) {
-                                    vm.stopDictation()
-                                } else if (hasMic()) {
-                                    vm.startDictation()
-                                } else {
-                                    micLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-                                }
+                                if (listening) vm.stopDictation()
+                                else if (hasMic()) vm.startDictation()
+                                else micLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
                             },
-                            enabled = !isBanned
+                            enabled = !isBanned && !vm.speechLoading
                         ) {
                             Icon(
                                 imageVector = if (listening) Icons.Filled.Stop else Icons.Filled.Mic,
                                 contentDescription = if (listening) "Stop dictation" else "Start dictation",
-                                tint = if (listening) MaterialTheme.colorScheme.error
-                                       else MaterialTheme.colorScheme.primary
+                                tint = if (listening) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                             )
                         }
                     }
                 }
             }
-            vm.speechError?.let { err ->
-                Text(
-                    err,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = 4.dp)
+            if (vm.speechDownloading) {
+                androidx.compose.material3.LinearProgressIndicator(
+                    progress = vm.speechDownloadPct / 100f,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
                 )
             }
+            vm.speechError?.let { err ->
+                Text(err, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp))
+            }
         }
+    }
+    if (showPicker) {
+        SpeechLanguageDialog(
+            current = vm.speechLanguage,
+            installedPacks = vm.speechInstalledPacks,
+            onSelect = { code -> showPicker = false; vm.selectSpeechLanguage(code) },
+            onDismiss = { showPicker = false }
+        )
     }
 }
 

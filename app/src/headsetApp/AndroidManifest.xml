@@ -49,15 +49,11 @@
          the square icon as fallback) and ignore a manifest banner. A proper QGO tile needs
          a custom cover set in QGO / submitted to its database; a store tile needs the Meta
          dashboard cover art. So the banner PNG was dropped to save headset APK space. -->
-    <!-- extractNativeLibs=true (headset ONLY): the Vosk voice-to-text engine loads
-         libvosk.so via JNA's Native.register, which dlopen()s the lib BY PATH. Under
-         AGP's default (extractNativeLibs=false / useLegacyPackaging=false) the .so is
-         stored compressed inside the APK with no on-disk path, so JNA can't find it and
-         LibVosk's static init throws (device showed "org.vosk.LibVosk"). Extracting the
-         native libs to the install dir gives JNA a real path. Scoped to the headset
-         flavor's merged manifest, so public/admin keep the smaller non-legacy packaging
-         (they ship no JNA/Vosk). AGP reads this per-variant when useLegacyPackaging is
-         unset in the DSL. -->
+    <!-- extractNativeLibs=true (headset ONLY): store the speech engine's native libs
+         (sherpa-onnx + ONNX Runtime, ~25 MB raw) COMPRESSED inside the APK and extract them
+         at install. Non-legacy packaging would store them uncompressed, roughly doubling the
+         APK download. AGP reads this per-variant when useLegacyPackaging is unset in the DSL,
+         so public/admin (no native speech engine) keep the default. -->
     <application
         android:resizeableActivity="true"
         android:usesCleartextTraffic="true"

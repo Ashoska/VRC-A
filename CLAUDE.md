@@ -24,6 +24,7 @@ This file is only the rules plus a **map**. The details of every feature and sys
 | Doc (`docs/systems/`) | Covers |
 |---|---|
 | `chatbox.md` | OSC Start/Stop gate (`oscSending`), feature toggles + OS-kill auto-restore (`FeatureSessionStore`), Pinned/Cycle content, sub-lines (`SubLineCodec`), cycle lines/shuffle/tokens `{time}{song}…`, preset auto-save, Manual Send (Instant/Live/Scroll), cycle sender, Invisible Chatbox Border, rate limit, "Pinned" naming, removed features |
+| `voice-to-text.md` | Headset offline dictation: `SpeechToText` (sherpa-onnx engine, Silero VAD phrases, gain), `SpeechCatalog` (language → pack, quality labels, pinned+SHA-256 files), `SpeechPacks` (resumable downloads, install/delete), `SpeechLanguageDialog`, engine shoot-out results (Vosk vs Parakeet/Canary/Whisper/Moonshine/Omnilingual…) |
 | `automations-editor.md` | `AutomationsPage` drag-and-drop: reorder, promote/demote, Pinned↔Cycle moves, drag ghost overlay, hover-to-arm |
 | `app-tabs.md` | Bottom nav, Home (preview card, Quick Toggles, Connection card, SetupHealthCard), Automations page layout, VRChat tab header, Settings page, `IpField` slots |
 | `ui-kit.md` | `PublicUiKit` (CompactSectionCard, TogglePill…), `VrcaDialogs` (card dialogs, timezone picker), `TimeZones` |
