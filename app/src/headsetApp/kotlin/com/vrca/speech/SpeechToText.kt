@@ -296,7 +296,16 @@ object SpeechToText {
                 var phraseStart = -1L
                 var lastPartialAt = 0L
                 var lastSegEnd = 0L // VAD end of the last phrase: pre-roll never reaches before it
-                fun drain() {
+                // The VAD counts samples from when it was built; vadBase = `total` then, so
+                // vadBase + its positions index the ring. It must be fed EVERY sample (silence
+                // while the gate is closed): skipping audio shifted every later phrase onto the
+                // wrong stretch of the ring (user-reported: after "pause"/"resume" finals
+                // lost their last words and replaced correct live words, until a restart).
+                var vadBase = 0L
+                val silence = FloatArray(pcm.size)
+                // [flushEnd]: after flush(), the real end of the phrase cut short (the VAD's
+                // flush drops its last minSilenceDuration, which then held real speech).
+                fun drain(flushEnd: Long = -1L) {
                     val v = vad ?: return
                     while (!v.empty()) {
                         val s = v.front(); v.pop()
@@ -309,7 +318,8 @@ object SpeechToText {
                         val noise = voicedCount < level.minVoiced && dur < level.blipMaxSec
                         // A little audio before and after the VAD's cut (still in the ring):
                         // it reacts late and ends early, clipping soft first/last syllables.
-                        val segStart = s.start.toLong(); val segEnd = segStart + s.samples.size
+                        val segStart = vadBase + s.start.toLong()
+                        val segEnd = if (flushEnd >= 0 && v.empty()) maxOf(segStart + s.samples.size, flushEnd) else segStart + s.samples.size
                         val from = maxOf(segStart - PRE_ROLL, lastSegEnd, total - ring.size, 0L)
                         val to = minOf(segEnd + POST_ROLL, total)
                         val padded = if (from <= segStart && to >= segEnd)
@@ -328,9 +338,10 @@ object SpeechToText {
                     if (sensitivity != level) {
                         // Switched in the picker: finish the current phrase on the old detector,
                         // then a new one (0.6 MB, instant); the speech model stays loaded.
-                        vad?.flush(); drain(); vad?.release()
+                        vad?.flush(); drain(flushEnd = total); vad?.release()
                         level = sensitivity
                         vad = newVad(level)
+                        vadBase = total
                     }
                     val f = FloatArray(n) { pcm[it] / 32768f }
                     val voiced = Voicing.isVoiced(f)
@@ -343,7 +354,7 @@ object SpeechToText {
                         heard = open
                         if (!open) {
                             // Finish the sentence in progress (said while listening), then stop.
-                            vad?.flush(); drain()
+                            vad?.flush(); drain(flushEnd = total - n)
                             voicedRun = 0; sinceVoiced = 1000; phraseStart = -1L
                             if (shown) { shown = false; listener.onSpeechActive(false) }
                         } else {
@@ -352,7 +363,12 @@ object SpeechToText {
                             lastSegEnd = maxOf(lastSegEnd, total - n - SAMPLE_RATE / 4)
                         }
                     }
-                    if (!open) continue
+                    if (!open) {
+                        // Silence in place of the audio: keeps the VAD's count in step with the ring.
+                        vad?.acceptWaveform(if (n == silence.size) silence else FloatArray(n))
+                        drain()
+                        continue
+                    }
                     vad?.acceptWaveform(f)
                     drain()
                     // "Hearing you" (and VRChat's typing dots) only for VOICED speech: on
@@ -393,7 +409,7 @@ object SpeechToText {
                     }
                 }
                 vad?.flush() // finish a phrase cut off by Stop
-                drain()
+                drain(flushEnd = total)
                 if (shown) listener.onSpeechActive(false)
             } catch (e: Throwable) {
                 Log.e(TAG, "dictation error", e)
