@@ -59,9 +59,19 @@ object Voicing {
     }
 
     /** Voiced 32 ms windows in a whole segment. */
-    fun voicedWindows(x: FloatArray): Int {
-        var count = 0; var i = 0
-        while (i + WINDOW <= x.size) { if (isVoiced(x, i, WINDOW)) count++; i += WINDOW }
-        return count
+    fun voicedWindows(x: FloatArray): Int = voicedStats(x).first
+
+    /** Voiced 32 ms windows in a segment, and the RMS over just those windows (how loud
+     *  the VOICE is, so silence around it doesn't count). One pass. */
+    fun voicedStats(x: FloatArray): Pair<Int, Float> {
+        var count = 0; var i = 0; var sum = 0.0
+        while (i + WINDOW <= x.size) {
+            if (isVoiced(x, i, WINDOW)) {
+                count++
+                for (k in i until i + WINDOW) sum += x[k] * x[k]
+            }
+            i += WINDOW
+        }
+        return count to if (count == 0) 0f else sqrt(sum / (count * WINDOW)).toFloat()
     }
 }

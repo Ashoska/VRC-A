@@ -19,6 +19,7 @@ object SpeechToText {
         fun onLoading(loading: Boolean) {}
         /** Listening ended for any reason (Stop, the notification's Stop, an error). */
         fun onStopped() {}
+        fun onCommand(command: VoiceCommand) {}
     }
 
     fun isListening(): Boolean = false
@@ -26,6 +27,8 @@ object SpeechToText {
     fun setSensitivity(s: MicSensitivity) {}
     fun discardPending() {}
     fun setGate(open: Boolean) {}
+    fun setCommands(words: Map<VoiceCommand, List<String>>?) {}
+    fun setVoicePaused(paused: Boolean) {}
 
     @Suppress("UNUSED_PARAMETER")
     fun start(ctx: Context, langCode: String, listener: Listener): Boolean {

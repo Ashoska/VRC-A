@@ -69,6 +69,9 @@ internal fun SpeechLanguageDialog(
     listenWhenOn: Boolean,
     triggerParams: () -> List<Pair<String, Boolean>>,
     onListen: (param: String?, whenOn: Boolean) -> Unit,
+    commandsOn: Boolean,
+    commandWords: Map<com.vrca.speech.VoiceCommand, List<String>>,
+    onCommands: () -> Unit,
     onSelect: (code: String, packId: String) -> Unit,
     onRemove: (packId: String) -> Unit,
     onDismiss: () -> Unit,
@@ -90,6 +93,7 @@ internal fun SpeechLanguageDialog(
             DialogHeader(title = "Voice language", icon = Icons.Filled.Mic, onClose = onDismiss)
             SensitivityRow(sensitivity, onSensitivity)
             ListenRow(listenParam, listenWhenOn, onChange = { editingListen = true })
+            CommandsRow(commandsOn, commandWords, onChange = onCommands)
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val paneHeight = if (maxHeight.value.isFinite()) minOf(440.dp, maxHeight) else 440.dp
                 val list: @Composable (Modifier) -> Unit = { m ->
@@ -167,6 +171,17 @@ internal fun listenSummary(param: String?, whenOn: Boolean): String = when (para
     null -> "Always"
     "MuteSelf" -> if (whenOn) "While muted in VRChat" else "While unmuted in VRChat"
     else -> "While $param is ${if (whenOn) "on" else "off"}"
+}
+
+@Composable
+private fun CommandsRow(on: Boolean, words: Map<com.vrca.speech.VoiceCommand, List<String>>, onChange: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Voice commands", style = MaterialTheme.typography.labelLarge)
+        Text(if (on) com.vrca.speech.VoiceCommand.entries.joinToString(" · ") { words[it]?.firstOrNull() ?: "" } else "Off",
+            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        ActionPill("Change", filled = false, onClick = onChange)
+    }
 }
 
 @Composable
@@ -449,7 +464,7 @@ private fun QualityBadge(t: SpeechCatalog.Tier) {
 }
 
 @Composable
-private fun Tag(text: String, color: Color) {
+internal fun Tag(text: String, color: Color) {
     Surface(shape = MaterialTheme.shapes.small, color = color.copy(alpha = 0.14f)) {
         Text(text, color = color, style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
@@ -457,7 +472,7 @@ private fun Tag(text: String, color: Color) {
 }
 
 @Composable
-private fun ActionPill(text: String, filled: Boolean, onClick: () -> Unit) {
+internal fun ActionPill(text: String, filled: Boolean, onClick: () -> Unit) {
     Surface(
         shape = MaterialTheme.shapes.small,
         color = if (filled) MaterialTheme.colorScheme.primary else Color.Transparent,

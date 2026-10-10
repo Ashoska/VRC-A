@@ -91,6 +91,32 @@ object SpeechPacks {
     fun listenWhenOn(ctx: Context): Boolean =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("listen_when_on", true)
 
+    /** Voice commands on/off (default on). */
+    fun commandsEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("commands", true)
+
+    fun setCommandsEnabled(ctx: Context, on: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("commands", on).commit()
+    }
+
+    /** The command words for [lang]: the user's own where set, else the defaults. */
+    fun commandWords(ctx: Context, lang: String): Map<VoiceCommand, List<String>> {
+        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val defaults = VoiceCommands.defaults(lang)
+        return VoiceCommand.entries.associateWith { c ->
+            prefs.getString("cmd_${lang}_${c.name}", null)?.split('|')?.filter { it.isNotBlank() }
+                ?.takeIf { it.isNotEmpty() } ?: defaults.getValue(c)
+        }
+    }
+
+    /** Set [cmd]'s words for [lang]; null = back to the default. */
+    fun setCommandWords(ctx: Context, lang: String, cmd: VoiceCommand, words: List<String>?) {
+        val e = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        val key = "cmd_${lang}_${cmd.name}"
+        if (words.isNullOrEmpty()) e.remove(key) else e.putString(key, words.joinToString("|"))
+        e.commit()
+    }
+
     fun setListenTrigger(ctx: Context, param: String?, whenOn: Boolean) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("listen_param", param).putBoolean("listen_when_on", whenOn).commit()

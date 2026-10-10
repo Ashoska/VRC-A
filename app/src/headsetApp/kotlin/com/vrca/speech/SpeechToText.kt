@@ -91,6 +91,9 @@ object SpeechToText {
         fun onLoading(loading: Boolean) {}
         /** Listening ended for any reason (Stop, the notification's Stop, an error). */
         fun onStopped() {}
+        /** A voice command fired (VoiceCommands: said on its own, passed every check).
+         *  PAUSE/RESUME only fire when they change something; CLEAR is the caller's call. */
+        fun onCommand(command: VoiceCommand) {}
     }
 
     @Volatile private var running = false
@@ -120,6 +123,7 @@ object SpeechToText {
             return false
         }
         running = true
+        voicePaused = false; micIgnoreUntil = 0L; talkStartedAt = 0L
         // Keep the mic live when VRC-A goes to the background (we're on screen now: the
         // user just tapped the mic, which is when Android allows this start).
         DictationService.start(app)
@@ -172,9 +176,55 @@ object SpeechToText {
                     var partialShown = false
                     var agreement: LiveAgreement? = null
                     var agreementFor = -1L
+                    val noSpace = langCode in NO_SPACE
+                    // The wearer's usual voice level (recent dictated phrases): a command must be
+                    // about this loud, so other people / VRChat's speakers can't fire one.
+                    val levels = ArrayDeque<Float>()
+                    fun loudEnough(level: Float): Boolean {
+                        if (levels.size < 3) return true
+                        val median = levels.sorted()[levels.size / 2]
+                        return level >= median * VoiceCommands.MIN_LEVEL_RATIO
+                    }
                     fun pauseFrom(start: Long) =
                         if (lastEnd < 0) Float.POSITIVE_INFINITY else (start - lastEnd).coerceAtLeast(0L) / SAMPLE_RATE.toFloat()
+                    // A finished phrase going in as text (unless it holds nothing, or paused by voice).
+                    fun deliver(seg: Segment, raw: String, pause: Float, ms: Long) {
+                        // Made-up fillers ("okay" from a rustle) count as nothing.
+                        val text = if (raw.isNotEmpty() && SpeechFilter.keep(raw, seg.voiced, seg.minVoiced, noSpace)) raw else ""
+                        if (text.isEmpty() || seg.epoch != epoch || voicePaused) {
+                            // Nothing there: take back live words shown for it, if any.
+                            if (partialShown) { partialShown = false; listener.onFinal("", pause, ms) }
+                            return
+                        }
+                        lastEnd = seg.end
+                        partialShown = false
+                        if (seg.level > 0f) { levels.addLast(seg.level); if (levels.size > 20) levels.removeFirst() }
+                        listener.onFinal(text, pause, ms)
+                    }
+                    // Fire a command that passed every check, if it changes anything.
+                    fun fire(cmd: VoiceCommand) {
+                        when (cmd) {
+                            VoiceCommand.PAUSE -> if (voicePaused) return else voicePaused = true
+                            VoiceCommand.RESUME -> if (!voicePaused) return else voicePaused = false
+                            VoiceCommand.CLEAR -> {}
+                        }
+                        micIgnoreUntil = android.os.SystemClock.elapsedRealtime() + CommandSounds.MIC_IGNORE_MS
+                        listener.onCommand(cmd)
+                    }
+                    // A command word waiting to see whether you carry on talking.
+                    class Pending(val cmd: VoiceCommand, val seg: Segment, val raw: String, val pause: Float, val ms: Long, val at: Long)
+                    var pending: Pending? = null
                     while (!captureDone.get() || phrases.isNotEmpty()) {
+                        pending?.let { pc ->
+                            when {
+                                // Kept talking ("Pause! wait…"): it was conversation, in as text.
+                                talkStartedAt > pc.at -> { pending = null; deliver(pc.seg, pc.raw, pc.pause, pc.ms) }
+                                android.os.SystemClock.elapsedRealtime() - pc.at >= VoiceCommands.CONFIRM_MS -> { pending = null; fire(pc.cmd) }
+                                // Undecided: hold everything else back so the order stays right.
+                                else -> { Thread.sleep(20); return@let }
+                            }
+                        }
+                        if (pending != null) continue
                         val seg = phrases.poll(50, TimeUnit.MILLISECONDS)
                         if (seg == null) {
                             val job = live.pending.getAndSet(null) ?: continue
@@ -186,7 +236,7 @@ object SpeechToText {
                                 hyp == null -> ""
                                 !r.hasTimes || hyp.tokens.isEmpty() -> hyp.text
                                 else -> {
-                                    if (agreementFor != job.start) { agreement = LiveAgreement(langCode in NO_SPACE); agreementFor = job.start }
+                                    if (agreementFor != job.start) { agreement = LiveAgreement(noSpace); agreementFor = job.start }
                                     val a = agreement!!
                                     a.update(hyp.tokens, hyp.times, job.chunkSec).also { live.cutSec = a.cutSec }
                                 }
@@ -194,8 +244,12 @@ object SpeechToText {
                             // Pace re-reads by what they cost on THIS device: wait ~2.5x a
                             // re-read, so live words never take over the CPU next to VRChat.
                             live.intervalMs = (ms * 5 / 2).coerceIn(LIVE_MIN_MS, LIVE_MAX_MS)
-                            // Drop it if its phrase finished meanwhile (the final is next).
-                            if (text.isNotEmpty() && job.seq == live.finalsQueued.get()) {
+                            // Drop it if its phrase finished meanwhile (the final is next), and
+                            // hold back words that could still be a command (never shown).
+                            val cmds = commands
+                            if (text.isNotEmpty() && job.seq == live.finalsQueued.get() && !voicePaused &&
+                                (cmds == null || !VoiceCommands.couldBe(text, cmds))
+                            ) {
                                 partialShown = true
                                 listener.onPartial(text, pauseFrom(job.start))
                             }
@@ -205,18 +259,20 @@ object SpeechToText {
                         val stale = seg.epoch != epoch // spoken before Clear
                         val t0 = System.nanoTime()
                         val raw = if (seg.noise || stale) "" else runCatching { r.text(normalize(seg.samples)) }.getOrElse { Log.w(TAG, "decode", it); "" }
-                        // Made-up fillers ("okay" from a rustle) count as nothing.
-                        val text = if (raw.isNotEmpty() && SpeechFilter.keep(raw, seg.voiced, seg.minVoiced, langCode in NO_SPACE)) raw else ""
                         val ms = (System.nanoTime() - t0) / 1_000_000
-                        if (text.isEmpty() || seg.epoch != epoch) {
-                            // Nothing there: take back live words shown for it, if any.
-                            if (partialShown) { partialShown = false; listener.onFinal("", pauseFrom(seg.start), ms) }
+                        val pause = pauseFrom(seg.start)
+                        // A command word on its own, after a quiet moment, clearly voiced and
+                        // as loud as you normally talk: wait to see you don't carry on.
+                        val cmds = commands
+                        val cmd = if (cmds != null && !stale && raw.isNotEmpty()) VoiceCommands.match(raw, cmds) else null
+                        if (cmd != null && pause >= VoiceCommands.QUIET_BEFORE_SEC &&
+                            seg.voiced >= VoiceCommands.MIN_VOICED && loudEnough(seg.level)
+                        ) {
+                            if (partialShown) { partialShown = false; listener.onFinal("", pause, ms) }
+                            pending = Pending(cmd, seg, raw, pause, ms, android.os.SystemClock.elapsedRealtime())
                             continue
                         }
-                        val pause = pauseFrom(seg.start)
-                        lastEnd = seg.end
-                        partialShown = false
-                        listener.onFinal(text, pause, ms)
+                        deliver(seg, raw, pause, ms)
                     }
                 }, "stt-decode").apply { isDaemon = true; start() }
 
@@ -232,6 +288,7 @@ object SpeechToText {
                 var sinceVoiced = 1000 // windows since the last voiced one
                 var shown = false      // what onSpeechActive last reported
                 var heard = true       // the listen trigger's state as last applied
+                var wasTalking = false
                 // Live words: the last RING_SEC of (gained) audio, so the unfinished phrase can
                 // be re-read; total = samples written, phraseStart = where it began (-1: none).
                 val ring = FloatArray(SAMPLE_RATE * RING_SEC)
@@ -248,7 +305,7 @@ object SpeechToText {
                         // phrases always reach the model. Still queued as "noise" so live
                         // words shown for it get taken back.
                         val dur = s.samples.size / SAMPLE_RATE.toFloat()
-                        val voicedCount = Voicing.voicedWindows(s.samples)
+                        val (voicedCount, voicedRms) = Voicing.voicedStats(s.samples)
                         val noise = voicedCount < level.minVoiced && dur < level.blipMaxSec
                         // A little audio before and after the VAD's cut (still in the ring):
                         // it reacts late and ends early, clipping soft first/last syllables.
@@ -259,7 +316,8 @@ object SpeechToText {
                             FloatArray((to - from).toInt()) { ring[((from + it) % ring.size).toInt()] } else s.samples
                         live.finalsQueued.incrementAndGet()
                         live.pending.set(null)
-                        phrases.offer(Segment(padded, segStart, segEnd, noise, epoch, voicedCount, level.minVoiced))
+                        phrases.offer(Segment(padded, segStart, segEnd, noise, epoch, voicedCount, level.minVoiced,
+                            voicedRms / gain.current))
                         lastSegEnd = segEnd
                         phraseStart = -1L
                     }
@@ -280,7 +338,7 @@ object SpeechToText {
                     for (v in f) { ring[(total % ring.size).toInt()] = v; total++ }
                     // Listen trigger (a VRChat param, setGate): closed = hear nothing, but the
                     // model stays loaded and the mic + ring keep running, so reopening is instant.
-                    val open = gateOpen
+                    val open = gateOpen && android.os.SystemClock.elapsedRealtime() >= micIgnoreUntil
                     if (open != heard) {
                         heard = open
                         if (!open) {
@@ -305,7 +363,11 @@ object SpeechToText {
                     val speech = vad?.isSpeechDetected() == true
                     voicedRun = if (!speech) 0 else if (voiced) voicedRun + 1 else voicedRun
                     sinceVoiced = if (voiced) 0 else sinceVoiced + 1
-                    val now = speech && voicedRun >= Voicing.MIN_VOICED_WINDOWS && sinceVoiced <= QUIET_WINDOWS
+                    val talking = speech && voicedRun >= Voicing.MIN_VOICED_WINDOWS && sinceVoiced <= QUIET_WINDOWS
+                    if (talking && !wasTalking) talkStartedAt = android.os.SystemClock.elapsedRealtime()
+                    wasTalking = talking
+                    // Paused by voice: no "Hearing you" / typing dots (only commands are heard).
+                    val now = talking && !voicePaused
                     if (now != shown) { shown = now; listener.onSpeechActive(now) }
                     // Live words: once you're really speaking, hand the decoder a copy of the
                     // phrase so far every intervalMs (it adapts to the model's speed). Starts a
@@ -321,7 +383,7 @@ object SpeechToText {
                     val cut = if (phraseStart < 0) 0L else
                         (phraseStart + (live.cutSec * SAMPLE_RATE).toLong()).coerceIn(maxOf(phraseStart, total - ring.size), total)
                     val len = total - cut
-                    if (liveEnabled && phraseStart >= 0 && voicedRun >= LIVE_MIN_VOICED && phrases.isEmpty() &&
+                    if (liveEnabled && !voicePaused && phraseStart >= 0 && voicedRun >= LIVE_MIN_VOICED && phrases.isEmpty() &&
                         len in (SAMPLE_RATE / 2)..(SAMPLE_RATE.toLong() * LIVE_MAX_SEC) &&
                         (total - lastPartialAt) * 1000 / SAMPLE_RATE >= live.intervalMs && live.pending.get() == null
                     ) {
@@ -366,6 +428,7 @@ object SpeechToText {
     private class Segment(
         val samples: FloatArray, val start: Long, val end: Long, val noise: Boolean, val epoch: Int,
         val voiced: Int, val minVoiced: Int, // voiced windows; the sensitivity's bar (SpeechFilter)
+        val level: Float,                    // the voice's loudness at the mic, before gain
     )
 
     /** The unfinished phrase from [chunkSec] (s after its start) to now, to re-read for live
@@ -389,6 +452,19 @@ object SpeechToText {
      *  nothing is heard while the model stays loaded, so reopening needs no model load. */
     @Volatile private var gateOpen = true
     fun setGate(open: Boolean) { gateOpen = open }
+
+    /** Voice command words (null = commands off, e.g. while the user records a word). */
+    @Volatile private var commands: Map<VoiceCommand, List<String>>? = null
+    fun setCommands(words: Map<VoiceCommand, List<String>>?) { commands = words }
+
+    /** Paused by voice: only commands are heard, nothing else goes in. */
+    @Volatile private var voicePaused = false
+    fun setVoicePaused(paused: Boolean) { voicePaused = paused }
+
+    // Mic ignored until then: a command's chime must never be heard as speech.
+    @Volatile private var micIgnoreUntil = 0L
+    // When the wearer last started talking (capture thread): cancels a pending command.
+    @Volatile private var talkStartedAt = 0L
 
     /** Mic sensitivity; switching mid-dictation rebuilds only the tiny voice detector. */
     @Volatile private var sensitivity = MicSensitivity.NORMAL
@@ -563,6 +639,7 @@ object SpeechToText {
     private class Agc {
         private var level = 0.03f
         private var gain = 1f
+        val current: Float get() = gain
         fun apply(x: FloatArray, voiced: Boolean, maxGain: Float) {
             if (voiced) {
                 var sum = 0.0

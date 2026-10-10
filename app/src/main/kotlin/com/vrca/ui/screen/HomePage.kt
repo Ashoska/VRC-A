@@ -608,6 +608,9 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
     if (!vm.speechSupported) return
     val ctx = LocalContext.current
     var showPicker by remember { mutableStateOf(false) }
+    var showCommands by remember { mutableStateOf(false) }
+    // "Say it" pressed before the mic permission was granted: record once it is.
+    var learnAfterMic by remember { mutableStateOf<com.vrca.speech.VoiceCommand?>(null) }
 
     LaunchedEffect(Unit) { vm.refreshSpeechModelReady() }
     // Dictation deliberately keeps running when this row leaves the screen (card
@@ -616,7 +619,11 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
 
     val micLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted -> if (granted) vm.startDictation() }
+    ) { granted ->
+        val learn = learnAfterMic
+        learnAfterMic = null
+        if (granted) { if (learn != null) vm.startSpeechLearning(learn) else vm.startDictation() }
+    }
 
     fun hasMic(): Boolean =
         ctx.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
@@ -647,6 +654,11 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     // Listen trigger: paused, but the model stays loaded (resumes instantly).
                     vm.speechListening && vm.speechPaused ->
                         "Paused" to "Listens ${listenSummary(vm.speechListenParam, vm.speechListenWhenOn).replaceFirstChar { it.lowercase() }}."
+                    // Paused by a voice command: only commands are heard.
+                    vm.speechListening && vm.speechVoicePaused -> "Paused by voice" to
+                        "Say \"${vm.speechCommandWords[com.vrca.speech.VoiceCommand.RESUME]?.firstOrNull() ?: "resume"}\" to carry on."
+                    vm.speechListening && vm.speechLearning != null -> "Recording a command word" to
+                        "Say it on its own (${vm.speechLearnHeard.size} of ${VrcaViewModel.LEARN_TIMES})."
                     vm.speechListening && vm.speechTriggerMissing && !vm.speechHearing ->
                         "Listening" to "VRChat isn't reporting ${vm.speechListenParam}, so it listens all the time."
                     // Copy says "talk normally": phrases end at the natural breath between
@@ -754,9 +766,31 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
             listenWhenOn = vm.speechListenWhenOn,
             triggerParams = { vm.speechTriggerParams() },
             onListen = { param, on -> vm.setSpeechListenTrigger(param, on) },
+            commandsOn = vm.speechCommandsOn,
+            commandWords = vm.speechCommandWords,
+            onCommands = { showCommands = true },
             onSelect = { code, packId -> showPicker = false; vm.selectSpeechLanguage(code, packId) },
             onRemove = { vm.deleteSpeechPack(it) },
             onDismiss = { showPicker = false }
+        )
+    }
+    if (showCommands) {
+        VoiceCommandsDialog(
+            enabled = vm.speechCommandsOn,
+            onEnabled = { vm.setSpeechCommandsEnabled(it) },
+            langCode = vm.speechLanguage,
+            langName = lang?.englishName ?: "English",
+            words = vm.speechCommandWords,
+            noSpace = com.vrca.speech.PhraseJoin.joiner(vm.speechLanguage).isEmpty(),
+            learning = vm.speechLearning,
+            heard = vm.speechLearnHeard,
+            onSayIt = { cmd ->
+                if (vm.speechListening || hasMic()) vm.startSpeechLearning(cmd)
+                else { learnAfterMic = cmd; micLauncher.launch(android.Manifest.permission.RECORD_AUDIO) }
+            },
+            onLearnDone = { save -> vm.finishSpeechLearning(save) },
+            onSetWords = { cmd, words -> vm.setSpeechCommandWords(cmd, words) },
+            onDismiss = { showCommands = false }
         )
     }
 }

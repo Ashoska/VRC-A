@@ -156,6 +156,8 @@ class VrcaViewModel(
         // oldest first, while newer words stay (user request). Alone, the 8 s hold after
         // the last words clears it first.
         private const val SPEECH_SENTENCE_MS = 10_000L
+        // "Say it" records a command word this many times.
+        const val LEARN_TIMES = 3
 
         private const val META_STABLE_MS = 1_100L
         private const val META_CONFIRM_MOVE_MS = 900L
@@ -2317,6 +2319,19 @@ class VrcaViewModel(
     /** A trigger is set but VRChat doesn't report it right now: listening anyway. */
     var speechTriggerMissing by mutableStateOf(false)
         private set
+    /** Voice commands (VoiceCommands): on/off, this language's words, paused by voice. */
+    var speechCommandsOn by mutableStateOf(true)
+        private set
+    var speechCommandWords by mutableStateOf<Map<com.vrca.speech.VoiceCommand, List<String>>>(emptyMap())
+        private set
+    var speechVoicePaused by mutableStateOf(false)
+        private set
+    /** "Say it": the command whose word is being recorded, and what the model heard. */
+    var speechLearning by mutableStateOf<com.vrca.speech.VoiceCommand?>(null)
+        private set
+    var speechLearnHeard by mutableStateOf<List<String>>(emptyList())
+        private set
+    private var speechLearnStartedDictation = false
     // How long the model took on the last sentence (shown while listening, so slowness
     // on the headset can be told apart from the pause it waits for).
     var speechLastDecodeMs by mutableStateOf<Long?>(null)
@@ -2348,9 +2363,12 @@ class VrcaViewModel(
             val sens = SpeechPacks.sensitivity(ctx)
             val listenParam = SpeechPacks.listenParam(ctx)
             val listenWhenOn = SpeechPacks.listenWhenOn(ctx)
+            val commandsOn = SpeechPacks.commandsEnabled(ctx)
+            val commandWords = SpeechPacks.commandWords(ctx, lang)
             launch(Dispatchers.Main) {
                 speechLanguage = lang; speechPackId = packId; speechInstalledPacks = installed; speechModelReady = ready
                 speechListenParam = listenParam; speechListenWhenOn = listenWhenOn
+                speechCommandsOn = commandsOn; speechCommandWords = commandWords
                 speechLive = live; speechSensitivity = sens
             }
         }
@@ -2401,6 +2419,72 @@ class VrcaViewModel(
         speechPaused = false; speechTriggerMissing = false
     }
 
+    // ---- Voice commands ----
+
+    /** The engine hears commands only while they're on and no word is being recorded. */
+    private fun applySpeechCommands() {
+        SpeechToText.setCommands(if (speechCommandsOn && speechLearning == null) speechCommandWords else null)
+    }
+
+    private fun handleSpeechCommand(command: com.vrca.speech.VoiceCommand, local: Boolean) {
+        if (isBanned || speechLearning != null) return
+        when (command) {
+            com.vrca.speech.VoiceCommand.PAUSE -> speechVoicePaused = true
+            com.vrca.speech.VoiceCommand.RESUME -> speechVoicePaused = false
+            // Nothing to clear = nothing happens (no sound either).
+            com.vrca.speech.VoiceCommand.CLEAR ->
+                if (messageText.value.text.isNotEmpty() || speechQueue.isNotEmpty()) clearManual(local) else return
+        }
+        com.vrca.speech.CommandSounds.play(command)
+    }
+
+    fun setSpeechCommandsEnabled(on: Boolean) {
+        if (!speechSupported) return
+        speechCommandsOn = on
+        SpeechPacks.setCommandsEnabled(app.applicationContext, on)
+        if (!on && speechVoicePaused) resumeSpeechByUi()
+        applySpeechCommands()
+    }
+
+    /** Set [command]'s words for the current language (null = its default). */
+    fun setSpeechCommandWords(command: com.vrca.speech.VoiceCommand, words: List<String>?) {
+        if (!speechSupported) return
+        val ctx = app.applicationContext
+        SpeechPacks.setCommandWords(ctx, speechLanguage, command, words?.map { com.vrca.speech.VoiceCommands.clean(it) }?.filter { it.isNotEmpty() })
+        speechCommandWords = SpeechPacks.commandWords(ctx, speechLanguage)
+        applySpeechCommands()
+    }
+
+    /** Paused by voice, resumed from the app instead. */
+    fun resumeSpeechByUi() {
+        SpeechToText.setVoicePaused(false)
+        speechVoicePaused = false
+    }
+
+    /** "Say it": record what the model hears for [command]'s word, LEARN_TIMES times.
+     *  Starts dictation for it if it isn't running (and stops it again after). */
+    fun startSpeechLearning(command: com.vrca.speech.VoiceCommand) {
+        if (!speechSupported || !speechModelReady || isBanned) return
+        speechLearnHeard = emptyList()
+        speechLearning = command
+        applySpeechCommands()
+        if (speechVoicePaused) resumeSpeechByUi()
+        if (!speechListening) { speechLearnStartedDictation = true; startDictation() }
+    }
+
+    /** End "Say it"; [save] keeps what was heard as the command's words. */
+    fun finishSpeechLearning(save: Boolean) {
+        val command = speechLearning ?: return
+        if (save) {
+            val (words, _) = com.vrca.speech.VoiceCommands.learn(speechLearnHeard)
+            if (words.isNotEmpty()) setSpeechCommandWords(command, words)
+        }
+        speechLearning = null
+        speechLearnHeard = emptyList()
+        applySpeechCommands()
+        if (speechLearnStartedDictation) { speechLearnStartedDictation = false; stopDictation() }
+    }
+
     fun setSpeechSensitivityLevel(level: com.vrca.speech.MicSensitivity) {
         if (!speechSupported) return
         speechSensitivity = level
@@ -2424,6 +2508,7 @@ class VrcaViewModel(
         SpeechPacks.setSelected(ctx, code, packId)
         speechLanguage = code
         speechPackId = SpeechPacks.selectedPackId(ctx, code)
+        speechCommandWords = SpeechPacks.commandWords(ctx, code)
         speechError = null
         speechModelReady = SpeechPacks.isLanguageReady(ctx, code)
         if (speechDownloading) {
@@ -2487,14 +2572,21 @@ class VrcaViewModel(
         speechLastDecodeMs = null
         SpeechToText.setLive(speechLive)
         SpeechToText.setSensitivity(speechSensitivity)
+        speechVoicePaused = false
+        applySpeechCommands()
         startSpeechGate()
         val started = SpeechToText.start(app.applicationContext, speechLanguage, object : SpeechToText.Listener {
             override fun onPartial(text: String, pauseBeforeSec: Float) {
-                viewModelScope.launch(Dispatchers.Main) { showSpeechPartial(text, pauseBeforeSec, local) }
+                viewModelScope.launch(Dispatchers.Main) { if (speechLearning == null) showSpeechPartial(text, pauseBeforeSec, local) }
             }
             override fun onFinal(text: String, pauseBeforeSec: Float, decodeMs: Long) {
                 viewModelScope.launch(Dispatchers.Main) {
                     speechLastDecodeMs = decodeMs
+                    // "Say it": record what the model heard instead of typing it.
+                    if (speechLearning != null) {
+                        if (text.isNotBlank() && speechLearnHeard.size < LEARN_TIMES) speechLearnHeard = speechLearnHeard + text
+                        return@launch
+                    }
                     // Live words on screen for this phrase: the final replaces them in place
                     // (an empty final takes them back). Otherwise it goes through the pacer.
                     if (!finishSpeechPartial(text, local)) queueSpeechPhrase(text, pauseBeforeSec, local)
@@ -2510,11 +2602,14 @@ class VrcaViewModel(
                     speechHearing = active
                     // VRChat's typing dots while you talk, so people know a message is
                     // coming (the VrcaOsc setter still hides them with the invisible border).
-                    if (!isBanned) speechOsc().typing = active
+                    if (!isBanned && (speechLearning == null || !active)) speechOsc().typing = active
                 }
             }
             override fun onLoading(loading: Boolean) {
                 viewModelScope.launch(Dispatchers.Main) { speechLoading = loading }
+            }
+            override fun onCommand(command: com.vrca.speech.VoiceCommand) {
+                viewModelScope.launch(Dispatchers.Main) { handleSpeechCommand(command, local) }
             }
             override fun onStopped() {
                 // Also covers the notification's Stop and errors, not just our button.
@@ -2522,6 +2617,8 @@ class VrcaViewModel(
                     if (speechHearing) speechOsc().typing = false
                     speechListening = false; speechHearing = false; speechLoading = false
                     stopSpeechGate()
+                    speechVoicePaused = false
+                    if (speechLearning != null) { speechLearning = null; speechLearnStartedDictation = false; applySpeechCommands() }
                 }
             }
         })
@@ -2538,6 +2635,7 @@ class VrcaViewModel(
         speechHearing = false
         speechLoading = false
         stopSpeechGate()
+        speechVoicePaused = false
         // Text still queued keeps going in at its pace (it was said; don't drop it).
     }
 
