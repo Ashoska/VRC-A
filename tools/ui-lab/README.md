@@ -42,7 +42,7 @@ avatar params for the dictation Listen trigger).
 **Voice to text (headset):** `voice` installs a stand-in English pack (sparse files at the exact sizes
 the app checks, so it counts as installed); `voice-listening`, `voice-hearing`, `voice-loading`,
 `voice-stopping`, `voice-paused` (by a voice command), `voice-trigger` (by the Listen trigger),
-`voice-learning` ("Say it" 2 of 3) and `voice-downloading` add a state on top, each clearing the last.
+`voice-learning` ("Teach my voice" 2 of 3), `voice-teach-loading` (Teach my voice waiting for the model) and `voice-downloading` add a state on top, each clearing the last.
 The engine itself can't run on the JVM. Expand Manual Send to see the row:
 `ui.sh run headset "preset voice-loading; tap Manual Send; shot v"`.
 

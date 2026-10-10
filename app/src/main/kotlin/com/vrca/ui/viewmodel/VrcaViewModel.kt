@@ -2520,7 +2520,10 @@ class VrcaViewModel(
     /** Choose the dictation language + tier (pack); installs the pack if needed. */
     fun selectSpeechLanguage(code: String, packId: String) {
         if (!speechSupported || SpeechCatalog.lang(code) == null) return
-        if (speechListening) stopDictation()
+        // The picker opens while listening (it also holds live settings). A new model needs a
+        // restart: stop now, and start again on the new one once stopped, if it's installed.
+        val wasListening = speechListening
+        if (wasListening) stopDictation()
         val ctx = app.applicationContext
         SpeechPacks.setSelected(ctx, code, packId)
         speechLanguage = code
@@ -2535,8 +2538,11 @@ class VrcaViewModel(
             speechDownloadAfterCancel = !speechModelReady
             SpeechPacks.cancelDownload()
         } else if (!speechModelReady) downloadSpeechModel()
+        speechRestartAfterStop = wasListening && speechModelReady
     }
     private var speechDownloadAfterCancel = false
+    // Switched language/size while listening: start again once the old session has stopped.
+    private var speechRestartAfterStop = false
 
     /** Download + verify the selected language's pack. Safe to call repeatedly. */
     fun downloadSpeechModel() {
@@ -2566,7 +2572,9 @@ class VrcaViewModel(
     fun cancelSpeechDownload() = SpeechPacks.cancelDownload()
 
     fun deleteSpeechPack(packId: String) {
-        if (speechListening) stopDictation()
+        // Only the pack in use (or the voice detector) stops dictation: the picker opens while
+        // listening, so removing some other language must not cut you off.
+        if (speechListening && (packId == speechPackId || packId == SpeechCatalog.VAD.id)) stopDictation()
         val ctx = app.applicationContext
         viewModelScope.launch(Dispatchers.IO) {
             SpeechPacks.deletePack(ctx, packId)
@@ -2645,6 +2653,7 @@ class VrcaViewModel(
                     stopSpeechGate()
                     speechVoicePaused = false
                     if (speechLearning != null) { speechLearning = null; speechLearnStartedDictation = false; applySpeechCommands() }
+                    if (speechRestartAfterStop) { speechRestartAfterStop = false; startDictation(speechLocal) }
                 }
             }
         })

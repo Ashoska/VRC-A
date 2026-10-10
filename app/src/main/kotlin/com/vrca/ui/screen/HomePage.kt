@@ -696,7 +696,9 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                             Surface(
                                 shape = MaterialTheme.shapes.small,
                                 color = MaterialTheme.colorScheme.surface,
-                                modifier = Modifier.clickable(enabled = !vm.speechListening) { showPicker = true }
+                                // Opens while listening too: sensitivity, Listen trigger and voice
+                                // commands apply live (a language/size switch restarts dictation).
+                                modifier = Modifier.clickable { showPicker = true }
                             ) {
                                 val tierLabel = lang?.takeIf { it.tiers.size > 1 }?.tier(vm.speechPackId)?.label
                                 Text(
@@ -794,6 +796,7 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
             words = vm.speechCommandWords,
             noSpace = com.vrca.speech.PhraseJoin.joiner(vm.speechLanguage).isEmpty(),
             learning = vm.speechLearning,
+            ready = vm.speechListening && !vm.speechLoading,
             heard = vm.speechLearnHeard,
             onSayIt = { cmd ->
                 if (vm.speechListening || hasMic()) vm.startSpeechLearning(cmd)

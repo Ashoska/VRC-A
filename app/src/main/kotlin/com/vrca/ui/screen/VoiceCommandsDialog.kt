@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -44,6 +45,8 @@ internal fun VoiceCommandsDialog(
     words: Map<VoiceCommand, List<String>>,
     noSpace: Boolean,
     learning: VoiceCommand?,
+    /** The voice model is loaded and listening (Teach my voice may have had to load it). */
+    ready: Boolean,
     heard: List<String>,
     onSayIt: (VoiceCommand) -> Unit,
     onLearnDone: (save: Boolean) -> Unit,
@@ -91,7 +94,7 @@ internal fun VoiceCommandsDialog(
                         }
                         VoiceCommands.warnings(VoiceCommands.shown(ws), cmd, words, noSpace).firstOrNull()?.let { Warning(it) }
                         when {
-                            learning == cmd -> LearnPanel(cmd, heard, words, noSpace,
+                            learning == cmd -> LearnPanel(cmd, heard, words, noSpace, ready,
                                 blocked = { usedElsewhere(cmd, it) }, onRetry = { onSayIt(cmd) }, onDone = onLearnDone)
                             typing == cmd -> {
                                 OutlinedTextField(
@@ -131,15 +134,26 @@ private fun LearnPanel(
     heard: List<String>,
     words: Map<VoiceCommand, List<String>>,
     noSpace: Boolean,
+    ready: Boolean,
     blocked: (List<String>) -> Boolean,
     onRetry: () -> Unit,
     onDone: (save: Boolean) -> Unit,
 ) {
     val times = VrcaViewModel.LEARN_TIMES
     val shown = heard.map { VoiceCommands.clean(it) }
+    // Loading the model takes a few seconds when voice to text was off: asking to speak right
+    // away lost those first tries (user-reported), so wait until it's actually listening.
+    if (!ready && heard.isEmpty()) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            Text("Getting ready: loading the voice model (a few seconds)…", style = MaterialTheme.typography.bodyMedium)
+        }
+        TextButton(onClick = { onDone(false) }) { Text("Cancel") }
+        return
+    }
     if (heard.size < times) {
         Text(
-            "Say \"${VoiceCommands.shown(words[cmd].orEmpty())}\" on its own, $times times, with a short pause between (${heard.size} of $times).",
+            "Now say \"${VoiceCommands.shown(words[cmd].orEmpty())}\" on its own, $times times, with a short pause between (${heard.size} of $times).",
             style = MaterialTheme.typography.bodyMedium
         )
         if (shown.isNotEmpty()) Text("Heard: ${shown.joinToString(" · ")}", style = MaterialTheme.typography.bodySmall)
