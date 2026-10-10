@@ -30,9 +30,9 @@ import com.vrca.ui.common.VrcaCardDialog
 import com.vrca.ui.viewmodel.VrcaViewModel
 
 /**
- * Voice commands: on/off, and each command's word for the current language. "Say it"
- * records the word 3 times and keeps what the model actually heard (a model may write
- * "pause" as "paws"; storing that is what makes it match); "Type it" for spellings.
+ * Voice commands: on/off, and each command's word for the current language. Only the word
+ * is shown; "Teach my voice" records it 3 times and keeps how the model wrote it for this
+ * voice as hidden spellings ("clear" heard as "Claire" then matches). "Change word" sets it.
  * Warns about short or everyday words and blocks a word another command already uses.
  */
 @Composable
@@ -83,19 +83,23 @@ internal fun VoiceCommandsDialog(
                                 Text(cmd.label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                                 Text(cmd.what, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            Text(ws.joinToString(" · "), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(VoiceCommands.shown(ws), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
+                                if (ws.size > 1) Text("Taught to your voice", style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
-                        ws.flatMap { VoiceCommands.warnings(it, cmd, words, noSpace) }.firstOrNull()?.let { Warning(it) }
+                        VoiceCommands.warnings(VoiceCommands.shown(ws), cmd, words, noSpace).firstOrNull()?.let { Warning(it) }
                         when {
                             learning == cmd -> LearnPanel(cmd, heard, words, noSpace,
                                 blocked = { usedElsewhere(cmd, it) }, onRetry = { onSayIt(cmd) }, onDone = onLearnDone)
                             typing == cmd -> {
                                 OutlinedTextField(
                                     value = typed, onValueChange = { typed = it }, singleLine = true,
-                                    label = { Text("Word (commas between other spellings)") },
+                                    label = { Text("Word") },
                                     modifier = Modifier.fillMaxWidth()
                                 )
-                                val list = typed.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                                val list = listOf(typed.trim()).filter { it.isNotEmpty() }
                                 list.flatMap { VoiceCommands.warnings(it, cmd, words, noSpace) }.distinct().forEach { Warning(it) }
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     if (list.isNotEmpty() && !usedElsewhere(cmd, list)) {
@@ -105,8 +109,8 @@ internal fun VoiceCommandsDialog(
                                 }
                             }
                             else -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                if (learning == null) ActionPill("Say it", filled = true, onClick = { typing = null; onSayIt(cmd) })
-                                ActionPill("Type it", filled = false, onClick = { typing = cmd; typed = ws.joinToString(", ") })
+                                if (learning == null) ActionPill("Teach my voice", filled = true, onClick = { typing = null; onSayIt(cmd) })
+                                ActionPill("Change word", filled = false, onClick = { typing = cmd; typed = VoiceCommands.shown(ws) })
                                 if (ws != defaults[cmd]) TextButton(onClick = { onSetWords(cmd, null) }) { Text("Use default") }
                             }
                         }
@@ -120,7 +124,7 @@ internal fun VoiceCommandsDialog(
     }
 }
 
-/** "Say it": progress while recording, then what will be saved (with any warnings). */
+/** "Teach my voice": progress while recording, then what the model heard and will match. */
 @Composable
 private fun LearnPanel(
     cmd: VoiceCommand,
@@ -135,21 +139,27 @@ private fun LearnPanel(
     val shown = heard.map { VoiceCommands.clean(it) }
     if (heard.size < times) {
         Text(
-            "Say your ${cmd.label} word on its own, $times times, with a short pause between (${heard.size} of $times).",
+            "Say \"${VoiceCommands.shown(words[cmd].orEmpty())}\" on its own, $times times, with a short pause between (${heard.size} of $times).",
             style = MaterialTheme.typography.bodyMedium
         )
         if (shown.isNotEmpty()) Text("Heard: ${shown.joinToString(" · ")}", style = MaterialTheme.typography.bodySmall)
         TextButton(onClick = { onDone(false) }) { Text("Cancel") }
         return
     }
-    val (learned, consistent) = VoiceCommands.learn(heard)
+    val word = VoiceCommands.shown(words[cmd].orEmpty())
+    val consistent = VoiceCommands.learn(heard).second
+    val learned = VoiceCommands.learnedSpellings(word, heard)
     Text("Heard: ${shown.joinToString(" · ")}", style = MaterialTheme.typography.bodySmall)
-    Text("Saves: ${learned.joinToString(" · ")}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+    Text(
+        if (learned.isEmpty()) "The model already hears you say \"$word\". Nothing extra to learn."
+        else "\"$word\" will also match when the model writes: ${learned.joinToString(" · ")}",
+        style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold
+    )
     val warnings = learned.flatMap { VoiceCommands.warnings(it, cmd, words, noSpace) }.distinct() +
         (if (!consistent) listOf("Heard differently each time. A longer, clearer word works better.") else emptyList())
     warnings.forEach { Warning(it) }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (learned.isNotEmpty() && !blocked(learned)) ActionPill("Save", filled = true, onClick = { onDone(true) })
+        if (!blocked(learned)) ActionPill("Save", filled = true, onClick = { onDone(true) })
         TextButton(onClick = onRetry) { Text("Try again") }
         TextButton(onClick = { onDone(false) }) { Text("Cancel") }
     }

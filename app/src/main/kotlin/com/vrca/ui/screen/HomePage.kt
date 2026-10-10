@@ -609,7 +609,7 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
     val ctx = LocalContext.current
     var showPicker by remember { mutableStateOf(false) }
     var showCommands by remember { mutableStateOf(false) }
-    // "Say it" pressed before the mic permission was granted: record once it is.
+    // "Teach my voice" pressed before the mic permission was granted: record once it is.
     var learnAfterMic by remember { mutableStateOf<com.vrca.speech.VoiceCommand?>(null) }
 
     LaunchedEffect(Unit) { vm.refreshSpeechModelReady() }
@@ -658,7 +658,7 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     // Paused by a voice command: only commands are heard.
                     vm.speechListening && vm.speechVoicePaused -> "Paused by voice" to
                         "Say \"${vm.speechCommandWords[com.vrca.speech.VoiceCommand.RESUME]?.firstOrNull() ?: "resume"}\" to carry on."
-                    vm.speechListening && vm.speechLearning != null -> "Recording a command word" to
+                    vm.speechListening && vm.speechLearning != null -> "Teaching a command word" to
                         "Say it on its own (${vm.speechLearnHeard.size} of ${VrcaViewModel.LEARN_TIMES})."
                     vm.speechListening && vm.speechTriggerMissing && !vm.speechHearing ->
                         "Listening" to "VRChat isn't reporting ${vm.speechListenParam}, so it listens all the time."

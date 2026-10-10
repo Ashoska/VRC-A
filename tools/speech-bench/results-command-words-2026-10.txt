@@ -1,0 +1,15 @@
+# Command words (2026-10-10): 80 synthetic voices each through Parakeet EN (sherpa-onnx 1.13.8).
+# Exact = the model wrote just that word. Synthetic voices don't capture every accent/mic: one
+# user's "clear" came out "Claire" on the Quest, fixed per person by "Teach my voice".
+continue  80/80
+clear     78/80  queer 2
+scratch   78/80
+resume    76/80  brazil 3
+pause     74/80  was 2
+remove    74/80
+delete    60/80  don't eat / to eat
+clean     53/80  queen 8
+reset     51/80  we said 10
+wipe      47/80  white 24
+erase     38/80  the race 27
+unpause   16/80  and pause 43   -> dropped as a default

@@ -33,7 +33,7 @@ enum class CommandMiss(val why: String) {
  *    level can differ from the in-app level;
  *  - a command that would change nothing (pause while paused) does nothing.
  * Words are per language (each model hears its own language) and users can replace
- * them, best by saying them ("Say it" stores what the model actually hears).
+ * them, and teach the model their voice ("Teach my voice": hidden spellings behind the word).
  */
 object VoiceCommands {
     const val QUIET_BEFORE_SEC = 1.0f
@@ -48,10 +48,11 @@ object VoiceCommands {
 
     // Defaults per language; variants are spellings the models write for the same word.
     private val DEFAULTS: Map<String, Map<VoiceCommand, List<String>>> = mapOf(
-        // English models often write the bare word as a sound-alike: "clear" as the name
-        // "Claire" (user-reported), "pause" as "paws". Accepted as the same command; the
-        // other checks (alone, quiet before, your voice) still apply.
-        "en" to cmds(listOf("pause", "paws"), listOf("resume", "unpause"), listOf("clear", "claire", "clare")),
+        // Picked on the bench (80 synthetic voices through Parakeet EN): clear 78/80, resume
+        // 76, pause 74; "unpause" only 16 (mostly heard "and pause"), so it's gone. A voice the
+        // model hears differently (one user's "clear" came out "Claire") is fixed per person
+        // by "Teach my voice", not by global sound-alikes (a lone name would fire it).
+        "en" to cmds(listOf("pause"), listOf("resume"), listOf("clear")),
         "es" to cmds(listOf("pausa"), listOf("continuar", "reanudar"), listOf("borrar")),
         "pt" to cmds(listOf("pausa", "pausar"), listOf("continuar"), listOf("limpar", "apagar")),
         "fr" to cmds(listOf("pause"), listOf("reprendre"), listOf("effacer")),
@@ -117,8 +118,16 @@ object VoiceCommands {
         return out
     }
 
+    /** The word a command shows: the first entry. The rest are spellings the model wrote
+     *  for this user's voice ("Teach my voice"), matched but never shown. */
+    fun shown(words: List<String>): String = words.firstOrNull().orEmpty()
+
+    /** "Teach my voice": what the model heard that the word [display] doesn't already match. */
+    fun learnedSpellings(display: String, heard: List<String>): List<String> =
+        learn(heard).first.filter { norm(it) != norm(display) }
+
     /**
-     * "Say it" results: what the model heard each time → the words to keep (most heard
+     * "Teach my voice" results: what the model heard each time → the words to keep (most heard
      * first, at most 3) and whether it heard the same thing at least twice (a word heard
      * differently every time won't work reliably).
      */
