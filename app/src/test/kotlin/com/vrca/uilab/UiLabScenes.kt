@@ -102,7 +102,7 @@ object UiLabScenes {
         "sending", "idle", "warned", "banned", "auth-dead", "logged-out", "nowplaying", "paused", "ad",
         "roster", "roster-empty", "manual", "owner", "osc-params",
         "voice", "voice-listening", "voice-hearing", "voice-loading", "voice-stopping",
-        "voice-paused", "voice-trigger", "voice-learning", "voice-downloading"
+        "voice-paused", "voice-trigger", "voice-learning", "voice-teach-loading", "voice-downloading"
     )
 
     fun preset(d: UiLabDriver, name: String): String {
@@ -176,7 +176,7 @@ object UiLabScenes {
             // install check passes. The others add a state on top (the engine itself can't
             // run on the JVM: its native libs are Android-only). Expand Manual Send to see it.
             "voice", "voice-listening", "voice-hearing", "voice-loading", "voice-stopping",
-            "voice-paused", "voice-trigger", "voice-learning", "voice-downloading" -> {
+            "voice-paused", "voice-trigger", "voice-learning", "voice-teach-loading", "voice-downloading" -> {
                 installVoicePack(ctx, "en", "kroko-en")
                 val vm = d.vm
                 setObj(vm, "speechLanguage", "en"); setObj(vm, "speechPackId", "kroko-en")
@@ -198,6 +198,9 @@ object UiLabScenes {
                     "voice-trigger" -> {
                         setObj(vm, "speechListenParam", "MuteSelf"); setObj(vm, "speechListenWhenOn", true)
                         setObj(vm, "speechPaused", true)
+                    }
+                    "voice-teach-loading" -> {
+                        setObj(vm, "speechLearning", com.vrca.speech.VoiceCommand.CLEAR); setObj(vm, "speechLoading", true)
                     }
                     "voice-learning" -> {
                         setObj(vm, "speechLearning", com.vrca.speech.VoiceCommand.PAUSE)
