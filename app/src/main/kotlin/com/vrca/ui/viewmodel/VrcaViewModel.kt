@@ -147,15 +147,12 @@ class VrcaViewModel(
         // been readable this long, and the window scrolls at most one line per gap.
         // Normal speech is slower than both, so they only smooth out bursts.
         private const val SPEECH_MIN_LINE_MS = 6_000L
-        // Dictated text stays this long after the last words, then the chatbox goes back to
-        // normal. Typed messages keep MANUAL_HOLD_MS (20 s) to be read; dictated words are
-        // already up while you speak, so 20 s felt like it lingered (user-reported).
+        // Dictated text: the chatbox goes back to normal once every piece on it has had its
+        // reading time (ReadingTime: ~8 s for "yeah", ~20 s for a full chatbox), and at least
+        // this long after the last change (live words have no piece yet). Typed messages keep
+        // MANUAL_HOLD_MS (20 s).
         private const val SPEECH_HOLD_MS = 8_000L
         private const val SPEECH_SCROLL_GAP_MS = 1_500L
-        // Each finished dictated sentence leaves the chatbox this long after it went up,
-        // oldest first, while newer words stay (user request). Alone, the 8 s hold after
-        // the last words clears it first.
-        private const val SPEECH_SENTENCE_MS = 10_000L
         // "Say it" records a command word this many times.
         const val LEARN_TIMES = 3
 
@@ -2796,7 +2793,7 @@ class VrcaViewModel(
     }
 
     // Sentence timeout: each dictated piece's size (ChatboxScroll.units) + when it went up.
-    private class SpeechShown(val units: Int, val at: Long)
+    private class SpeechShown(val units: Int, val at: Long, val lifeMs: Long)
     private val speechShown = ArrayDeque<SpeechShown>()
     private var speechFieldSet: String? = null    // the field after our last dictation write
     private var speechLiveNow: String? = null     // live words on screen right now
@@ -2805,10 +2802,15 @@ class VrcaViewModel(
 
     private fun speechNoSpace() = PhraseJoin.joiner(speechLanguage).isEmpty()
 
+    /** When dictated text may go: once every piece on it has had its reading time, and not
+     *  before SPEECH_HOLD_MS after this change (live words have no piece yet). */
+    private fun speechHoldUntil(now: Long): Long =
+        maxOf(now + SPEECH_HOLD_MS, speechShown.maxOfOrNull { it.at + it.lifeMs } ?: 0L)
+
     private fun noteSpeechShown(text: String, local: Boolean) {
         val units = ChatboxScroll.units(text, speechNoSpace())
         if (units == 0) return
-        speechShown.addLast(SpeechShown(units, System.currentTimeMillis()))
+        speechShown.addLast(SpeechShown(units, System.currentTimeMillis(), ReadingTime.ms(text)))
         if (speechExpiryJob?.isActive == true) return
         speechExpiryJob = viewModelScope.launch {
             while (speechShown.isNotEmpty()) {
@@ -2820,12 +2822,12 @@ class VrcaViewModel(
         }
     }
 
-    /** Cut sentences older than SPEECH_SENTENCE_MS off the front, keeping the newer ones
+    /** Cut pieces whose reading time (ReadingTime) is over off the front, keeping the newer ones
      *  and any live words. Only while something newer stays up. */
     private fun expireOldSpeech(local: Boolean) {
         val now = System.currentTimeMillis()
         var drop = 0
-        while (drop < speechShown.size && now - speechShown[drop].at >= SPEECH_SENTENCE_MS) drop++
+        while (drop < speechShown.size && now - speechShown[drop].at >= speechShown[drop].lifeMs) drop++
         val noSpace = speechNoSpace()
         val base = speechLiveBase
         val live = speechLiveNow?.takeIf { base != null && messageText.value.text == speechLiveSet }
@@ -3033,11 +3035,12 @@ class VrcaViewModel(
                 val changed = text != lastManualLiveSent
                 if (changed) {
                     // A genuine edit (re)arms the hold + shows the typing dots. Dictated text
-                    // gets the shorter SPEECH_HOLD_MS.
+                    // stays until its pieces have had their reading time (speechHoldUntil).
                     lastManualLiveSent = text
                     // An old dictated sentence timing out isn't new speech: no hold, no dots.
                     if (text != speechExpiredText) {
-                        manualHoldUntilMs = System.currentTimeMillis() + if (lastChangeBySpeech) SPEECH_HOLD_MS else MANUAL_HOLD_MS
+                        val now = System.currentTimeMillis()
+                        manualHoldUntilMs = if (lastChangeBySpeech) speechHoldUntil(now) else now + MANUAL_HOLD_MS
                         if (!typingOn) { osc.typing = true; typingOn = true }
                     }
                 } else if (!manualHoldActive()) {
