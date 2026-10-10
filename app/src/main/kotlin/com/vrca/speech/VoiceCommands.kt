@@ -48,7 +48,10 @@ object VoiceCommands {
 
     // Defaults per language; variants are spellings the models write for the same word.
     private val DEFAULTS: Map<String, Map<VoiceCommand, List<String>>> = mapOf(
-        "en" to cmds(listOf("pause"), listOf("resume", "unpause"), listOf("clear")),
+        // English models often write the bare word as a sound-alike: "clear" as the name
+        // "Claire" (user-reported), "pause" as "paws". Accepted as the same command; the
+        // other checks (alone, quiet before, your voice) still apply.
+        "en" to cmds(listOf("pause", "paws"), listOf("resume", "unpause"), listOf("clear", "claire", "clare")),
         "es" to cmds(listOf("pausa"), listOf("continuar", "reanudar"), listOf("borrar")),
         "pt" to cmds(listOf("pausa", "pausar"), listOf("continuar"), listOf("limpar", "apagar")),
         "fr" to cmds(listOf("pause"), listOf("reprendre"), listOf("effacer")),
