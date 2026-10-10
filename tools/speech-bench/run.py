@@ -37,6 +37,9 @@ def nonint8(pat):
     return h[0] if h else find(pat)
 
 base = rss(); t0 = time.time(); cache = {}
+# Engines with one recognizer per language warm up in the job's first language: warming
+# up in a fixed one built a second recognizer and doubled their RAM figure.
+WARM_ISO = next((ISO.get(c, "en") for c in langs_csv.split(",") if not c.startswith("set:")), "en")
 import sherpa_onnx as so
 def sherpa_text(rec, x):
     s = rec.create_stream(); s.accept_waveform(16000, x); rec.decode_stream(s); return s.result.text
@@ -59,7 +62,7 @@ elif kind == "canary180":
             cache[iso] = so.OfflineRecognizer.from_nemo_canary(encoder=find("encoder*int8.onnx"), decoder=find("decoder*int8.onnx"),
                 tokens=find("tokens.txt"), src_lang=iso, tgt_lang=iso, num_threads=threads)
         return sherpa_text(cache[iso], x)
-    tr(np.zeros(16000, dtype=np.float32), "en")
+    tr(np.zeros(16000, dtype=np.float32), WARM_ISO)
 elif kind == "sensevoice":
     def tr(x, iso):
         lang = iso if iso in ("zh", "en", "ja", "ko", "yue") else "auto"
@@ -67,7 +70,7 @@ elif kind == "sensevoice":
             cache[lang] = so.OfflineRecognizer.from_sense_voice(model=find("model.int8.onnx", "model*.onnx"), tokens=find("tokens.txt"),
                 num_threads=threads, language=lang, use_itn=True)
         return sherpa_text(cache[lang], x)
-    tr(np.zeros(16000, dtype=np.float32), "zh")
+    tr(np.zeros(16000, dtype=np.float32), WARM_ISO)
 elif kind == "nemo_ctc":
     R = so.OfflineRecognizer.from_nemo_ctc(model=find("model.int8.onnx", "model*.onnx"), tokens=find("tokens.txt"), num_threads=threads)
     def tr(x, iso): return sherpa_text(R, x)

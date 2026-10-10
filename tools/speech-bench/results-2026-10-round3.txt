@@ -2,7 +2,8 @@
 # (characters for zh/yue/ja/ko/th), sorted best first. sherpa-onnx 1.13.8, 1 thread, desktop x86.
 # New: kroko-es/fr/de (Banafo streaming), ru-small (Vosk streaming zipformer), zh-stream / zh-ctc-small
 # (k2-fsa streaming), ml8-stream (8-language streaming), dolbase (Dolphin base), wtiny/wbase (Whisper via sherpa).
-# RAM figures for engines that keep one recognizer per language (sv24, c180) are sums; svone-* = one language.
+# RAM figures for engines that keep one recognizer per language (sv24, c180) are sums. svone-zh (340) = one
+# SenseVoice language; svone-ja/ko/yue (~660) also held run.py's old fixed zh warm-up recognizer (since fixed).
 
 es_419       pk3=2.2  c180=4.3  kroko-es=5.8  wbase=10.6  om300=10.8  wtiny=21.8
 pt_br        pk3=4.5  om300=14.6  wbase=15.3  wtiny=32.0

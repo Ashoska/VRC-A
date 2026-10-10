@@ -411,7 +411,7 @@ object SpeechCatalog {
             Tier("whisper-base", "Small", 15.3),
         )),
         // GigaAM v3 is both the most accurate (6.2% vs Parakeet-25's 10.6%) and the
-        // lightest full model; the 29 MB streaming one is the Light tier.
+        // lightest full model; the 29 MB streaming one is the Small tier.
         Lang("ru", "Russian", "Русский", listOf(
             Tier("gigaam3-ru", "Large", 6.2),
             Tier("ru-small", "Small", 14.1),

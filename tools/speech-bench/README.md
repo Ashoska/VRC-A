@@ -13,7 +13,10 @@ Linux box with Python, never in the app. Results and decisions: `docs/systems/vo
    can never "detect" the wrong one. Multilingual models that auto-detect are checked for
    wrong-language output and only used for languages where they never did it.
 3. **It must run on a Quest CPU next to VRChat**: speed and RAM are measured, not guessed.
-4. **Tiers**: per language, Best / Balanced / Light when a smaller model is still usable.
+4. **Tiers**: per language Large / Medium / Small ("Standard" when there's one). Large = the most
+   accurate; each lower tier must be a different, smaller model (less download AND less RAM;
+   Dolphin base is the one exception: far smaller download at about SenseVoice's RAM) that is
+   still ≤ ~25% wrong. A language only gets the tiers a decent smaller model exists for.
 5. **Ship exactly what was tested**: the app downloads single files from a pinned Hugging
    Face revision and checks SHA-256, so test those same files with the same sherpa-onnx
    version as the app's AAR.
@@ -55,28 +58,32 @@ runs; onnx-asr / faster-whisper candidates only tell us whether a model is worth
 - **% wrong** = word error rate (characters for Chinese, Cantonese, Japanese, Korean, Thai),
   after Whisper's normalisers. 20 FLEURS clips per language ≈ ±2–3 points, so differences
   under ~2 points are a tie: pick the lighter/faster model.
-- **Quality label** in the picker: Great < 8%, Good 8–12%, OK 12–18%, Experimental 18–30%,
-  not offered > 30% (Hebrew at 40% was left out until a model beat it).
+- **Quality label** in the picker: the app derives it from accuracy = 100 − % wrong (rounded):
+  Excellent ≥ 98, Great ≥ 92, Good ≥ 88, OK ≥ 82, else Experimental. A language is offered
+  only if its best model is ≤ 18% wrong (Arabic 19.0, Malay/Persian 19.8 and Hebrew 40 were
+  left out); a lower tier may reach ~25% (shows as Experimental).
 - **Wrong-language %** (score.py, European languages): how often the output is in another
   language, minus the detector's own error on the correct text. Anything ≥ 5 points means the
   model guesses languages → only offer it where it stays ~0 (Parakeet-25 wrote Slovenian 40%
-  of the time in another language, so it serves Spanish/Portuguese only).
+  of the time in another language, so it only serves es/pt/de/it/bg/pl/uk/nl, where it didn't).
 - **RTF** (processing ÷ audio time, 1 thread, desktop x86): the Quest runs ~2× slower per
   core and the app uses 2 threads, so roughly: RTF ≤ 0.4 → fine, 0.4–0.8 → noticeable delay
   per sentence, ≥ 1 → too slow for live chat (Whisper turbo ~2, because Whisper always
   encodes a 30 s window even for a 3 s phrase).
 - **RAM** (`rss_end_mb`): VRChat needs most of the Quest's memory; ≤ ~1 GB per pack is the
-  comfortable limit, ~1.7–2 GB only for a clearly better "Best" tier. Note: engines that build
+  comfortable limit, ~1.7–2 GB only for a clearly better Large tier. Note: engines that build
   one recognizer per language in the bench (canary180, sensevoice) report the SUM — measure
-  one language alone for the real figure.
+  one language alone for the real figure (they warm up in the job's first language, so a
+  one-language job holds one recognizer).
 - **Speed/RAM on the headset** are the final word: check the dictation row's "last took X s"
   with a new pack before calling it done.
 
 ## Shipping a winner
 
 1. `SpeechCatalog`: a `Pack` (files from the pinned revision with exact size + SHA-256 —
-   `fetch_model.sh hf` prints both; non-LFS files like `tokens.txt` too) and the language's
-   `Tier`s best-first with quality labels from the cut-offs above.
+   `fetch_model.sh hf` prints both; non-LFS files like `tokens.txt` too; `ramMb` from the
+   bench; `slow = true` if it's near real time) and the language's `Tier(packId, label,
+   errorPct)`s biggest-first with the measured FLEURS % wrong (the app derives the label).
 2. New model family → a `Kind` + its `PhraseDecoder` branch in `SpeechToText` (headset
    flavor), configured exactly like the bench's sherpa call (feature dim, model type,
    language settings).
@@ -88,4 +95,6 @@ runs; onnx-asr / faster-whisper candidates only tell us whether a model is worth
 
 Canary-1B-v2 in sherpa format (won 21/25 European languages; ~1.9 GB RAM), a Korean model
 under 1 GB that beats Whisper small's 4.0%, Hebrew, faster "other languages" than
-Omnilingual-1B, and streaming models for a live word-by-word mode.
+Omnilingual-1B, a single-file build of the Thai zipformer (7.9, beats Omnilingual-1B's 9.3),
+and models with token timestamps (live words lock in only with timestamps; Canary and
+Whisper re-read the whole sentence).
