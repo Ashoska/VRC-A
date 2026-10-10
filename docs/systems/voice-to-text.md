@@ -75,6 +75,7 @@ Hands-free dictation into the Manual Send field — built first for **mute playe
 ## Known limits / next steps
 - **Background**: built (`DictationService`) and confirmed on a Quest 3: keeps listening with VRChat in front, breathing doesn't trigger it, it didn't seem to cost frames, Parakeet EN ~0.3 s per sentence (user test, Oct 2026). Frame/RAM cost isn't profiled; the memory guard refuses packs that would squeeze VRChat.
 - **Whispering** has no pitch, so the voicing filter sees it as breath: no "Hearing you"/typing dots and no live words for it, and on Noisy room it's dropped. On Normal/Soft a whispered phrase the voice detector catches still reaches the model if it's longer than the blip limit (0.8 s / 0.5 s). If mute players whisper, a dedicated level may be needed (open question).
+- **Hands-free wake word** ("<wake>, pause", up to ~100 fixed phrases, < 10 MB RAM, always on): planned, not started; see `docs/wake-word-plan.md`. Separate from the Cardinal AI.
 - Later, only if asked: Canary-1B for European languages (~1.9 GB RAM), a self-hosted single-file Thai zipformer, a reduced-operator ONNX Runtime build (smaller APK).
 
 ## Testing new models (the process)

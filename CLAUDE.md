@@ -49,7 +49,7 @@ This file is only the rules plus a **map**. The details of every feature and sys
 | `storage.md` | Every cache/on-disk store and its cap or cleanup |
 | `labs.md` | UI Lab (`tools/ui-lab/`) and Cardinal Lab (`tools/cardinal-lab/`) |
 
-Other reference docs in `docs/`: `ui-revamp.md` (public UI + onboarding design spec; read before public UI work), `cardinal-audit.md`, `account-system-plan.md`, `avatar-catalog-sharding-plan.md`, `backend-migration-plan.md`, `vrc-nexus-teardown.md`.
+Other reference docs in `docs/`: `ui-revamp.md` (public UI + onboarding design spec; read before public UI work), `wake-word-plan.md` (hands-free wake word + fixed phrase list, not started; separate from the Cardinal AI), `cardinal-audit.md`, `account-system-plan.md`, `avatar-catalog-sharding-plan.md`, `backend-migration-plan.md`, `vrc-nexus-teardown.md`.
 
 ## Build Commands
 ```bash
