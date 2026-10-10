@@ -83,6 +83,19 @@ object SpeechPacks {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("sensitivity", s.name).commit()
     }
 
+    /** Listen trigger: the VRChat avatar parameter (OSCQuery) that gates dictation, null =
+     *  always listen; [listenWhenOn] = listen while it's on (else while it's off). */
+    fun listenParam(ctx: Context): String? =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("listen_param", null)
+
+    fun listenWhenOn(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("listen_when_on", true)
+
+    fun setListenTrigger(ctx: Context, param: String?, whenOn: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("listen_param", param).putBoolean("listen_when_on", whenOn).commit()
+    }
+
     /** Select [code] as the dictation language, using tier [packId] for it. */
     fun setSelected(ctx: Context, code: String, packId: String) {
         // commit (not apply): written before returning, so closing the app right after

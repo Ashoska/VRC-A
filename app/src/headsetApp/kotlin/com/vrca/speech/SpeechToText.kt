@@ -231,6 +231,7 @@ object SpeechToText {
                 var voicedRun = 0      // voiced windows inside the current VAD speech
                 var sinceVoiced = 1000 // windows since the last voiced one
                 var shown = false      // what onSpeechActive last reported
+                var heard = true       // the listen trigger's state as last applied
                 // Live words: the last RING_SEC of (gained) audio, so the unfinished phrase can
                 // be re-read; total = samples written, phraseStart = where it began (-1: none).
                 val ring = FloatArray(SAMPLE_RATE * RING_SEC)
@@ -277,6 +278,23 @@ object SpeechToText {
                     val voiced = Voicing.isVoiced(f)
                     gain.apply(f, voiced, level.maxGain)
                     for (v in f) { ring[(total % ring.size).toInt()] = v; total++ }
+                    // Listen trigger (a VRChat param, setGate): closed = hear nothing, but the
+                    // model stays loaded and the mic + ring keep running, so reopening is instant.
+                    val open = gateOpen
+                    if (open != heard) {
+                        heard = open
+                        if (!open) {
+                            // Finish the sentence in progress (said while listening), then stop.
+                            vad?.flush(); drain()
+                            voicedRun = 0; sinceVoiced = 1000; phraseStart = -1L
+                            if (shown) { shown = false; listener.onSpeechActive(false) }
+                        } else {
+                            // Noticed up to ~0.25 s late (OSCQuery poll): the pre-roll may reach
+                            // back that far for the first word, never into the paused stretch.
+                            lastSegEnd = maxOf(lastSegEnd, total - n - SAMPLE_RATE / 4)
+                        }
+                    }
+                    if (!open) continue
                     vad?.acceptWaveform(f)
                     drain()
                     // "Hearing you" (and VRChat's typing dots) only for VOICED speech: on
@@ -366,6 +384,11 @@ object SpeechToText {
     /** Live words on/off ("Live" vs "Phrases"); takes effect immediately, even mid-dictation. */
     @Volatile private var liveEnabled = true
     fun setLive(on: Boolean) { liveEnabled = on }
+
+    /** Listen trigger (a VRChat avatar param via OSCQuery, decided by the caller): closed =
+     *  nothing is heard while the model stays loaded, so reopening needs no model load. */
+    @Volatile private var gateOpen = true
+    fun setGate(open: Boolean) { gateOpen = open }
 
     /** Mic sensitivity; switching mid-dictation rebuilds only the tiny voice detector. */
     @Volatile private var sensitivity = MicSensitivity.NORMAL

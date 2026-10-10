@@ -644,6 +644,11 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     !vm.speechModelReady -> "Voice to text" to
                         "Speak instead of typing. ${lang?.nativeName ?: "English"}${lang?.takeIf { it.tiers.size > 1 }?.tier(vm.speechPackId)?.let { " (${it.label})" } ?: ""}, works offline once installed."
                     vm.speechLoading -> "Loading voice model…" to "This takes a few seconds."
+                    // Listen trigger: paused, but the model stays loaded (resumes instantly).
+                    vm.speechListening && vm.speechPaused ->
+                        "Paused" to "Listens ${listenSummary(vm.speechListenParam, vm.speechListenWhenOn).replaceFirstChar { it.lowercase() }}."
+                    vm.speechListening && vm.speechTriggerMissing && !vm.speechHearing ->
+                        "Listening" to "VRChat isn't reporting ${vm.speechListenParam}, so it listens all the time."
                     // Copy says "talk normally": phrases end at the natural breath between
                     // sentences (VAD, 0.5 s), never a deliberate pause; nonstop talk still
                     // splits itself (maxSpeechDuration).
@@ -745,6 +750,10 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
             installedPacks = vm.speechInstalledPacks,
             sensitivity = vm.speechSensitivity,
             onSensitivity = { vm.setSpeechSensitivityLevel(it) },
+            listenParam = vm.speechListenParam,
+            listenWhenOn = vm.speechListenWhenOn,
+            triggerParams = { vm.speechTriggerParams() },
+            onListen = { param, on -> vm.setSpeechListenTrigger(param, on) },
             onSelect = { code, packId -> showPicker = false; vm.selectSpeechLanguage(code, packId) },
             onRemove = { vm.deleteSpeechPack(it) },
             onDismiss = { showPicker = false }

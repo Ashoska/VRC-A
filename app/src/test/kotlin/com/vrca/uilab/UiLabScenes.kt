@@ -72,7 +72,7 @@ object UiLabScenes {
     val PRESETS = listOf(
         "in-world", "offline", "friends", "incident", "outage-minor", "status-ok", "alerts", "no-alerts",
         "sending", "idle", "warned", "banned", "auth-dead", "logged-out", "nowplaying", "paused", "ad",
-        "roster", "roster-empty", "manual", "owner"
+        "roster", "roster-empty", "manual", "owner", "osc-params"
     )
 
     fun preset(d: UiLabDriver, name: String): String {
@@ -139,6 +139,15 @@ object UiLabScenes {
                 )
             }
             "owner" -> com.vrca.admin.AdminLabAccess.forceOwner = true
+            // VRChat avatar params as OSCQuery would report them (dictation Listen trigger),
+            // re-fed every second so they stay "present" (VrcaOscState ages them out).
+            "osc-params" -> Thread {
+                repeat(600) {
+                    listOf("MuteSelf" to true, "Earmuffs" to false, "AFK" to false, "STT" to true, "Grounded" to true)
+                        .forEach { (k, v) -> com.vrca.osc.VrcaOscState.onParam(k, v) }
+                    Thread.sleep(1000)
+                }
+            }.apply { isDaemon = true }.start()
             "manual" -> d.vm.onMessageTextChange(androidx.compose.ui.text.input.TextFieldValue("be right back, grabbing food"))
             else -> error("unknown preset \"$name\". Presets: ${PRESETS.joinToString()}")
         }

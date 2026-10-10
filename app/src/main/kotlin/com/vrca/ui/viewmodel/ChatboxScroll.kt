@@ -162,6 +162,34 @@ internal object ChatboxScroll {
         return first.isNotEmpty() && lineCount(shown) > 0 && linesAdded(shown, first) == 0
     }
 
+    /**
+     * Size of [text] in "units" for timing dictated sentences out: words, or letters for
+     * no-space scripts. Punctuation never counts, so a full stop added to a sentence
+     * later doesn't shift anything.
+     */
+    fun units(text: String, noSpace: Boolean): Int =
+        if (noSpace) text.count { it.isLetterOrDigit() }
+        else text.split(Regex("\\s+")).count { w -> w.any { it.isLetterOrDigit() } }
+
+    /** The end of [shown] holding its last [units] units (see [units]): older text cut off. */
+    fun keepLastUnits(shown: String, units: Int, noSpace: Boolean): String {
+        val f = flow(shown)
+        if (units <= 0) return ""
+        if (noSpace) {
+            var n = 0
+            for (i in f.indices.reversed()) {
+                if (f[i].isLetterOrDigit() && ++n == units) return f.substring(i).trim()
+            }
+            return f
+        }
+        val words = f.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        var n = 0
+        for (i in words.indices.reversed()) {
+            if (words[i].any { it.isLetterOrDigit() } && ++n == units) return words.drop(i).joinToString(" ")
+        }
+        return f
+    }
+
     private fun flow(shown: String) = shown.replace("\n", " ").trim()
     private fun join(a: String, b: String) = if (a.isEmpty()) b else if (b.isEmpty()) a else "$a $b"
 }

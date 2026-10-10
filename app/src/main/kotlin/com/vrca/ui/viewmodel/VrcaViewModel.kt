@@ -152,6 +152,10 @@ class VrcaViewModel(
         // already up while you speak, so 20 s felt like it lingered (user-reported).
         private const val SPEECH_HOLD_MS = 8_000L
         private const val SPEECH_SCROLL_GAP_MS = 1_500L
+        // Each finished dictated sentence leaves the chatbox this long after it went up,
+        // oldest first, while newer words stay (user request). Alone, the 8 s hold after
+        // the last words clears it first.
+        private const val SPEECH_SENTENCE_MS = 10_000L
 
         private const val META_STABLE_MS = 1_100L
         private const val META_CONFIRM_MOVE_MS = 900L
@@ -2301,6 +2305,18 @@ class VrcaViewModel(
     /** Mic sensitivity (Soft voice / Normal / Noisy room). */
     var speechSensitivity by mutableStateOf(com.vrca.speech.MicSensitivity.NORMAL)
         private set
+    /** Listen trigger: the VRChat avatar param (OSCQuery) that gates dictation, null =
+     *  always listen; [speechListenWhenOn] = listen while it's on, else while it's off. */
+    var speechListenParam by mutableStateOf<String?>(null)
+        private set
+    var speechListenWhenOn by mutableStateOf(true)
+        private set
+    /** Dictation is on but the trigger says don't listen (the model stays loaded). */
+    var speechPaused by mutableStateOf(false)
+        private set
+    /** A trigger is set but VRChat doesn't report it right now: listening anyway. */
+    var speechTriggerMissing by mutableStateOf(false)
+        private set
     // How long the model took on the last sentence (shown while listening, so slowness
     // on the headset can be told apart from the pause it waits for).
     var speechLastDecodeMs by mutableStateOf<Long?>(null)
@@ -2330,14 +2346,61 @@ class VrcaViewModel(
             val ready = SpeechPacks.isLanguageReady(ctx, lang)
             val live = SpeechPacks.liveEnabled(ctx)
             val sens = SpeechPacks.sensitivity(ctx)
+            val listenParam = SpeechPacks.listenParam(ctx)
+            val listenWhenOn = SpeechPacks.listenWhenOn(ctx)
             launch(Dispatchers.Main) {
                 speechLanguage = lang; speechPackId = packId; speechInstalledPacks = installed; speechModelReady = ready
+                speechListenParam = listenParam; speechListenWhenOn = listenWhenOn
                 speechLive = live; speechSensitivity = sens
             }
         }
     }
 
     /** Mic sensitivity; applies at once, even mid-dictation (only the voice detector restarts). */
+    /** Set the listen trigger (null = always listen); applies at once while listening. */
+    fun setSpeechListenTrigger(param: String?, whenOn: Boolean) {
+        if (!speechSupported) return
+        speechListenParam = param; speechListenWhenOn = whenOn
+        SpeechPacks.setListenTrigger(app.applicationContext, param, whenOn)
+        if (speechListening) applySpeechGate()
+    }
+
+    /** On/off params VRChat reports right now (OSCQuery), the useful built-ins first. */
+    fun speechTriggerParams(): List<Pair<String, Boolean>> {
+        val top = listOf("MuteSelf", "Earmuffs", "AFK")
+        return com.vrca.osc.VrcaOscState.boolParams().toList()
+            .sortedWith(compareBy({ it.first !in top }, { top.indexOf(it.first) }, { it.first.lowercase() }))
+    }
+
+    // Re-checks the trigger every OSCQuery poll while dictation is on.
+    private var speechGateJob: Job? = null
+
+    /** Open (listen) unless a trigger is set AND VRChat reports it in the other state.
+     *  Unknown (VRChat not running, param not on this avatar) = listen, so dictation
+     *  never silently stops. */
+    private fun applySpeechGate() {
+        val param = speechListenParam
+        val value = param?.let { com.vrca.osc.VrcaOscState.freshBool(it) }
+        val open = param == null || value == null || value == speechListenWhenOn
+        SpeechToText.setGate(open)
+        if (speechPaused != !open) speechPaused = !open
+        val missing = param != null && value == null
+        if (speechTriggerMissing != missing) speechTriggerMissing = missing
+    }
+
+    private fun startSpeechGate() {
+        speechGateJob?.cancel()
+        applySpeechGate()
+        speechGateJob = viewModelScope.launch {
+            while (true) { delay(250L); applySpeechGate() }
+        }
+    }
+
+    private fun stopSpeechGate() {
+        speechGateJob?.cancel(); speechGateJob = null
+        speechPaused = false; speechTriggerMissing = false
+    }
+
     fun setSpeechSensitivityLevel(level: com.vrca.speech.MicSensitivity) {
         if (!speechSupported) return
         speechSensitivity = level
@@ -2424,6 +2487,7 @@ class VrcaViewModel(
         speechLastDecodeMs = null
         SpeechToText.setLive(speechLive)
         SpeechToText.setSensitivity(speechSensitivity)
+        startSpeechGate()
         val started = SpeechToText.start(app.applicationContext, speechLanguage, object : SpeechToText.Listener {
             override fun onPartial(text: String, pauseBeforeSec: Float) {
                 viewModelScope.launch(Dispatchers.Main) { showSpeechPartial(text, pauseBeforeSec, local) }
@@ -2457,10 +2521,12 @@ class VrcaViewModel(
                 viewModelScope.launch(Dispatchers.Main) {
                     if (speechHearing) speechOsc().typing = false
                     speechListening = false; speechHearing = false; speechLoading = false
+                    stopSpeechGate()
                 }
             }
         })
         speechListening = started
+        if (!started) stopSpeechGate()
         if (!started && speechError == null) speechError = "Couldn't start the microphone."
     }
 
@@ -2471,6 +2537,7 @@ class VrcaViewModel(
         speechListening = false
         speechHearing = false
         speechLoading = false
+        stopSpeechGate()
         // Text still queued keeps going in at its pace (it was said; don't drop it).
     }
 
@@ -2502,9 +2569,7 @@ class VrcaViewModel(
                 val mark = PhraseJoin.sentenceMark(speechLanguage)
                 if (speechQueue.isNotEmpty()) speechQueue[speechQueue.lastIndex] = speechQueue.last() + mark
                 else {
-                    val cur = messageText.value.text.trimEnd() + mark
-                    speechChanging = true
-                    try { onMessageTextChange(TextFieldValue(cur, TextRange(cur.length)), local) } finally { speechChanging = false }
+                    setFieldBySpeech(messageText.value.text.trimEnd() + mark, local)
                 }
             } else {
                 p = PhraseJoin.continueCase(p, speechLanguage)
@@ -2554,14 +2619,15 @@ class VrcaViewModel(
     private fun finishSpeechPartial(raw: String, local: Boolean): Boolean {
         val base = speechLiveBase ?: return false
         speechLiveBase = null
+        speechLiveNow = null
         if (messageText.value.text != speechLiveSet) return raw.isBlank() // edited meanwhile: queue it normally
         val text = liveText(raw)
         if (text.isEmpty()) {
-            val restored = base.trimEnd()
-            speechChanging = true
-            try { onMessageTextChange(TextFieldValue(restored, TextRange(restored.length)), local) } finally { speechChanging = false }
+            setFieldBySpeech(base.trimEnd(), local)
         } else {
             speechLiveBase = base; setSpeechLive(text, local); speechLiveBase = null
+            speechLiveNow = null
+            noteSpeechShown(text, local)
         }
         return true
     }
@@ -2574,8 +2640,8 @@ class VrcaViewModel(
     private fun setSpeechLive(text: String, local: Boolean) {
         val base = speechLiveBase ?: return
         val combined = listOf(base, text).filter { it.isNotBlank() }.joinToString(PhraseJoin.joiner(speechLanguage))
-        speechChanging = true
-        try { onMessageTextChange(TextFieldValue(combined, TextRange(combined.length)), local) } finally { speechChanging = false }
+        speechLiveNow = text
+        setFieldBySpeech(combined, local)
         speechLiveSet = messageText.value.text
         if (manualLiveMode && messageText.value.text.isNotEmpty()) {
             manualLiveJob?.cancel(); manualLiveJob = null
@@ -2588,14 +2654,72 @@ class VrcaViewModel(
     private fun appendSpeechPhrase(phrase: String, local: Boolean) {
         val cur = messageText.value.text.trim()
         val combined = listOf(cur, phrase.trim()).filter { it.isNotBlank() }.joinToString(PhraseJoin.joiner(speechLanguage))
-        speechChanging = true
-        try { onMessageTextChange(TextFieldValue(combined, TextRange(combined.length)), local) } finally { speechChanging = false }
+        setFieldBySpeech(combined, local)
+        noteSpeechShown(phrase, local)
         // Push it to VRChat NOW instead of on the live loop's next 0.5 s tick: restarting
         // the loop sends on its first pass (it re-arms the hold + dots as for any edit).
         if (manualLiveMode && messageText.value.text.isNotEmpty()) {
             manualLiveJob?.cancel(); manualLiveJob = null
             startManualLiveLoop(local)
         }
+    }
+
+    /** Every dictation write to the field goes through here (Live + Scroll format it like
+     *  typing); remembers the result so a clear/edit by anything else is noticed. */
+    private fun setFieldBySpeech(text: String, local: Boolean) {
+        speechChanging = true
+        try { onMessageTextChange(TextFieldValue(text, TextRange(text.length)), local) } finally { speechChanging = false }
+        speechFieldSet = messageText.value.text
+    }
+
+    // Sentence timeout: each dictated piece's size (ChatboxScroll.units) + when it went up.
+    private class SpeechShown(val units: Int, val at: Long)
+    private val speechShown = ArrayDeque<SpeechShown>()
+    private var speechFieldSet: String? = null    // the field after our last dictation write
+    private var speechLiveNow: String? = null     // live words on screen right now
+    private var speechExpiredText: String? = null // the field after a timeout cut
+    private var speechExpiryJob: Job? = null
+
+    private fun speechNoSpace() = PhraseJoin.joiner(speechLanguage).isEmpty()
+
+    private fun noteSpeechShown(text: String, local: Boolean) {
+        val units = ChatboxScroll.units(text, speechNoSpace())
+        if (units == 0) return
+        speechShown.addLast(SpeechShown(units, System.currentTimeMillis()))
+        if (speechExpiryJob?.isActive == true) return
+        speechExpiryJob = viewModelScope.launch {
+            while (speechShown.isNotEmpty()) {
+                delay(500L)
+                // Cleared, reverted or typed in by something else: nothing left to time out.
+                if (messageText.value.text != speechFieldSet) { speechShown.clear(); break }
+                expireOldSpeech(local)
+            }
+        }
+    }
+
+    /** Cut sentences older than SPEECH_SENTENCE_MS off the front, keeping the newer ones
+     *  and any live words. Only while something newer stays up. */
+    private fun expireOldSpeech(local: Boolean) {
+        val now = System.currentTimeMillis()
+        var drop = 0
+        while (drop < speechShown.size && now - speechShown[drop].at >= SPEECH_SENTENCE_MS) drop++
+        val noSpace = speechNoSpace()
+        val base = speechLiveBase
+        val live = speechLiveNow?.takeIf { base != null && messageText.value.text == speechLiveSet }
+        val liveUnits = live?.let { ChatboxScroll.units(it, noSpace) } ?: 0
+        if (drop == 0 || (drop == speechShown.size && liveUnits == 0)) return
+        repeat(drop) { speechShown.removeFirst() }
+        val kept = speechShown.sumOf { it.units }
+        if (live != null && base != null) {
+            val newBase = ChatboxScroll.keepLastUnits(base, kept, noSpace)
+            setFieldBySpeech(listOf(newBase, live).filter { it.isNotBlank() }.joinToString(PhraseJoin.joiner(speechLanguage)), local)
+            speechLiveBase = newBase
+            speechLiveSet = messageText.value.text
+        } else {
+            setFieldBySpeech(ChatboxScroll.keepLastUnits(messageText.value.text, kept, noSpace), local)
+        }
+        // A timeout isn't new speech: the live loop must not extend the hold for it.
+        speechExpiredText = messageText.value.text
     }
 
     // True while a dictation path is changing the field (vs typing), so the live loop
@@ -2673,6 +2797,7 @@ class VrcaViewModel(
         // Speech still queued/decoding would land after Clear and put text back.
         if (speechListening) SpeechToText.discardPending()
         speechQueueJob?.cancel(); speechQueueJob = null; speechQueue.clear(); speechLiveBase = null
+        speechExpiryJob?.cancel(); speechExpiryJob = null; speechShown.clear(); speechLiveNow = null
         manualLiveJob?.cancel(); manualLiveJob = null
         manualRevertJob?.cancel(); manualRevertJob = null
         lastManualLiveSent = null
@@ -2787,8 +2912,11 @@ class VrcaViewModel(
                     // A genuine edit (re)arms the hold + shows the typing dots. Dictated text
                     // gets the shorter SPEECH_HOLD_MS.
                     lastManualLiveSent = text
-                    manualHoldUntilMs = System.currentTimeMillis() + if (lastChangeBySpeech) SPEECH_HOLD_MS else MANUAL_HOLD_MS
-                    if (!typingOn) { osc.typing = true; typingOn = true }
+                    // An old dictated sentence timing out isn't new speech: no hold, no dots.
+                    if (text != speechExpiredText) {
+                        manualHoldUntilMs = System.currentTimeMillis() + if (lastChangeBySpeech) SPEECH_HOLD_MS else MANUAL_HOLD_MS
+                        if (!typingOn) { osc.typing = true; typingOn = true }
+                    }
                 } else if (!manualHoldActive()) {
                     // Unchanged AND the hold window elapsed: revert to the normal
                     // chatbox HERE (the loop owns expiry in live mode), CLEAR the

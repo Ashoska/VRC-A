@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -29,6 +30,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -40,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import com.vrca.speech.MicSensitivity
 import com.vrca.speech.SpeechCatalog
 import com.vrca.speech.SpeechPacks
@@ -62,11 +65,16 @@ internal fun SpeechLanguageDialog(
     installedPacks: Set<String>,
     sensitivity: MicSensitivity,
     onSensitivity: (MicSensitivity) -> Unit,
+    listenParam: String?,
+    listenWhenOn: Boolean,
+    triggerParams: () -> List<Pair<String, Boolean>>,
+    onListen: (param: String?, whenOn: Boolean) -> Unit,
     onSelect: (code: String, packId: String) -> Unit,
     onRemove: (packId: String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var removing by remember { mutableStateOf<SpeechCatalog.Pack?>(null) }
+    var editingListen by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var focused by remember { mutableStateOf(currentLang) }
     var narrowShowsDetails by remember { mutableStateOf(false) }
@@ -81,6 +89,7 @@ internal fun SpeechLanguageDialog(
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             DialogHeader(title = "Voice language", icon = Icons.Filled.Mic, onClose = onDismiss)
             SensitivityRow(sensitivity, onSensitivity)
+            ListenRow(listenParam, listenWhenOn, onChange = { editingListen = true })
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val paneHeight = if (maxHeight.value.isFinite()) minOf(440.dp, maxHeight) else 440.dp
                 val list: @Composable (Modifier) -> Unit = { m ->
@@ -127,6 +136,13 @@ internal fun SpeechLanguageDialog(
             }
         }
     }
+    if (editingListen) {
+        ListenTriggerDialog(
+            param = listenParam, whenOn = listenWhenOn, params = triggerParams,
+            onDone = { p, on -> onListen(p, on); editingListen = false },
+            onDismiss = { editingListen = false },
+        )
+    }
     removing?.let { pack ->
         // One pack can serve several languages (SenseVoice: Chinese, Cantonese, Korean):
         // say so, since removing it takes it away from all of them.
@@ -146,6 +162,89 @@ internal fun SpeechLanguageDialog(
 }
 
 /** Mic sensitivity for all languages: Soft voice / Normal (default) / Noisy room. */
+/** "While muted in VRChat", "While STT is on", or "Always". */
+internal fun listenSummary(param: String?, whenOn: Boolean): String = when (param) {
+    null -> "Always"
+    "MuteSelf" -> if (whenOn) "While muted in VRChat" else "While unmuted in VRChat"
+    else -> "While $param is ${if (whenOn) "on" else "off"}"
+}
+
+@Composable
+private fun ListenRow(param: String?, whenOn: Boolean, onChange: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Listen", style = MaterialTheme.typography.labelLarge)
+        Text(listenSummary(param, whenOn), style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false))
+        ActionPill("Change", filled = false, onClick = onChange)
+    }
+}
+
+/**
+ * Pick the VRChat avatar parameter (read live over OSCQuery) that switches listening on
+ * and off: MuteSelf, Earmuffs, AFK or any on/off toggle on the avatar. While it says
+ * "don't listen" the model stays loaded, so listening resumes instantly.
+ */
+@Composable
+private fun ListenTriggerDialog(
+    param: String?,
+    whenOn: Boolean,
+    params: () -> List<Pair<String, Boolean>>,
+    onDone: (String?, Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var picked by remember { mutableStateOf(param) }
+    var on by remember { mutableStateOf(whenOn) }
+    var live by remember { mutableStateOf(params()) }
+    LaunchedEffect(Unit) { while (true) { delay(500); live = params() } }
+    // Keep the saved choice listed even while VRChat doesn't report it.
+    val rows = live + listOfNotNull(param?.takeIf { p -> live.none { it.first == p } }?.let { it to null })
+    VrcaCardDialog(onDismiss = onDismiss) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            DialogHeader(title = "Listen", icon = Icons.Filled.Mic, onClose = onDismiss)
+            Text("Voice to text listens only while a VRChat setting is on (or off). The voice model stays loaded, so it hears you straight away.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TriggerRow("Always", null, selected = picked == null) { picked = null }
+            if (live.isEmpty()) Text("Open VRChat with OSC on to see your avatar's settings here.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 260.dp)) {
+                items(rows, key = { it.first }) { (name, value) ->
+                    TriggerRow(if (name == "MuteSelf") "Mic muted (MuteSelf)" else name, value, selected = picked == name) { picked = name }
+                }
+            }
+            if (picked != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Listen while it's", style = MaterialTheme.typography.labelLarge)
+                    ActionPill("On", filled = on, onClick = { on = true })
+                    ActionPill("Off", filled = !on, onClick = { on = false })
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                ActionPill("Done", filled = true, onClick = { onDone(picked, on) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun TriggerRow(label: String, value: Boolean?, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f) else Color.Transparent,
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }
+    ) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
+            if (label != "Always") Tag(when (value) { true -> "On now"; false -> "Off now"; null -> "Not found now" },
+                if (value == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            if (selected) Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 8.dp).size(18.dp))
+        }
+    }
+}
+
 @Composable
 private fun SensitivityRow(current: MicSensitivity, onPick: (MicSensitivity) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
