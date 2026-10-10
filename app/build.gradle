@@ -210,6 +210,10 @@ android {
                     t.testLogging { showStandardStreams = true; events 'passed', 'failed', 'skipped' }
                     t.systemProperty 'ui.lab', '1'
                     t.systemProperty 'ui.lab.root', rootProject.projectDir.absolutePath
+                    // delay() on the main looper's clock (the app clock the lab steps one frame
+                    // at a time), not wall time: JVM frames are far slower than a headset's, so
+                    // wall-time delays fired "early" against animations (UiLabDriver.settle).
+                    t.systemProperty 'kotlinx.coroutines.main.delay', 'true'
                     project.properties.each { k, v ->
                         if (k.startsWith('ui.')) t.systemProperty("uilab.$k", v.toString())
                     }

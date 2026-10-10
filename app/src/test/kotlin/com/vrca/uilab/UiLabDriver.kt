@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.os.Looper
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -37,7 +38,7 @@ import java.time.Duration
  *   scroll down|up [n]          scroll the main scrollable area n screens (default 1)
  *   scrollto <text>             scroll until the element is in view
  *   back                        dismiss the top dialog, else system back
- *   wait <ms>                   let the app run (real time)
+ *   wait <ms>                   let the app run (app time, 16 ms frames; never faster than real time)
  *   tree                        list what's on screen and what can be tapped / typed / scrolled
  *   set <prop> <value>          force state: VM field (warned, oscSending, …) or Object.prop
  *   get <prop>                  read it
@@ -60,10 +61,36 @@ class UiLabDriver(
 
     private val looper = shadowOf(Looper.getMainLooper())
     private val log = File(outDir, ".lab.log").also { it.parentFile?.mkdirs() }
-
+    /**
+     * Lets the app run for [ms] of app time, one 16 ms frame at a time, like a headset's frame loop:
+     *  - The app clock is the looper's: animations AND `delay()` (moved onto the main looper by
+     *    `kotlinx.coroutines.main.delay` in app/build.gradle) both run on it, so they stay in step
+     *    however slow a JVM frame is. With wall-time delays, Manual Send's 120 ms bring-into-view
+     *    fired before the slow first expand frame had grown the card, and didn't scroll.
+     *  - Layout after every frame. Robolectric never draws on its own, and Compose measures +
+     *    lays out inside draw, so without [layoutRoots] the layout only moved when `shot` drew
+     *    the screen (scroll extents, bring-into-view and `tree` positions were all stale).
+     *  - The sleep keeps app time from running ahead of real time, so network replies still
+     *    land within a `wait`.
+     */
     fun settle(ms: Long) {
         var left = ms
-        while (left > 0) { Thread.sleep(50); looper.idleFor(Duration.ofMillis(50)); left -= 50 }
+        while (left > 0) {
+            val frameStart = System.nanoTime()
+            looper.idleFor(Duration.ofMillis(FRAME_MS))
+            layoutRoots()
+            left -= FRAME_MS
+            val spentMs = (System.nanoTime() - frameStart) / 1_000_000
+            if (spentMs < FRAME_MS) Thread.sleep(FRAME_MS - spentMs)
+        }
+    }
+
+    /** Measure + lay out every Compose window now (what a device does in each frame's draw pass). */
+    @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+    fun layoutRoots() {
+        val roots = mutableListOf<RootForTest>()
+        windows().forEach { composeRoots(it.view, roots) }
+        roots.forEach { runCatching { it.measureAndLayoutForTest() } }
     }
 
     fun run(script: String): List<String> {
@@ -82,6 +109,7 @@ class UiLabDriver(
     fun exec(line: String): String {
         val cmd = line.substringBefore(' ').lowercase()
         val arg = line.substringAfter(' ', "").trim()
+        layoutRoots() // act on what a device would show now, not the last frame's layout
         val r = when (cmd) {
             "shot" -> shot(arg.ifBlank { "shot" })
             "tap", "click" -> act(arg, SemanticsActions.OnClick.name) { n -> n.config.getOrNull(SemanticsActions.OnClick)?.action?.invoke() }
@@ -193,7 +221,12 @@ class UiLabDriver(
         fun withAction(n: SemanticsNode): SemanticsNode? {
             var cur: SemanticsNode? = n
             while (cur != null) { if (hasAction(cur)) return cur; cur = cur.parent }
-            return null
+            // A label beside its own control (ToggleRow = text + Switch): the unlabeled control
+            // on the same line, to the right — what "tap Scroll" means on the device.
+            val b = n.boundsInRoot
+            return all.filter { hasAction(it) && label(it).isBlank() }
+                .filter { val c = it.boundsInRoot; c.top < b.bottom && c.bottom > b.top && c.left >= b.left }
+                .minByOrNull { it.boundsInRoot.left - b.right }
         }
         val exact = all.filter { label(it).lowercase() == q }
         val partial = all.filter { label(it).lowercase().contains(q) && it !in exact }
@@ -261,6 +294,13 @@ class UiLabDriver(
     private fun back(): String {
         val dismiss = nodes().firstOrNull { it.config.getOrNull(SemanticsActions.Dismiss) != null }
         if (dismiss != null) { dismiss.config[SemanticsActions.Dismiss].action?.invoke(); return "dismissed" }
+        val top = windows().lastOrNull()
+        if (top != null && top.view !== act.window.decorView) {
+            // A dialog window on top: a real BACK key to it, like the headset's back button.
+            top.view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK))
+            top.view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK))
+            return "back (closed the top window)"
+        }
         act.onBackPressedDispatcher.onBackPressed()
         return "back"
     }
@@ -344,5 +384,6 @@ class UiLabDriver(
 
     companion object {
         const val SETTLE_AFTER_ACTION_MS = 400L
+        private const val FRAME_MS = 16L
     }
 }

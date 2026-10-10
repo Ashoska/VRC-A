@@ -7,7 +7,7 @@
 #   tools/ui-lab/ui.sh serve <variant> [options]                  # live: then tools/ui-lab/uictl.sh "cmd" …
 #
 # variant: admin | headset | public
-# options: --size phone|small|tablet|headset   --tall (a long page, whole scroll content)
+# options: --size phone|small|tablet|headset   --tall (phone sizes only: a long page, whole scroll content)
 #          --qualifiers Q   --settle MS   --firestore (real project)   --no-vrchat   --port N
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -42,6 +42,11 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+if [[ -n "$TALL" && "$SIZE" == headset ]]; then
+  # The Quest panel is a fixed 1024x640dp. A 3x-tall render stretches the columns and leaves a
+  # huge gap above the bottom bar that the headset never shows; it scrolls instead.
+  echo "--tall isn't supported for the headset panel: use 'scrollto <text>' / 'scroll down' (the app scrolls like the device)"; exit 2
+fi
 if [[ -z "$Q" ]]; then
   case "$SIZE" in
     phone) W=411; H=891; D=xxhdpi; O=port ;;

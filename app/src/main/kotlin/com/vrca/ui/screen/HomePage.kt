@@ -646,16 +646,15 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                 Column(Modifier.weight(1f)) {
                     Text(label, style = MaterialTheme.typography.labelLarge)
                     Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                when {
-                    vm.speechDownloading -> OutlinedButton(onClick = { vm.cancelSpeechDownload() }) { Text("Cancel") }
-                    !vm.speechModelReady -> Button(onClick = { showPicker = true }, enabled = !isBanned) { Text("Install") }
-                    else -> {
-                        // Language chip: tap to switch language / install another pack.
+                    if (vm.speechModelReady && !vm.speechDownloading) {
+                        // Language chip under the text (beside it, it squeezed the text to
+                        // one word per line): tap to switch language / install another pack.
                         Surface(
                             shape = MaterialTheme.shapes.small,
                             color = MaterialTheme.colorScheme.surface,
-                            modifier = Modifier.clickable(enabled = !vm.speechListening) { showPicker = true }
+                            modifier = Modifier
+                                .padding(top = 6.dp)
+                                .clickable(enabled = !vm.speechListening) { showPicker = true }
                         ) {
                             val tierLabel = lang?.takeIf { it.tiers.size > 1 }?.tier(vm.speechPackId)?.label
                             Text(
@@ -664,6 +663,12 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                             )
                         }
+                    }
+                }
+                when {
+                    vm.speechDownloading -> OutlinedButton(onClick = { vm.cancelSpeechDownload() }) { Text("Cancel") }
+                    !vm.speechModelReady -> Button(onClick = { showPicker = true }, enabled = !isBanned) { Text("Install") }
+                    else -> {
                         val listening = vm.speechListening
                         IconButton(
                             onClick = {
