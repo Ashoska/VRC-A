@@ -743,7 +743,10 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
             currentLang = vm.speechLanguage,
             currentPackId = vm.speechPackId,
             installedPacks = vm.speechInstalledPacks,
+            sensitivity = vm.speechSensitivity,
+            onSensitivity = { vm.setSpeechSensitivityLevel(it) },
             onSelect = { code, packId -> showPicker = false; vm.selectSpeechLanguage(code, packId) },
+            onRemove = { vm.deleteSpeechPack(it) },
             onDismiss = { showPicker = false }
         )
     }

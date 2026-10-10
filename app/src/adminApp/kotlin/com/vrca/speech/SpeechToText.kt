@@ -23,6 +23,8 @@ object SpeechToText {
 
     fun isListening(): Boolean = false
     fun setLive(on: Boolean) {}
+    fun setSensitivity(s: MicSensitivity) {}
+    fun discardPending() {}
 
     @Suppress("UNUSED_PARAMETER")
     fun start(ctx: Context, langCode: String, listener: Listener): Boolean {

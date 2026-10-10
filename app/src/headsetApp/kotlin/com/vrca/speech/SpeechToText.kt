@@ -52,6 +52,9 @@ object SpeechToText {
     private const val DECODE_THREADS = 2
     /** "Hearing you" ends this many 32 ms windows (~0.4 s) after the voice stops. */
     private const val QUIET_WINDOWS = 12
+    /** Audio kept before / after the VAD's cut of a phrase (samples). */
+    private const val PRE_ROLL = SAMPLE_RATE / 4L   // 0.25 s
+    private const val POST_ROLL = SAMPLE_RATE / 5L  // 0.2 s
     /** Free memory that must remain above Android's low-memory line after loading a model. */
     private const val MEMORY_MARGIN_MB = 300L
     /** Written without spaces between words (live words join without them). */
@@ -128,11 +131,13 @@ object SpeechToText {
                 // priority (it must never miss mic data).
                 runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND) }
                 rec = phraseDecoder(app, pack, langCode)
-                vad = Vad(config = VadModelConfig(
+                var level = sensitivity
+                fun newVad(l: MicSensitivity) = Vad(config = VadModelConfig(
                     sileroVadModelConfig = SileroVadModelConfig(
                         model = SpeechPacks.filePath(app, SpeechCatalog.VAD.id, "silero_vad.onnx"),
-                        // 0.6 (default 0.5): breathing right at the headset mic kept tripping it.
-                        threshold = 0.6f,
+                        // Per sensitivity (MicSensitivity): 0.6 stopped breath triggers but
+                        // missed soft words; Normal is 0.5 now that Voicing filters breaths.
+                        threshold = l.vadThreshold,
                         // Pause that ends a phrase. Short on purpose (text shows sooner); a
                         // mid-sentence breath no longer adds a full stop (the caller joins
                         // phrases by pauseBeforeSec).
@@ -144,6 +149,7 @@ object SpeechToText {
                     sampleRate = SAMPLE_RATE,
                     numThreads = 1,
                 ))
+                vad = newVad(level)
                 listener.onLoading(false)
                 runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
 
@@ -189,16 +195,17 @@ object SpeechToText {
                             continue
                         }
                         agreement = null; agreementFor = -1L
+                        val stale = seg.epoch != epoch // spoken before Clear
                         val t0 = System.nanoTime()
-                        val text = if (seg.noise) "" else runCatching { r.text(normalize(seg.samples)) }.getOrElse { Log.w(TAG, "decode", it); "" }
+                        val text = if (seg.noise || stale) "" else runCatching { r.text(normalize(seg.samples)) }.getOrElse { Log.w(TAG, "decode", it); "" }
                         val ms = (System.nanoTime() - t0) / 1_000_000
-                        if (text.isEmpty()) {
+                        if (text.isEmpty() || seg.epoch != epoch) {
                             // Nothing there: take back live words shown for it, if any.
                             if (partialShown) { partialShown = false; listener.onFinal("", pauseFrom(seg.start), ms) }
                             continue
                         }
                         val pause = pauseFrom(seg.start)
-                        lastEnd = seg.start + seg.samples.size
+                        lastEnd = seg.end
                         partialShown = false
                         listener.onFinal(text, pause, ms)
                     }
@@ -222,34 +229,50 @@ object SpeechToText {
                 var phraseStart = -1L
                 var lastPartialAt = 0L
                 fun drain() {
-                    while (!vad.empty()) {
-                        val s = vad.front(); vad.pop()
-                        // Breaths, clicks and fan noise have no voice (no pitch): don't spend
-                        // the model on them (they decoded to nothing anyway, but cost CPU and
-                        // delayed the next real phrase). Still queued as "noise" so live
+                    val v = vad ?: return
+                    while (!v.empty()) {
+                        val s = v.front(); v.pop()
+                        // Short weak blips (breath, click) have no voice: don't spend the model
+                        // on them. How short/weak is the sensitivity's call: longer quiet
+                        // phrases always reach the model. Still queued as "noise" so live
                         // words shown for it get taken back.
-                        val noise = Voicing.voicedWindows(s.samples) < Voicing.MIN_VOICED_WINDOWS
+                        val dur = s.samples.size / SAMPLE_RATE.toFloat()
+                        val noise = Voicing.voicedWindows(s.samples) < level.minVoiced && dur < level.blipMaxSec
+                        // A little audio before and after the VAD's cut (still in the ring):
+                        // it reacts late and ends early, clipping soft first/last syllables.
+                        val segStart = s.start.toLong(); val segEnd = segStart + s.samples.size
+                        val from = maxOf(segStart - PRE_ROLL, total - ring.size, 0L)
+                        val to = minOf(segEnd + POST_ROLL, total)
+                        val padded = if (from <= segStart && to >= segEnd)
+                            FloatArray((to - from).toInt()) { ring[((from + it) % ring.size).toInt()] } else s.samples
                         live.finalsQueued.incrementAndGet()
                         live.pending.set(null)
-                        phrases.offer(Segment(s.samples, s.start.toLong(), noise))
+                        phrases.offer(Segment(padded, segStart, segEnd, noise, epoch))
                         phraseStart = -1L
                     }
                 }
                 while (running) {
                     val n = audio.read(pcm, 0, pcm.size)
                     if (n <= 0) continue
+                    if (sensitivity != level) {
+                        // Switched in the picker: finish the current phrase on the old detector,
+                        // then a new one (0.6 MB, instant); the speech model stays loaded.
+                        vad?.flush(); drain(); vad?.release()
+                        level = sensitivity
+                        vad = newVad(level)
+                    }
                     val f = FloatArray(n) { pcm[it] / 32768f }
                     val voiced = Voicing.isVoiced(f)
-                    gain.apply(f, voiced)
+                    gain.apply(f, voiced, level.maxGain)
                     for (v in f) { ring[(total % ring.size).toInt()] = v; total++ }
-                    vad.acceptWaveform(f)
+                    vad?.acceptWaveform(f)
                     drain()
                     // "Hearing you" (and VRChat's typing dots) only for VOICED speech: on
                     // after a few voiced windows; off when the VAD's phrase ends OR ~0.4 s
                     // after your voice stops, whichever is first (noise could hold the VAD
                     // open, so it lingered after you stopped). A bare VAD flag flipped on
                     // every breath.
-                    val speech = vad.isSpeechDetected()
+                    val speech = vad?.isSpeechDetected() == true
                     voicedRun = if (!speech) 0 else if (voiced) voicedRun + 1 else voicedRun
                     sinceVoiced = if (voiced) 0 else sinceVoiced + 1
                     val now = speech && voicedRun >= Voicing.MIN_VOICED_WINDOWS && sinceVoiced <= QUIET_WINDOWS
@@ -262,7 +285,7 @@ object SpeechToText {
                         phraseStart = (total - n - SAMPLE_RATE * PREROLL_MS / 1000).coerceAtLeast(maxOf(0L, total - ring.size))
                         live.cutSec = 0.0
                     }
-                    if (!speech && vad.empty()) phraseStart = -1L
+                    if (!speech && vad?.empty() != false) phraseStart = -1L
                     // Re-read from the cut (words before it are locked in), so a re-read covers
                     // ~2-3 s however long the phrase gets.
                     val cut = if (phraseStart < 0) 0L else
@@ -277,7 +300,7 @@ object SpeechToText {
                         lastPartialAt = total
                     }
                 }
-                vad.flush() // finish a phrase cut off by Stop
+                vad?.flush() // finish a phrase cut off by Stop
                 drain()
                 if (shown) listener.onSpeechActive(false)
             } catch (e: Throwable) {
@@ -307,8 +330,10 @@ object SpeechToText {
         capture = null
     }
 
-    /** A VAD phrase and where it starts in the mic stream (samples); noise = no voice in it. */
-    private class Segment(val samples: FloatArray, val start: Long, val noise: Boolean = false)
+    /** A VAD phrase: [samples] padded with a little audio before/after (soft first and last
+     *  syllables), [start]/[end] = the VAD's own bounds (pauses are measured on those),
+     *  noise = too little voice to decode, [epoch] = discardPending() count when queued. */
+    private class Segment(val samples: FloatArray, val start: Long, val end: Long, val noise: Boolean, val epoch: Int)
 
     /** The unfinished phrase from [chunkSec] (s after its start) to now, to re-read for live
      *  words; seq = finals queued when copied. */
@@ -326,6 +351,15 @@ object SpeechToText {
     /** Live words on/off ("Live" vs "Phrases"); takes effect immediately, even mid-dictation. */
     @Volatile private var liveEnabled = true
     fun setLive(on: Boolean) { liveEnabled = on }
+
+    /** Mic sensitivity; switching mid-dictation rebuilds only the tiny voice detector. */
+    @Volatile private var sensitivity = MicSensitivity.NORMAL
+    fun setSensitivity(s: MicSensitivity) { sensitivity = s }
+
+    /** Clear pressed: drop speech that's queued or still decoding, so a sentence finishing
+     *  just after Clear can't put text back into the emptied chatbox. */
+    @Volatile private var epoch = 0
+    fun discardPending() { epoch++ }
 
     /** A recognised phrase: text plus its tokens with start times (s), when the model gives them. */
     private class Hyp(val text: String, val tokens: Array<String>, val times: FloatArray)
@@ -491,13 +525,13 @@ object SpeechToText {
     private class Agc {
         private var level = 0.03f
         private var gain = 1f
-        fun apply(x: FloatArray, voiced: Boolean) {
+        fun apply(x: FloatArray, voiced: Boolean, maxGain: Float) {
             if (voiced) {
                 var sum = 0.0
                 for (v in x) sum += v * v
                 val rms = sqrt(sum / x.size).toFloat()
                 level = level * 0.95f + rms * 0.05f
-                val target = (0.063f / level).coerceIn(1f, 6f)
+                val target = (0.063f / level).coerceIn(1f, maxGain)
                 gain += (target - gain) * 0.1f
             }
             for (i in x.indices) x[i] = (x[i] * gain).coerceIn(-1f, 1f)

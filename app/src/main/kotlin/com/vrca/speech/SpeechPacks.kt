@@ -74,6 +74,15 @@ object SpeechPacks {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("live", on).commit()
     }
 
+    /** Mic sensitivity (Soft voice / Normal / Noisy room). Default: Normal. */
+    fun sensitivity(ctx: Context): MicSensitivity =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("sensitivity", null)
+            ?.let { n -> MicSensitivity.entries.firstOrNull { it.name == n } } ?: MicSensitivity.NORMAL
+
+    fun setSensitivity(ctx: Context, s: MicSensitivity) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("sensitivity", s.name).commit()
+    }
+
     /** Select [code] as the dictation language, using tier [packId] for it. */
     fun setSelected(ctx: Context, code: String, packId: String) {
         // commit (not apply): written before returning, so closing the app right after

@@ -40,10 +40,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.vrca.speech.MicSensitivity
 import com.vrca.speech.SpeechCatalog
 import com.vrca.speech.SpeechPacks
 import com.vrca.ui.common.DialogHeader
 import com.vrca.ui.common.VrcaCardDialog
+import com.vrca.ui.common.VrcaConfirmDialog
 
 /**
  * Voice-language picker. Wide panel (the Quest's 1024 dp): two panes — a compact,
@@ -58,9 +60,13 @@ internal fun SpeechLanguageDialog(
     currentLang: String,
     currentPackId: String?,
     installedPacks: Set<String>,
+    sensitivity: MicSensitivity,
+    onSensitivity: (MicSensitivity) -> Unit,
     onSelect: (code: String, packId: String) -> Unit,
+    onRemove: (packId: String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    var removing by remember { mutableStateOf<SpeechCatalog.Pack?>(null) }
     var query by remember { mutableStateOf("") }
     var focused by remember { mutableStateOf(currentLang) }
     var narrowShowsDetails by remember { mutableStateOf(false) }
@@ -74,6 +80,7 @@ internal fun SpeechLanguageDialog(
     VrcaCardDialog(onDismiss = onDismiss) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             DialogHeader(title = "Voice language", icon = Icons.Filled.Mic, onClose = onDismiss)
+            SensitivityRow(sensitivity, onSensitivity)
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val paneHeight = if (maxHeight.value.isFinite()) minOf(440.dp, maxHeight) else 440.dp
                 val list: @Composable (Modifier) -> Unit = { m ->
@@ -97,6 +104,7 @@ internal fun SpeechLanguageDialog(
                         inUsePackId = if (focusedLang.code == currentLang) focusedLang.tier(currentPackId).packId else null,
                         installedPacks = installedPacks,
                         onPick = { packId -> onSelect(focusedLang.code, packId) },
+                        onRemove = { pack -> removing = pack },
                     )
                 }
                 if (maxWidth >= 640.dp) {
@@ -117,6 +125,52 @@ internal fun SpeechLanguageDialog(
                 }
             }
         }
+    }
+    removing?.let { pack ->
+        // One pack can serve several languages (SenseVoice: Chinese, Cantonese, Korean):
+        // say so, since removing it takes it away from all of them.
+        val others = SpeechCatalog.languages.filter { l -> l.code != focusedLang.code && l.tiers.any { it.packId == pack.id } }
+            .joinToString(", ") { it.englishName }
+        VrcaConfirmDialog(
+            title = "Remove this voice pack?",
+            body = "Frees ${SpeechPacks.mb(pack.sizeBytes)}." +
+                (if (others.isNotEmpty()) " It's also used for $others, so those lose it too." else "") +
+                " You can download it again any time.",
+            confirmLabel = "Remove",
+            onConfirm = { onRemove(pack.id); removing = null },
+            onDismiss = { removing = null },
+            destructive = true,
+        )
+    }
+}
+
+/** Mic sensitivity for all languages: Soft voice / Normal (default) / Noisy room. */
+@Composable
+private fun SensitivityRow(current: MicSensitivity, onPick: (MicSensitivity) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Mic sensitivity", style = MaterialTheme.typography.labelLarge)
+        MicSensitivity.entries.forEach { level ->
+            val selected = level == current
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.clickable { onPick(level) }
+            ) {
+                Text(level.label + if (level == MicSensitivity.NORMAL) " (recommended)" else "",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+            }
+        }
+        Text(
+            when (current) {
+                MicSensitivity.SOFT -> "Picks up quiet speech; may react to more background sound."
+                MicSensitivity.NORMAL -> "Best for most people."
+                MicSensitivity.NOISY -> "Ignores more background sound; speak up a little."
+            },
+            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -183,6 +237,7 @@ private fun LanguageDetails(
     inUsePackId: String?,
     installedPacks: Set<String>,
     onPick: (String) -> Unit,
+    onRemove: (SpeechCatalog.Pack) -> Unit,
 ) {
     var showCredits by remember { mutableStateOf(false) }
     Column(modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -208,6 +263,7 @@ private fun LanguageDetails(
                     installed = t.packId in installedPacks,
                     inUse = t.packId == inUsePackId,
                     onClick = { onPick(t.packId) },
+                    onRemove = { onRemove(pack) },
                 )
             }
         }
@@ -234,6 +290,7 @@ private fun TierCard(
     installed: Boolean,
     inUse: Boolean,
     onClick: () -> Unit,
+    onRemove: () -> Unit,
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -253,6 +310,12 @@ private fun TierCard(
                     "${SpeechPacks.mb(pack.sizeBytes)} download · ${memory(pack.ramMb)} memory",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+            // Downloaded sizes can be removed right here (Settings also lists them).
+            if (installed) {
+                TextButton(onClick = onRemove) {
+                    Text("Remove", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error)
+                }
             }
             when {
                 inUse -> Row(verticalAlignment = Alignment.CenterVertically) {
