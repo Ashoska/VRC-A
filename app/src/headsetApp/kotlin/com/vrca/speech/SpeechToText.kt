@@ -48,10 +48,21 @@ object SpeechToText {
     private const val DECODE_THREADS = 2
     /** "Hearing you" ends this many 32 ms windows (~0.4 s) after the voice stops. */
     private const val QUIET_WINDOWS = 12
+    /** Live words: re-read the unfinished phrase at most this often / at least this often. */
+    private const val LIVE_MIN_MS = 800L
+    private const val LIVE_MAX_MS = 5_000L
+    /** No live re-reads past this phrase length (the final arrives by 15 s anyway). */
+    private const val LIVE_MAX_SEC = 12
+    /** Audio kept for re-reads, and how far before the VAD's trigger a phrase starts. */
+    private const val RING_SEC = 20
+    private const val PREROLL_MS = 300
 
     interface Listener {
-        /** Unused in phrase mode (kept for API compatibility). */
-        fun onPartial(text: String) {}
+        /**
+         * Live words: the unfinished sentence so far (re-read about once a second while you
+         * talk). The next [onFinal] replaces it; an empty final means "it was nothing, remove it".
+         */
+        fun onPartial(text: String, pauseBeforeSec: Float) {}
         /**
          * A finished phrase. [pauseBeforeSec] = silence since the previous phrase ended
          * (infinite for the first), so the caller can tell a mid-sentence breath from a
@@ -85,6 +96,7 @@ object SpeechToText {
         // user just tapped the mic, which is when Android allows this start).
         DictationService.start(app)
         val phrases = LinkedBlockingQueue<Segment>()
+        val live = LiveState()
         val captureDone = java.util.concurrent.atomic.AtomicBoolean(false)
         val t = Thread({
             var rec: PhraseDecoder? = null
@@ -115,16 +127,40 @@ object SpeechToText {
                 val r = rec
                 decoder = Thread({
                     // Runs until capture has flushed its last phrase AND the queue is drained,
-                    // so words spoken right before Stop are never lost.
+                    // so words spoken right before Stop are never lost. Finished phrases always
+                    // go first; live re-reads (partials) only run when none is waiting.
                     var lastEnd = -1L // end sample of the last phrase that produced text
+                    var partialShown = false
+                    fun pauseFrom(start: Long) =
+                        if (lastEnd < 0) Float.POSITIVE_INFINITY else (start - lastEnd).coerceAtLeast(0L) / SAMPLE_RATE.toFloat()
                     while (!captureDone.get() || phrases.isNotEmpty()) {
-                        val seg = phrases.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                        val seg = phrases.poll(50, TimeUnit.MILLISECONDS)
+                        if (seg == null) {
+                            val job = live.pending.getAndSet(null) ?: continue
+                            val t0 = System.nanoTime()
+                            val text = runCatching { r.text(normalize(job.samples)) }.getOrElse { "" }
+                            val ms = (System.nanoTime() - t0) / 1_000_000
+                            // Pace re-reads by what they cost on THIS device: wait ~2.5x a
+                            // re-read, so live words never take over the CPU next to VRChat.
+                            live.intervalMs = (ms * 5 / 2).coerceIn(LIVE_MIN_MS, LIVE_MAX_MS)
+                            // Drop it if its phrase finished meanwhile (the final is next).
+                            if (text.isNotEmpty() && job.seq == live.finalsQueued.get()) {
+                                partialShown = true
+                                listener.onPartial(text, pauseFrom(job.start))
+                            }
+                            continue
+                        }
                         val t0 = System.nanoTime()
-                        val text = runCatching { r.text(normalize(seg.samples)) }.getOrElse { Log.w(TAG, "decode", it); "" }
+                        val text = if (seg.noise) "" else runCatching { r.text(normalize(seg.samples)) }.getOrElse { Log.w(TAG, "decode", it); "" }
                         val ms = (System.nanoTime() - t0) / 1_000_000
-                        if (text.isEmpty()) continue
-                        val pause = if (lastEnd < 0) Float.POSITIVE_INFINITY else (seg.start - lastEnd).coerceAtLeast(0L) / SAMPLE_RATE.toFloat()
+                        if (text.isEmpty()) {
+                            // Nothing there: take back live words shown for it, if any.
+                            if (partialShown) { partialShown = false; listener.onFinal("", pauseFrom(seg.start), ms) }
+                            continue
+                        }
+                        val pause = pauseFrom(seg.start)
                         lastEnd = seg.start + seg.samples.size
+                        partialShown = false
                         listener.onFinal(text, pause, ms)
                     }
                 }, "stt-decode").apply { isDaemon = true; start() }
@@ -140,15 +176,24 @@ object SpeechToText {
                 var voicedRun = 0      // voiced windows inside the current VAD speech
                 var sinceVoiced = 1000 // windows since the last voiced one
                 var shown = false      // what onSpeechActive last reported
+                // Live words: the last RING_SEC of (gained) audio, so the unfinished phrase can
+                // be re-read; total = samples written, phraseStart = where it began (-1: none).
+                val ring = FloatArray(SAMPLE_RATE * RING_SEC)
+                var total = 0L
+                var phraseStart = -1L
+                var lastPartialAt = 0L
                 fun drain() {
                     while (!vad.empty()) {
                         val s = vad.front(); vad.pop()
                         // Breaths, clicks and fan noise have no voice (no pitch): don't spend
                         // the model on them (they decoded to nothing anyway, but cost CPU and
-                        // delayed the next real phrase).
-                        if (Voicing.voicedWindows(s.samples) >= Voicing.MIN_VOICED_WINDOWS) {
-                            phrases.offer(Segment(s.samples, s.start.toLong()))
-                        }
+                        // delayed the next real phrase). Still queued as "noise" so live
+                        // words shown for it get taken back.
+                        val noise = Voicing.voicedWindows(s.samples) < Voicing.MIN_VOICED_WINDOWS
+                        live.finalsQueued.incrementAndGet()
+                        live.pending.set(null)
+                        phrases.offer(Segment(s.samples, s.start.toLong(), noise))
+                        phraseStart = -1L
                     }
                 }
                 while (running) {
@@ -157,6 +202,7 @@ object SpeechToText {
                     val f = FloatArray(n) { pcm[it] / 32768f }
                     val voiced = Voicing.isVoiced(f)
                     gain.apply(f, voiced)
+                    for (v in f) { ring[(total % ring.size).toInt()] = v; total++ }
                     vad.acceptWaveform(f)
                     drain()
                     // "Hearing you" (and VRChat's typing dots) only for VOICED speech: on
@@ -169,6 +215,21 @@ object SpeechToText {
                     sinceVoiced = if (voiced) 0 else sinceVoiced + 1
                     val now = speech && voicedRun >= Voicing.MIN_VOICED_WINDOWS && sinceVoiced <= QUIET_WINDOWS
                     if (now != shown) { shown = now; listener.onSpeechActive(now) }
+                    // Live words: once you're really speaking, hand the decoder a copy of the
+                    // phrase so far every intervalMs (it adapts to the model's speed). Starts a
+                    // little before the VAD noticed you (it reacts late). Not for very long
+                    // phrases: the final comes soon (maxSpeechDuration) and re-reads get slow.
+                    if (speech && phraseStart < 0) phraseStart = (total - n - SAMPLE_RATE * PREROLL_MS / 1000).coerceAtLeast(maxOf(0L, total - ring.size))
+                    if (!speech && vad.empty()) phraseStart = -1L
+                    val len = total - phraseStart
+                    if (phraseStart >= 0 && voicedRun >= Voicing.MIN_VOICED_WINDOWS && phrases.isEmpty() &&
+                        len in (SAMPLE_RATE / 2)..(SAMPLE_RATE.toLong() * LIVE_MAX_SEC) &&
+                        (total - lastPartialAt) * 1000 / SAMPLE_RATE >= live.intervalMs && live.pending.get() == null
+                    ) {
+                        val copy = FloatArray(len.toInt()) { ring[((phraseStart + it) % ring.size).toInt()] }
+                        live.pending.set(LiveJob(copy, phraseStart, live.finalsQueued.get()))
+                        lastPartialAt = total
+                    }
                 }
                 vad.flush() // finish a phrase cut off by Stop
                 drain()
@@ -200,8 +261,18 @@ object SpeechToText {
         capture = null
     }
 
-    /** A VAD phrase and where it starts in the mic stream (samples). */
-    private class Segment(val samples: FloatArray, val start: Long)
+    /** A VAD phrase and where it starts in the mic stream (samples); noise = no voice in it. */
+    private class Segment(val samples: FloatArray, val start: Long, val noise: Boolean = false)
+
+    /** The unfinished phrase so far, to re-read for live words; seq = finals queued when copied. */
+    private class LiveJob(val samples: FloatArray, val start: Long, val seq: Int)
+
+    /** Shared between the capture and decode threads. */
+    private class LiveState {
+        val pending = java.util.concurrent.atomic.AtomicReference<LiveJob?>(null)
+        val finalsQueued = java.util.concurrent.atomic.AtomicInteger(0)
+        @Volatile var intervalMs = LIVE_MIN_MS
+    }
 
     /** Recognises one finished phrase. One implementation per model family. */
     private interface PhraseDecoder {

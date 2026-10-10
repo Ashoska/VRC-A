@@ -12,7 +12,7 @@ object SpeechToText {
     const val SUPPORTED = false
 
     interface Listener {
-        fun onPartial(text: String) {}
+        fun onPartial(text: String, pauseBeforeSec: Float) {}
         fun onFinal(text: String, pauseBeforeSec: Float, decodeMs: Long)
         fun onError(message: String)
         fun onSpeechActive(active: Boolean) {}

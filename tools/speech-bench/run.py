@@ -6,7 +6,8 @@
 
 Langs are FLEURS codes (en_us, ru_ru, cmn_hans_cn, ...) or set:<name> from fetch_sets.py.
 Kinds (sherpa-onnx = what the app runs, so prefer those): parakeet / gigaam (NeMo transducer),
-nemo_ctc (GigaAM v3), canary180, zipformer (offline transducer), sensevoice, dolphin, omni
+nemo_ctc (GigaAM v3), canary180, zipformer (offline transducer), streaming / streaming_ctc
+(streaming zipformers: Kroko, small Russian/Chinese), sherpa_whisper, sensevoice, dolphin, omni
 (Omnilingual CTC), paraformer, qwen3; non-sherpa reference engines: whisper (faster-whisper),
 canary1b + gigaam3 (onnx-asr), moonshine2. Add a kind = one elif building `tr(x, iso)`.
 Output: per language the RTF (processing time / audio time; > 1 = slower than real time),
@@ -70,6 +71,28 @@ elif kind == "sensevoice":
 elif kind == "nemo_ctc":
     R = so.OfflineRecognizer.from_nemo_ctc(model=find("model.int8.onnx", "model*.onnx"), tokens=find("tokens.txt"), num_threads=threads)
     def tr(x, iso): return sherpa_text(R, x)
+elif kind in ("streaming", "streaming_ctc"):
+    # Streaming models, fed one phrase at a time like the app's ONLINE_* decoders
+    # (whole phrase + 0.8 s of silence so the look-ahead flushes, then input_finished).
+    if kind == "streaming":
+        R = so.OnlineRecognizer.from_transducer(tokens=find("tokens.txt"), encoder=find("encoder*int8.onnx", "encoder*.onnx"),
+            decoder=nonint8("decoder*.onnx"), joiner=find("joiner*int8.onnx", "joiner*.onnx"), num_threads=threads)
+    else:
+        R = so.OnlineRecognizer.from_zipformer2_ctc(tokens=find("tokens.txt"), model=find("model*.onnx"), num_threads=threads)
+    tail = np.zeros(int(16000 * 0.8), dtype=np.float32)
+    def tr(x, iso):
+        s = R.create_stream(); s.accept_waveform(16000, x); s.accept_waveform(16000, tail); s.input_finished()
+        while R.is_ready(s): R.decode_stream(s)
+        return R.get_result(s)
+elif kind == "sherpa_whisper":
+    # Whisper through sherpa (what the app would run); language set explicitly.
+    def tr(x, iso):
+        lang = {"yue": "yue", "fil": "tl"}.get(iso, iso)
+        if lang not in cache:
+            cache.clear()  # one recognizer at a time: RAM = a single language's
+            cache[lang] = so.OfflineRecognizer.from_whisper(encoder=find("*encoder.int8.onnx"), decoder=find("*decoder.int8.onnx"),
+                tokens=find("*tokens.txt"), language=lang, task="transcribe", num_threads=threads)
+        return sherpa_text(cache[lang], x)
 elif kind == "dolphin":
     R = so.OfflineRecognizer.from_dolphin_ctc(model=find("model.int8.onnx", "model*.onnx"), tokens=find("tokens.txt"), num_threads=threads)
     def tr(x, iso): return sherpa_text(R, x)

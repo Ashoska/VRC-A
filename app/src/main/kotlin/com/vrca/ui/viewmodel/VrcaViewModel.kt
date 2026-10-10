@@ -2390,10 +2390,15 @@ class VrcaViewModel(
         speechLocal = local
         speechLastDecodeMs = null
         val started = SpeechToText.start(app.applicationContext, speechLanguage, object : SpeechToText.Listener {
+            override fun onPartial(text: String, pauseBeforeSec: Float) {
+                viewModelScope.launch(Dispatchers.Main) { showSpeechPartial(text, pauseBeforeSec, local) }
+            }
             override fun onFinal(text: String, pauseBeforeSec: Float, decodeMs: Long) {
                 viewModelScope.launch(Dispatchers.Main) {
                     speechLastDecodeMs = decodeMs
-                    queueSpeechPhrase(text, pauseBeforeSec, local)
+                    // Live words on screen for this phrase: the final replaces them in place
+                    // (an empty final takes them back). Otherwise it goes through the pacer.
+                    if (!finishSpeechPartial(text, local)) queueSpeechPhrase(text, pauseBeforeSec, local)
                 }
             }
             override fun onError(message: String) {
@@ -2485,6 +2490,61 @@ class VrcaViewModel(
         }
     }
 
+    // Live words: the field as it was before this phrase's live words (with its
+    // sentence mark if one was due), the phrase's join decision, and what we last set
+    // (to notice the field being cleared/edited meanwhile).
+    private var speechLiveBase: String? = null
+    private var speechLiveContinues = false
+    private var speechLiveSet: String? = null
+
+    /**
+     * Show the unfinished phrase so far after the text already sent, replacing the previous
+     * live words. The full-stop / capital decision is made once per phrase (first live
+     * words) and kept for its final. Skipped while the pacer still feeds earlier text.
+     */
+    private fun showSpeechPartial(raw: String, pauseBeforeSec: Float, local: Boolean) {
+        if (speechQueue.isNotEmpty() || isBanned) return
+        if (speechLiveBase != null && messageText.value.text != speechLiveSet) speechLiveBase = null // cleared/edited
+        if (speechLiveBase == null) {
+            var base = messageText.value.text.trim()
+            speechLiveContinues = base.isNotBlank() && !PhraseJoin.endsSentence(base) && pauseBeforeSec < PhraseJoin.SENTENCE_PAUSE_SEC
+            if (base.isNotBlank() && !PhraseJoin.endsSentence(base) && !speechLiveContinues) base += PhraseJoin.sentenceMark(speechLanguage)
+            speechLiveBase = base
+        }
+        setSpeechLive(liveText(raw), local)
+    }
+
+    /** The phrase's final arrived: replace its live words. False = none were shown. */
+    private fun finishSpeechPartial(raw: String, local: Boolean): Boolean {
+        val base = speechLiveBase ?: return false
+        speechLiveBase = null
+        if (messageText.value.text != speechLiveSet) return raw.isBlank() // edited meanwhile: queue it normally
+        val text = liveText(raw)
+        if (text.isEmpty()) {
+            val restored = base.trimEnd()
+            onMessageTextChange(TextFieldValue(restored, TextRange(restored.length)), local)
+        } else {
+            speechLiveBase = base; setSpeechLive(text, local); speechLiveBase = null
+        }
+        return true
+    }
+
+    private fun liveText(raw: String): String {
+        val p = PhraseJoin.stripStop(raw)
+        return if (speechLiveContinues) PhraseJoin.continueCase(p, speechLanguage) else p
+    }
+
+    private fun setSpeechLive(text: String, local: Boolean) {
+        val base = speechLiveBase ?: return
+        val combined = listOf(base, text).filter { it.isNotBlank() }.joinToString(PhraseJoin.joiner(speechLanguage))
+        onMessageTextChange(TextFieldValue(combined, TextRange(combined.length)), local)
+        speechLiveSet = messageText.value.text
+        if (manualLiveMode && messageText.value.text.isNotEmpty()) {
+            manualLiveJob?.cancel(); manualLiveJob = null
+            startManualLiveLoop(local)
+        }
+    }
+
     /** Append a finished phrase to the field (routed through onMessageTextChange so
      *  Live + Scroll format/scroll it exactly like typing). */
     private fun appendSpeechPhrase(phrase: String, local: Boolean) {
@@ -2565,7 +2625,7 @@ class VrcaViewModel(
     /** Clear the manual message from the chatbox + the field, drop the hold, and
      *  restore the normal automated chatbox (or a clear if nothing is enabled). */
     fun clearManual(local: Boolean = false) {
-        speechQueueJob?.cancel(); speechQueueJob = null; speechQueue.clear()
+        speechQueueJob?.cancel(); speechQueueJob = null; speechQueue.clear(); speechLiveBase = null
         manualLiveJob?.cancel(); manualLiveJob = null
         manualRevertJob?.cancel(); manualRevertJob = null
         lastManualLiveSent = null
