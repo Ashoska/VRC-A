@@ -17,6 +17,15 @@ object PhraseJoin {
         return if ((p.endsWith('.') && !p.endsWith("..")) || p.endsWith('。')) p.dropLast(1).trimEnd() else p
     }
 
+    /** Languages written without spaces between words: phrases join with no space. */
+    private val NO_SPACE = setOf("zh", "yue", "ja")
+
+    /** What goes between two phrases. */
+    fun joiner(lang: String): String = if (lang in NO_SPACE) "" else " "
+
+    /** The full stop that closes a sentence after a real break. */
+    fun sentenceMark(lang: String): String = if (lang in NO_SPACE) "。" else "."
+
     /** Whether [text] already ends a sentence. */
     fun endsSentence(text: String): Boolean = text.trimEnd().lastOrNull()?.let { it in ".!?…。！？" } ?: false
 

@@ -25,6 +25,14 @@ object SpeechCatalog {
         CANARY,
         /** Streaming zipformer transducer (Kroko), fed one phrase at a time. */
         ONLINE_TRANSDUCER,
+        /** Offline zipformer transducer (ReazonSpeech Japanese, Vietnamese). */
+        TRANSDUCER,
+        /** SenseVoice (Chinese, Cantonese, Korean); the language is set explicitly. */
+        SENSE_VOICE,
+        /** Meta Omnilingual CTC (1,600 languages; used for ones nothing smaller covers). */
+        OMNILINGUAL_CTC,
+        /** DataoceanAI Dolphin CTC (Asian languages; Thai, and a fast Indonesian tier). */
+        DOLPHIN_CTC,
     }
 
     data class PackFile(val name: String, val url: String, val size: Long, val sha256: String)
@@ -38,6 +46,8 @@ object SpeechCatalog {
         val ramMb: Int,
         /** Licence/attribution line shown in the language picker. */
         val credit: String,
+        /** Noticeably slower per sentence on a Quest (shown as "slow" in the picker). */
+        val slow: Boolean = false,
     ) {
         val sizeBytes: Long get() = files.sumOf { it.size }
         fun file(name: String) = files.first { it.name == name }
@@ -67,6 +77,18 @@ object SpeechCatalog {
     private const val CAN180_REV = "9077164e0d3dd1d5353743e89ceaa1d3a770838c"
     private const val GIGA3 = "csukuangfj/sherpa-onnx-nemo-ctc-punct-giga-am-v3-russian-2025-12-16"
     private const val GIGA3_REV = "4fb5407ff028a69fec516cdf4c10fac9ddea7c16"
+    private const val SV = "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
+    private const val SV_REV = "2365baeacb507f821a0c8120fcee3d484dba7a07"
+    // Third-party mirror of k2-fsa's ReazonSpeech release (no official single-file copy);
+    // the files are byte-identical to the official tarball (checked by SHA-256).
+    private const val REAZON = "DeL-TaiseiOzaki/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01"
+    private const val REAZON_REV = "13b45961a89ff3633ea9028d7701054268921d50"
+    private const val VI = "csukuangfj/sherpa-onnx-zipformer-vi-int8-2025-04-20"
+    private const val VI_REV = "b2745a435379992ad3f299635468db0c34918e1e"
+    private const val OMNI = "csukuangfj/sherpa-onnx-omnilingual-asr-1600-languages-1B-ctc-int8-2025-11-12"
+    private const val OMNI_REV = "17db76eab583b0b868ffb0df104ab879145087e5"
+    private const val DOLPHIN = "csukuangfj/sherpa-onnx-dolphin-small-ctc-multi-lang-int8-2025-04-02"
+    private const val DOLPHIN_REV = "c8b6689509acfcd744c04e5e169164f9ac4cae32"
     private const val KROKO = "csukuangfj/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06"
     private const val KROKO_REV = "572aaf4e2e0c603c3fc2a574d096e755a178faa1"
 
@@ -149,6 +171,66 @@ object SpeechCatalog {
             ramMb = 150,
             credit = "Banafo Kroko (CC-BY-SA-4.0)",
         ),
+        Pack(
+            id = "sensevoice",
+            title = "SenseVoice (Chinese, Cantonese, Korean)",
+            kind = Kind.SENSE_VOICE,
+            files = listOf(
+                hf(SV, SV_REV, "model.int8.onnx", 239_233_841, "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"),
+                hf(SV, SV_REV, "tokens.txt", 315_894, "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc"),
+            ),
+            ramMb = 340,
+            credit = "Alibaba SenseVoice (FunASR model licence)",
+        ),
+        Pack(
+            id = "reazon-ja",
+            title = "ReazonSpeech (Japanese)",
+            kind = Kind.TRANSDUCER,
+            files = listOf(
+                hf(REAZON, REAZON_REV, "encoder-epoch-99-avg-1.int8.onnx", 154_670_139, "2c7bd08a8a99f9ddd0d9e458456577b1f6279214e51426f114f9eced44c54e1d"),
+                hf(REAZON, REAZON_REV, "decoder-epoch-99-avg-1.onnx", 11_767_836, "58b18211ae06265466bfa17172dab574df94f76c8bcb61a3640c28ba860e4124"),
+                hf(REAZON, REAZON_REV, "joiner-epoch-99-avg-1.onnx", 10_720_115, "d38a81d1191c9ed6de6a1719503692e07e3e973e2364adde0abae5eaaded1174"),
+                hf(REAZON, REAZON_REV, "tokens.txt", 45_754, "2c3ac659818a48a0c04010e0593bbc4d7c8a24a054340b01131499c05fd52def"),
+            ),
+            ramMb = 380,
+            credit = "ReazonSpeech k2 (Apache-2.0)",
+        ),
+        Pack(
+            id = "zipformer-vi",
+            title = "Zipformer (Vietnamese)",
+            kind = Kind.TRANSDUCER,
+            files = listOf(
+                hf(VI, VI_REV, "encoder-epoch-12-avg-8.int8.onnx", 70_876_129, "b3abdef7a660fea7faf5e076b3c7613b0fc98406707103784d018189bb522124"),
+                hf(VI, VI_REV, "decoder-epoch-12-avg-8.onnx", 5_165_084, "d1d27cca84c824a8acf5ce6edf0f2c0880cfe295d2e69b95134de1707e1d9998"),
+                hf(VI, VI_REV, "joiner-epoch-12-avg-8.int8.onnx", 1_033_417, "38ec49e1c18e4feb0cad4de13e25c83a866cf56f4a66f22e8ff579d591a69a46"),
+                hf(VI, VI_REV, "tokens.txt", 25_847, "f536d03c2e95ebd2930cf0abec88e823bd17d3c1933da7ae6a82db3b80605e15"),
+            ),
+            ramMb = 290,
+            credit = "k2-fsa Zipformer Vietnamese (Apache-2.0)",
+        ),
+        Pack(
+            id = "omnilingual-1b",
+            title = "Omnilingual 1B (Indonesian, Hindi, Turkish, Filipino)",
+            kind = Kind.OMNILINGUAL_CTC,
+            files = listOf(
+                hf(OMNI, OMNI_REV, "model.int8.onnx", 1_031_628_252, "f7b74c964039162423b83e3fa950ce24810c9a635d9ff8468b5f4d142b7c1e8c"),
+                hf(OMNI, OMNI_REV, "tokens.txt", 86_423, "a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31"),
+            ),
+            ramMb = 1700,
+            credit = "Meta Omnilingual ASR (Apache-2.0)",
+            slow = true,
+        ),
+        Pack(
+            id = "dolphin-small",
+            title = "Dolphin small (Thai, Indonesian)",
+            kind = Kind.DOLPHIN_CTC,
+            files = listOf(
+                hf(DOLPHIN, DOLPHIN_REV, "model.int8.onnx", 249_658_954, "c1afcb9265de0ebd853eb8f570b371f399a6f9b2b9af9a3cb17c2e509171e697"),
+                hf(DOLPHIN, DOLPHIN_REV, "tokens.txt", 504_662, "c3788261a51df1899ea4b210b552cd42139204de72c0ad60f6cebb199078872e"),
+            ),
+            ramMb = 600,
+            credit = "DataoceanAI Dolphin (Apache-2.0)",
+        ),
     ).associateBy { it.id }
 
     /**
@@ -182,6 +264,25 @@ object SpeechCatalog {
         Lang("fr", "French", "Français", listOf(
             Tier("canary-180m", "Standard", Quality.GOOD),
         )),
+        // Parakeet-25 never answered in the wrong language for these (shoot-out check).
+        Lang("it", "Italian", "Italiano", listOf(Tier("parakeet-25", "Standard", Quality.GOOD))),
+        Lang("bg", "Bulgarian", "Български", listOf(Tier("parakeet-25", "Standard", Quality.GOOD))),
+        Lang("pl", "Polish", "Polski", listOf(Tier("parakeet-25", "Standard", Quality.OK))),
+        Lang("uk", "Ukrainian", "Українська", listOf(Tier("parakeet-25", "Standard", Quality.OK))),
+        Lang("nl", "Dutch", "Nederlands", listOf(Tier("parakeet-25", "Standard", Quality.OK))),
+        Lang("zh", "Chinese (Mandarin)", "中文", listOf(Tier("sensevoice", "Standard", Quality.GOOD))),
+        Lang("yue", "Cantonese", "粵語", listOf(Tier("sensevoice", "Standard", Quality.GREAT))),
+        Lang("ja", "Japanese", "日本語", listOf(Tier("reazon-ja", "Standard", Quality.GREAT))),
+        Lang("ko", "Korean", "한국어", listOf(Tier("sensevoice", "Standard", Quality.GREAT))),
+        Lang("vi", "Vietnamese", "Tiếng Việt", listOf(Tier("zipformer-vi", "Standard", Quality.GOOD))),
+        Lang("th", "Thai", "ไทย", listOf(Tier("dolphin-small", "Standard", Quality.OK))),
+        Lang("id", "Indonesian", "Bahasa Indonesia", listOf(
+            Tier("omnilingual-1b", "Best", Quality.GOOD),
+            Tier("dolphin-small", "Light", Quality.OK),
+        )),
+        Lang("hi", "Hindi", "हिन्दी", listOf(Tier("omnilingual-1b", "Standard", Quality.GOOD))),
+        Lang("tr", "Turkish", "Türkçe", listOf(Tier("omnilingual-1b", "Standard", Quality.OK))),
+        Lang("fil", "Filipino", "Filipino", listOf(Tier("omnilingual-1b", "Standard", Quality.OK))),
     )
 
     fun lang(code: String): Lang? = languages.firstOrNull { it.code == code }

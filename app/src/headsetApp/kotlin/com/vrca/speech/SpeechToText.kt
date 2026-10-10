@@ -8,8 +8,11 @@ import android.media.MediaRecorder
 import android.util.Log
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OfflineCanaryModelConfig
+import com.k2fsa.sherpa.onnx.OfflineDolphinModelConfig
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineNemoEncDecCtcModelConfig
+import com.k2fsa.sherpa.onnx.OfflineOmnilingualAsrCtcModelConfig
+import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
@@ -223,6 +226,40 @@ object SpeechToText {
                 featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
                 modelConfig = OfflineModelConfig(
                     nemo = OfflineNemoEncDecCtcModelConfig(model = p("model")),
+                    tokens = p("tokens"), numThreads = DECODE_THREADS,
+                ),
+                decodingMethod = "greedy_search",
+            ))
+            SpeechCatalog.Kind.TRANSDUCER -> offline(OfflineRecognizerConfig(
+                featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
+                modelConfig = OfflineModelConfig(
+                    transducer = OfflineTransducerModelConfig(encoder = p("encoder"), decoder = p("decoder"), joiner = p("joiner")),
+                    tokens = p("tokens"), numThreads = DECODE_THREADS, modelType = "transducer",
+                ),
+                decodingMethod = "greedy_search",
+            ))
+            SpeechCatalog.Kind.SENSE_VOICE -> offline(OfflineRecognizerConfig(
+                featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
+                modelConfig = OfflineModelConfig(
+                    // Language set explicitly (zh / yue / ko), so it never answers in another.
+                    senseVoice = OfflineSenseVoiceModelConfig(model = p("model"), language = langCode,
+                        useInverseTextNormalization = true),
+                    tokens = p("tokens"), numThreads = DECODE_THREADS,
+                ),
+                decodingMethod = "greedy_search",
+            ))
+            SpeechCatalog.Kind.OMNILINGUAL_CTC -> offline(OfflineRecognizerConfig(
+                featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
+                modelConfig = OfflineModelConfig(
+                    omnilingual = OfflineOmnilingualAsrCtcModelConfig(model = p("model")),
+                    tokens = p("tokens"), numThreads = DECODE_THREADS,
+                ),
+                decodingMethod = "greedy_search",
+            ))
+            SpeechCatalog.Kind.DOLPHIN_CTC -> offline(OfflineRecognizerConfig(
+                featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
+                modelConfig = OfflineModelConfig(
+                    dolphin = OfflineDolphinModelConfig(model = p("model")),
                     tokens = p("tokens"), numThreads = DECODE_THREADS,
                 ),
                 decodingMethod = "greedy_search",

@@ -116,6 +116,7 @@ private fun LanguageCard(
                     detail = listOfNotNull(
                         if (t.packId in installedPacks) "Installed" else pack?.let { SpeechPacks.mb(it.sizeBytes) },
                         pack?.let { "~${it.ramMb} MB RAM" },
+                        "slower".takeIf { pack?.slow == true },
                     ).joinToString(" · "),
                     selected = t.packId == selectedPackId,
                     onClick = { onPick(t.packId) },

@@ -2459,10 +2459,11 @@ class VrcaViewModel(
         if (prev.isNotBlank() && !PhraseJoin.endsSentence(prev)) {
             if (pauseBeforeSec >= PhraseJoin.SENTENCE_PAUSE_SEC) {
                 // A real break: close the previous sentence, keep this one's capital.
-                if (speechQueue.isNotEmpty()) speechQueue[speechQueue.lastIndex] = speechQueue.last() + "."
+                val mark = PhraseJoin.sentenceMark(speechLanguage)
+                if (speechQueue.isNotEmpty()) speechQueue[speechQueue.lastIndex] = speechQueue.last() + mark
                 else {
-                    val cur = messageText.value.text.trimEnd()
-                    onMessageTextChange(TextFieldValue("$cur.", TextRange(cur.length + 1)), local)
+                    val cur = messageText.value.text.trimEnd() + mark
+                    onMessageTextChange(TextFieldValue(cur, TextRange(cur.length)), local)
                 }
             } else {
                 p = PhraseJoin.continueCase(p, speechLanguage)
@@ -2488,7 +2489,7 @@ class VrcaViewModel(
      *  Live + Scroll format/scroll it exactly like typing). */
     private fun appendSpeechPhrase(phrase: String, local: Boolean) {
         val cur = messageText.value.text.trim()
-        val combined = listOf(cur, phrase.trim()).filter { it.isNotBlank() }.joinToString(" ")
+        val combined = listOf(cur, phrase.trim()).filter { it.isNotBlank() }.joinToString(PhraseJoin.joiner(speechLanguage))
         onMessageTextChange(TextFieldValue(combined, TextRange(combined.length)), local)
         // Push it to VRChat NOW instead of on the live loop's next 0.5 s tick: restarting
         // the loop sends on its first pass (it re-arms the hold + dots as for any edit).

@@ -52,10 +52,22 @@ internal object ChatboxScroll {
      *  proportional text, so caps/wide glyphs wrap sooner than a char count). */
     fun charWidth(c: Char): Float = when {
         c == ' ' -> 0.5f
+        isWide(c) -> 2.0f // CJK + full-width forms: about two Latin letters wide
         c in "iIlj|.,:;'!`" -> 0.5f
         c in "mwMW" -> 1.5f
         c.isUpperCase() || c.isDigit() -> 1.15f
         else -> 1.0f
+    }
+
+    /** Chinese/Japanese/Korean characters and full-width punctuation. */
+    private fun isWide(c: Char): Boolean {
+        val code = c.code
+        if (code in 0x3000..0x303F || code in 0xFF00..0xFFEF) return true
+        return when (Character.UnicodeScript.of(code)) {
+            Character.UnicodeScript.HAN, Character.UnicodeScript.HIRAGANA,
+            Character.UnicodeScript.KATAKANA, Character.UnicodeScript.HANGUL -> true
+            else -> false
+        }
     }
 
     fun strWidth(s: String): Float {
@@ -108,8 +120,8 @@ internal object ChatboxScroll {
         while (i >= 0 && line[i] in "\"')]»”’") i--
         if (i < 0) return false
         return when (line[i]) {
-            '.', '!', '?', '…' -> w >= maxW * SENTENCE_BREAK_FILL
-            ',', ';', ':' -> w >= maxW * CLAUSE_BREAK_FILL
+            '.', '!', '?', '…', '。', '！', '？' -> w >= maxW * SENTENCE_BREAK_FILL
+            ',', ';', ':', '，', '、', '；', '：' -> w >= maxW * CLAUSE_BREAK_FILL
             else -> false
         }
     }
@@ -125,10 +137,12 @@ internal object ChatboxScroll {
         if (scrolledOff(shown, p) == 0) return p to ""
         val base = flow(shown)
         val baseLines = lineCount(base)
-        val words = p.split(" ").filter { it.isNotEmpty() }
+        // Text without spaces (Chinese, Japanese) goes character by character.
+        val sep = if (p.contains(' ')) " " else ""
+        val words = if (sep.isEmpty()) p.map { it.toString() } else p.split(" ").filter { it.isNotEmpty() }
         var n = 1
-        while (n < words.size && wrap(join(base, words.take(n + 1).joinToString(" ")), WIDTH).size <= baseLines + 1) n++
-        return words.take(n).joinToString(" ") to words.drop(n).joinToString(" ")
+        while (n < words.size && wrap(join(base, words.take(n + 1).joinToString(sep)), WIDTH).size <= baseLines + 1) n++
+        return words.take(n).joinToString(sep) to words.drop(n).joinToString(sep)
     }
 
     /** Wrapped chatbox lines in [shown]. */
