@@ -196,15 +196,24 @@ class VrcaOsc(
      *  hold) — for the width-calibration harness, where the exact glyph run matters. */
     fun sendRaw(text: String) {
         sendOscMessage("/chatbox/input", listOf(text, true, false))
+        lastChatboxText = text
+        latestMsgTimestamp = System.currentTimeMillis()
     }
 
     fun sendMessage(text: String, sendImmediately: Boolean, triggerSFX: Boolean) {
         sendOscMessage("/chatbox/input", listOf(withMinimalBackground(text), sendImmediately, triggerSFX))
+        lastChatboxText = text
         latestMsgTimestamp = System.currentTimeMillis()
     }
 
+    /** The last text sent to the chatbox (any sender) and when, so Manual Send's live
+     *  loop can skip re-sending what VRChat already shows and keep VRChat's send floor. */
+    @Volatile var lastChatboxText: String? = null
+        private set
+    val lastChatboxSendMs: Long get() = latestMsgTimestamp
+
     private var realtimeMsgJob: Job? = null
-    private var latestMsgTimestamp: Long = 0
+    @Volatile private var latestMsgTimestamp: Long = 0
     private var realtimeMsgInterval = 1500
 
 
@@ -226,6 +235,7 @@ class VrcaOsc(
             sendOscMessage("/chatbox/input", listOf(withMinimalBackground(text), true, false))
             sendOscMessage("/chatbox/typing", listOf(text.isNotEmpty()), 50)
 
+            lastChatboxText = text
             latestMsgTimestamp = System.currentTimeMillis()
         }
     }

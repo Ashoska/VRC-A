@@ -139,6 +139,10 @@ class VrcaViewModel(
         private const val MANUAL_HOLD_MS = 20_000L
         // Live-typing push cadence (matches the Music 0.5s refresh).
         private const val MANUAL_LIVE_TICK_MS = 500L
+        // Live mode re-sends UNCHANGED text only this often, just to keep it up (viewers
+        // can shorten how long VRChat shows a message). Re-sending every 0.5 s flooded
+        // VRChat while you were quiet (user-reported with dictation).
+        private const val MANUAL_REFRESH_MS = 3_000L
         // Dictation roll-up (CaptionPacer): a chatbox line may only scroll off after it's
         // been readable this long, and the window scrolls at most one line per gap.
         // Normal speech is slower than both, so they only smooth out bursts.
@@ -2748,8 +2752,9 @@ class VrcaViewModel(
     /**
      * Live-typing loop: every 0.5s, if the field text changed, push it (scroll-
      * formatted when Scroll is on) to the chatbox with a typing indicator and
-     * re-arm the 10s hold. When the field goes blank it restores the normal
-     * chatbox and stops; onMessageTextChange restarts it on the next keystroke.
+     * re-arm the hold; unchanged text is only re-sent every MANUAL_REFRESH_MS.
+     * When the field goes blank it restores the normal chatbox and stops;
+     * onMessageTextChange restarts it on the next keystroke.
      */
     private fun startManualLiveLoop(local: Boolean = false) {
         if (manualLiveJob?.isActive == true) return
@@ -2798,22 +2803,26 @@ class VrcaViewModel(
                     revertToNormalChatbox(local)
                     break
                 } else if (typingOn && !speechHearing) {
-                    // Paused but still inside the 10s window: drop the typing dots,
-                    // but KEEP pushing the text below so it stays up until revert.
+                    // Paused but still inside the hold: drop the typing dots; the text
+                    // stays up (refreshed below) until the revert.
                     // (Not while dictation hears you: those dots mean "still talking".)
                     osc.typing = false; typingOn = false
                 }
-                // Push the CURRENT field text EVERY 0.5s tick for the whole hold
-                // window — even when the user pauses typing — so a keystroke that
-                // landed between ticks (fast typing) is always reflected within
-                // 0.5s and the final bit is never stranded. Identical re-sends are
-                // cheap and keep the chatbox message fresh until the revert.
+                // Text VRChat doesn't show yet goes out now, but never < SEND_FLOOR_MS
+                // after the last chatbox send (VRChat drops it, which once stranded the
+                // last bit of fast typing). Text it already shows is only re-sent every
+                // MANUAL_REFRESH_MS: enough to keep it up and to repair a dropped send,
+                // without flooding VRChat while you're quiet. Compared with what was
+                // really SENT (any sender), so a loop restart can't skip unsent text.
                 val budget = manualCharBudget()
                 val shown = if (manualScroll) ChatboxScroll.format(text, budget) else text.take(budget)
-                osc.sendMessage(shown, sendImmediately = true, triggerSFX = false)
                 lastManualHoldText = shown
                 combinedPreviewText = shown
-                delay(MANUAL_LIVE_TICK_MS)
+                val now = System.currentTimeMillis()
+                val fresh = shown != osc.lastChatboxText
+                val due = osc.lastChatboxSendMs + if (fresh) SEND_FLOOR_MS else MANUAL_REFRESH_MS
+                if (now >= due) osc.sendMessage(shown, sendImmediately = true, triggerSFX = false)
+                delay(if (fresh && now < due) (due - now).coerceIn(10L, MANUAL_LIVE_TICK_MS) else MANUAL_LIVE_TICK_MS)
             }
         }
     }
