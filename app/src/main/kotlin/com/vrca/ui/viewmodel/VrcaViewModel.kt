@@ -42,6 +42,7 @@ import com.vrca.ui.conversation.Message
 import com.vrca.speech.SpeechCatalog
 import com.vrca.speech.SpeechPacks
 import com.vrca.speech.SpeechToText
+import com.vrca.speech.PhraseJoin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -138,12 +139,11 @@ class VrcaViewModel(
         private const val MANUAL_HOLD_MS = 20_000L
         // Live-typing push cadence (matches the Music 0.5s refresh).
         private const val MANUAL_LIVE_TICK_MS = 500L
-        // Live scroll window: newest N lines stay visible, older ones scroll off.
-        private const val MANUAL_SCROLL_LINES = 4
-        // Estimated proportional width to wrap each scroll line at — kept a touch
-        // narrower than VRChat's ~30-unit chatbox wrap so it never re-wraps our
-        // computed lines into a 5th, which would blow the 4-line window.
-        private const val MANUAL_SCROLL_WIDTH = 26f
+        // Dictation roll-up (CaptionPacer): a chatbox line may only scroll off after it's
+        // been readable this long, and the window scrolls at most one line per gap.
+        // Normal speech is slower than both, so they only smooth out bursts.
+        private const val SPEECH_MIN_LINE_MS = 6_000L
+        private const val SPEECH_SCROLL_GAP_MS = 1_500L
 
         private const val META_STABLE_MS = 1_100L
         private const val META_CONFIRM_MOVE_MS = 900L
@@ -1881,87 +1881,6 @@ class VrcaViewModel(
         viewModelScope.launch { userPreferencesRepository.saveManualScroll(enabled) }
     }
 
-    /**
-     * Live scroll formatter: show the NEWEST [MANUAL_SCROLL_LINES] VRChat chatbox
-     * lines, older lines scrolling off the top. VRChat wraps a long message into
-     * multiple visual lines, so we must wrap it OURSELVES and keep the newest few
-     * — splitting only on '\n' meant one long unbroken line was treated as a
-     * single line and we trimmed CHARACTERS off the front instead of dropping a
-     * whole line (the reported bug). We wrap by estimated proportional width (a
-     * touch narrower than VRChat so it never re-wraps our lines into a 5th),
-     * insert explicit newlines to lock those breaks, keep the last N, and cap at
-     * [budget] so nothing is lost at a wrap point ("drop the 4th line" backstop).
-     */
-    private fun formatManualScroll(text: String, budget: Int): String {
-        if (text.isEmpty()) return ""
-        val lines = wrapToVisualLines(text, MANUAL_SCROLL_WIDTH)
-        val kept = ArrayDeque<String>()
-        var total = 0
-        // Walk from the newest wrapped line backwards, keeping what fits.
-        for (i in lines.indices.reversed()) {
-            if (kept.size >= MANUAL_SCROLL_LINES) break
-            val line = lines[i]
-            val add = line.length + if (kept.isEmpty()) 0 else 1 // +1 for the join '\n'
-            if (total + add > budget) {
-                if (kept.isEmpty()) return line.takeLast(budget) // newest line alone over budget
-                break
-            }
-            kept.addFirst(line)
-            total += add
-        }
-        return kept.joinToString("\n")
-    }
-
-    /** Estimated proportional glyph width (VRChat's chatbox is centered
-     *  proportional text, so caps/wide glyphs wrap sooner than a char count). */
-    private fun manualCharWidth(c: Char): Float = when {
-        c == ' ' -> 0.5f
-        c in "iIlj|.,:;'!`" -> 0.5f
-        c in "mwMW" -> 1.5f
-        c.isUpperCase() || c.isDigit() -> 1.15f
-        else -> 1.0f
-    }
-
-    private fun manualStrWidth(s: String): Float {
-        var t = 0f; for (c in s) t += manualCharWidth(c); return t
-    }
-
-    /** Greedy word-wrap into visual lines of ≤ [maxW] estimated width, honoring
-     *  explicit newlines and hard-splitting a single word longer than a line. */
-    private fun wrapToVisualLines(text: String, maxW: Float): List<String> {
-        val out = mutableListOf<String>()
-        for (para in text.split("\n")) {
-            val cur = StringBuilder()
-            var curW = 0f
-            for (word in para.split(" ")) {
-                var wd = word
-                // Hard-split a word that alone exceeds a full line.
-                while (manualStrWidth(wd) > maxW) {
-                    if (cur.isNotEmpty()) { out.add(cur.toString()); cur.setLength(0); curW = 0f }
-                    val sb = StringBuilder(); var acc = 0f; var i = 0
-                    while (i < wd.length) {
-                        val cw = manualCharWidth(wd[i])
-                        if (acc + cw > maxW && sb.isNotEmpty()) break
-                        sb.append(wd[i]); acc += cw; i++
-                    }
-                    out.add(sb.toString())
-                    wd = wd.substring(i.coerceAtLeast(1))
-                }
-                val sepW = if (cur.isEmpty()) 0f else manualCharWidth(' ')
-                val wW = manualStrWidth(wd)
-                if (cur.isNotEmpty() && curW + sepW + wW > maxW) {
-                    out.add(cur.toString()); cur.setLength(0); curW = 0f
-                    cur.append(wd); curW = wW
-                } else {
-                    if (cur.isNotEmpty()) { cur.append(' '); curW += sepW }
-                    cur.append(wd); curW += wW
-                }
-            }
-            out.add(cur.toString())
-        }
-        return out
-    }
-
     fun stashMessage(local: Boolean = false) {
         val osc = if (!local) remoteVrcaOsc else localVrcaOsc
         osc.typing = false
@@ -2368,6 +2287,10 @@ class VrcaViewModel(
     /** The voice detector currently hears speech. */
     var speechHearing by mutableStateOf(false)
         private set
+    // How long the model took on the last sentence (shown while listening, so slowness
+    // on the headset can be told apart from the pause it waits for).
+    var speechLastDecodeMs by mutableStateOf<Long?>(null)
+        private set
     /** Language whose pack is downloading, or null. */
     var speechDownloadingLang by mutableStateOf<String?>(null)
         private set
@@ -2456,9 +2379,14 @@ class VrcaViewModel(
         speechError = null
         setManualLiveModeFlag(true)
         setManualScrollFlag(true)
+        speechLocal = local
+        speechLastDecodeMs = null
         val started = SpeechToText.start(app.applicationContext, speechLanguage, object : SpeechToText.Listener {
-            override fun onFinal(text: String) {
-                viewModelScope.launch(Dispatchers.Main) { appendSpeechPhrase(text, local) }
+            override fun onFinal(text: String, pauseBeforeSec: Float, decodeMs: Long) {
+                viewModelScope.launch(Dispatchers.Main) {
+                    speechLastDecodeMs = decodeMs
+                    queueSpeechPhrase(text, pauseBeforeSec, local)
+                }
             }
             override fun onError(message: String) {
                 viewModelScope.launch(Dispatchers.Main) {
@@ -2466,7 +2394,12 @@ class VrcaViewModel(
                 }
             }
             override fun onSpeechActive(active: Boolean) {
-                viewModelScope.launch(Dispatchers.Main) { speechHearing = active }
+                viewModelScope.launch(Dispatchers.Main) {
+                    speechHearing = active
+                    // VRChat's typing dots while you talk, so people know a message is
+                    // coming (the VrcaOsc setter still hides them with the invisible border).
+                    if (!isBanned) speechOsc().typing = active
+                }
             }
             override fun onLoading(loading: Boolean) {
                 viewModelScope.launch(Dispatchers.Main) { speechLoading = loading }
@@ -2479,9 +2412,61 @@ class VrcaViewModel(
     fun stopDictation() {
         if (!speechSupported) return
         SpeechToText.stop()
+        if (speechHearing) speechOsc().typing = false
         speechListening = false
         speechHearing = false
         speechLoading = false
+        // Text still queued keeps going in at its pace (it was said; don't drop it).
+    }
+
+    // Which OSC target dictation drives (remote vs local), for the typing dots.
+    private var speechLocal = false
+    private fun speechOsc() = if (!speechLocal) remoteVrcaOsc else localVrcaOsc
+
+    // Dictated phrases waiting to go into the field, fed in at a readable pace.
+    private val speechQueue = ArrayDeque<String>()
+    private var speechQueueJob: Job? = null
+    private val speechPacer = CaptionPacer(SPEECH_MIN_LINE_MS, SPEECH_SCROLL_GAP_MS)
+
+    /**
+     * Queue a finished phrase for the chatbox. [CaptionPacer] decides each piece: whole
+     * when it scrolls nothing off, else one line at a time, at most one per
+     * [SPEECH_SCROLL_GAP_MS] and only once the line it pushes off has been readable for
+     * [SPEECH_MIN_LINE_MS]. Before this, a phrase longer than the 4-line window landed
+     * whole and its start scrolled off before anyone saw it.
+     */
+    private fun queueSpeechPhrase(phrase: String, pauseBeforeSec: Float, local: Boolean) {
+        // Join like speech, not like separate sentences (PhraseJoin): no full stop after
+        // a mere breath; a full stop goes back only after a real break.
+        var p = PhraseJoin.stripStop(phrase)
+        if (p.isEmpty()) return
+        val prev = speechQueue.lastOrNull() ?: messageText.value.text
+        if (prev.isNotBlank() && !PhraseJoin.endsSentence(prev)) {
+            if (pauseBeforeSec >= PhraseJoin.SENTENCE_PAUSE_SEC) {
+                // A real break: close the previous sentence, keep this one's capital.
+                if (speechQueue.isNotEmpty()) speechQueue[speechQueue.lastIndex] = speechQueue.last() + "."
+                else {
+                    val cur = messageText.value.text.trimEnd()
+                    onMessageTextChange(TextFieldValue("$cur.", TextRange(cur.length + 1)), local)
+                }
+            } else {
+                p = PhraseJoin.continueCase(p, speechLanguage)
+            }
+        }
+        speechQueue.addLast(p)
+        if (speechQueueJob?.isActive == true) return
+        speechQueueJob = viewModelScope.launch {
+            while (speechQueue.isNotEmpty()) {
+                val shown = messageText.value.text
+                val (piece, rest, wait) = speechPacer.next(shown, speechQueue.first(), System.currentTimeMillis())
+                // Re-plan after waiting: the field may have changed meanwhile.
+                if (wait > 0) { delay(wait); continue }
+                speechQueue.removeFirst()
+                if (rest.isNotEmpty()) speechQueue.addFirst(rest)
+                speechPacer.added(shown, piece, System.currentTimeMillis())
+                appendSpeechPhrase(piece, local)
+            }
+        }
     }
 
     /** Append a finished phrase to the field (routed through onMessageTextChange so
@@ -2490,6 +2475,12 @@ class VrcaViewModel(
         val cur = messageText.value.text.trim()
         val combined = listOf(cur, phrase.trim()).filter { it.isNotBlank() }.joinToString(" ")
         onMessageTextChange(TextFieldValue(combined, TextRange(combined.length)), local)
+        // Push it to VRChat NOW instead of on the live loop's next 0.5 s tick: restarting
+        // the loop sends on its first pass (it re-arms the hold + dots as for any edit).
+        if (manualLiveMode && messageText.value.text.isNotEmpty()) {
+            manualLiveJob?.cancel(); manualLiveJob = null
+            startManualLiveLoop(local)
+        }
     }
 
     fun onMessageTextChange(message: TextFieldValue, local: Boolean = false) {
@@ -2516,7 +2507,7 @@ class VrcaViewModel(
             // collapse to spaces — a scrolling ticker is one flowing line in VRChat,
             // so manual line breaks aren't kept while Scroll is on.
             if (manualScroll && message.text.isNotEmpty()) {
-                val display = formatManualScroll(message.text.replace("\n", " "), manualCharBudget())
+                val display = ChatboxScroll.format(message.text.replace("\n", " "), manualCharBudget())
                 if (display != message.text) {
                     messageText.value = TextFieldValue(display, TextRange(display.length))
                     stashedMessage = display
@@ -2558,6 +2549,7 @@ class VrcaViewModel(
     /** Clear the manual message from the chatbox + the field, drop the hold, and
      *  restore the normal automated chatbox (or a clear if nothing is enabled). */
     fun clearManual(local: Boolean = false) {
+        speechQueueJob?.cancel(); speechQueueJob = null; speechQueue.clear()
         manualLiveJob?.cancel(); manualLiveJob = null
         manualRevertJob?.cancel(); manualRevertJob = null
         lastManualLiveSent = null
@@ -2672,9 +2664,10 @@ class VrcaViewModel(
                     stashedMessage = ""
                     revertToNormalChatbox(local)
                     break
-                } else if (typingOn) {
+                } else if (typingOn && !speechHearing) {
                     // Paused but still inside the 10s window: drop the typing dots,
                     // but KEEP pushing the text below so it stays up until revert.
+                    // (Not while dictation hears you: those dots mean "still talking".)
                     osc.typing = false; typingOn = false
                 }
                 // Push the CURRENT field text EVERY 0.5s tick for the whole hold
@@ -2683,7 +2676,7 @@ class VrcaViewModel(
                 // 0.5s and the final bit is never stranded. Identical re-sends are
                 // cheap and keep the chatbox message fresh until the revert.
                 val budget = manualCharBudget()
-                val shown = if (manualScroll) formatManualScroll(text, budget) else text.take(budget)
+                val shown = if (manualScroll) ChatboxScroll.format(text, budget) else text.take(budget)
                 osc.sendMessage(shown, sendImmediately = true, triggerSFX = false)
                 lastManualHoldText = shown
                 combinedPreviewText = shown

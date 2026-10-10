@@ -9,6 +9,7 @@ import android.util.Log
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OfflineCanaryModelConfig
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
+import com.k2fsa.sherpa.onnx.OfflineNemoEncDecCtcModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
@@ -42,14 +43,20 @@ object SpeechToText {
     private const val TAG = "SpeechToText"
     private const val SAMPLE_RATE = 16000
     private const val DECODE_THREADS = 2
+    /** "Hearing you" ends this many 32 ms windows (~0.4 s) after the voice stops. */
+    private const val QUIET_WINDOWS = 12
 
     interface Listener {
         /** Unused in phrase mode (kept for API compatibility). */
         fun onPartial(text: String) {}
-        /** A finished phrase. */
-        fun onFinal(text: String)
+        /**
+         * A finished phrase. [pauseBeforeSec] = silence since the previous phrase ended
+         * (infinite for the first), so the caller can tell a mid-sentence breath from a
+         * new sentence. [decodeMs] = time the model took on it.
+         */
+        fun onFinal(text: String, pauseBeforeSec: Float, decodeMs: Long)
         fun onError(message: String)
-        /** True while the voice detector hears you speaking. */
+        /** True while you're speaking (voiced speech, not breathing or clicks). */
         fun onSpeechActive(active: Boolean) {}
         /** True while the model loads (a few seconds on first start). */
         fun onLoading(loading: Boolean) {}
@@ -69,7 +76,10 @@ object SpeechToText {
             listener.onError("Voice pack for this language isn't installed yet."); return false
         }
         running = true
-        val phrases = LinkedBlockingQueue<FloatArray>()
+        // Keep the mic live when VRC-A goes to the background (we're on screen now: the
+        // user just tapped the mic, which is when Android allows this start).
+        DictationService.start(app)
+        val phrases = LinkedBlockingQueue<Segment>()
         val captureDone = java.util.concurrent.atomic.AtomicBoolean(false)
         val t = Thread({
             var rec: PhraseDecoder? = null
@@ -82,8 +92,12 @@ object SpeechToText {
                 vad = Vad(config = VadModelConfig(
                     sileroVadModelConfig = SileroVadModelConfig(
                         model = SpeechPacks.filePath(app, SpeechCatalog.VAD.id, "silero_vad.onnx"),
-                        threshold = 0.5f,
-                        minSilenceDuration = 0.5f, // pause that ends a phrase
+                        // 0.6 (default 0.5): breathing right at the headset mic kept tripping it.
+                        threshold = 0.6f,
+                        // Pause that ends a phrase. Short on purpose (text shows sooner); a
+                        // mid-sentence breath no longer adds a full stop (the caller joins
+                        // phrases by pauseBeforeSec).
+                        minSilenceDuration = 0.4f,
                         minSpeechDuration = 0.25f,
                         windowSize = 512,
                         maxSpeechDuration = 15f,  // long monologues are split, never truncated
@@ -97,10 +111,16 @@ object SpeechToText {
                 decoder = Thread({
                     // Runs until capture has flushed its last phrase AND the queue is drained,
                     // so words spoken right before Stop are never lost.
+                    var lastEnd = -1L // end sample of the last phrase that produced text
                     while (!captureDone.get() || phrases.isNotEmpty()) {
                         val seg = phrases.poll(200, TimeUnit.MILLISECONDS) ?: continue
-                        val text = runCatching { r.text(normalize(seg)) }.getOrElse { Log.w(TAG, "decode", it); "" }
-                        if (text.isNotEmpty()) listener.onFinal(text)
+                        val t0 = System.nanoTime()
+                        val text = runCatching { r.text(normalize(seg.samples)) }.getOrElse { Log.w(TAG, "decode", it); "" }
+                        val ms = (System.nanoTime() - t0) / 1_000_000
+                        if (text.isEmpty()) continue
+                        val pause = if (lastEnd < 0) Float.POSITIVE_INFINITY else (seg.start - lastEnd).coerceAtLeast(0L) / SAMPLE_RATE.toFloat()
+                        lastEnd = seg.start + seg.samples.size
+                        listener.onFinal(text, pause, ms)
                     }
                 }, "stt-decode").apply { isDaemon = true; start() }
 
@@ -112,20 +132,42 @@ object SpeechToText {
 
                 val pcm = ShortArray(512) // 32 ms windows
                 val gain = Agc()
-                var wasSpeech = false
+                var voicedRun = 0      // voiced windows inside the current VAD speech
+                var sinceVoiced = 1000 // windows since the last voiced one
+                var shown = false      // what onSpeechActive last reported
+                fun drain() {
+                    while (!vad.empty()) {
+                        val s = vad.front(); vad.pop()
+                        // Breaths, clicks and fan noise have no voice (no pitch): don't spend
+                        // the model on them (they decoded to nothing anyway, but cost CPU and
+                        // delayed the next real phrase).
+                        if (Voicing.voicedWindows(s.samples) >= Voicing.MIN_VOICED_WINDOWS) {
+                            phrases.offer(Segment(s.samples, s.start.toLong()))
+                        }
+                    }
+                }
                 while (running) {
                     val n = audio.read(pcm, 0, pcm.size)
                     if (n <= 0) continue
                     val f = FloatArray(n) { pcm[it] / 32768f }
-                    gain.apply(f)
+                    val voiced = Voicing.isVoiced(f)
+                    gain.apply(f, voiced)
                     vad.acceptWaveform(f)
-                    while (!vad.empty()) { phrases.offer(vad.front().samples); vad.pop() }
+                    drain()
+                    // "Hearing you" (and VRChat's typing dots) only for VOICED speech: on
+                    // after a few voiced windows; off when the VAD's phrase ends OR ~0.4 s
+                    // after your voice stops, whichever is first (noise could hold the VAD
+                    // open, so it lingered after you stopped). A bare VAD flag flipped on
+                    // every breath.
                     val speech = vad.isSpeechDetected()
-                    if (speech != wasSpeech) { wasSpeech = speech; listener.onSpeechActive(speech) }
+                    voicedRun = if (!speech) 0 else if (voiced) voicedRun + 1 else voicedRun
+                    sinceVoiced = if (voiced) 0 else sinceVoiced + 1
+                    val now = speech && voicedRun >= Voicing.MIN_VOICED_WINDOWS && sinceVoiced <= QUIET_WINDOWS
+                    if (now != shown) { shown = now; listener.onSpeechActive(now) }
                 }
                 vad.flush() // finish a phrase cut off by Stop
-                while (!vad.empty()) { phrases.offer(vad.front().samples); vad.pop() }
-                if (wasSpeech) listener.onSpeechActive(false)
+                drain()
+                if (shown) listener.onSpeechActive(false)
             } catch (e: Throwable) {
                 Log.e(TAG, "dictation error", e)
                 listener.onLoading(false)
@@ -133,6 +175,7 @@ object SpeechToText {
             } finally {
                 running = false
                 captureDone.set(true)
+                DictationService.stop(app)
                 runCatching { audio?.stop() }
                 runCatching { audio?.release() }
                 runCatching { decoder?.join(15_000) } // let queued phrases finish
@@ -151,6 +194,9 @@ object SpeechToText {
         capture = null
     }
 
+    /** A VAD phrase and where it starts in the mic stream (samples). */
+    private class Segment(val samples: FloatArray, val start: Long)
+
     /** Recognises one finished phrase. One implementation per model family. */
     private interface PhraseDecoder {
         fun text(seg: FloatArray): String
@@ -167,6 +213,14 @@ object SpeechToText {
                 modelConfig = OfflineModelConfig(
                     transducer = OfflineTransducerModelConfig(encoder = p("encoder"), decoder = p("decoder"), joiner = p("joiner")),
                     tokens = p("tokens"), numThreads = DECODE_THREADS, modelType = "nemo_transducer",
+                ),
+                decodingMethod = "greedy_search",
+            ))
+            SpeechCatalog.Kind.NEMO_CTC -> offline(OfflineRecognizerConfig(
+                featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
+                modelConfig = OfflineModelConfig(
+                    nemo = OfflineNemoEncDecCtcModelConfig(model = p("model")),
+                    tokens = p("tokens"), numThreads = DECODE_THREADS,
                 ),
                 decodingMethod = "greedy_search",
             ))
@@ -237,17 +291,24 @@ object SpeechToText {
         return seg
     }
 
-    /** Slow automatic gain so a quiet headset mic still triggers the voice detector. */
+    /**
+     * Slow automatic gain so a quiet headset mic still triggers the voice detector. It
+     * learns your level from VOICED windows only and holds still in between: the old one
+     * tracked any sound, so in silence it climbed toward 8x and amplified breathing into
+     * "speech" (the VAD kept firing on breaths).
+     */
     private class Agc {
         private var level = 0.03f
         private var gain = 1f
-        fun apply(x: FloatArray) {
-            var sum = 0.0
-            for (v in x) sum += v * v
-            val rms = sqrt(sum / x.size).toFloat()
-            if (rms > 0.002f) level = level * 0.97f + rms * 0.03f // track speech-ish level only
-            val target = (0.063f / level).coerceIn(1f, 8f)
-            gain += (target - gain) * 0.05f
+        fun apply(x: FloatArray, voiced: Boolean) {
+            if (voiced) {
+                var sum = 0.0
+                for (v in x) sum += v * v
+                val rms = sqrt(sum / x.size).toFloat()
+                level = level * 0.95f + rms * 0.05f
+                val target = (0.063f / level).coerceIn(1f, 6f)
+                gain += (target - gain) * 0.1f
+            }
             for (i in x.indices) x[i] = (x[i] * gain).coerceIn(-1f, 1f)
         }
     }

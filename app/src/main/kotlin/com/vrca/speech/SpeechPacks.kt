@@ -83,6 +83,11 @@ object SpeechPacks {
         ctx.filesDir.listFiles()?.forEach { f ->
             if (f.isDirectory && (f.name == "vosk-model" || f.name.startsWith("vosk-model-"))) f.deleteRecursively()
         }
+        // Packs the catalog no longer offers (e.g. GigaAM v2, replaced by v3) would sit
+        // invisible in storage forever (Settings only lists catalog packs): delete them.
+        baseDir(ctx).listFiles()?.forEach { d ->
+            if (d.isDirectory && SpeechCatalog.pack(d.name) == null) d.deleteRecursively()
+        }
     }
 
     fun cancelDownload() { cancelRequested = true }

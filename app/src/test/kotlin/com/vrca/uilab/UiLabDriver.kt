@@ -278,7 +278,9 @@ class UiLabDriver(
                 while (anc != null && anc.config.getOrNull(SemanticsActions.ScrollBy) == null) anc = anc.parent
                 if (anc == null) return "\"$query\" is on screen (not inside a scroll area)"
                 val view: Rect = anc.boundsInRoot
-                val b = n.boundsInRoot
+                // Unclipped: boundsInRoot of a node scrolled out of view is all zeros, which
+                // sent the scroll the wrong way (the target never came into view).
+                val b = unclipped(n)
                 if (b.top >= view.top && b.bottom <= view.bottom) return "\"$query\" in view"
                 anc.config[SemanticsActions.ScrollBy].action?.invoke(0f, b.top - view.top - view.height * 0.2f)
                 settle(150)
@@ -289,6 +291,12 @@ class UiLabDriver(
             }
         }
         error("\"$query\" not found after scrolling")
+    }
+
+    /** Where [n] really is, even when scrolled out of view (boundsInRoot clips to zero). */
+    private fun unclipped(n: SemanticsNode): Rect {
+        val p = n.positionInRoot
+        return Rect(p.x, p.y, p.x + n.size.width, p.y + n.size.height)
     }
 
     private fun back(): String {
@@ -325,7 +333,10 @@ class UiLabDriver(
             val b = n.boundsInRoot
             sb.append("- ").append(l.take(90).ifBlank { "(no text)" })
             if (acts.isNotEmpty()) sb.append("  [").append(acts.joinToString(",")).append("]")
-            sb.append("  @").append(b.top.toInt()).append('\n')
+            // Real position; "off-screen" when it's scrolled/clipped out of view.
+            sb.append("  @").append(unclipped(n).top.toInt())
+            if (b.width <= 0f || b.height <= 0f) sb.append(" (off-screen)")
+            sb.append('\n')
         }
         return sb.toString().trimEnd()
     }
@@ -335,6 +346,17 @@ class UiLabDriver(
         val cls = owner.javaClass
         fun convert(cur: Any?): Any? = when {
             raw == "null" -> null
+            // A null field has no type to copy (generics are erased), so take a Kotlin-style
+            // literal: 12L Long, 12 Int, 1.5f Float, 1.5 Double, true/false (else a String).
+            // Writing "1240" into a MutableState<Long?> crashed the composition.
+            cur == null -> when {
+                Regex("-?\\d+L").matches(raw) -> raw.dropLast(1).toLong()
+                Regex("-?\\d+").matches(raw) -> raw.toInt()
+                Regex("-?\\d*\\.?\\d+[fF]").matches(raw) -> raw.dropLast(1).toFloat()
+                Regex("-?\\d*\\.\\d+").matches(raw) -> raw.toDouble()
+                raw == "true" || raw == "false" -> raw.toBooleanStrict()
+                else -> raw
+            }
             cur is Boolean -> raw.toBooleanStrict()
             cur is Int -> raw.toInt()
             cur is Long -> raw.toLong()

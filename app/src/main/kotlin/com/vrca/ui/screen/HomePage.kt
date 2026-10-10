@@ -648,8 +648,20 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     else -> "Tap the mic to speak" to "Talk normally. Your words are added sentence by sentence."
                 }
                 Column(Modifier.weight(1f)) {
-                    Text(label, style = MaterialTheme.typography.labelLarge)
-                    Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, style = MaterialTheme.typography.labelLarge)
+                        // How long the model took on the last sentence (tells model speed
+                        // apart from the pause it waits for).
+                        val ms = vm.speechLastDecodeMs
+                        if (vm.speechListening && ms != null) {
+                            Text("  · last took ${"%.1f".format(ms / 1000f)} s", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        }
+                    }
+                    // Always two lines tall, so switching Listening / Hearing you never
+                    // changes the card's height (it used to jump the layout as it toggled).
+                    Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     if (vm.speechModelReady && !vm.speechDownloading) {
                         // Language chip under the text (beside it, it squeezed the text to
                         // one word per line): tap to switch language / install another pack.

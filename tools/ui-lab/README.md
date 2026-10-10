@@ -28,7 +28,7 @@ including recompiling edited code; in live mode a command is ~0.4 s (code edits 
 | `back` | close the top dialog (BACK key to its window), else system back |
 | `wait <ms>` | let the app run (app time, 16 ms frames) |
 | `tree` | what's on screen and what can be tapped, typed or scrolled |
-| `set <prop> <value>` / `get <prop>` | force any state: a view-model field (`set warned true`) or `Object.prop` (`set VrchatPipelineState.authDead true`) |
+| `set <prop> <value>` / `get <prop>` | force any state: a view-model field (`set warned true`) or `Object.prop` (`set VrchatPipelineState.authDead true`); a field that's currently null takes a typed literal (`12L`, `12`, `1.5f`, `true`) |
 | `preset <name>` | ready-made states, see below |
 | `show <name> [args]` | screens normally behind a gate, see below |
 | `root screen\|app` | draw the main screen (default) or the full app with its boot/ToS/onboarding/update gates |

@@ -13,7 +13,7 @@ object SpeechToText {
 
     interface Listener {
         fun onPartial(text: String) {}
-        fun onFinal(text: String)
+        fun onFinal(text: String, pauseBeforeSec: Float, decodeMs: Long)
         fun onError(message: String)
         fun onSpeechActive(active: Boolean) {}
         fun onLoading(loading: Boolean) {}

@@ -17,8 +17,10 @@ object SpeechCatalog {
 
     /** How the engine loads a pack (the sherpa-onnx model family). */
     enum class Kind {
-        /** NeMo transducer, offline (Parakeet, GigaAM). */
+        /** NeMo transducer, offline (Parakeet). */
         NEMO_TRANSDUCER,
+        /** NeMo CTC, offline (GigaAM v3 with punctuation). */
+        NEMO_CTC,
         /** NeMo Canary, offline; the language is set explicitly so it can't mix languages up. */
         CANARY,
         /** Streaming zipformer transducer (Kroko), fed one phrase at a time. */
@@ -63,8 +65,8 @@ object SpeechCatalog {
     private const val PK_25_REV = "2bda32ec70b097a55adaa07d9a7173915b43cc78"
     private const val CAN180 = "csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8"
     private const val CAN180_REV = "9077164e0d3dd1d5353743e89ceaa1d3a770838c"
-    private const val GIGA = "csukuangfj/sherpa-onnx-nemo-transducer-giga-am-v2-russian-2025-04-19"
-    private const val GIGA_REV = "d7002de64f758983ac1146695e5de5a381c36785"
+    private const val GIGA3 = "csukuangfj/sherpa-onnx-nemo-ctc-punct-giga-am-v3-russian-2025-12-16"
+    private const val GIGA3_REV = "4fb5407ff028a69fec516cdf4c10fac9ddea7c16"
     private const val KROKO = "csukuangfj/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06"
     private const val KROKO_REV = "572aaf4e2e0c603c3fc2a574d096e755a178faa1"
 
@@ -124,17 +126,15 @@ object SpeechCatalog {
             credit = "NVIDIA Canary 180M Flash (CC-BY-4.0)",
         ),
         Pack(
-            id = "gigaam-ru",
-            title = "GigaAM (Russian)",
-            kind = Kind.NEMO_TRANSDUCER,
+            id = "gigaam3-ru",
+            title = "GigaAM v3 (Russian)",
+            kind = Kind.NEMO_CTC,
             files = listOf(
-                hf(GIGA, GIGA_REV, "encoder.int8.onnx", 236_314_144, "b51efc61e3c0037ad1cb804079975468de3d175324fe8323aef5be4f5c6a38a1"),
-                hf(GIGA, GIGA_REV, "decoder.onnx", 3_331_651, "208e24cc150fb0ebca3fab169502796daa12e0255dcf7b4acf65015c436e9f76"),
-                hf(GIGA, GIGA_REV, "joiner.onnx", 1_440_448, "4b02eced18e033fc5173e6c47b6ab166b5efea8d35c3f33a6755ff0d622fb5b0"),
-                hf(GIGA, GIGA_REV, "tokens.txt", 196, "17cc514451bcceac9c280068c71502f8448f99e9fb1456b8d0761651fd0392f2"),
+                hf(GIGA3, GIGA3_REV, "model.int8.onnx", 224_893_661, "d5fea8df94263c285e54b21e5774b707c707192d3bdbeffd7b1eb07fb6743b35"),
+                hf(GIGA3, GIGA3_REV, "tokens.txt", 2_007, "142de7570b3de5b3035ce111a89c228e80e6085273731d944093ddf24fa539cd"),
             ),
-            ramMb = 620,
-            credit = "Sber GigaAM v2 (MIT)",
+            ramMb = 320,
+            credit = "Sber GigaAM v3 (MIT)",
         ),
         Pack(
             id = "kroko-en",
@@ -171,9 +171,10 @@ object SpeechCatalog {
         Lang("pt", "Portuguese", "Português", listOf(
             Tier("parakeet-25", "Best", Quality.GREAT),
         )),
+        // GigaAM v3 is both the most accurate (6.2% vs Parakeet-25's 10.6%) and the
+        // lightest Russian option, so it's the only tier.
         Lang("ru", "Russian", "Русский", listOf(
-            Tier("parakeet-25", "Best", Quality.GOOD),
-            Tier("gigaam-ru", "Light", Quality.GOOD),
+            Tier("gigaam3-ru", "Standard", Quality.GREAT),
         )),
         Lang("de", "German", "Deutsch", listOf(
             Tier("canary-180m", "Standard", Quality.GREAT),
