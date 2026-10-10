@@ -104,6 +104,10 @@ object SpeechToText {
     @SuppressLint("MissingPermission")
     fun start(ctx: Context, langCode: String, listener: Listener): Boolean {
         if (running) return true
+        // The last session is still winding down (decoder draining, model being freed):
+        // starting now loaded a second model next to it (headset lag on fast mic taps), and
+        // its ending then stopped the new one.
+        if (capture != null) { listener.onError("Still stopping, try again in a moment."); return false }
         val app = ctx.applicationContext
         val pack = SpeechPacks.selectedPack(app, langCode)
         if (pack == null || !SpeechPacks.isLanguageReady(app, langCode)) {
@@ -424,6 +428,7 @@ object SpeechToText {
                 runCatching { decoder?.join(15_000) } // let queued phrases finish
                 runCatching { vad?.release() }
                 runCatching { rec?.release() }
+                if (capture === Thread.currentThread()) capture = null // fully stopped: may start again
                 listener.onStopped()
             }
         }, "stt-capture")
@@ -433,9 +438,9 @@ object SpeechToText {
         return true
     }
 
+    /** Ends the session; [capture] stays set until it has fully stopped (see start). */
     fun stop() {
         running = false
-        capture = null
     }
 
     /** A VAD phrase: [samples] padded with a little audio before/after (soft first and last

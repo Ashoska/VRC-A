@@ -2298,6 +2298,10 @@ class VrcaViewModel(
     /** Model is loading into RAM after the mic was tapped. */
     var speechLoading by mutableStateOf(false)
         private set
+    /** Stopped, but the engine is still freeing the model: the mic can't restart yet
+     *  (fast taps loaded a second model next to the first: headset lag). */
+    var speechStopping by mutableStateOf(false)
+        private set
     /** The voice detector currently hears speech. */
     var speechHearing by mutableStateOf(false)
         private set
@@ -2426,11 +2430,19 @@ class VrcaViewModel(
         SpeechToText.setCommands(if (speechCommandsOn && speechLearning == null) speechCommandWords else null)
     }
 
+    private var lastSpeechCommandAt = 0L
+    private var lastSpeechCommand: com.vrca.speech.VoiceCommand? = null
+
     private fun handleSpeechCommand(command: com.vrca.speech.VoiceCommand, local: Boolean) {
         if (isBanned || speechLearning != null) return
+        // The same command again within 1.5 s is an echo, not a new one (user-reported:
+        // a command's sound sometimes played twice). Only real changes make a sound.
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (command == lastSpeechCommand && now - lastSpeechCommandAt < 1_500L) return
+        lastSpeechCommand = command; lastSpeechCommandAt = now
         when (command) {
-            com.vrca.speech.VoiceCommand.PAUSE -> speechVoicePaused = true
-            com.vrca.speech.VoiceCommand.RESUME -> speechVoicePaused = false
+            com.vrca.speech.VoiceCommand.PAUSE -> if (speechVoicePaused) return else speechVoicePaused = true
+            com.vrca.speech.VoiceCommand.RESUME -> if (!speechVoicePaused) return else speechVoicePaused = false
             // Nothing to clear = nothing happens (no sound either).
             com.vrca.speech.VoiceCommand.CLEAR ->
                 if (messageText.value.text.isNotEmpty() || speechQueue.isNotEmpty()) clearManual(local) else return
@@ -2563,7 +2575,7 @@ class VrcaViewModel(
      * (the UI checks/requests). Pack missing → start its download instead.
      */
     fun startDictation(local: Boolean = false) {
-        if (!speechSupported || isBanned || speechListening) return
+        if (!speechSupported || isBanned || speechListening || speechLoading || speechStopping) return
         if (!speechModelReady) { downloadSpeechModel(); return }
         speechError = null
         setManualLiveModeFlag(true)
@@ -2575,6 +2587,9 @@ class VrcaViewModel(
         speechVoicePaused = false
         applySpeechCommands()
         startSpeechGate()
+        // Locked at once (the engine's own onLoading arrives a moment later): a second
+        // tap in between used to stop it again before it had loaded.
+        speechLoading = true
         val started = SpeechToText.start(app.applicationContext, speechLanguage, object : SpeechToText.Listener {
             override fun onPartial(text: String, pauseBeforeSec: Float) {
                 viewModelScope.launch(Dispatchers.Main) { if (speechLearning == null) showSpeechPartial(text, pauseBeforeSec, local) }
@@ -2615,7 +2630,7 @@ class VrcaViewModel(
                 // Also covers the notification's Stop and errors, not just our button.
                 viewModelScope.launch(Dispatchers.Main) {
                     if (speechHearing) speechOsc().typing = false
-                    speechListening = false; speechHearing = false; speechLoading = false
+                    speechListening = false; speechHearing = false; speechLoading = false; speechStopping = false
                     stopSpeechGate()
                     speechVoicePaused = false
                     if (speechLearning != null) { speechLearning = null; speechLearnStartedDictation = false; applySpeechCommands() }
@@ -2623,12 +2638,14 @@ class VrcaViewModel(
             }
         })
         speechListening = started
-        if (!started) stopSpeechGate()
+        if (!started) { stopSpeechGate(); speechLoading = false }
         if (!started && speechError == null) speechError = "Couldn't start the microphone."
     }
 
     fun stopDictation() {
         if (!speechSupported) return
+        // Locked until the engine reports it has fully stopped (onStopped).
+        if (speechListening) speechStopping = true
         SpeechToText.stop()
         if (speechHearing) speechOsc().typing = false
         speechListening = false

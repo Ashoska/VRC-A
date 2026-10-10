@@ -650,6 +650,7 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     }
                     !vm.speechModelReady -> "Voice to text" to
                         "Speak instead of typing. ${lang?.nativeName ?: "English"}${lang?.takeIf { it.tiers.size > 1 }?.tier(vm.speechPackId)?.let { " (${it.label})" } ?: ""}, works offline once installed."
+                    vm.speechStopping -> "Stopping…" to "Freeing the voice model's memory."
                     vm.speechLoading -> "Loading voice model…" to "This takes a few seconds."
                     // Listen trigger: paused, but the model stays loaded (resumes instantly).
                     vm.speechListening && vm.speechPaused ->
@@ -732,13 +733,21 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                                 else if (hasMic()) vm.startDictation()
                                 else micLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
                             },
-                            enabled = !isBanned && !vm.speechLoading
+                            // Locked while the model loads or is being freed: fast taps loaded a
+                            // second model (headset lag) or stopped it before it had loaded.
+                            enabled = !isBanned && !vm.speechLoading && !vm.speechStopping
                         ) {
-                            Icon(
-                                imageVector = if (listening) Icons.Filled.Stop else Icons.Filled.Mic,
-                                contentDescription = if (listening) "Stop dictation" else "Start dictation",
-                                tint = if (listening) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                            )
+                            if (vm.speechLoading || vm.speechStopping) {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp), strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = if (listening) Icons.Filled.Stop else Icons.Filled.Mic,
+                                    contentDescription = if (listening) "Stop dictation" else "Start dictation",
+                                    tint = if (listening) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
                 }
