@@ -67,12 +67,42 @@ object UiLabScenes {
         return "$prop = ${d.getState(owner, name)}"
     }
 
+    /** Write [value] into a ViewModel MutableState (`<name>$delegate`) of any type: the
+     *  string `set` can't express enums-from-null or lists. */
+    private fun setObj(owner: Any, name: String, value: Any?) {
+        var c: Class<*>? = owner.javaClass
+        while (c != null) {
+            c.declaredFields.firstOrNull { it.name == "$name\$delegate" }?.let { f ->
+                f.isAccessible = true
+                @Suppress("UNCHECKED_CAST")
+                (f.get(owner) as androidx.compose.runtime.MutableState<Any?>).value = value
+                return
+            }
+            c = c.superclass
+        }
+        error("no state $name")
+    }
+
+    /** A voice pack + the voice detector "installed" as SpeechPacks.isInstalled sees it: every
+     *  file at its exact size (sparse) and the .ok marker; [packId] selected for [lang]. */
+    private fun installVoicePack(ctx: android.content.Context, lang: String, packId: String) {
+        listOf(packId, com.vrca.speech.SpeechCatalog.VAD.id).forEach { id ->
+            val pack = com.vrca.speech.SpeechCatalog.pack(id) ?: error("no pack $id")
+            val dir = com.vrca.speech.SpeechPacks.packDir(ctx, id).apply { mkdirs() }
+            pack.files.forEach { f -> java.io.RandomAccessFile(java.io.File(dir, f.name), "rw").use { it.setLength(f.size) } }
+            java.io.File(dir, ".ok").writeText("ui-lab")
+        }
+        com.vrca.speech.SpeechPacks.setSelected(ctx, lang, packId)
+    }
+
     // ------------------------------------------------------------------ presets
 
     val PRESETS = listOf(
         "in-world", "offline", "friends", "incident", "outage-minor", "status-ok", "alerts", "no-alerts",
         "sending", "idle", "warned", "banned", "auth-dead", "logged-out", "nowplaying", "paused", "ad",
-        "roster", "roster-empty", "manual", "owner"
+        "roster", "roster-empty", "manual", "owner", "osc-params",
+        "voice", "voice-listening", "voice-hearing", "voice-loading", "voice-stopping",
+        "voice-paused", "voice-trigger", "voice-learning", "voice-downloading"
     )
 
     fun preset(d: UiLabDriver, name: String): String {
@@ -139,6 +169,50 @@ object UiLabScenes {
                 )
             }
             "owner" -> com.vrca.admin.AdminLabAccess.forceOwner = true
+            // VRChat avatar params as OSCQuery would report them (dictation Listen trigger),
+            // re-fed every second so they stay "present" (VrcaOscState ages them out).
+            // Voice to text (headset). "voice" = a pack installed: stand-in files of the exact
+            // sizes SpeechPacks checks (sparse, so instant and no disk use), so the app's own
+            // install check passes. The others add a state on top (the engine itself can't
+            // run on the JVM: its native libs are Android-only). Expand Manual Send to see it.
+            "voice", "voice-listening", "voice-hearing", "voice-loading", "voice-stopping",
+            "voice-paused", "voice-trigger", "voice-learning", "voice-downloading" -> {
+                installVoicePack(ctx, "en", "kroko-en")
+                val vm = d.vm
+                setObj(vm, "speechLanguage", "en"); setObj(vm, "speechPackId", "kroko-en")
+                setObj(vm, "speechInstalledPacks", setOf("kroko-en", com.vrca.speech.SpeechCatalog.VAD.id))
+                setObj(vm, "speechModelReady", true)
+                vm.refreshSpeechModelReady()
+                // Start from a clean slate so voice presets can follow each other in one run.
+                listOf("speechListening", "speechHearing", "speechLoading", "speechStopping", "speechVoicePaused",
+                    "speechPaused", "speechTriggerMissing").forEach { setObj(vm, it, false) }
+                setObj(vm, "speechListenParam", null); setObj(vm, "speechLearning", null)
+                setObj(vm, "speechLearnHeard", emptyList<String>()); setObj(vm, "speechDownloadingLang", null)
+                val listening = name !in setOf("voice", "voice-stopping", "voice-downloading")
+                if (listening) setObj(vm, "speechListening", true)
+                when (name) {
+                    "voice-hearing" -> setObj(vm, "speechHearing", true)
+                    "voice-loading" -> setObj(vm, "speechLoading", true)
+                    "voice-stopping" -> setObj(vm, "speechStopping", true)
+                    "voice-paused" -> setObj(vm, "speechVoicePaused", true)
+                    "voice-trigger" -> {
+                        setObj(vm, "speechListenParam", "MuteSelf"); setObj(vm, "speechListenWhenOn", true)
+                        setObj(vm, "speechPaused", true)
+                    }
+                    "voice-learning" -> {
+                        setObj(vm, "speechLearning", com.vrca.speech.VoiceCommand.PAUSE)
+                        setObj(vm, "speechLearnHeard", listOf("Pause.", "Paws."))
+                    }
+                    "voice-downloading" -> { setObj(vm, "speechDownloadingLang", "en"); setObj(vm, "speechDownloadPct", 42) }
+                }
+            }
+            "osc-params" -> Thread {
+                repeat(600) {
+                    listOf("MuteSelf" to true, "Earmuffs" to false, "AFK" to false, "STT" to true, "Grounded" to true)
+                        .forEach { (k, v) -> com.vrca.osc.VrcaOscState.onParam(k, v) }
+                    Thread.sleep(1000)
+                }
+            }.apply { isDaemon = true }.start()
             "manual" -> d.vm.onMessageTextChange(androidx.compose.ui.text.input.TextFieldValue("be right back, grabbing food"))
             else -> error("unknown preset \"$name\". Presets: ${PRESETS.joinToString()}")
         }

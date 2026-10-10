@@ -1,0 +1,29 @@
+# Round 3 (2026-10-10): light/balanced tier candidates vs shipped packs. % wrong on 20 FLEURS clips/lang
+# (characters for zh/yue/ja/ko/th), sorted best first. sherpa-onnx 1.13.8, 1 thread, desktop x86.
+# New: kroko-es/fr/de (Banafo streaming), ru-small (Vosk streaming zipformer), zh-stream / zh-ctc-small
+# (k2-fsa streaming), ml8-stream (8-language streaming), dolbase (Dolphin base), wtiny/wbase (Whisper via sherpa).
+# RAM figures for engines that keep one recognizer per language (sv24, c180) are sums. svone-zh (340) = one
+# SenseVoice language; svone-ja/ko/yue (~660) also held run.py's old fixed zh warm-up recognizer (since fixed).
+
+es_419       pk3=2.2  c180=4.3  kroko-es=5.8  wbase=10.6  om300=10.8  wtiny=21.8
+pt_br        pk3=4.5  om300=14.6  wbase=15.3  wtiny=32.0
+fr_fr        c180=9.7  pk3=10.8  kroko-fr=12.9  om300=25.4  wbase=35.7  wtiny=55.6
+de_de        pk3=6.0  c180=6.5  kroko-de=7.7  wbase=19.4  om300=20.3  wtiny=37.5
+it_it        pk3=9.0  om300=13.8  wbase=27.5  wtiny=43.5
+pl_pl        pk3=13.7  om300=25.7  wbase=48.3  wtiny=73.3
+uk_ua        pk3=14.2  om300=36.1  wbase=50.0  wtiny=71.3
+nl_nl        pk3=14.7  om300=29.8  wbase=48.3  wtiny=83.2
+bg_bg        pk3=11.9  om300=25.2  wbase=65.3  wtiny=92.9
+ru_ru        g3s-ctc=6.2  pk3=10.6  ru-small=14.1  ml8-stream=18.4  wbase=27.2  om300=38.1  wtiny=53.4
+cmn_hans_cn  sv24=8.0  svone-zh=8.0  dol=13.6  zh-stream=14.4  dolbase=16.1  zh-ctc-small=17.5  ml8-stream=19.1  om1b=20.4  om300=22.4  wtiny=46.7
+yue_hant_hk  sv24=5.5  svone-yue=5.5  dolbase=12.3  dol=13.9  om1b=17.6  om300=23.9  wtiny=56.0  zh-stream=73.6  zh-ctc-small=88.8
+ja_jp        ja-reazon=5.3  ja-mirror=5.5  sv24=9.2  svone-ja=9.2  dol=13.1  om1b=15.2  dolbase=17.6  om300=19.1  ml8-stream=20.6  wtiny=46.4
+ko_kr        sv24=7.2  svone-ko=7.2  dol=7.5  om1b=9.5  dolbase=11.6  om300=13.5  wtiny=36.1
+th_th        th=7.9  om1b=9.3  ml8-stream=13.3  dolbase=14.2  om300=14.5  dol=16.6  wtiny=75.1
+vi_vn        vi=10.8  ml8-stream=13.6  dol=18.9  om1b=19.3  dolbase=23.7  om300=28.1  wtiny=72.1
+id_id        om1b=9.7  ml8-stream=11.6  dol=13.2  om300=16.1  dolbase=16.7  wtiny=50.0
+hi_in        om1b=11.4  om300=22.5  dolbase=26.5  dol=34.6  wtiny=100.1
+tr_tr        om1b=14.9  om300=29.8  wtiny=67.5  dol=98.2
+fil_ph       om1b=16.5  om300=22.4  dol=37.3  wtiny=89.9
+
+RAM MB: c180=1874  dol=604  dolbase=372  g3s-ctc=320  ja-mirror=380  ja-reazon=373  kroko-de=157  kroko-es=270  kroko-fr=158  ml8-stream=460  om1b=1673  om300=904  pk3=1013  ru-small=96  sv24=1543  svone-ja=661  svone-ko=662  svone-yue=675  svone-zh=340  th=392  vi=282  wbase=556  wtiny=437  zh-ctc-small=95  zh-stream=248

@@ -23,7 +23,8 @@ This file is only the rules plus a **map**. The details of every feature and sys
 ## Map
 | Doc (`docs/systems/`) | Covers |
 |---|---|
-| `chatbox.md` | OSC Start/Stop gate (`oscSending`), feature toggles + OS-kill auto-restore (`FeatureSessionStore`), Pinned/Cycle content, sub-lines (`SubLineCodec`), cycle lines/shuffle/tokens `{time}{song}…`, preset auto-save, Manual Send (Instant/Live/Scroll), cycle sender, Invisible Chatbox Border, rate limit, "Pinned" naming, removed features |
+| `chatbox.md` | OSC Start/Stop gate (`oscSending`), feature toggles + OS-kill auto-restore (`FeatureSessionStore`), Pinned/Cycle content, sub-lines (`SubLineCodec`), cycle lines/shuffle/tokens `{time}{song}…`, preset auto-save, Manual Send (Instant/Live/Scroll, `ChatboxScroll` wrap + natural-pause line breaks), cycle sender, Invisible Chatbox Border, rate limit, "Pinned" naming, removed features |
+| `voice-to-text.md` | Headset offline dictation: `SpeechToText` (sherpa-onnx engine, Silero VAD phrases, voiced-only gain, memory guard), `Voicing` (breath/noise filter), `MicSensitivity` (Soft voice/Normal/Noisy room), Listen trigger (OSCQuery avatar param pauses listening, model stays loaded), `SpeechFilter` (made-up fillers), voice commands (`VoiceCommands` pause/resume/clear words per language, Say it, false-trigger checks, `CommandSounds` chimes), 10 s sentence timeout, live words (`LiveAgreement` lock-in, Live words/Phrases toggle), `PhraseJoin` (no full stop on a breath), `CaptionPacer` (line-at-a-time roll-up), 8 s hold + Clear (`discardPending`), `DictationService` (microphone FGS for background), typing dots, `SpeechCatalog` (21 languages → Large/Medium/Small tiers, quality badges Excellent…Experimental, packs: Parakeet, Canary, GigaAM v3, SenseVoice, ReazonSpeech, Dolphin, Omnilingual, Kroko, Whisper base…, pinned+SHA-256 files), `SpeechPacks` (resumable downloads, install/delete, orphan cleanup), `SpeechLanguageDialog` (two-pane picker, Remove), engine shoot-out results (Vosk vs Parakeet/Canary/Whisper/Moonshine/Omnilingual/GigaAM…), model testing process (`tools/speech-bench/`) |
 | `automations-editor.md` | `AutomationsPage` drag-and-drop: reorder, promote/demote, Pinned↔Cycle moves, drag ghost overlay, hover-to-arm |
 | `app-tabs.md` | Bottom nav, Home (preview card, Quick Toggles, Connection card, SetupHealthCard), Automations page layout, VRChat tab header, Settings page, `IpField` slots |
 | `ui-kit.md` | `PublicUiKit` (CompactSectionCard, TogglePill…), `VrcaDialogs` (card dialogs, timezone picker), `TimeZones` |
@@ -48,7 +49,7 @@ This file is only the rules plus a **map**. The details of every feature and sys
 | `storage.md` | Every cache/on-disk store and its cap or cleanup |
 | `labs.md` | UI Lab (`tools/ui-lab/`) and Cardinal Lab (`tools/cardinal-lab/`) |
 
-Other reference docs in `docs/`: `ui-revamp.md` (public UI + onboarding design spec; read before public UI work), `cardinal-audit.md`, `account-system-plan.md`, `avatar-catalog-sharding-plan.md`, `backend-migration-plan.md`, `vrc-nexus-teardown.md`.
+Other reference docs in `docs/`: `ui-revamp.md` (public UI + onboarding design spec; read before public UI work), `wake-word-plan.md` (hands-free wake word + fixed phrase list, not started; separate from the Cardinal AI), `cardinal-audit.md`, `account-system-plan.md`, `avatar-catalog-sharding-plan.md`, `backend-migration-plan.md`, `vrc-nexus-teardown.md`.
 
 ## Build Commands
 ```bash

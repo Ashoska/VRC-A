@@ -19,6 +19,9 @@ import java.util.concurrent.ConcurrentHashMap
 object VrcaOscState {
 
     private val params = ConcurrentHashMap<String, Any>()
+    // When each param was last reported: one missing from the current avatar (or after
+    // VRChat closed) keeps its old value in [params], so "present" = seen recently.
+    private val seenMs = ConcurrentHashMap<String, Long>()
     @Volatile private var lastRxMs = 0L
 
     // True while we've received at least one OSC message recently (= VRChat is
@@ -28,6 +31,8 @@ object VrcaOscState {
     val isLive: Boolean get() = System.currentTimeMillis() - lastRxMs < LIVE_WINDOW_MS
 
     private const val LIVE_WINDOW_MS = 8_000L
+    // OSCQuery is polled every 250 ms; a param not reported for this long is gone.
+    private const val PRESENT_MS = 3_000L
     private const val MOVING_THRESHOLD = 0.10f // m/s magnitude to read as "moving"
 
     // ---- diagnostics (headset OSC-in debugging) ------------------------------
@@ -145,7 +150,7 @@ object VrcaOscState {
     }
 
     fun onParam(name: String, value: Any?) {
-        if (value != null) params[name] = value
+        if (value != null) { params[name] = value; seenMs[name] = System.currentTimeMillis() }
         lastRxMs = System.currentTimeMillis()
         if (!_live.value) _live.value = true
         if (name == "EyeHeightAsMeters") {
@@ -169,7 +174,24 @@ object VrcaOscState {
     /** Called periodically so `isLive` can flip false when OSC stops. */
     fun tickLiveness() { _live.value = isLive }
 
-    fun clear() { params.clear(); lastRxMs = 0L; _live.value = false }
+    fun clear() { params.clear(); seenMs.clear(); lastRxMs = 0L; _live.value = false }
+
+    /** A bool param's value if VRChat reported it within [maxAgeMs], else null (not on
+     *  this avatar, or VRChat/OSC isn't running). Drives the dictation Listen trigger. */
+    fun freshBool(name: String, maxAgeMs: Long = PRESENT_MS): Boolean? {
+        val at = seenMs[name] ?: return null
+        if (System.currentTimeMillis() - at > maxAgeMs) return null
+        return params[name] as? Boolean
+    }
+
+    /** Every on/off param VRChat reports right now (built-ins + the avatar's own), with
+     *  its value. */
+    fun boolParams(maxAgeMs: Long = PRESENT_MS): Map<String, Boolean> {
+        val now = System.currentTimeMillis()
+        return params.entries.mapNotNull { (k, v) ->
+            if (v is Boolean && now - (seenMs[k] ?: 0L) <= maxAgeMs) k to v else null
+        }.toMap()
+    }
 
     // ---- typed accessors -----------------------------------------------------
 

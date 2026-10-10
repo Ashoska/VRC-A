@@ -44,3 +44,11 @@
 -keep,allowobfuscation,allowshrinking class retrofit2.Response
 
 # ================================================================================
+# ===================================================================================
+# sherpa-onnx offline speech-to-text (headset voice-to-text, headsetApp flavor only)
+# -----------------------------------------------------------------------------------
+# The JNI layer reads the Kotlin config classes' fields BY NAME (GetFieldID) and calls
+# back into result classes, so R8 must not rename/strip anything in the package or the
+# native side fails at runtime (release builds minify).
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-dontwarn com.k2fsa.sherpa.onnx.**

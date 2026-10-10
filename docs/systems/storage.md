@@ -22,3 +22,4 @@ _Scope: Every on-disk cache and its cap or cleanup rule._
 - **Seen notification IDs** (`vrca_seen_notifs`): capped at 500 (FIFO).
 
 - **Crash log** (`vrca_crash`): capped at 80,000 chars, overwritten on next crash.
+- **Voice packs** (`filesDir/stt/<packId>/`, headset only): offline speech models, 0.6 MB (voice detector) to ~670 MB per pack, downloaded on demand from the Manual Send language picker, verified by SHA-256. No cap — removed per pack from Settings → App (the voice detector goes with the last pack). `SpeechPacks.cleanupLegacy` deletes the old Vosk model dirs (`filesDir/vosk-model*`) and any `stt/<id>` pack the catalog no longer lists (e.g. GigaAM v2, replaced by v3). See `voice-to-text.md`.

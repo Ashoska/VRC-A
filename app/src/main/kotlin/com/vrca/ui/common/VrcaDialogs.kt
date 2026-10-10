@@ -83,7 +83,7 @@ fun VrcaCardDialog(
 
 /** A header row: optional icon-in-tinted-circle, title, and an optional dismiss X. */
 @Composable
-private fun DialogHeader(
+internal fun DialogHeader(
     title: String,
     icon: ImageVector? = null,
     iconTint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.primary,

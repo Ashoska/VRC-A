@@ -12,7 +12,8 @@ PNGs of what's on screen, popups and menus included. No APK, no device.
     tools/ui-lab/sheet.py ui-shots/sheet.png ui-shots/a.png ui-shots/b.png   # contact sheet
 
 Options: `--size phone|small|tablet|headset` (default: phone for admin/public, the Quest panel
-1024x640dp for headset), `--tall` (3x height: the whole scrolling page in one shot),
+1024x640dp for headset), `--tall` (phone sizes only — 3x height: the whole scrolling page in one
+shot; refused for headset, whose panel is fixed: scroll with `scrollto` like the device does),
 `--qualifiers Q`, `--settle MS`, `--firestore`, `--no-vrchat`. A one-shot run is ~15-25 s
 including recompiling edited code; in live mode a command is ~0.4 s (code edits need a restart).
 
@@ -21,13 +22,13 @@ including recompiling edited code; in live mode a command is ~0.4 s (code edits 
 | | |
 |---|---|
 | `shot <name>` | PNG of the whole screen, dialogs and menus drawn over it (dimmed) |
-| `tap <text> [#n]` / `long <text>` | click / long-press the n-th element whose text or icon description matches |
+| `tap <text> [#n]` / `long <text>` | click / long-press the n-th element whose text or icon description matches (or the switch beside that label) |
 | `type <value>` / `typein <field> \| <value>` | set the focused (or first) text field / the field whose label matches |
 | `scroll down\|up [n]` / `scrollto <text>` | scroll the main area / until the element is visible |
-| `back` | dismiss the top dialog, else system back |
-| `wait <ms>` | let the app run |
+| `back` | close the top dialog (BACK key to its window), else system back |
+| `wait <ms>` | let the app run (app time, 16 ms frames) |
 | `tree` | what's on screen and what can be tapped, typed or scrolled |
-| `set <prop> <value>` / `get <prop>` | force any state: a view-model field (`set warned true`) or `Object.prop` (`set VrchatPipelineState.authDead true`) |
+| `set <prop> <value>` / `get <prop>` | force any state: a view-model field (`set warned true`) or `Object.prop` (`set VrchatPipelineState.authDead true`); a field that's currently null takes a typed literal (`12L`, `12`, `1.5f`, `true`) |
 | `preset <name>` | ready-made states, see below |
 | `show <name> [args]` | screens normally behind a gate, see below |
 | `root screen\|app` | draw the main screen (default) or the full app with its boot/ToS/onboarding/update gates |
@@ -35,7 +36,15 @@ including recompiling edited code; in live mode a command is ~0.4 s (code edits 
 
 **Presets:** in-world, offline, friends, incident, outage-minor, status-ok, alerts, no-alerts, sending,
 idle, warned, banned, auth-dead, logged-out, nowplaying, paused, ad, roster, roster-empty, manual, owner
-(opens the admin panel without the owner account — its data stays empty).
+(opens the admin panel without the owner account — its data stays empty), osc-params (sample VRChat
+avatar params for the dictation Listen trigger).
+
+**Voice to text (headset):** `voice` installs a stand-in English pack (sparse files at the exact sizes
+the app checks, so it counts as installed); `voice-listening`, `voice-hearing`, `voice-loading`,
+`voice-stopping`, `voice-paused` (by a voice command), `voice-trigger` (by the Listen trigger),
+`voice-learning` ("Say it" 2 of 3) and `voice-downloading` add a state on top, each clearing the last.
+The engine itself can't run on the JVM. Expand Manual Send to see the row:
+`ui.sh run headset "preset voice-loading; tap Manual Send; shot v"`.
 
 **Shows:** update, update-optional, whatsnew, confirm, confirm-destructive, timezone (dialogs);
 boot [2|error|done], crash, banned [reason], tos, onboarding <step 0-7>, login [nocancel] (full screens).
@@ -65,3 +74,10 @@ finds elements through Compose semantics (every window: dialogs first) and runs 
 `shot` draws every window in z-order at its position. Robolectric's choreographer is paused at
 16 ms frames so endless animations (spinners) can't lock the clock. Logs of every command with its
 time go to `ui-shots/.lab.log`.
+
+The app runs like a headset's frame loop: one 16 ms frame of app time per step, then a layout pass
+on every window (Robolectric never draws by itself, and Compose lays out inside draw — without the
+pass, scrolling and bring-into-view acted on stale layouts). `delay()` uses the same app clock
+(`kotlinx.coroutines.main.delay`), so timed UI (e.g. Manual Send scrolling itself into view after
+it expands) behaves as on the device however slow a JVM frame is. `wait` never runs app time faster
+than real time. `tap <label>` also reaches the switch beside a label; `back` closes the top dialog.

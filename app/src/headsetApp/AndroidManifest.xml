@@ -34,6 +34,13 @@
     <!-- All-files access, headset-only: read VRChat's output log for the roster. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
+    <!-- Microphone, headset-only: offline voice-to-text dictation into the chatbox
+         (sherpa-onnx). Runtime-requested. FOREGROUND_SERVICE_MICROPHONE: while dictating,
+         DictationService (type microphone) keeps the mic live once you switch to VRChat;
+         without it Android silenced the mic after about one phrase in the background. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
     <!-- usesCleartextTraffic: VRChat's OSCQuery service is plain HTTP on the LAN
          (e.g. http://192.168.0.89:45631). Android blocks cleartext by default, so
          reading avatar params over OSCQuery needs this. Headset-only (the phone/
@@ -44,15 +51,27 @@
          the square icon as fallback) and ignore a manifest banner. A proper QGO tile needs
          a custom cover set in QGO / submitted to its database; a store tile needs the Meta
          dashboard cover art. So the banner PNG was dropped to save headset APK space. -->
+    <!-- extractNativeLibs=true (headset ONLY): store the speech engine's native libs
+         (sherpa-onnx + ONNX Runtime, ~25 MB raw) COMPRESSED inside the APK and extract them
+         at install. Non-legacy packaging would store them uncompressed, roughly doubling the
+         APK download. AGP reads this per-variant when useLegacyPackaging is unset in the DSL,
+         so public/admin (no native speech engine) keep the default. -->
     <application
         android:resizeableActivity="true"
         android:usesCleartextTraffic="true"
+        android:extractNativeLibs="true"
         tools:node="merge">
         <activity
             android:name=".app.MainActivity"
             android:screenOrientation="sensorLandscape"
             android:resizeableActivity="true"
             tools:node="merge" />
+
+        <!-- Runs only while dictation is on (see DictationService). -->
+        <service
+            android:name="com.vrca.speech.DictationService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
     </application>
 
 </manifest>

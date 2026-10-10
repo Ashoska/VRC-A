@@ -11,6 +11,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Only for the official sherpa-onnx Android AAR (headset speech engine).
+        exclusiveContent {
+            forRepository { maven { url "https://jitpack.io" } }
+            filter { includeGroup "com.github.k2-fsa.sherpa-onnx" }
+        }
     }
 }
 

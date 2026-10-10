@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.os.Looper
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -37,7 +38,7 @@ import java.time.Duration
  *   scroll down|up [n]          scroll the main scrollable area n screens (default 1)
  *   scrollto <text>             scroll until the element is in view
  *   back                        dismiss the top dialog, else system back
- *   wait <ms>                   let the app run (real time)
+ *   wait <ms>                   let the app run (app time, 16 ms frames; never faster than real time)
  *   tree                        list what's on screen and what can be tapped / typed / scrolled
  *   set <prop> <value>          force state: VM field (warned, oscSending, …) or Object.prop
  *   get <prop>                  read it
@@ -60,10 +61,36 @@ class UiLabDriver(
 
     private val looper = shadowOf(Looper.getMainLooper())
     private val log = File(outDir, ".lab.log").also { it.parentFile?.mkdirs() }
-
+    /**
+     * Lets the app run for [ms] of app time, one 16 ms frame at a time, like a headset's frame loop:
+     *  - The app clock is the looper's: animations AND `delay()` (moved onto the main looper by
+     *    `kotlinx.coroutines.main.delay` in app/build.gradle) both run on it, so they stay in step
+     *    however slow a JVM frame is. With wall-time delays, Manual Send's 120 ms bring-into-view
+     *    fired before the slow first expand frame had grown the card, and didn't scroll.
+     *  - Layout after every frame. Robolectric never draws on its own, and Compose measures +
+     *    lays out inside draw, so without [layoutRoots] the layout only moved when `shot` drew
+     *    the screen (scroll extents, bring-into-view and `tree` positions were all stale).
+     *  - The sleep keeps app time from running ahead of real time, so network replies still
+     *    land within a `wait`.
+     */
     fun settle(ms: Long) {
         var left = ms
-        while (left > 0) { Thread.sleep(50); looper.idleFor(Duration.ofMillis(50)); left -= 50 }
+        while (left > 0) {
+            val frameStart = System.nanoTime()
+            looper.idleFor(Duration.ofMillis(FRAME_MS))
+            layoutRoots()
+            left -= FRAME_MS
+            val spentMs = (System.nanoTime() - frameStart) / 1_000_000
+            if (spentMs < FRAME_MS) Thread.sleep(FRAME_MS - spentMs)
+        }
+    }
+
+    /** Measure + lay out every Compose window now (what a device does in each frame's draw pass). */
+    @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+    fun layoutRoots() {
+        val roots = mutableListOf<RootForTest>()
+        windows().forEach { composeRoots(it.view, roots) }
+        roots.forEach { runCatching { it.measureAndLayoutForTest() } }
     }
 
     fun run(script: String): List<String> {
@@ -82,6 +109,7 @@ class UiLabDriver(
     fun exec(line: String): String {
         val cmd = line.substringBefore(' ').lowercase()
         val arg = line.substringAfter(' ', "").trim()
+        layoutRoots() // act on what a device would show now, not the last frame's layout
         val r = when (cmd) {
             "shot" -> shot(arg.ifBlank { "shot" })
             "tap", "click" -> act(arg, SemanticsActions.OnClick.name) { n -> n.config.getOrNull(SemanticsActions.OnClick)?.action?.invoke() }
@@ -193,7 +221,12 @@ class UiLabDriver(
         fun withAction(n: SemanticsNode): SemanticsNode? {
             var cur: SemanticsNode? = n
             while (cur != null) { if (hasAction(cur)) return cur; cur = cur.parent }
-            return null
+            // A label beside its own control (ToggleRow = text + Switch): the unlabeled control
+            // on the same line, to the right — what "tap Scroll" means on the device.
+            val b = n.boundsInRoot
+            return all.filter { hasAction(it) && label(it).isBlank() }
+                .filter { val c = it.boundsInRoot; c.top < b.bottom && c.bottom > b.top && c.left >= b.left }
+                .minByOrNull { it.boundsInRoot.left - b.right }
         }
         val exact = all.filter { label(it).lowercase() == q }
         val partial = all.filter { label(it).lowercase().contains(q) && it !in exact }
@@ -237,7 +270,7 @@ class UiLabDriver(
     }
 
     private fun scrollTo(query: String): String {
-        repeat(25) {
+        repeat(60) {
             val q = query.lowercase()
             val n = nodes().firstOrNull { label(it).lowercase().contains(q) }
             if (n != null) {
@@ -245,12 +278,18 @@ class UiLabDriver(
                 while (anc != null && anc.config.getOrNull(SemanticsActions.ScrollBy) == null) anc = anc.parent
                 if (anc == null) return "\"$query\" is on screen (not inside a scroll area)"
                 val view: Rect = anc.boundsInRoot
-                val b = n.boundsInRoot
+                // Unclipped: boundsInRoot of a node scrolled out of view is all zeros, which
+                // sent the scroll the wrong way (the target never came into view).
+                val b = unclipped(n)
                 if (b.top >= view.top && b.bottom <= view.bottom) return "\"$query\" in view"
                 anc.config[SemanticsActions.ScrollBy].action?.invoke(0f, b.top - view.top - view.height * 0.2f)
                 settle(150)
             } else {
-                val target = scrollables().maxByOrNull { it.boundsInRoot.height } ?: error("\"$query\" not found")
+                // Not built yet (lazy lists only build rows as they scroll in) or further
+                // down: step through each scroll area that can still go down, TOP window
+                // first and in screen order (a dialog's list before its details pane). Only
+                // scrolling the largest area missed lists next to a bigger pane.
+                val target = scrollables().firstOrNull { canScrollDown(it) } ?: error("\"$query\" not found after scrolling")
                 target.config[SemanticsActions.ScrollBy].action?.invoke(0f, target.boundsInRoot.height * 0.7f)
                 settle(150)
             }
@@ -258,9 +297,28 @@ class UiLabDriver(
         error("\"$query\" not found after scrolling")
     }
 
+    /** Whether a scroll area isn't at its end yet (lists without a range count as scrollable). */
+    private fun canScrollDown(n: SemanticsNode): Boolean {
+        val r = n.config.getOrNull(SemanticsProperties.VerticalScrollAxisRange) ?: return true
+        return r.value() < r.maxValue() - 0.5f
+    }
+
+    /** Where [n] really is, even when scrolled out of view (boundsInRoot clips to zero). */
+    private fun unclipped(n: SemanticsNode): Rect {
+        val p = n.positionInRoot
+        return Rect(p.x, p.y, p.x + n.size.width, p.y + n.size.height)
+    }
+
     private fun back(): String {
         val dismiss = nodes().firstOrNull { it.config.getOrNull(SemanticsActions.Dismiss) != null }
         if (dismiss != null) { dismiss.config[SemanticsActions.Dismiss].action?.invoke(); return "dismissed" }
+        val top = windows().lastOrNull()
+        if (top != null && top.view !== act.window.decorView) {
+            // A dialog window on top: a real BACK key to it, like the headset's back button.
+            top.view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK))
+            top.view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK))
+            return "back (closed the top window)"
+        }
         act.onBackPressedDispatcher.onBackPressed()
         return "back"
     }
@@ -285,7 +343,10 @@ class UiLabDriver(
             val b = n.boundsInRoot
             sb.append("- ").append(l.take(90).ifBlank { "(no text)" })
             if (acts.isNotEmpty()) sb.append("  [").append(acts.joinToString(",")).append("]")
-            sb.append("  @").append(b.top.toInt()).append('\n')
+            // Real position; "off-screen" when it's scrolled/clipped out of view.
+            sb.append("  @").append(unclipped(n).top.toInt())
+            if (b.width <= 0f || b.height <= 0f) sb.append(" (off-screen)")
+            sb.append('\n')
         }
         return sb.toString().trimEnd()
     }
@@ -295,6 +356,17 @@ class UiLabDriver(
         val cls = owner.javaClass
         fun convert(cur: Any?): Any? = when {
             raw == "null" -> null
+            // A null field has no type to copy (generics are erased), so take a Kotlin-style
+            // literal: 12L Long, 12 Int, 1.5f Float, 1.5 Double, true/false (else a String).
+            // Writing "1240" into a MutableState<Long?> crashed the composition.
+            cur == null -> when {
+                Regex("-?\\d+L").matches(raw) -> raw.dropLast(1).toLong()
+                Regex("-?\\d+").matches(raw) -> raw.toInt()
+                Regex("-?\\d*\\.?\\d+[fF]").matches(raw) -> raw.dropLast(1).toFloat()
+                Regex("-?\\d*\\.\\d+").matches(raw) -> raw.toDouble()
+                raw == "true" || raw == "false" -> raw.toBooleanStrict()
+                else -> raw
+            }
             cur is Boolean -> raw.toBooleanStrict()
             cur is Int -> raw.toInt()
             cur is Long -> raw.toLong()
@@ -344,5 +416,6 @@ class UiLabDriver(
 
     companion object {
         const val SETTLE_AFTER_ACTION_MS = 400L
+        private const val FRAME_MS = 16L
     }
 }

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Power
@@ -187,6 +188,7 @@ internal fun SettingsPage(
                 primary = "View"
             ) { showWhatsNew = true }
             StorageRow()
+            if (BuildConfig.IS_HEADSET_BUILD && vm.speechSupported) VoicePacksRows(vm)
             if (showWhatsNew) WhatsNewDialog(onDismiss = { showWhatsNew = false })
         }
 
@@ -1155,6 +1157,45 @@ private fun StorageRow() {
                     .setData(android.net.Uri.parse("package:${ctx.packageName}"))
             )
         }
+    }
+}
+
+/**
+ * Installed offline voice-to-text packs (headset): each with its size and a Delete
+ * button, so the hundreds of MB a pack takes can be reclaimed. Installing happens from
+ * the Manual Send card's language picker.
+ */
+@Composable
+private fun VoicePacksRows(vm: VrcaViewModel) {
+    androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshSpeechModelReady() }
+    var confirm by androidx.compose.runtime.remember { mutableStateOf<com.vrca.speech.SpeechCatalog.Pack?>(null) }
+    val packs = vm.speechInstalledPacks.mapNotNull { com.vrca.speech.SpeechCatalog.packs[it] }
+    if (packs.isEmpty()) {
+        SettingsRow(
+            icon = Icons.Filled.Mic,
+            title = "Voice to text",
+            subtitle = "No voice packs installed. Install one from the Manual Send card on Home.",
+            primary = ""
+        ) { }
+    }
+    packs.forEach { p ->
+        val langs = com.vrca.speech.SpeechCatalog.languages.filter { l -> l.tiers.any { it.packId == p.id } }.joinToString(", ") { it.englishName }
+        SettingsRow(
+            icon = Icons.Filled.Mic,
+            title = "Voice pack: ${p.title}",
+            subtitle = "${com.vrca.speech.SpeechPacks.mb(p.sizeBytes)} · $langs",
+            primary = "Delete"
+        ) { confirm = p }
+    }
+    confirm?.let { p ->
+        com.vrca.ui.common.VrcaConfirmDialog(
+            title = "Delete voice pack?",
+            body = "Frees ${com.vrca.speech.SpeechPacks.mb(p.sizeBytes)}. You can download it again from the Manual Send card.",
+            confirmLabel = "Delete",
+            onConfirm = { vm.deleteSpeechPack(p.id); confirm = null },
+            onDismiss = { confirm = null },
+            destructive = true
+        )
     }
 }
 

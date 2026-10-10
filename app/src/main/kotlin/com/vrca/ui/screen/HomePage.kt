@@ -2,6 +2,8 @@ package com.vrca.ui.screen
 
 import android.content.Context
 import android.os.PowerManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -39,6 +41,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Loop
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
@@ -487,7 +490,11 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
     CompactSectionCard(
         title = "Manual Send",
         icon = Icons.Filled.Send,
-        summary = if (vm.manualLiveMode) "Live typing" else "Type a manual message",
+        summary = when {
+            vm.speechListening -> "Voice to text is on"
+            vm.manualLiveMode -> "Live typing"
+            else -> "Type a manual message"
+        },
         expandedState = manualExpanded,
         modifier = Modifier.bringIntoViewRequester(cardBring)
     ) {
@@ -531,6 +538,10 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
                 enabled = !isBanned
             ) { vm.setManualScrollFlag(it) }
         }
+
+        // Voice-to-text (headset-only; hidden on public/admin). Dictates into the
+        // field above through Live + Scroll so long speech never hits the char cap.
+        SpeechDictationRow(vm = vm, isBanned = isBanned)
 
         // Bring the input back into view as the live preview above grows/shifts
         // while typing (a small delay lets it relayout first).
@@ -579,6 +590,217 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
                 enabled = !isBanned
             ) { Text("Clear") }
         }
+    }
+}
+
+/**
+ * Voice-to-text row inside Manual Send. HEADSET-ONLY — renders nothing when
+ * SpeechToText.SUPPORTED is false (public/admin).
+ *
+ * States: not installed → "Install voice to text" (opens the language picker);
+ * downloading → progress + Cancel; ready → language chip + mic. Phrase-based: each
+ * phrase is added at the natural breath after it (people just talk; no deliberate
+ * pausing needed), and Live + Scroll (forced on by the VM)
+ * keeps long dictation inside the chatbox budget.
+ */
+@Composable
+private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
+    if (!vm.speechSupported) return
+    val ctx = LocalContext.current
+    var showPicker by remember { mutableStateOf(false) }
+    var showCommands by remember { mutableStateOf(false) }
+    // "Say it" pressed before the mic permission was granted: record once it is.
+    var learnAfterMic by remember { mutableStateOf<com.vrca.speech.VoiceCommand?>(null) }
+
+    LaunchedEffect(Unit) { vm.refreshSpeechModelReady() }
+    // Dictation deliberately keeps running when this row leaves the screen (card
+    // collapsed, another tab, VRChat in front): it used to stop here, cutting people off.
+    // Stop = the mic button, or the Stop on the "listening" notification.
+
+    val micLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val learn = learnAfterMic
+        learnAfterMic = null
+        if (granted) { if (learn != null) vm.startSpeechLearning(learn) else vm.startDictation() }
+    }
+
+    fun hasMic(): Boolean =
+        ctx.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    val lang = com.vrca.speech.SpeechCatalog.lang(vm.speechLanguage)
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = if (vm.speechListening) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                else MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                val (label, sub) = when {
+                    vm.speechDownloading -> {
+                        val name = com.vrca.speech.SpeechCatalog.lang(vm.speechDownloadingLang ?: "")?.englishName ?: ""
+                        (if (vm.speechVerifying) "Verifying $name pack…" else "Downloading $name… ${vm.speechDownloadPct}%") to
+                            "One-time download, then it works fully offline."
+                    }
+                    !vm.speechModelReady -> "Voice to text" to
+                        "Speak instead of typing. ${lang?.nativeName ?: "English"}${lang?.takeIf { it.tiers.size > 1 }?.tier(vm.speechPackId)?.let { " (${it.label})" } ?: ""}, works offline once installed."
+                    vm.speechStopping -> "Stopping…" to "Freeing the voice model's memory."
+                    vm.speechLoading -> "Loading voice model…" to "This takes a few seconds."
+                    // Listen trigger: paused, but the model stays loaded (resumes instantly).
+                    vm.speechListening && vm.speechPaused ->
+                        "Paused" to "Listens ${listenSummary(vm.speechListenParam, vm.speechListenWhenOn).replaceFirstChar { it.lowercase() }}."
+                    // Paused by a voice command: only commands are heard.
+                    vm.speechListening && vm.speechVoicePaused -> "Paused by voice" to
+                        "Say \"${vm.speechCommandWords[com.vrca.speech.VoiceCommand.RESUME]?.firstOrNull() ?: "resume"}\" to carry on."
+                    vm.speechListening && vm.speechLearning != null -> "Recording a command word" to
+                        "Say it on its own (${vm.speechLearnHeard.size} of ${VrcaViewModel.LEARN_TIMES})."
+                    vm.speechListening && vm.speechTriggerMissing && !vm.speechHearing ->
+                        "Listening" to "VRChat isn't reporting ${vm.speechListenParam}, so it listens all the time."
+                    // Copy says "talk normally": phrases end at the natural breath between
+                    // sentences (VAD, 0.5 s), never a deliberate pause; nonstop talk still
+                    // splits itself (maxSpeechDuration).
+                    vm.speechListening && vm.speechHearing ->
+                        "Hearing you…" to (if (vm.speechLive) "Your words show as you talk." else "Keep talking. Each sentence is added as you finish it.")
+                    vm.speechListening -> "Listening" to "Just talk normally. Tap stop when you're done."
+                    else -> "Tap the mic to speak" to
+                        (if (vm.speechLive) "Talk normally. Your words show as you talk." else "Talk normally. Each sentence shows when you pause.")
+                }
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, style = MaterialTheme.typography.labelLarge)
+                        // How long the model took on the last sentence (tells model speed
+                        // apart from the pause it waits for).
+                        val ms = vm.speechLastDecodeMs
+                        if (vm.speechListening && ms != null) {
+                            Text("  · last took ${"%.1f".format(ms / 1000f)} s", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        }
+                    }
+                    // Always two lines tall, so switching Listening / Hearing you never
+                    // changes the card's height (it used to jump the layout as it toggled).
+                    Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (vm.speechModelReady && !vm.speechDownloading) {
+                        // Language chip under the text (beside it, it squeezed the text to
+                        // one word per line): tap to switch language / install another pack.
+                        // Next to it: Live (words while you talk) vs Phrases (cheapest).
+                        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Surface(
+                                shape = MaterialTheme.shapes.small,
+                                color = MaterialTheme.colorScheme.surface,
+                                modifier = Modifier.clickable(enabled = !vm.speechListening) { showPicker = true }
+                            ) {
+                                val tierLabel = lang?.takeIf { it.tiers.size > 1 }?.tier(vm.speechPackId)?.label
+                                Text(
+                                    (lang?.nativeName ?: vm.speechLanguage) + (tierLabel?.let { " · $it" } ?: "") + " ▾",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                            Surface(
+                                shape = MaterialTheme.shapes.small,
+                                color = if (vm.speechLive) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                                        else MaterialTheme.colorScheme.surface,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.clickable { vm.setSpeechLiveMode(!vm.speechLive) }
+                            ) {
+                                Text(
+                                    // Not just "Live": Manual Send's typing switch is already Instant/Live.
+                                    if (vm.speechLive) "Live words" else "Phrases",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+                when {
+                    vm.speechDownloading -> OutlinedButton(onClick = { vm.cancelSpeechDownload() }) { Text("Cancel") }
+                    !vm.speechModelReady -> Button(onClick = { showPicker = true }, enabled = !isBanned) { Text("Install") }
+                    else -> {
+                        val listening = vm.speechListening
+                        IconButton(
+                            onClick = {
+                                if (listening) vm.stopDictation()
+                                else if (hasMic()) vm.startDictation()
+                                else micLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                            },
+                            // Locked while the model loads or is being freed: fast taps loaded a
+                            // second model (headset lag) or stopped it before it had loaded.
+                            enabled = !isBanned && !vm.speechLoading && !vm.speechStopping
+                        ) {
+                            if (vm.speechLoading || vm.speechStopping) {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp), strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = if (listening) Icons.Filled.Stop else Icons.Filled.Mic,
+                                    contentDescription = if (listening) "Stop dictation" else "Start dictation",
+                                    tint = if (listening) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            if (vm.speechDownloading) {
+                androidx.compose.material3.LinearProgressIndicator(
+                    progress = vm.speechDownloadPct / 100f,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                )
+            }
+            vm.speechError?.let { err ->
+                Text(err, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp))
+            }
+        }
+    }
+    if (showPicker) {
+        SpeechLanguageDialog(
+            currentLang = vm.speechLanguage,
+            currentPackId = vm.speechPackId,
+            installedPacks = vm.speechInstalledPacks,
+            sensitivity = vm.speechSensitivity,
+            onSensitivity = { vm.setSpeechSensitivityLevel(it) },
+            listenParam = vm.speechListenParam,
+            listenWhenOn = vm.speechListenWhenOn,
+            triggerParams = { vm.speechTriggerParams() },
+            onListen = { param, on -> vm.setSpeechListenTrigger(param, on) },
+            commandsOn = vm.speechCommandsOn,
+            commandWords = vm.speechCommandWords,
+            onCommands = { showCommands = true },
+            onSelect = { code, packId -> showPicker = false; vm.selectSpeechLanguage(code, packId) },
+            onRemove = { vm.deleteSpeechPack(it) },
+            onDismiss = { showPicker = false }
+        )
+    }
+    if (showCommands) {
+        VoiceCommandsDialog(
+            enabled = vm.speechCommandsOn,
+            onEnabled = { vm.setSpeechCommandsEnabled(it) },
+            langCode = vm.speechLanguage,
+            langName = lang?.englishName ?: "English",
+            words = vm.speechCommandWords,
+            noSpace = com.vrca.speech.PhraseJoin.joiner(vm.speechLanguage).isEmpty(),
+            learning = vm.speechLearning,
+            heard = vm.speechLearnHeard,
+            onSayIt = { cmd ->
+                if (vm.speechListening || hasMic()) vm.startSpeechLearning(cmd)
+                else { learnAfterMic = cmd; micLauncher.launch(android.Manifest.permission.RECORD_AUDIO) }
+            },
+            onLearnDone = { save -> vm.finishSpeechLearning(save) },
+            onSetWords = { cmd, words -> vm.setSpeechCommandWords(cmd, words) },
+            onDismiss = { showCommands = false }
+        )
     }
 }
 
