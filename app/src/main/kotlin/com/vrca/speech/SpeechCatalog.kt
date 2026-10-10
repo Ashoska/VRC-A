@@ -1,5 +1,7 @@
 package com.vrca.speech
 
+import kotlin.math.roundToInt
+
 /**
  * Offline voice-to-text catalog: which downloadable model pack serves each language.
  *
@@ -23,16 +25,20 @@ object SpeechCatalog {
         NEMO_CTC,
         /** NeMo Canary, offline; the language is set explicitly so it can't mix languages up. */
         CANARY,
-        /** Streaming zipformer transducer (Kroko), fed one phrase at a time. */
+        /** Streaming zipformer transducer (Kroko, small Russian), fed one phrase at a time. */
         ONLINE_TRANSDUCER,
+        /** Streaming zipformer CTC (small Chinese), fed one phrase at a time. */
+        ONLINE_CTC,
         /** Offline zipformer transducer (ReazonSpeech Japanese, Vietnamese). */
         TRANSDUCER,
         /** SenseVoice (Chinese, Cantonese, Korean); the language is set explicitly. */
         SENSE_VOICE,
         /** Meta Omnilingual CTC (1,600 languages; used for ones nothing smaller covers). */
         OMNILINGUAL_CTC,
-        /** DataoceanAI Dolphin CTC (Asian languages; Thai, and a fast Indonesian tier). */
+        /** DataoceanAI Dolphin CTC (light tiers for several Asian languages). */
         DOLPHIN_CTC,
+        /** OpenAI Whisper (language set explicitly; always encodes a 30 s window, so slower). */
+        WHISPER,
     }
 
     data class PackFile(val name: String, val url: String, val size: Long, val sha256: String)
@@ -53,8 +59,21 @@ object SpeechCatalog {
         fun file(name: String) = files.first { it.name == name }
     }
 
-    /** One size/quality option for a language. Tiers are listed best-first. */
-    data class Tier(val packId: String, val label: String, val quality: Quality)
+    /**
+     * One size/quality option for a language, listed best-first. [errorPct] = % of words
+     * (characters for zh/yue/ja/ko/th) wrong on the shoot-out's FLEURS read-speech test
+     * (tools/speech-bench) — the SAME yardstick for every language, so the shown accuracy
+     * compares across tiers. The quality label is derived from it, never set by hand.
+     */
+    data class Tier(val packId: String, val label: String, val errorPct: Double) {
+        val accuracy: Int get() = (100 - errorPct).roundToInt()
+        val quality: Quality get() = when {
+            errorPct < 8 -> Quality.GREAT
+            errorPct < 12 -> Quality.GOOD
+            errorPct < 18 -> Quality.OK
+            else -> Quality.EXPERIMENTAL
+        }
+    }
 
     data class Lang(
         val code: String,
@@ -87,8 +106,27 @@ object SpeechCatalog {
     private const val VI_REV = "b2745a435379992ad3f299635468db0c34918e1e"
     private const val OMNI = "csukuangfj/sherpa-onnx-omnilingual-asr-1600-languages-1B-ctc-int8-2025-11-12"
     private const val OMNI_REV = "17db76eab583b0b868ffb0df104ab879145087e5"
-    private const val DOLPHIN = "csukuangfj/sherpa-onnx-dolphin-small-ctc-multi-lang-int8-2025-04-02"
-    private const val DOLPHIN_REV = "c8b6689509acfcd744c04e5e169164f9ac4cae32"
+    private const val DOLPHIN_B = "csukuangfj/sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02"
+    private const val DOLPHIN_B_REV = "1f3a53d0ecf658f8b0974e2cfde368eee40732fa"
+    private const val OMNI3 = "csukuangfj/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12"
+    private const val OMNI3_REV = "6abf1ece20cd2308bdb7d13cd78ec1c44fa4c094"
+    private const val KROKO_ES = "csukuangfj/sherpa-onnx-streaming-zipformer-es-kroko-2025-08-06"
+    private const val KROKO_ES_REV = "20cf7a4921613397841d31168796cade5b866585"
+    private const val KROKO_FR = "csukuangfj/sherpa-onnx-streaming-zipformer-fr-kroko-2025-08-06"
+    private const val KROKO_FR_REV = "08b84b7b7cf519be9817e9c16919d96a7a8bad91"
+    private const val KROKO_DE = "csukuangfj/sherpa-onnx-streaming-zipformer-de-kroko-2025-08-06"
+    private const val KROKO_DE_REV = "887db3d083240198c2d2b99fb66cfcfe6948ced8"
+    private const val RU_SMALL = "csukuangfj/sherpa-onnx-streaming-zipformer-small-ru-vosk-int8-2025-08-16"
+    private const val RU_SMALL_REV = "31fa603e4f31279c6e1f7600fed13dc4312663ab"
+    private const val ZH_STREAM = "csukuangfj/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30"
+    private const val ZH_STREAM_REV = "ad658fa0201659a09ea3c176129a191c77ecae8f"
+    private const val ZH_SMALL = "csukuangfj/sherpa-onnx-streaming-zipformer-small-ctc-zh-int8-2025-04-01"
+    private const val ZH_SMALL_REV = "a5f60fe00dcfbaf68fcc1c6b5cf53061e144d6da"
+    private const val ML8 = "csukuangfj/sherpa-onnx-streaming-zipformer-ar_en_id_ja_ru_th_vi_zh-2025-02-10"
+    private const val ML8_REV = "c6726c1147387ad2a11148b33973135d92a55e6c"
+    private const val ML8_F = "epoch-75-avg-11-chunk-16-left-128"
+    private const val WBASE = "csukuangfj/sherpa-onnx-whisper-base"
+    private const val WBASE_REV = "bb53ee204431c90d314c1cc08d28d23e5b7927cc"
     private const val KROKO = "csukuangfj/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06"
     private const val KROKO_REV = "572aaf4e2e0c603c3fc2a574d096e755a178faa1"
 
@@ -210,7 +248,7 @@ object SpeechCatalog {
         ),
         Pack(
             id = "omnilingual-1b",
-            title = "Omnilingual 1B (Indonesian, Hindi, Turkish, Filipino)",
+            title = "Omnilingual 1B (Thai, Indonesian, Hindi, Turkish, Filipino)",
             kind = Kind.OMNILINGUAL_CTC,
             files = listOf(
                 hf(OMNI, OMNI_REV, "model.int8.onnx", 1_031_628_252, "f7b74c964039162423b83e3fa950ce24810c9a635d9ff8468b5f4d142b7c1e8c"),
@@ -221,68 +259,211 @@ object SpeechCatalog {
             slow = true,
         ),
         Pack(
-            id = "dolphin-small",
-            title = "Dolphin small (Thai, Indonesian)",
+            id = "dolphin-base",
+            title = "Dolphin base (light: Thai, Indonesian, Japanese, Korean, Cantonese)",
             kind = Kind.DOLPHIN_CTC,
             files = listOf(
-                hf(DOLPHIN, DOLPHIN_REV, "model.int8.onnx", 249_658_954, "c1afcb9265de0ebd853eb8f570b371f399a6f9b2b9af9a3cb17c2e509171e697"),
-                hf(DOLPHIN, DOLPHIN_REV, "tokens.txt", 504_662, "c3788261a51df1899ea4b210b552cd42139204de72c0ad60f6cebb199078872e"),
+                hf(DOLPHIN_B, DOLPHIN_B_REV, "model.int8.onnx", 103_729_802, "a3aa46c97f3f60f135ff949793cb05fabe7a0b3c484dc2e3cc699d354ee11b76"),
+                hf(DOLPHIN_B, DOLPHIN_B_REV, "tokens.txt", 504_662, "c3788261a51df1899ea4b210b552cd42139204de72c0ad60f6cebb199078872e"),
             ),
-            ramMb = 600,
+            ramMb = 370,
             credit = "DataoceanAI Dolphin (Apache-2.0)",
+        ),
+        Pack(
+            id = "omnilingual-300m",
+            title = "Omnilingual 300M (light: Hindi, Filipino)",
+            kind = Kind.OMNILINGUAL_CTC,
+            files = listOf(
+                hf(OMNI3, OMNI3_REV, "model.int8.onnx", 365_352_120, "e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c"),
+                hf(OMNI3, OMNI3_REV, "tokens.txt", 86_423, "a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31"),
+            ),
+            ramMb = 900,
+            credit = "Meta Omnilingual ASR (Apache-2.0)",
+        ),
+        Pack(
+            id = "kroko-es",
+            title = "Kroko (Spanish, light)",
+            kind = Kind.ONLINE_TRANSDUCER,
+            files = listOf(
+                hf(KROKO_ES, KROKO_ES_REV, "encoder.onnx", 154_878_102, "2d9f5ef87d1a5257f8a6687e21501c56f3aa2fcbfcfab9364dcc4ce4e06ae81b"),
+                hf(KROKO_ES, KROKO_ES_REV, "decoder.onnx", 617_488, "d4ce176b94b25f7acc88717bc3f704fcf5d6e131aaac2e0cabab3885541181ee"),
+                hf(KROKO_ES, KROKO_ES_REV, "joiner.onnx", 336_817, "dae35df88d676e320fcdb99217328e66dcf722bf11b0f2459e14ddb5b982ded5"),
+                hf(KROKO_ES, KROKO_ES_REV, "tokens.txt", 6_385, "1be5e0a58e05d06d327df4c6b7b5e4f8aba01da6981eb016fcaceafc6a56680f"),
+            ),
+            ramMb = 270,
+            credit = "Banafo Kroko (CC-BY-SA-4.0)",
+        ),
+        Pack(
+            id = "kroko-fr",
+            title = "Kroko (French, light)",
+            kind = Kind.ONLINE_TRANSDUCER,
+            files = listOf(
+                hf(KROKO_FR, KROKO_FR_REV, "encoder.onnx", 70_092_599, "e02facae1daf6f1f13da67ea3ace7c722516d0868d1768d78c0580bc22cc0c5b"),
+                hf(KROKO_FR, KROKO_FR_REV, "decoder.onnx", 617_488, "6aed547570e3ab5afc05429a017cedd3a056c16df3baa5703f02461cefa25bac"),
+                hf(KROKO_FR, KROKO_FR_REV, "joiner.onnx", 336_817, "a51eec759bcdcaae2614686fa2a8b57417b2d420dd55a5a5558b388d35a9b2b6"),
+                hf(KROKO_FR, KROKO_FR_REV, "tokens.txt", 5_415, "fedfb9c844bfb2bf14171f8184863e3d617b815a8667bdd9fc9a3149fde73298"),
+            ),
+            ramMb = 160,
+            credit = "Banafo Kroko (CC-BY-SA-4.0)",
+        ),
+        Pack(
+            id = "kroko-de",
+            title = "Kroko (German, light)",
+            kind = Kind.ONLINE_TRANSDUCER,
+            files = listOf(
+                hf(KROKO_DE, KROKO_DE_REV, "encoder.onnx", 70_091_557, "6e83993d6967ec7a3498b055b7e85ace85b5d64d1b1e8773cb29a43a11f5edb5"),
+                hf(KROKO_DE, KROKO_DE_REV, "decoder.onnx", 617_489, "94a29592b403c53fa2231b478637da1ab4abcef7f5e46e432098416a4a3ed562"),
+                hf(KROKO_DE, KROKO_DE_REV, "joiner.onnx", 336_817, "28356bff070aea51ab1d725a3278e81d19f9300f860d3248a7014292264df15a"),
+                hf(KROKO_DE, KROKO_DE_REV, "tokens.txt", 5_606, "86e8370994ff2c01149ba8c4f8709aa93cdc18914b27a717e291e96faf39a6eb"),
+            ),
+            ramMb = 160,
+            credit = "Banafo Kroko (CC-BY-SA-4.0)",
+        ),
+        Pack(
+            id = "ru-small",
+            title = "Small streaming (Russian, light)",
+            kind = Kind.ONLINE_TRANSDUCER,
+            files = listOf(
+                hf(RU_SMALL, RU_SMALL_REV, "encoder.int8.onnx", 26_214_060, "e0db705e94ec35d803b1df4f40cda23d064e1142977c80ab288430b109777a9d"),
+                hf(RU_SMALL, RU_SMALL_REV, "decoder.onnx", 2_093_080, "89b3088a9e20e1ef7f2e85ce1a3478afe6a9c4ac57369cabcc4beb8e95328ea0"),
+                hf(RU_SMALL, RU_SMALL_REV, "joiner.int8.onnx", 259_417, "b55784b071ab7512eab4c7c44e4f5478284ef33c83562cc6a249b972515a31e5"),
+                hf(RU_SMALL, RU_SMALL_REV, "tokens.txt", 6_388, "93bbbc0bae6b78c0bbb743d4aa9fded3bb5ff3aac5f0200e3a769a5a05e0fdf6"),
+            ),
+            ramMb = 100,
+            credit = "Alpha Cephei Vosk small zipformer (Apache-2.0)",
+        ),
+        Pack(
+            id = "zh-stream",
+            title = "Streaming zipformer (Chinese)",
+            kind = Kind.ONLINE_TRANSDUCER,
+            files = listOf(
+                hf(ZH_STREAM, ZH_STREAM_REV, "encoder.int8.onnx", 161_141_793, "5ac51e27981bb4dab01bb9be4958453ba50c3b61c063ddda0eab23fd3671aa4f"),
+                hf(ZH_STREAM, ZH_STREAM_REV, "decoder.onnx", 5_165_083, "06522ad63cec0fdf6809f4e1db9bb4f7d710c34582e3b35db62ac60eccafac7e"),
+                hf(ZH_STREAM, ZH_STREAM_REV, "joiner.int8.onnx", 1_033_416, "b34584dc6f561089e1d747fedebb3765f2caa72c927ef54d7ca55e5ae40a814b"),
+                hf(ZH_STREAM, ZH_STREAM_REV, "tokens.txt", 20_628, "6193c7ea1c96d0d9a1e9652789b40d13a8a913b434a5451e93158f5a09fd6652"),
+            ),
+            ramMb = 250,
+            credit = "k2-fsa streaming Zipformer (Apache-2.0)",
+        ),
+        Pack(
+            id = "zh-small",
+            title = "Small streaming (Chinese, light)",
+            kind = Kind.ONLINE_CTC,
+            files = listOf(
+                hf(ZH_SMALL, ZH_SMALL_REV, "model.int8.onnx", 26_342_340, "68c9c943840f7d9cf3e8a4970ba50f404feb5277f611fa82b7e72267786fa84a"),
+                hf(ZH_SMALL, ZH_SMALL_REV, "tokens.txt", 13_366, "6fed8c6c248516f38e7faa19404b57413e8ce259f1cbc1fa4aebc86eac32fdfd"),
+            ),
+            ramMb = 100,
+            credit = "k2-fsa streaming Zipformer (Apache-2.0)",
+        ),
+        Pack(
+            id = "ml8-stream",
+            title = "8-language streaming (Thai, Indonesian)",
+            kind = Kind.ONLINE_TRANSDUCER,
+            files = listOf(
+                hf(ML8, ML8_REV, "encoder-$ML8_F.int8.onnx", 296_583_597, "f9001ed7a9e46d0294438c1a30cd7c72d1cc4bdd4e7880edbcda36f67081e32e"),
+                hf(ML8, ML8_REV, "decoder-$ML8_F.onnx", 33_837_085, "7ebc63f34b21c8efb4a41a5a2eee7fe1448829ce0230ecc5369e67fc14d90d48"),
+                hf(ML8, ML8_REV, "joiner-$ML8_F.int8.onnx", 8_257_421, "db88e3172323551abaa99b91b18fb422a27ea4a834fd0db10389f9478816f917"),
+                hf(ML8, ML8_REV, "tokens.txt", 195_244, "784f24950f6bcce1b0021035632dd60fd4617ecd8ca0581ab57d7b39d77ba5ab"),
+            ),
+            ramMb = 460,
+            credit = "k2-fsa streaming Zipformer (Apache-2.0)",
+        ),
+        Pack(
+            id = "whisper-base",
+            title = "Whisper base (Portuguese, light)",
+            kind = Kind.WHISPER,
+            files = listOf(
+                hf(WBASE, WBASE_REV, "base-encoder.int8.onnx", 29_120_534, "0b8fb1304b6109976038efff5ace81720e00386f3ff6b54ee8c75291ca0a1e11"),
+                hf(WBASE, WBASE_REV, "base-decoder.int8.onnx", 130_672_026, "9759d217388a01b3a4c7c15533201067b48ae819c4daafc8624e64b9409dc02d"),
+                hf(WBASE, WBASE_REV, "base-tokens.txt", 816_730, "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"),
+            ),
+            ramMb = 560,
+            credit = "OpenAI Whisper (MIT)",
+            slow = true,
         ),
     ).associateBy { it.id }
 
     /**
      * Languages offered right now, each with its tiers best-first (bigger + more accurate
      * first, smaller + lighter after) so users can trade accuracy for device space.
-     * Quality labels come from the shoot-out (docs/systems/voice-to-text.md). Parakeet-25
+     * Accuracy + quality come from the shoot-out (docs/systems/voice-to-text.md). Parakeet-25
      * is only used where it never wrote the wrong language; Canary takes the language
      * explicitly, so it can't confuse them.
      */
     val languages: List<Lang> = listOf(
         Lang("en", "English", "English", listOf(
-            Tier("parakeet-en", "Best", Quality.GREAT),
-            Tier("canary-180m", "Balanced", Quality.GOOD),
-            Tier("kroko-en", "Light", Quality.OK),
+            Tier("parakeet-en", "Best", 7.8),
+            Tier("canary-180m", "Balanced", 16.7),
+            Tier("kroko-en", "Light", 19.8),
         )),
         Lang("es", "Spanish", "Español", listOf(
-            Tier("parakeet-25", "Best", Quality.GREAT),
-            Tier("canary-180m", "Light", Quality.GREAT),
+            Tier("parakeet-25", "Best", 2.2),
+            Tier("canary-180m", "Balanced", 4.3),
+            Tier("kroko-es", "Light", 5.8),
         )),
         Lang("pt", "Portuguese", "Português", listOf(
-            Tier("parakeet-25", "Best", Quality.GREAT),
+            Tier("parakeet-25", "Best", 4.5),
+            Tier("whisper-base", "Light", 15.3),
         )),
         // GigaAM v3 is both the most accurate (6.2% vs Parakeet-25's 10.6%) and the
-        // lightest Russian option, so it's the only tier.
+        // lightest full model; the 29 MB streaming one is the Light tier.
         Lang("ru", "Russian", "Русский", listOf(
-            Tier("gigaam3-ru", "Standard", Quality.GREAT),
+            Tier("gigaam3-ru", "Best", 6.2),
+            Tier("ru-small", "Light", 14.1),
         )),
         Lang("de", "German", "Deutsch", listOf(
-            Tier("canary-180m", "Standard", Quality.GREAT),
+            Tier("parakeet-25", "Best", 6.0),
+            Tier("canary-180m", "Balanced", 6.5),
+            Tier("kroko-de", "Light", 7.7),
         )),
         Lang("fr", "French", "Français", listOf(
-            Tier("canary-180m", "Standard", Quality.GOOD),
+            Tier("canary-180m", "Best", 9.7),
+            Tier("kroko-fr", "Light", 12.9),
         )),
         // Parakeet-25 never answered in the wrong language for these (shoot-out check).
-        Lang("it", "Italian", "Italiano", listOf(Tier("parakeet-25", "Standard", Quality.GOOD))),
-        Lang("bg", "Bulgarian", "Български", listOf(Tier("parakeet-25", "Standard", Quality.GOOD))),
-        Lang("pl", "Polish", "Polski", listOf(Tier("parakeet-25", "Standard", Quality.OK))),
-        Lang("uk", "Ukrainian", "Українська", listOf(Tier("parakeet-25", "Standard", Quality.OK))),
-        Lang("nl", "Dutch", "Nederlands", listOf(Tier("parakeet-25", "Standard", Quality.OK))),
-        Lang("zh", "Chinese (Mandarin)", "中文", listOf(Tier("sensevoice", "Standard", Quality.GOOD))),
-        Lang("yue", "Cantonese", "粵語", listOf(Tier("sensevoice", "Standard", Quality.GREAT))),
-        Lang("ja", "Japanese", "日本語", listOf(Tier("reazon-ja", "Standard", Quality.GREAT))),
-        Lang("ko", "Korean", "한국어", listOf(Tier("sensevoice", "Standard", Quality.GREAT))),
-        Lang("vi", "Vietnamese", "Tiếng Việt", listOf(Tier("zipformer-vi", "Standard", Quality.GOOD))),
-        Lang("th", "Thai", "ไทย", listOf(Tier("dolphin-small", "Standard", Quality.OK))),
-        Lang("id", "Indonesian", "Bahasa Indonesia", listOf(
-            Tier("omnilingual-1b", "Best", Quality.GOOD),
-            Tier("dolphin-small", "Light", Quality.OK),
+        Lang("it", "Italian", "Italiano", listOf(Tier("parakeet-25", "Standard", 9.0))),
+        Lang("bg", "Bulgarian", "Български", listOf(Tier("parakeet-25", "Standard", 11.9))),
+        Lang("pl", "Polish", "Polski", listOf(Tier("parakeet-25", "Standard", 13.7))),
+        Lang("uk", "Ukrainian", "Українська", listOf(Tier("parakeet-25", "Standard", 14.2))),
+        Lang("nl", "Dutch", "Nederlands", listOf(Tier("parakeet-25", "Standard", 14.7))),
+        Lang("zh", "Chinese (Mandarin)", "中文", listOf(
+            Tier("sensevoice", "Best", 8.0),
+            Tier("zh-stream", "Balanced", 14.4),
+            Tier("zh-small", "Light", 17.5),
         )),
-        Lang("hi", "Hindi", "हिन्दी", listOf(Tier("omnilingual-1b", "Standard", Quality.GOOD))),
-        Lang("tr", "Turkish", "Türkçe", listOf(Tier("omnilingual-1b", "Standard", Quality.OK))),
-        Lang("fil", "Filipino", "Filipino", listOf(Tier("omnilingual-1b", "Standard", Quality.OK))),
+        Lang("yue", "Cantonese", "粵語", listOf(
+            Tier("sensevoice", "Best", 5.5),
+            Tier("dolphin-base", "Light", 12.3),
+        )),
+        Lang("ja", "Japanese", "日本語", listOf(
+            Tier("reazon-ja", "Best", 5.5),
+            Tier("dolphin-base", "Light", 17.6),
+        )),
+        Lang("ko", "Korean", "한국어", listOf(
+            Tier("sensevoice", "Best", 7.2),
+            Tier("dolphin-base", "Light", 11.6),
+        )),
+        Lang("vi", "Vietnamese", "Tiếng Việt", listOf(Tier("zipformer-vi", "Standard", 10.8))),
+        Lang("th", "Thai", "ไทย", listOf(
+            Tier("omnilingual-1b", "Best", 9.3),
+            Tier("ml8-stream", "Balanced", 13.3),
+            Tier("dolphin-base", "Light", 14.2),
+        )),
+        Lang("id", "Indonesian", "Bahasa Indonesia", listOf(
+            Tier("omnilingual-1b", "Best", 9.7),
+            Tier("ml8-stream", "Balanced", 11.6),
+            Tier("dolphin-base", "Light", 16.7),
+        )),
+        Lang("hi", "Hindi", "हिन्दी", listOf(
+            Tier("omnilingual-1b", "Best", 11.4),
+            Tier("omnilingual-300m", "Light", 22.5),
+        )),
+        Lang("tr", "Turkish", "Türkçe", listOf(Tier("omnilingual-1b", "Standard", 14.9))),
+        Lang("fil", "Filipino", "Filipino", listOf(
+            Tier("omnilingual-1b", "Best", 16.5),
+            Tier("omnilingual-300m", "Light", 22.4),
+        )),
     )
 
     fun lang(code: String): Lang? = languages.firstOrNull { it.code == code }

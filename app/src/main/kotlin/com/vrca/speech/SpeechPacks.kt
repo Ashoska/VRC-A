@@ -66,6 +66,14 @@ object SpeechPacks {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LANG, null)
             ?.takeIf { SpeechCatalog.lang(it) != null } ?: SpeechCatalog.defaultLanguage()
 
+    /** Live words (re-read while you talk) vs phrases only (cheapest). Default: live. */
+    fun liveEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("live", true)
+
+    fun setLiveEnabled(ctx: Context, on: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("live", on).commit()
+    }
+
     /** Select [code] as the dictation language, using tier [packId] for it. */
     fun setSelected(ctx: Context, code: String, packId: String) {
         // commit (not apply): written before returning, so closing the app right after

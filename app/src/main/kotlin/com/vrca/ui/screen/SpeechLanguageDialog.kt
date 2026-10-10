@@ -82,7 +82,7 @@ internal fun SpeechLanguageDialog(
                 }
             }
             Text(
-                "Runs fully on your headset after the one-time download. Smaller tiers use less storage and memory but make more mistakes. More languages are coming.\n" +
+                "Runs fully on your headset after the one-time download. Smaller tiers use less storage and memory but make more mistakes. Accuracy = words right on test recordings of read speech; casual talk scores a bit lower.\n" +
                     "Models: " + (SpeechCatalog.packs.values.map { it.credit } + SpeechCatalog.VAD.credit).distinct().joinToString(", "),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -140,13 +140,15 @@ private fun TierRow(tier: SpeechCatalog.Tier, detail: String, selected: Boolean,
             Text(tier.label, style = MaterialTheme.typography.labelLarge)
             Text("  $detail", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-            QualityChip(tier.quality)
+            QualityChip(tier)
         }
     }
 }
 
+/** "98% · Great": the measured accuracy, so tiers that share a label still compare. */
 @Composable
-private fun QualityChip(q: SpeechCatalog.Quality) {
+private fun QualityChip(t: SpeechCatalog.Tier) {
+    val q = t.quality
     val c = when (q) {
         SpeechCatalog.Quality.GREAT -> Color(0xFF4CAF50)
         SpeechCatalog.Quality.GOOD -> Color(0xFF42A5F5)
@@ -154,7 +156,7 @@ private fun QualityChip(q: SpeechCatalog.Quality) {
         SpeechCatalog.Quality.EXPERIMENTAL -> Color(0xFF9E9E9E)
     }
     Surface(shape = MaterialTheme.shapes.small, color = c.copy(alpha = 0.2f)) {
-        Text(q.label, color = c, style = MaterialTheme.typography.labelSmall,
+        Text("${t.accuracy}% · ${q.label}", color = c, style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
     }
 }

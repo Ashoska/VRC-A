@@ -87,7 +87,9 @@ elif kind in ("streaming", "streaming_ctc"):
 elif kind == "sherpa_whisper":
     # Whisper through sherpa (what the app would run); language set explicitly.
     def tr(x, iso):
-        lang = {"yue": "yue", "fil": "tl"}.get(iso, iso)
+        # tiny/base/small predate Whisper's "yue": Cantonese goes as Chinese (an unknown
+        # language aborts sherpa natively, killing the whole job).
+        lang = {"yue": "zh", "fil": "tl"}.get(iso, iso)
         if lang not in cache:
             cache.clear()  # one recognizer at a time: RAM = a single language's
             cache[lang] = so.OfflineRecognizer.from_whisper(encoder=find("*encoder.int8.onnx"), decoder=find("*decoder.int8.onnx"),

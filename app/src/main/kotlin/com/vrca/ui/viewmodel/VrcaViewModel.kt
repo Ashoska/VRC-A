@@ -2287,6 +2287,9 @@ class VrcaViewModel(
     /** The voice detector currently hears speech. */
     var speechHearing by mutableStateOf(false)
         private set
+    /** Live words while talking (true) or text only at each pause (false, cheapest). */
+    var speechLive by mutableStateOf(true)
+        private set
     // How long the model took on the last sentence (shown while listening, so slowness
     // on the headset can be told apart from the pause it waits for).
     var speechLastDecodeMs by mutableStateOf<Long?>(null)
@@ -2314,10 +2317,20 @@ class VrcaViewModel(
             val packId = SpeechPacks.selectedPackId(ctx, lang)
             val installed = SpeechPacks.installedPacks(ctx).map { it.id }.toSet()
             val ready = SpeechPacks.isLanguageReady(ctx, lang)
+            val live = SpeechPacks.liveEnabled(ctx)
             launch(Dispatchers.Main) {
                 speechLanguage = lang; speechPackId = packId; speechInstalledPacks = installed; speechModelReady = ready
+                speechLive = live
             }
         }
+    }
+
+    /** Live words on/off; applies at once, even mid-dictation. */
+    fun setSpeechLiveMode(on: Boolean) {
+        if (!speechSupported) return
+        speechLive = on
+        SpeechPacks.setLiveEnabled(app.applicationContext, on)
+        SpeechToText.setLive(on)
     }
 
     /** Choose the dictation language + tier (pack); installs the pack if needed. */
@@ -2389,6 +2402,7 @@ class VrcaViewModel(
         setManualScrollFlag(true)
         speechLocal = local
         speechLastDecodeMs = null
+        SpeechToText.setLive(speechLive)
         val started = SpeechToText.start(app.applicationContext, speechLanguage, object : SpeechToText.Listener {
             override fun onPartial(text: String, pauseBeforeSec: Float) {
                 viewModelScope.launch(Dispatchers.Main) { showSpeechPartial(text, pauseBeforeSec, local) }

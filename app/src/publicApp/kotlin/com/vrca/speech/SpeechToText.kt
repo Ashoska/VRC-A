@@ -22,6 +22,7 @@ object SpeechToText {
     }
 
     fun isListening(): Boolean = false
+    fun setLive(on: Boolean) {}
 
     @Suppress("UNUSED_PARAMETER")
     fun start(ctx: Context, langCode: String, listener: Listener): Boolean {

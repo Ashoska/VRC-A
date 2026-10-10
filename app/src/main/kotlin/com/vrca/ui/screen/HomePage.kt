@@ -647,9 +647,11 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     // Copy says "talk normally": phrases end at the natural breath between
                     // sentences (VAD, 0.5 s), never a deliberate pause; nonstop talk still
                     // splits itself (maxSpeechDuration).
-                    vm.speechListening && vm.speechHearing -> "Hearing you…" to "Keep talking. Each sentence is added as you finish it."
+                    vm.speechListening && vm.speechHearing ->
+                        "Hearing you…" to (if (vm.speechLive) "Your words show as you talk." else "Keep talking. Each sentence is added as you finish it.")
                     vm.speechListening -> "Listening" to "Just talk normally. Tap stop when you're done."
-                    else -> "Tap the mic to speak" to "Talk normally. Your words are added sentence by sentence."
+                    else -> "Tap the mic to speak" to
+                        (if (vm.speechLive) "Talk normally. Your words show as you talk." else "Talk normally. Each sentence shows when you pause.")
                 }
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -669,19 +671,36 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     if (vm.speechModelReady && !vm.speechDownloading) {
                         // Language chip under the text (beside it, it squeezed the text to
                         // one word per line): tap to switch language / install another pack.
-                        Surface(
-                            shape = MaterialTheme.shapes.small,
-                            color = MaterialTheme.colorScheme.surface,
-                            modifier = Modifier
-                                .padding(top = 6.dp)
-                                .clickable(enabled = !vm.speechListening) { showPicker = true }
-                        ) {
-                            val tierLabel = lang?.takeIf { it.tiers.size > 1 }?.tier(vm.speechPackId)?.label
-                            Text(
-                                (lang?.nativeName ?: vm.speechLanguage) + (tierLabel?.let { " · $it" } ?: "") + " ▾",
-                                style = MaterialTheme.typography.labelMedium,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                            )
+                        // Next to it: Live (words while you talk) vs Phrases (cheapest).
+                        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Surface(
+                                shape = MaterialTheme.shapes.small,
+                                color = MaterialTheme.colorScheme.surface,
+                                modifier = Modifier.clickable(enabled = !vm.speechListening) { showPicker = true }
+                            ) {
+                                val tierLabel = lang?.takeIf { it.tiers.size > 1 }?.tier(vm.speechPackId)?.label
+                                Text(
+                                    (lang?.nativeName ?: vm.speechLanguage) + (tierLabel?.let { " · $it" } ?: "") + " ▾",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                            Surface(
+                                shape = MaterialTheme.shapes.small,
+                                color = if (vm.speechLive) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                                        else MaterialTheme.colorScheme.surface,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.clickable { vm.setSpeechLiveMode(!vm.speechLive) }
+                            ) {
+                                Text(
+                                    // Not just "Live": Manual Send's typing switch is already Instant/Live.
+                                    if (vm.speechLive) "Live words" else "Phrases",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
                         }
                     }
                 }

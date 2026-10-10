@@ -1,7 +1,9 @@
 package com.vrca.speech
 
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.content.Context
+import android.os.Process
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -16,10 +18,12 @@ import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
+import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import com.k2fsa.sherpa.onnx.OnlineZipformer2CtcModelConfig
 import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
@@ -48,6 +52,10 @@ object SpeechToText {
     private const val DECODE_THREADS = 2
     /** "Hearing you" ends this many 32 ms windows (~0.4 s) after the voice stops. */
     private const val QUIET_WINDOWS = 12
+    /** Free memory that must remain above Android's low-memory line after loading a model. */
+    private const val MEMORY_MARGIN_MB = 300L
+    /** Written without spaces between words (live words join without them). */
+    private val NO_SPACE = setOf("zh", "yue", "ja")
     /** Live words: re-read the unfinished phrase at most this often / at least this often. */
     private const val LIVE_MIN_MS = 800L
     private const val LIVE_MAX_MS = 5_000L
@@ -91,6 +99,16 @@ object SpeechToText {
         if (pack == null || !SpeechPacks.isLanguageReady(app, langCode)) {
             listener.onError("Voice pack for this language isn't installed yet."); return false
         }
+        // Never squeeze VRChat: refuse a model that wouldn't leave the system comfortably
+        // above its low-memory line (Android starts killing apps below it).
+        val mem = ActivityManager.MemoryInfo()
+        runCatching { (app.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(mem) }
+        val freeMb = mem.availMem / (1024 * 1024)
+        val needMb = pack.ramMb + 50L
+        if (mem.availMem > 0 && freeMb - needMb < mem.threshold / (1024 * 1024) + MEMORY_MARGIN_MB) {
+            listener.onError("Not enough free memory for this voice model (needs about $needMb MB, $freeMb MB free). Pick a lighter tier, or close other apps.")
+            return false
+        }
         running = true
         // Keep the mic live when VRC-A goes to the background (we're on screen now: the
         // user just tapped the mic, which is when Android allows this start).
@@ -105,6 +123,10 @@ object SpeechToText {
             var decoder: Thread? = null
             try {
                 listener.onLoading(true)
+                // Created at background priority: ONNX Runtime's worker threads inherit it,
+                // so decoding never outranks VRChat. Capture itself then runs at audio
+                // priority (it must never miss mic data).
+                runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND) }
                 rec = phraseDecoder(app, pack, langCode)
                 vad = Vad(config = VadModelConfig(
                     sileroVadModelConfig = SileroVadModelConfig(
@@ -123,14 +145,20 @@ object SpeechToText {
                     numThreads = 1,
                 ))
                 listener.onLoading(false)
+                runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
 
                 val r = rec
                 decoder = Thread({
+                    // Background priority: VRChat always gets the CPU first; under load live
+                    // words just update less often instead of the game stuttering.
+                    runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND) }
                     // Runs until capture has flushed its last phrase AND the queue is drained,
                     // so words spoken right before Stop are never lost. Finished phrases always
                     // go first; live re-reads (partials) only run when none is waiting.
                     var lastEnd = -1L // end sample of the last phrase that produced text
                     var partialShown = false
+                    var agreement: LiveAgreement? = null
+                    var agreementFor = -1L
                     fun pauseFrom(start: Long) =
                         if (lastEnd < 0) Float.POSITIVE_INFINITY else (start - lastEnd).coerceAtLeast(0L) / SAMPLE_RATE.toFloat()
                     while (!captureDone.get() || phrases.isNotEmpty()) {
@@ -138,8 +166,18 @@ object SpeechToText {
                         if (seg == null) {
                             val job = live.pending.getAndSet(null) ?: continue
                             val t0 = System.nanoTime()
-                            val text = runCatching { r.text(normalize(job.samples)) }.getOrElse { "" }
+                            val hyp = runCatching { r.hyp(normalize(job.samples)) }.getOrNull()
                             val ms = (System.nanoTime() - t0) / 1_000_000
+                            // Lock in words two re-reads agree on; re-read only after them next.
+                            val text = when {
+                                hyp == null -> ""
+                                !r.hasTimes || hyp.tokens.isEmpty() -> hyp.text
+                                else -> {
+                                    if (agreementFor != job.start) { agreement = LiveAgreement(langCode in NO_SPACE); agreementFor = job.start }
+                                    val a = agreement!!
+                                    a.update(hyp.tokens, hyp.times, job.chunkSec).also { live.cutSec = a.cutSec }
+                                }
+                            }
                             // Pace re-reads by what they cost on THIS device: wait ~2.5x a
                             // re-read, so live words never take over the CPU next to VRChat.
                             live.intervalMs = (ms * 5 / 2).coerceIn(LIVE_MIN_MS, LIVE_MAX_MS)
@@ -150,6 +188,7 @@ object SpeechToText {
                             }
                             continue
                         }
+                        agreement = null; agreementFor = -1L
                         val t0 = System.nanoTime()
                         val text = if (seg.noise) "" else runCatching { r.text(normalize(seg.samples)) }.getOrElse { Log.w(TAG, "decode", it); "" }
                         val ms = (System.nanoTime() - t0) / 1_000_000
@@ -219,15 +258,22 @@ object SpeechToText {
                     // phrase so far every intervalMs (it adapts to the model's speed). Starts a
                     // little before the VAD noticed you (it reacts late). Not for very long
                     // phrases: the final comes soon (maxSpeechDuration) and re-reads get slow.
-                    if (speech && phraseStart < 0) phraseStart = (total - n - SAMPLE_RATE * PREROLL_MS / 1000).coerceAtLeast(maxOf(0L, total - ring.size))
+                    if (speech && phraseStart < 0) {
+                        phraseStart = (total - n - SAMPLE_RATE * PREROLL_MS / 1000).coerceAtLeast(maxOf(0L, total - ring.size))
+                        live.cutSec = 0.0
+                    }
                     if (!speech && vad.empty()) phraseStart = -1L
-                    val len = total - phraseStart
-                    if (phraseStart >= 0 && voicedRun >= Voicing.MIN_VOICED_WINDOWS && phrases.isEmpty() &&
+                    // Re-read from the cut (words before it are locked in), so a re-read covers
+                    // ~2-3 s however long the phrase gets.
+                    val cut = if (phraseStart < 0) 0L else
+                        (phraseStart + (live.cutSec * SAMPLE_RATE).toLong()).coerceIn(maxOf(phraseStart, total - ring.size), total)
+                    val len = total - cut
+                    if (liveEnabled && phraseStart >= 0 && voicedRun >= Voicing.MIN_VOICED_WINDOWS && phrases.isEmpty() &&
                         len in (SAMPLE_RATE / 2)..(SAMPLE_RATE.toLong() * LIVE_MAX_SEC) &&
                         (total - lastPartialAt) * 1000 / SAMPLE_RATE >= live.intervalMs && live.pending.get() == null
                     ) {
-                        val copy = FloatArray(len.toInt()) { ring[((phraseStart + it) % ring.size).toInt()] }
-                        live.pending.set(LiveJob(copy, phraseStart, live.finalsQueued.get()))
+                        val copy = FloatArray(len.toInt()) { ring[((cut + it) % ring.size).toInt()] }
+                        live.pending.set(LiveJob(copy, phraseStart, (cut - phraseStart) / SAMPLE_RATE.toDouble(), live.finalsQueued.get()))
                         lastPartialAt = total
                     }
                 }
@@ -264,19 +310,32 @@ object SpeechToText {
     /** A VAD phrase and where it starts in the mic stream (samples); noise = no voice in it. */
     private class Segment(val samples: FloatArray, val start: Long, val noise: Boolean = false)
 
-    /** The unfinished phrase so far, to re-read for live words; seq = finals queued when copied. */
-    private class LiveJob(val samples: FloatArray, val start: Long, val seq: Int)
+    /** The unfinished phrase from [chunkSec] (s after its start) to now, to re-read for live
+     *  words; seq = finals queued when copied. */
+    private class LiveJob(val samples: FloatArray, val start: Long, val chunkSec: Double, val seq: Int)
 
     /** Shared between the capture and decode threads. */
     private class LiveState {
         val pending = java.util.concurrent.atomic.AtomicReference<LiveJob?>(null)
         val finalsQueued = java.util.concurrent.atomic.AtomicInteger(0)
         @Volatile var intervalMs = LIVE_MIN_MS
+        /** Where the next re-read starts (s after the phrase start): words before it are locked. */
+        @Volatile var cutSec = 0.0
     }
+
+    /** Live words on/off ("Live" vs "Phrases"); takes effect immediately, even mid-dictation. */
+    @Volatile private var liveEnabled = true
+    fun setLive(on: Boolean) { liveEnabled = on }
+
+    /** A recognised phrase: text plus its tokens with start times (s), when the model gives them. */
+    private class Hyp(val text: String, val tokens: Array<String>, val times: FloatArray)
 
     /** Recognises one finished phrase. One implementation per model family. */
     private interface PhraseDecoder {
-        fun text(seg: FloatArray): String
+        fun hyp(seg: FloatArray): Hyp
+        fun text(seg: FloatArray): String = hyp(seg).text
+        /** Token timestamps available (live words lock in agreed words; Canary has none). */
+        val hasTimes: Boolean get() = true
         fun release()
     }
 
@@ -284,6 +343,7 @@ object SpeechToText {
         // File names differ per pack (e.g. Parakeet ships int8 decoders, GigaAM fp32),
         // so resolve them from the catalog by prefix.
         fun p(prefix: String) = SpeechPacks.filePath(ctx, pack.id, pack.files.first { it.name.startsWith(prefix) }.name)
+        fun pc(part: String) = SpeechPacks.filePath(ctx, pack.id, pack.files.first { it.name.contains(part) }.name)
         return when (pack.kind) {
             SpeechCatalog.Kind.NEMO_TRANSDUCER -> offline(OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
@@ -344,46 +404,66 @@ object SpeechToText {
                     tokens = p("tokens"), numThreads = DECODE_THREADS,
                 ),
                 decodingMethod = "greedy_search",
+            ), times = false)
+            SpeechCatalog.Kind.WHISPER -> offline(OfflineRecognizerConfig(
+                featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
+                modelConfig = OfflineModelConfig(
+                    // Whisper files are named base-encoder… / base-tokens.txt.
+                    whisper = OfflineWhisperModelConfig(encoder = pc("encoder"), decoder = pc("decoder"),
+                        language = langCode, task = "transcribe"),
+                    tokens = pc("tokens"), numThreads = DECODE_THREADS,
+                ),
+                decodingMethod = "greedy_search",
+            ), times = false)
+            SpeechCatalog.Kind.ONLINE_TRANSDUCER -> online(OnlineModelConfig(
+                transducer = OnlineTransducerModelConfig(encoder = p("encoder"), decoder = p("decoder"), joiner = p("joiner")),
+                tokens = p("tokens"), numThreads = DECODE_THREADS,
             ))
-            SpeechCatalog.Kind.ONLINE_TRANSDUCER -> {
-                val rec = OnlineRecognizer(config = OnlineRecognizerConfig(
-                    featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
-                    modelConfig = OnlineModelConfig(
-                        transducer = OnlineTransducerModelConfig(encoder = p("encoder"), decoder = p("decoder"), joiner = p("joiner")),
-                        tokens = p("tokens"), numThreads = DECODE_THREADS,
-                    ),
-                    enableEndpoint = false,
-                    decodingMethod = "greedy_search",
-                ))
-                val tail = FloatArray((SAMPLE_RATE * 0.8f).toInt()) // flush the model's look-ahead
-                object : PhraseDecoder {
-                    override fun text(seg: FloatArray): String {
-                        val s = rec.createStream("")
-                        try {
-                            s.acceptWaveform(seg, SAMPLE_RATE)
-                            s.acceptWaveform(tail, SAMPLE_RATE)
-                            s.inputFinished()
-                            while (rec.isReady(s)) rec.decode(s)
-                            return rec.getResult(s).text.trim()
-                        } finally { s.release() }
-                    }
-                    override fun release() = rec.release()
-                }
-            }
+            SpeechCatalog.Kind.ONLINE_CTC -> online(OnlineModelConfig(
+                zipformer2Ctc = OnlineZipformer2CtcModelConfig(model = p("model")),
+                tokens = p("tokens"), numThreads = DECODE_THREADS,
+            ))
         }
     }
 
-    private fun offline(config: OfflineRecognizerConfig): PhraseDecoder {
+    /** Streaming models (Kroko, small Russian/Chinese), fed one phrase at a time. */
+    private fun online(model: OnlineModelConfig): PhraseDecoder {
+        val rec = OnlineRecognizer(config = OnlineRecognizerConfig(
+            featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
+            modelConfig = model,
+            enableEndpoint = false,
+            decodingMethod = "greedy_search",
+        ))
+        val tail = FloatArray((SAMPLE_RATE * 0.8f).toInt()) // flush the model's look-ahead
+        return object : PhraseDecoder {
+            override fun hyp(seg: FloatArray): Hyp {
+                val s = rec.createStream("")
+                try {
+                    s.acceptWaveform(seg, SAMPLE_RATE)
+                    s.acceptWaveform(tail, SAMPLE_RATE)
+                    s.inputFinished()
+                    while (rec.isReady(s)) rec.decode(s)
+                    val r = rec.getResult(s)
+                    return Hyp(r.text.trim(), r.tokens, r.timestamps)
+                } finally { s.release() }
+            }
+            override fun release() = rec.release()
+        }
+    }
+
+    private fun offline(config: OfflineRecognizerConfig, times: Boolean = true): PhraseDecoder {
         val rec = OfflineRecognizer(config = config)
         return object : PhraseDecoder {
-            override fun text(seg: FloatArray): String {
+            override fun hyp(seg: FloatArray): Hyp {
                 val s = rec.createStream()
                 try {
                     s.acceptWaveform(seg, SAMPLE_RATE)
                     rec.decode(s)
-                    return rec.getResult(s).text.trim()
+                    val r = rec.getResult(s)
+                    return Hyp(r.text.trim(), r.tokens, r.timestamps)
                 } finally { s.release() }
             }
+            override val hasTimes = times
             override fun release() = rec.release()
         }
     }
