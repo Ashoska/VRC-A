@@ -7,26 +7,41 @@ enum class VoiceCommand(val label: String, val what: String) {
     CLEAR("Clear", "Clear the chatbox"),
 }
 
+/** Why a heard command word wasn't acted on (shown on the dictation row, so a miss in
+ *  VRChat can be checked afterwards: user-reported "sometimes it works, sometimes not"). */
+enum class CommandMiss(val why: String) {
+    TOO_SOON("too soon after other words"),
+    TOO_SHORT("too short: say it slower"),
+    TOO_QUIET("quieter than your usual voice"),
+    KEPT_TALKING("you kept talking after it"),
+}
+
 /**
  * Voice commands: a command word said ON ITS OWN (the whole phrase) pauses, resumes or
  * clears dictation. Several checks keep conversation from firing them (user: "lets think
  * of how to make this not have false triggers"); the engine applies the timing/voice
  * ones, this object the words:
  *  - the whole phrase must be the word (exact, ignoring case/punctuation/spaces);
- *  - ≥ [QUIET_BEFORE_SEC] of quiet before it, and no more talking within [CONFIRM_MS]
- *    after it ("Pause! wait…" is conversation, so it goes in as text);
+ *  - ≥ [QUIET_BEFORE_SEC] of quiet before it ([RESUME_QUIET_SEC] for resume while paused:
+ *    nothing is being typed then), and no more talking within [CONFIRM_MS] after it
+ *    ("Pause! wait…" is conversation, so it goes in as text). Both count only the
+ *    WEARER's voice: other players through the speakers used to block real commands;
  *  - clearly voiced ([MIN_VOICED]) and about as loud as you normally talk
- *    ([MIN_LEVEL_RATIO]): other people and VRChat's own sound from the speakers reach
- *    the mic quieter than the wearer;
+ *    ([MIN_LEVEL_RATIO] of the median of your last [LEVEL_WINDOW] phrases, learnt while
+ *    paused too): other people and VRChat's sound reach the mic quieter than the wearer,
+ *    and the baseline must follow the mic quickly: with VRChat in front sharing it, the
+ *    level can differ from the in-app level;
  *  - a command that would change nothing (pause while paused) does nothing.
  * Words are per language (each model hears its own language) and users can replace
  * them, best by saying them ("Say it" stores what the model actually hears).
  */
 object VoiceCommands {
     const val QUIET_BEFORE_SEC = 1.0f
+    const val RESUME_QUIET_SEC = 0.5f
     const val CONFIRM_MS = 500L
-    const val MIN_VOICED = 6
-    const val MIN_LEVEL_RATIO = 0.5f
+    const val MIN_VOICED = 4
+    const val MIN_LEVEL_RATIO = 0.4f
+    const val LEVEL_WINDOW = 8
 
     private fun cmds(pause: List<String>, resume: List<String>, clear: List<String>) =
         mapOf(VoiceCommand.PAUSE to pause, VoiceCommand.RESUME to resume, VoiceCommand.CLEAR to clear)

@@ -94,6 +94,9 @@ object SpeechToText {
         /** A voice command fired (VoiceCommands: said on its own, passed every check).
          *  PAUSE/RESUME only fire when they change something; CLEAR is the caller's call. */
         fun onCommand(command: VoiceCommand) {}
+        /** A command word was heard on its own but not acted on, and why ([heard] = what the
+         *  model wrote). Only for commands that would have changed something. */
+        fun onCommandRejected(command: VoiceCommand, miss: CommandMiss, heard: String) {}
     }
 
     @Volatile private var running = false
@@ -127,7 +130,7 @@ object SpeechToText {
             return false
         }
         running = true
-        voicePaused = false; micIgnoreUntil = 0L; talkStartedAt = 0L
+        voicePaused = false; micIgnoreUntil = 0L; ownVoiceAt = 0L; typicalLevel = 0f
         // Keep the mic live when VRC-A goes to the background (we're on screen now: the
         // user just tapped the mic, which is when Android allows this start).
         DictationService.start(app)
@@ -181,13 +184,25 @@ object SpeechToText {
                     var agreement: LiveAgreement? = null
                     var agreementFor = -1L
                     val noSpace = langCode in NO_SPACE
-                    // The wearer's usual voice level (recent dictated phrases): a command must be
-                    // about this loud, so other people / VRChat's speakers can't fire one.
+                    // The wearer's usual voice level (median of recent phrases): a command must be
+                    // about this loud, so other people / VRChat's speakers can't fire one. A short
+                    // window, learnt while paused too: with VRChat in front sharing the mic the
+                    // level can differ from in the app, and a stale baseline refused commands.
                     val levels = ArrayDeque<Float>()
-                    fun loudEnough(level: Float): Boolean {
-                        if (levels.size < 3) return true
-                        val median = levels.sorted()[levels.size / 2]
-                        return level >= median * VoiceCommands.MIN_LEVEL_RATIO
+                    var lastOwnEnd = -1L // end of the wearer's last phrase (for "quiet before")
+                    fun ownVoice(level: Float): Boolean {
+                        val t = typicalLevel
+                        return t <= 0f || level >= t * VoiceCommands.MIN_LEVEL_RATIO
+                    }
+                    // A real phrase was heard (kept by SpeechFilter): learn its level, and note when
+                    // the wearer last spoke. Others' quieter voices don't count as "talking".
+                    fun noteVoice(seg: Segment) {
+                        if (ownVoice(seg.level)) lastOwnEnd = seg.end
+                        if (seg.level > 0f) {
+                            levels.addLast(seg.level)
+                            if (levels.size > VoiceCommands.LEVEL_WINDOW) levels.removeFirst()
+                            typicalLevel = if (levels.size < 3) 0f else levels.sorted()[levels.size / 2]
+                        }
                     }
                     fun pauseFrom(start: Long) =
                         if (lastEnd < 0) Float.POSITIVE_INFINITY else (start - lastEnd).coerceAtLeast(0L) / SAMPLE_RATE.toFloat()
@@ -195,6 +210,7 @@ object SpeechToText {
                     fun deliver(seg: Segment, raw: String, pause: Float, ms: Long) {
                         // Made-up fillers ("okay" from a rustle) count as nothing.
                         val text = if (raw.isNotEmpty() && SpeechFilter.keep(raw, seg.voiced, seg.minVoiced, noSpace)) raw else ""
+                        if (text.isNotEmpty()) noteVoice(seg)
                         if (text.isEmpty() || seg.epoch != epoch || voicePaused) {
                             // Nothing there: take back live words shown for it, if any.
                             if (partialShown) { partialShown = false; listener.onFinal("", pause, ms) }
@@ -202,7 +218,6 @@ object SpeechToText {
                         }
                         lastEnd = seg.end
                         partialShown = false
-                        if (seg.level > 0f) { levels.addLast(seg.level); if (levels.size > 20) levels.removeFirst() }
                         listener.onFinal(text, pause, ms)
                     }
                     // Fire a command that passed every check, if it changes anything.
@@ -221,8 +236,12 @@ object SpeechToText {
                     while (!captureDone.get() || phrases.isNotEmpty()) {
                         pending?.let { pc ->
                             when {
-                                // Kept talking ("Pause! wait…"): it was conversation, in as text.
-                                talkStartedAt > pc.at -> { pending = null; deliver(pc.seg, pc.raw, pc.pause, pc.ms) }
+                                // The wearer kept talking ("Pause! wait…"): conversation, in as text.
+                                ownVoiceAt > pc.at -> {
+                                    pending = null
+                                    listener.onCommandRejected(pc.cmd, CommandMiss.KEPT_TALKING, pc.raw)
+                                    deliver(pc.seg, pc.raw, pc.pause, pc.ms)
+                                }
                                 android.os.SystemClock.elapsedRealtime() - pc.at >= VoiceCommands.CONFIRM_MS -> { pending = null; fire(pc.cmd) }
                                 // Undecided: hold everything else back so the order stays right.
                                 else -> { Thread.sleep(20); return@let }
@@ -269,12 +288,30 @@ object SpeechToText {
                         // as loud as you normally talk: wait to see you don't carry on.
                         val cmds = commands
                         val cmd = if (cmds != null && !stale && raw.isNotEmpty()) VoiceCommands.match(raw, cmds) else null
-                        if (cmd != null && pause >= VoiceCommands.QUIET_BEFORE_SEC &&
-                            seg.voiced >= VoiceCommands.MIN_VOICED && loudEnough(seg.level)
-                        ) {
-                            if (partialShown) { partialShown = false; listener.onFinal("", pause, ms) }
-                            pending = Pending(cmd, seg, raw, pause, ms, android.os.SystemClock.elapsedRealtime())
-                            continue
+                        if (cmd != null) {
+                            // Quiet before = since the WEARER last spoke (others' voices don't count).
+                            val ownPause = if (lastOwnEnd < 0) Float.POSITIVE_INFINITY
+                                else (seg.start - lastOwnEnd).coerceAtLeast(0L) / SAMPLE_RATE.toFloat()
+                            val quietNeeded = if (cmd == VoiceCommand.RESUME && voicePaused) VoiceCommands.RESUME_QUIET_SEC
+                                else VoiceCommands.QUIET_BEFORE_SEC
+                            val miss = when {
+                                ownPause < quietNeeded -> CommandMiss.TOO_SOON
+                                seg.voiced < VoiceCommands.MIN_VOICED -> CommandMiss.TOO_SHORT
+                                !ownVoice(seg.level) -> CommandMiss.TOO_QUIET
+                                else -> null
+                            }
+                            if (miss == null) {
+                                if (partialShown) { partialShown = false; listener.onFinal("", pause, ms) }
+                                pending = Pending(cmd, seg, raw, pause, ms, android.os.SystemClock.elapsedRealtime())
+                                continue
+                            }
+                            // Say why, if it would have changed something (pause while paused wouldn't).
+                            val wouldChange = when (cmd) {
+                                VoiceCommand.PAUSE -> !voicePaused
+                                VoiceCommand.RESUME -> voicePaused
+                                VoiceCommand.CLEAR -> true
+                            }
+                            if (wouldChange) listener.onCommandRejected(cmd, miss, raw)
                         }
                         deliver(seg, raw, pause, ms)
                     }
@@ -292,7 +329,6 @@ object SpeechToText {
                 var sinceVoiced = 1000 // windows since the last voiced one
                 var shown = false      // what onSpeechActive last reported
                 var heard = true       // the listen trigger's state as last applied
-                var wasTalking = false
                 // Live words: the last RING_SEC of (gained) audio, so the unfinished phrase can
                 // be re-read; total = samples written, phraseStart = where it began (-1: none).
                 val ring = FloatArray(SAMPLE_RATE * RING_SEC)
@@ -349,6 +385,8 @@ object SpeechToText {
                     }
                     val f = FloatArray(n) { pcm[it] / 32768f }
                     val voiced = Voicing.isVoiced(f)
+                    // This window's voice level before gain (compared with typicalLevel below).
+                    val rawLevel = if (voiced) rms(f) else 0f
                     gain.apply(f, voiced, level.maxGain)
                     for (v in f) { ring[(total % ring.size).toInt()] = v; total++ }
                     // Listen trigger (a VRChat param, setGate): closed = hear nothing, but the
@@ -384,8 +422,12 @@ object SpeechToText {
                     voicedRun = if (!speech) 0 else if (voiced) voicedRun + 1 else voicedRun
                     sinceVoiced = if (voiced) 0 else sinceVoiced + 1
                     val talking = speech && voicedRun >= Voicing.MIN_VOICED_WINDOWS && sinceVoiced <= QUIET_WINDOWS
-                    if (talking && !wasTalking) talkStartedAt = android.os.SystemClock.elapsedRealtime()
-                    wasTalking = talking
+                    // The wearer's own voice, about their usual loudness: what cancels a pending
+                    // command (others through the speakers used to cancel real ones).
+                    val typical = typicalLevel
+                    if (speech && voiced && (typical <= 0f || rawLevel >= typical * VoiceCommands.MIN_LEVEL_RATIO)) {
+                        ownVoiceAt = android.os.SystemClock.elapsedRealtime()
+                    }
                     // Paused by voice: no "Hearing you" / typing dots (only commands are heard).
                     val now = talking && !voicePaused
                     if (now != shown) { shown = now; listener.onSpeechActive(now) }
@@ -485,7 +527,10 @@ object SpeechToText {
     // Mic ignored until then: a command's chime must never be heard as speech.
     @Volatile private var micIgnoreUntil = 0L
     // When the wearer last started talking (capture thread): cancels a pending command.
-    @Volatile private var talkStartedAt = 0L
+    @Volatile private var ownVoiceAt = 0L
+    // The wearer's usual voice level (median of recent phrases, 0 = not known yet), shared
+    // with the capture thread so only THEIR voice cancels a pending command.
+    @Volatile private var typicalLevel = 0f
 
     /** Mic sensitivity; switching mid-dictation rebuilds only the tiny voice detector. */
     @Volatile private var sensitivity = MicSensitivity.NORMAL
@@ -635,6 +680,12 @@ object SpeechToText {
             override val hasTimes = times
             override fun release() = rec.release()
         }
+    }
+
+    private fun rms(x: FloatArray): Float {
+        var sum = 0.0
+        for (v in x) sum += v * v
+        return if (x.isEmpty()) 0f else sqrt(sum / x.size).toFloat()
     }
 
     /** Normalise a phrase's loudness (~-24 dBFS): quiet mics hurt recognition badly. */
