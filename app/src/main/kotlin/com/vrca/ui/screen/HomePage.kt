@@ -490,7 +490,11 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
     CompactSectionCard(
         title = "Manual Send",
         icon = Icons.Filled.Send,
-        summary = if (vm.manualLiveMode) "Live typing" else "Type a manual message",
+        summary = when {
+            vm.speechListening -> "Voice to text is on"
+            vm.manualLiveMode -> "Live typing"
+            else -> "Type a manual message"
+        },
         expandedState = manualExpanded,
         modifier = Modifier.bringIntoViewRequester(cardBring)
     ) {
@@ -606,10 +610,9 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
     var showPicker by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { vm.refreshSpeechModelReady() }
-    // Never leave the mic recording when the card/screen goes away.
-    DisposableEffect(Unit) {
-        onDispose { if (vm.speechListening) vm.stopDictation() }
-    }
+    // Dictation deliberately keeps running when this row leaves the screen (card
+    // collapsed, another tab, VRChat in front): it used to stop here, cutting people off.
+    // Stop = the mic button, or the Stop on the "listening" notification.
 
     val micLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -638,7 +641,8 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                         (if (vm.speechVerifying) "Verifying $name pack…" else "Downloading $name… ${vm.speechDownloadPct}%") to
                             "One-time download, then it works fully offline."
                     }
-                    !vm.speechModelReady -> "Voice to text" to "Speak instead of typing. Works offline once installed."
+                    !vm.speechModelReady -> "Voice to text" to
+                        "Speak instead of typing. ${lang?.nativeName ?: "English"}${lang?.takeIf { it.tiers.size > 1 }?.tier(vm.speechPackId)?.let { " (${it.label})" } ?: ""}, works offline once installed."
                     vm.speechLoading -> "Loading voice model…" to "This takes a few seconds."
                     // Copy says "talk normally": phrases end at the natural breath between
                     // sentences (VAD, 0.5 s), never a deliberate pause; nonstop talk still

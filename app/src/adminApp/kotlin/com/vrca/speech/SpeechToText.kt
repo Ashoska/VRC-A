@@ -17,6 +17,8 @@ object SpeechToText {
         fun onError(message: String)
         fun onSpeechActive(active: Boolean) {}
         fun onLoading(loading: Boolean) {}
+        /** Listening ended for any reason (Stop, the notification's Stop, an error). */
+        fun onStopped() {}
     }
 
     fun isListening(): Boolean = false

@@ -60,6 +60,8 @@ object SpeechToText {
         fun onSpeechActive(active: Boolean) {}
         /** True while the model loads (a few seconds on first start). */
         fun onLoading(loading: Boolean) {}
+        /** Listening ended for any reason (Stop, the notification's Stop, an error). */
+        fun onStopped() {}
     }
 
     @Volatile private var running = false
@@ -181,6 +183,7 @@ object SpeechToText {
                 runCatching { decoder?.join(15_000) } // let queued phrases finish
                 runCatching { vad?.release() }
                 runCatching { rec?.release() }
+                listener.onStopped()
             }
         }, "stt-capture")
         t.isDaemon = true

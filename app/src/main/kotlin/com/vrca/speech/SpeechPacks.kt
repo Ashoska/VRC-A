@@ -68,8 +68,10 @@ object SpeechPacks {
 
     /** Select [code] as the dictation language, using tier [packId] for it. */
     fun setSelected(ctx: Context, code: String, packId: String) {
+        // commit (not apply): written before returning, so closing the app right after
+        // picking can't lose the choice.
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_LANG, code).putString("tier_$code", packId).apply()
+            .putString(KEY_LANG, code).putString("tier_$code", packId).commit()
     }
 
     /** Remove a language pack; the shared voice detector goes too once no pack is left. */

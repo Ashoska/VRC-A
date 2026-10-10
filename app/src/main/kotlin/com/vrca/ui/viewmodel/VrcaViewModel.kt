@@ -2322,7 +2322,7 @@ class VrcaViewModel(
 
     /** Choose the dictation language + tier (pack); installs the pack if needed. */
     fun selectSpeechLanguage(code: String, packId: String) {
-        if (!speechSupported || SpeechCatalog.lang(code) == null || speechDownloading) return
+        if (!speechSupported || SpeechCatalog.lang(code) == null) return
         if (speechListening) stopDictation()
         val ctx = app.applicationContext
         SpeechPacks.setSelected(ctx, code, packId)
@@ -2330,8 +2330,15 @@ class VrcaViewModel(
         speechPackId = SpeechPacks.selectedPackId(ctx, code)
         speechError = null
         speechModelReady = SpeechPacks.isLanguageReady(ctx, code)
-        if (!speechModelReady) downloadSpeechModel()
+        if (speechDownloading) {
+            // A pick while another pack downloads used to be silently ignored (so the
+            // old choice "came back" after a restart): cancel it and fetch the new one
+            // once it has stopped (its partial file is kept for later).
+            speechDownloadAfterCancel = !speechModelReady
+            SpeechPacks.cancelDownload()
+        } else if (!speechModelReady) downloadSpeechModel()
     }
+    private var speechDownloadAfterCancel = false
 
     /** Download + verify the selected language's pack. Safe to call repeatedly. */
     fun downloadSpeechModel() {
@@ -2352,6 +2359,7 @@ class VrcaViewModel(
                     speechVerifying = false
                     if (!ok && err != "Cancelled") speechError = err ?: "Download failed"
                     refreshSpeechModelReady()
+                    if (speechDownloadAfterCancel) { speechDownloadAfterCancel = false; downloadSpeechModel() }
                 }
             },
         )
@@ -2403,6 +2411,13 @@ class VrcaViewModel(
             }
             override fun onLoading(loading: Boolean) {
                 viewModelScope.launch(Dispatchers.Main) { speechLoading = loading }
+            }
+            override fun onStopped() {
+                // Also covers the notification's Stop and errors, not just our button.
+                viewModelScope.launch(Dispatchers.Main) {
+                    if (speechHearing) speechOsc().typing = false
+                    speechListening = false; speechHearing = false; speechLoading = false
+                }
             }
         })
         speechListening = started
@@ -3012,6 +3027,10 @@ class VrcaViewModel(
     private val cyclePresetEnabled = mutableStateListOf("", "", "", "", "")
 
     init {
+        // Saved voice-to-text language + tier right away (not only once Manual Send is
+        // opened), so the picker and Settings show the real choice after a restart.
+        refreshSpeechModelReady()
+
         // Restore the last-synced baseline from the previous session so the
         // delta writer knows what Firestore already has. Enables cold-open
         // delta writes (only changed content + liveness) instead of full

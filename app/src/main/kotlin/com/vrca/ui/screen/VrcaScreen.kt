@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
@@ -716,6 +717,15 @@ fun VrcaScreen(
                         }
                     },
                     actions = {
+                        // Voice to text keeps listening on every tab (and in VRChat), and
+                        // Quest shows no app notifications, so a stop button lives here,
+                        // visible only while it's on.
+                        if (chatboxViewModel.speechListening) {
+                            IconButton(onClick = { chatboxViewModel.stopDictation() }) {
+                                Icon(Icons.Filled.Mic, contentDescription = "Stop voice to text",
+                                    tint = MaterialTheme.colorScheme.error)
+                            }
+                        }
                         // Headset ONLY: alerts live in this top-bar notification
                         // button. Phones/admin keep the alert cards at the top of Home.
                         if (BuildConfig.IS_HEADSET_BUILD) {
