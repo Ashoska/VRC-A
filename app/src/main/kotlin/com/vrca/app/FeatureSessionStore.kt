@@ -105,10 +105,12 @@ object FeatureSessionStore {
         }
     }
 
-    /** Disarm restore. Called on a deliberate swipe so the next launch starts clean. */
+    /** Disarm restore. Called on a deliberate swipe so the next launch starts clean
+     *  (voice to text included: it isn't put back either). */
     fun disarm(context: Context) {
         try {
             prefs(context).edit().putBoolean(KEY_ARMED, false).apply()
         } catch (_: Throwable) {}
+        com.vrca.speech.DictationRestore.clear(context)
     }
 }

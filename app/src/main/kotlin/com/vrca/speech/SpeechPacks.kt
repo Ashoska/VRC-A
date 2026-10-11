@@ -22,7 +22,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object SpeechPacks {
     private const val TAG = "SpeechPacks"
-    private const val PREFS = "vrca_speech"
+    /** Also holds DictationRestore's "restore_*" keys. */
+    internal const val PREFS = "vrca_speech"
     private const val KEY_LANG = "lang"
     private const val OK_MARKER = ".ok"
     private const val FREE_SPACE_MARGIN = 50L * 1024 * 1024

@@ -388,6 +388,21 @@ fun VrcaApp() {
         factory = VrcaViewModel.Factory
     )
 
+    // Whether VRC-A's screen is showing: voice to text that Android stopped (by closing
+    // VRC-A) comes back then, since a mic can only be started while VRC-A is on screen.
+    val screenLifecycle = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(screenLifecycle) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> vm.setAppOnScreen(true)
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> vm.setAppOnScreen(false)
+                else -> {}
+            }
+        }
+        screenLifecycle.lifecycle.addObserver(obs)
+        onDispose { screenLifecycle.lifecycle.removeObserver(obs); vm.setAppOnScreen(false) }
+    }
+
     var releaseCheckResult by remember { mutableStateOf<ReleaseCheckResult?>(null) }
     var updateDismissed    by remember { mutableStateOf(false) }
     var downloadId         by remember { mutableLongStateOf(-1L) }

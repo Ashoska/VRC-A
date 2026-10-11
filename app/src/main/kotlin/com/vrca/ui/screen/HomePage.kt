@@ -766,6 +766,11 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                 Text(err, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 4.dp))
             }
+            // Why it stopped (or the mic dropped out) without being asked, until the mic is tapped.
+            vm.speechNotice?.let { note ->
+                Text(note, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp))
+            }
         }
     }
     if (showPicker) {
