@@ -3,21 +3,25 @@ package com.vrca.speech
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.os.SystemClock
+import android.util.Log
 import kotlin.math.PI
 import kotlin.math.sin
 
 /**
  * Short chimes confirming a voice command, since you can't see the app in VR and the
  * chatbox mustn't show it: falling = paused, rising = resumed, a double blip = cleared.
- * Generated tones (no assets), played as a sonification over whatever VRChat plays. The
- * engine ignores the mic while one plays, so a chime is never heard as speech.
+ * Generated tones (no assets), played on the game/media volume next to VRChat's audio (the
+ * system-sounds volume can be muted on its own). The engine ignores the mic meanwhile, so a
+ * chime is never heard as speech.
  */
 object CommandSounds {
     private const val RATE = 22_050
     private const val AMP = 0.22
 
-    /** How long the mic is ignored after a command fires (covers the chime + echo). */
-    const val MIC_IGNORE_MS = 600L
+    /** How long the mic is ignored after a command fires (covers the chime + echo, also on
+     *  an output with extra delay such as Bluetooth headphones). */
+    const val MIC_IGNORE_MS = 900L
 
     fun play(cmd: VoiceCommand) {
         val pcm = when (cmd) {
@@ -29,7 +33,7 @@ object CommandSounds {
             runCatching {
                 val track = AudioTrack.Builder()
                     .setAudioAttributes(AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                        .setUsage(AudioAttributes.USAGE_GAME)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
                     .setAudioFormat(AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(RATE)
@@ -40,9 +44,16 @@ object CommandSounds {
                 try {
                     track.write(pcm, 0, pcm.size)
                     track.play()
-                    Thread.sleep(pcm.size * 1000L / RATE + 100)
+                    // Release only once every frame has been played out. A fixed sleep (the
+                    // sound's length + 0.1 s) cut the chime off before it was heard on outputs
+                    // with more delay, e.g. Bluetooth (user-reported: commands worked, no sound).
+                    val deadline = SystemClock.elapsedRealtime() + 3_000
+                    while (track.playbackHeadPosition < pcm.size && SystemClock.elapsedRealtime() < deadline) {
+                        Thread.sleep(20)
+                    }
+                    Thread.sleep(300) // what's already in the output path still has to drain
                 } finally { track.release() }
-            }
+            }.onFailure { Log.w("CommandSounds", "chime failed", it) }
         }, "command-sound").apply { isDaemon = true }.start()
     }
 
