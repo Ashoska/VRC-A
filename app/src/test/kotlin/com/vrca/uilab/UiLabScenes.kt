@@ -102,7 +102,8 @@ object UiLabScenes {
         "sending", "idle", "warned", "banned", "auth-dead", "logged-out", "nowplaying", "paused", "ad",
         "roster", "roster-empty", "manual", "owner", "osc-params",
         "voice", "voice-listening", "voice-hearing", "voice-loading", "voice-stopping",
-        "voice-paused", "voice-trigger", "voice-learning", "voice-teach-loading", "voice-downloading"
+        "voice-paused", "voice-trigger", "voice-learning", "voice-teach-loading", "voice-downloading",
+        "voice-stopped", "voice-restored"
     )
 
     fun preset(d: UiLabDriver, name: String): String {
@@ -176,7 +177,8 @@ object UiLabScenes {
             // install check passes. The others add a state on top (the engine itself can't
             // run on the JVM: its native libs are Android-only). Expand Manual Send to see it.
             "voice", "voice-listening", "voice-hearing", "voice-loading", "voice-stopping",
-            "voice-paused", "voice-trigger", "voice-learning", "voice-teach-loading", "voice-downloading" -> {
+            "voice-paused", "voice-trigger", "voice-learning", "voice-teach-loading", "voice-downloading",
+            "voice-stopped", "voice-restored" -> {
                 installVoicePack(ctx, "en", "kroko-en")
                 val vm = d.vm
                 setObj(vm, "speechLanguage", "en"); setObj(vm, "speechPackId", "kroko-en")
@@ -188,7 +190,8 @@ object UiLabScenes {
                     "speechPaused", "speechTriggerMissing").forEach { setObj(vm, it, false) }
                 setObj(vm, "speechListenParam", null); setObj(vm, "speechLearning", null)
                 setObj(vm, "speechLearnHeard", emptyList<String>()); setObj(vm, "speechDownloadingLang", null)
-                val listening = name !in setOf("voice", "voice-stopping", "voice-downloading")
+                setObj(vm, "speechNotice", null)
+                val listening = name !in setOf("voice", "voice-stopping", "voice-downloading", "voice-stopped")
                 if (listening) setObj(vm, "speechListening", true)
                 when (name) {
                     "voice-hearing" -> setObj(vm, "speechHearing", true)
@@ -207,6 +210,11 @@ object UiLabScenes {
                         setObj(vm, "speechLearnHeard", listOf("Pause.", "Paws."))
                     }
                     "voice-downloading" -> { setObj(vm, "speechDownloadingLang", "en"); setObj(vm, "speechDownloadPct", 42) }
+                    // Android closed VRC-A mid-dictation (DictationRestore): the card says why.
+                    "voice-stopped", "voice-restored" -> setObj(vm, "speechNotice",
+                        "Stopped at 9:14 PM: the headset ran low on memory and closed VRC-A " +
+                            "(it was using 1.1 GB). A smaller voice model uses less memory." +
+                            if (name == "voice-restored") " It came back on when you opened VRC-A." else " Tap the mic to start again.")
                 }
             }
             "osc-params" -> Thread {

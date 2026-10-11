@@ -155,6 +155,9 @@ class VrcaViewModel(
         private const val SPEECH_SCROLL_GAP_MS = 1_500L
         // "Teach my voice" records a command word this many times.
         const val LEARN_TIMES = 3
+        // Dictation Android stopped (closed VRC-A): the "stopped" sound only plays when the
+        // stop was this recent (a late restart's sound out of nowhere would just confuse).
+        private const val SPEECH_STOP_SOUND_MS = 5 * 60_000L
 
         private const val META_STABLE_MS = 1_100L
         private const val META_CONFIRM_MOVE_MS = 900L
@@ -2331,6 +2334,15 @@ class VrcaViewModel(
      *  until the next command or session so a miss in VRChat can be read afterwards. */
     var speechCommandNote by mutableStateOf<String?>(null)
         private set
+    /** Why voice to text stopped, or the mic dropped out, without being asked (Android closed
+     *  VRC-A, its audio restarted): kept on the card until the mic is next tapped. */
+    var speechNotice by mutableStateOf<String?>(null)
+        private set
+    // Dictation Android stopped by closing VRC-A (DictationRestore), put back once VRC-A is on
+    // screen: Android only lets a mic start then.
+    private var speechResume: com.vrca.speech.DictationRestore.Stopped? = null
+    // VRC-A's screen is showing (ON_RESUME until ON_PAUSE, from VrcaApp).
+    private var appOnScreen = false
     /** "Teach my voice": the command whose word is being recorded, and what the model heard. */
     var speechLearning by mutableStateOf<com.vrca.speech.VoiceCommand?>(null)
         private set
@@ -2355,7 +2367,8 @@ class VrcaViewModel(
         private set
     val speechDownloading: Boolean get() = speechDownloadingLang != null
 
-    fun refreshSpeechModelReady() {
+    /** Re-reads the saved language, tier and settings; [then] runs (main thread) once they're in. */
+    fun refreshSpeechModelReady(then: (() -> Unit)? = null) {
         if (!speechSupported) return
         val ctx = app.applicationContext
         viewModelScope.launch(Dispatchers.IO) {
@@ -2375,6 +2388,7 @@ class VrcaViewModel(
                 speechListenParam = listenParam; speechListenWhenOn = listenWhenOn
                 speechCommandsOn = commandsOn; speechCommandWords = commandWords
                 speechLive = live; speechSensitivity = sens
+                then?.invoke()
             }
         }
     }
@@ -2587,9 +2601,10 @@ class VrcaViewModel(
      * stream to the chatbox and long speech scrolls. Caller MUST have RECORD_AUDIO
      * (the UI checks/requests). Pack missing → start its download instead.
      */
-    fun startDictation(local: Boolean = false) {
+    fun startDictation(local: Boolean = false, restored: Boolean = false) {
         if (!speechSupported || isBanned || speechListening || speechLoading || speechStopping) return
         if (!speechModelReady) { downloadSpeechModel(); return }
+        if (!restored) { speechNotice = null; speechResume = null; com.vrca.speech.DictationRestore.clear(app.applicationContext) }
         speechError = null
         setManualLiveModeFlag(true)
         setManualScrollFlag(true)
@@ -2604,6 +2619,9 @@ class VrcaViewModel(
         // Locked at once (the engine's own onLoading arrives a moment later): a second
         // tap in between used to stop it again before it had loaded.
         speechLoading = true
+        // Recorded so a session Android ends by closing VRC-A can be put back (DictationRestore).
+        // Before the start: the engine's own end (onStopped → ended) must come after it.
+        com.vrca.speech.DictationRestore.started(app.applicationContext, local)
         val started = SpeechToText.start(app.applicationContext, speechLanguage, object : SpeechToText.Listener {
             override fun onPartial(text: String, pauseBeforeSec: Float) {
                 // VRChat's own words spelled right ("VR chat" → VRChat, "chat box" → chatbox).
@@ -2625,7 +2643,14 @@ class VrcaViewModel(
             }
             override fun onError(message: String) {
                 viewModelScope.launch(Dispatchers.Main) {
+                    // Stopped mid-session while you're in VRChat: the "stopped" sound says so.
+                    if (speechListening && !appOnScreen) com.vrca.speech.CommandSounds.stopped()
                     speechError = message; speechListening = false; speechLoading = false; speechHearing = false
+                }
+            }
+            override fun onMicReconnected() {
+                viewModelScope.launch(Dispatchers.Main) {
+                    speechNotice = "The microphone dropped out at ${clockTime(System.currentTimeMillis())} and reconnected by itself."
                 }
             }
             override fun onSpeechActive(active: Boolean) {
@@ -2649,6 +2674,8 @@ class VrcaViewModel(
             }
             override fun onStopped() {
                 // Also covers the notification's Stop and errors, not just our button.
+                // Ended inside the process: nothing to put back after a restart.
+                com.vrca.speech.DictationRestore.ended(app.applicationContext)
                 viewModelScope.launch(Dispatchers.Main) {
                     if (speechHearing) speechOsc().typing = false
                     speechListening = false; speechHearing = false; speechLoading = false; speechStopping = false
@@ -2660,12 +2687,13 @@ class VrcaViewModel(
             }
         })
         speechListening = started
-        if (!started) { stopSpeechGate(); speechLoading = false }
+        if (!started) { com.vrca.speech.DictationRestore.ended(app.applicationContext); stopSpeechGate(); speechLoading = false }
         if (!started && speechError == null) speechError = "Couldn't start the microphone."
     }
 
     fun stopDictation() {
         if (!speechSupported) return
+        speechNotice = null; speechResume = null
         // Locked until the engine reports it has fully stopped (onStopped).
         if (speechListening) speechStopping = true
         SpeechToText.stop()
@@ -2677,6 +2705,60 @@ class VrcaViewModel(
         speechVoicePaused = false
         // Text still queued keeps going in at its pace (it was said; don't drop it).
     }
+
+    /**
+     * At start: dictation that was on when Android closed VRC-A (low memory, a crash). The
+     * card says why (Android's exit record), and it comes back once VRC-A is on screen
+     * (a mic can't start from the background). Before, everything else came back on its own
+     * and only dictation silently stayed off (user-reported after a lag spike in VRChat).
+     */
+    private fun checkSpeechAfterKill() {
+        if (!speechSupported) return
+        val ctx = app.applicationContext
+        val stopped = com.vrca.speech.DictationRestore.check(ctx) ?: return
+        speechNotice = speechStopText(stopped, back = false)
+        if (!stopped.resume) { com.vrca.speech.DictationRestore.clear(ctx); return }
+        speechResume = stopped
+        if (appOnScreen) { resumeSpeechAfterKill(); return }
+        // In VRChat the card can't be seen: the "stopped" sound tells you (once, if recent).
+        if (stopped.fresh && System.currentTimeMillis() - stopped.atMs < SPEECH_STOP_SOUND_MS) {
+            viewModelScope.launch {
+                delay(2_000L) // VRC-A may be opening right now: then it just comes back on
+                if (!appOnScreen && speechResume != null) com.vrca.speech.CommandSounds.stopped()
+            }
+        }
+    }
+
+    /** VRC-A's screen shows (ON_RESUME) or not (ON_PAUSE); dictation Android stopped comes back then. */
+    fun setAppOnScreen(on: Boolean) {
+        appOnScreen = on
+        if (on && speechResume != null) resumeSpeechAfterKill()
+    }
+
+    private fun resumeSpeechAfterKill() {
+        val stopped = speechResume ?: return
+        speechResume = null
+        val ctx = app.applicationContext
+        com.vrca.speech.DictationRestore.clear(ctx)
+        val micOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!micOk || System.currentTimeMillis() - stopped.atMs > com.vrca.speech.DictationRestore.RESUME_WINDOW_MS) return
+        // The saved language + tier load in the background at start: begin once they're in.
+        refreshSpeechModelReady {
+            if (!speechModelReady || isBanned || speechListening || speechLoading || speechStopping) return@refreshSpeechModelReady
+            if (!appOnScreen) { speechResume = stopped; return@refreshSpeechModelReady } // left again: next time
+            startDictation(stopped.local, restored = true)
+            if (speechListening) speechNotice = speechStopText(stopped, back = true)
+        }
+    }
+
+    private fun speechStopText(s: com.vrca.speech.DictationRestore.Stopped, back: Boolean): String =
+        "Stopped at ${clockTime(s.atMs)}: ${s.why}." +
+            (if (s.lowMemory) " A smaller voice model uses less memory." else "") +
+            (if (back) " It came back on when you opened VRC-A." else " Tap the mic to start again.")
+
+    private fun clockTime(ms: Long): String =
+        java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(ms))
 
     // Which OSC target dictation drives (remote vs local), for the typing dots.
     private var speechLocal = false
@@ -3573,6 +3655,8 @@ class VrcaViewModel(
             // makes the chatbox resume on its own — including headlessly, when a
             // service (KeepAliveService) recreated this ViewModel without any UI.
             restoreFeatureSession()
+            // Voice to text that was on when Android closed VRC-A: say why, put it back on screen.
+            checkSpeechAfterKill()
             // Read-before-write: fetch the Firestore doc so admin edits
             // made while the user was offline aren't clobbered by our
             // app-open write. Toggles always start OFF per design, so we

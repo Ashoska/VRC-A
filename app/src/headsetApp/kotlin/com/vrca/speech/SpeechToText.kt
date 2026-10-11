@@ -57,7 +57,6 @@ object SpeechToText {
     // 0.25 s; never reaches back into the previous phrase (clamped to its end).
     private const val PRE_ROLL = SAMPLE_RATE / 2L   // 0.5 s
     private const val POST_ROLL = SAMPLE_RATE / 5L  // 0.2 s
-    /** Free memory that must remain above Android's low-memory line after loading a model. */
     /** Written without spaces between words (live words join without them). */
     private val NO_SPACE = setOf("zh", "yue", "ja")
     /** Live words: re-read the unfinished phrase at most this often / at least this often. */
@@ -71,6 +70,11 @@ object SpeechToText {
     // Live words wait for this much voice (~0.2 s): a cough or hum used to flash a
     // made-up "okay" before its final took it back.
     private const val LIVE_MIN_VOICED = 6
+    /** Mic lost (reads fail): wait this long between tries, open a new one every few tries,
+     *  give up (an error) after MIC_GIVE_UP_MS. */
+    private const val MIC_RETRY_MS = 100L
+    private const val MIC_REOPEN_EVERY = 4
+    private const val MIC_GIVE_UP_MS = 10_000L
 
     interface Listener {
         /**
@@ -97,6 +101,8 @@ object SpeechToText {
         /** A command word was heard on its own but not acted on, and why ([heard] = what the
          *  model wrote). Only for commands that would have changed something. */
         fun onCommandRejected(command: VoiceCommand, miss: CommandMiss, heard: String) {}
+        /** The mic stopped delivering audio and a new one was opened (it keeps listening). */
+        fun onMicReconnected() {}
     }
 
     @Volatile private var running = false
@@ -317,11 +323,20 @@ object SpeechToText {
                     }
                 }, "stt-decode").apply { isDaemon = true; start() }
 
-                val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-                audio = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, SAMPLE_RATE * 2))
-                if (audio.state != AudioRecord.STATE_INITIALIZED) { listener.onError("Microphone unavailable."); return@Thread }
-                audio.startRecording()
+                // A recording mic, or null if Android won't give one right now.
+                fun openMic(): AudioRecord? {
+                    val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+                    val a = runCatching {
+                        AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE,
+                            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, SAMPLE_RATE * 2))
+                    }.getOrNull() ?: return null
+                    if (a.state != AudioRecord.STATE_INITIALIZED || runCatching { a.startRecording() }.isFailure) {
+                        runCatching { a.release() }; return null
+                    }
+                    return a
+                }
+                audio = openMic()
+                if (audio == null) { listener.onError("Microphone unavailable."); return@Thread }
 
                 val pcm = ShortArray(512) // 32 ms windows
                 val gain = Agc()
@@ -391,9 +406,31 @@ object SpeechToText {
                         phraseStart = -1L
                     }
                 }
+                var micFails = 0        // reads in a row that gave no audio
+                var reopened = false    // a new mic was opened: say so once it delivers
                 while (running) {
-                    val n = audio.read(pcm, 0, pcm.size)
-                    if (n <= 0) continue
+                    val mic = audio
+                    val n = mic?.read(pcm, 0, pcm.size) ?: AudioRecord.ERROR_DEAD_OBJECT
+                    if (n <= 0) {
+                        // The mic stopped delivering, e.g. ERROR_DEAD_OBJECT once Android's audio
+                        // service restarted (it can on a heavy hitch). Retrying the dead one
+                        // returned at once, forever: a core spun at audio priority and nothing
+                        // more was heard. Wait a little, open a new one, give up after ~10 s.
+                        micFails++
+                        if (micFails * MIC_RETRY_MS >= MIC_GIVE_UP_MS) {
+                            listener.onError("Lost the microphone (Android's audio stopped, error $n). Tap the mic to start again.")
+                            break
+                        }
+                        Thread.sleep(MIC_RETRY_MS)
+                        if (micFails % MIC_REOPEN_EVERY == 0) {
+                            mic?.let { runCatching { it.stop() }; runCatching { it.release() } }
+                            audio = openMic()
+                            if (audio != null) reopened = true
+                        }
+                        continue
+                    }
+                    micFails = 0
+                    if (reopened) { reopened = false; listener.onMicReconnected() }
                     if (sensitivity != level) {
                         // Switched in the picker: finish the current phrase on the old detector,
                         // then a new one (0.6 MB, instant); the speech model stays loaded.

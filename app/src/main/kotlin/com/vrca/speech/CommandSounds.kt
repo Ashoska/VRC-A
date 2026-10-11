@@ -10,7 +10,8 @@ import kotlin.math.sin
 
 /**
  * Short chimes confirming a voice command, since you can't see the app in VR and the
- * chatbox mustn't show it: falling = paused, rising = resumed, a double blip = cleared.
+ * chatbox mustn't show it: falling = paused, rising = resumed, a double blip = cleared,
+ * and three falling notes = voice to text stopped by itself ([stopped]).
  * Generated tones (no assets), played on the game/media volume next to VRChat's audio (the
  * system-sounds volume can be muted on its own). The engine ignores the mic meanwhile, so a
  * chime is never heard as speech.
@@ -23,12 +24,17 @@ object CommandSounds {
      *  an output with extra delay such as Bluetooth headphones). */
     const val MIC_IGNORE_MS = 900L
 
-    fun play(cmd: VoiceCommand) {
-        val pcm = when (cmd) {
-            VoiceCommand.PAUSE -> tones(784, 523)
-            VoiceCommand.RESUME -> tones(523, 784)
-            VoiceCommand.CLEAR -> tones(988, 988)
-        }
+    fun play(cmd: VoiceCommand) = play(when (cmd) {
+        VoiceCommand.PAUSE -> tones(784, 523)
+        VoiceCommand.RESUME -> tones(523, 784)
+        VoiceCommand.CLEAR -> tones(988, 988)
+    })
+
+    /** Voice to text stopped without being asked (Android closed VRC-A, the mic was lost)
+     *  while you're in VRChat and can't see the card: three falling notes, lower than "paused". */
+    fun stopped() = play(tones(659, 523, 392))
+
+    private fun play(pcm: ShortArray) {
         Thread({
             runCatching {
                 val track = AudioTrack.Builder()
