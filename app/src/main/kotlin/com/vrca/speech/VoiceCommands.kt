@@ -40,7 +40,7 @@ object VoiceCommands {
     const val RESUME_QUIET_SEC = 0.5f
     const val CONFIRM_MS = 500L
     const val MIN_VOICED = 4
-    const val MIN_LEVEL_RATIO = 0.4f
+    const val MIN_LEVEL_RATIO = 0.35f
     const val LEVEL_WINDOW = 8
 
     private fun cmds(pause: List<String>, resume: List<String>, clear: List<String>) =
