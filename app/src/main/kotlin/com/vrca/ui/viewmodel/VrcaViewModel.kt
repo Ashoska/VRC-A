@@ -148,7 +148,7 @@ class VrcaViewModel(
         // Normal speech is slower than both, so they only smooth out bursts.
         private const val SPEECH_MIN_LINE_MS = 6_000L
         // Dictated text: the chatbox goes back to normal once every piece on it has had its
-        // reading time (ReadingTime: ~8 s for "yeah", ~20 s for a full chatbox), and at least
+        // reading time (ReadingTime: ~8 s for "yeah", ~16 s for a full chatbox), and at least
         // this long after the last change (live words have no piece yet). Typed messages keep
         // MANUAL_HOLD_MS (20 s).
         private const val SPEECH_HOLD_MS = 8_000L
