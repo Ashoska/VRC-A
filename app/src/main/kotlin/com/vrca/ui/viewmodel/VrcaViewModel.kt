@@ -2867,6 +2867,13 @@ class VrcaViewModel(
     private var lastChangeBySpeech = false
 
     fun onMessageTextChange(message: TextFieldValue, local: Boolean = false) {
+        // Same text, only the cursor/selection moved (or the field echoing back a value we
+        // just set, which the IME does): not an edit. Treated as typing, it gave dictated
+        // text the 20 s typed-message hold (user-reported: last words stayed 20-30 s).
+        if (!speechChanging && message.text == messageText.value.text) {
+            messageText.value = message
+            return
+        }
         lastChangeBySpeech = speechChanging
         val osc = if (!local) remoteVrcaOsc else localVrcaOsc
         messageText.value = message
@@ -2946,13 +2953,21 @@ class VrcaViewModel(
         stashedMessage = ""
         remoteVrcaOsc.typing = false
         localVrcaOsc.typing = false
-        revertToNormalChatbox(local)
-        // VRChat silently drops a chatbox message sent < 0.5 s after the previous one, and
-        // live dictation/typing sends often, so a single revert was often swallowed and the
-        // dictated text stayed up (user-reported). Re-send it twice (like Stop's robust clear),
-        // unless something new was sent meanwhile.
+        // VRChat silently drops a chatbox message sent < 0.5 s after the previous one. Send
+        // the revert as soon as that allows: sent blindly right after a live send it was
+        // dropped and only the re-send at +0.6 s landed, so Clear looked ~1 s late
+        // (user-reported). Then re-send it twice (like Stop's robust clear) in case it was
+        // still swallowed, unless something new was sent meanwhile.
+        val osc = if (!local) remoteVrcaOsc else localVrcaOsc
+        val floorWait = osc.lastChatboxSendMs + SEND_FLOOR_MS + 50 - System.currentTimeMillis()
+        if (floorWait <= 0) revertToNormalChatbox(local)
         clearRevertJob?.cancel()
         clearRevertJob = viewModelScope.launch {
+            if (floorWait > 0) {
+                delay(floorWait)
+                if (manualHoldUntilMs != 0L || messageText.value.text.isNotEmpty()) return@launch
+                revertToNormalChatbox(local)
+            }
             for (wait in longArrayOf(600L, 700L)) {
                 delay(wait)
                 if (manualHoldUntilMs != 0L || messageText.value.text.isNotEmpty()) return@launch
@@ -3054,7 +3069,10 @@ class VrcaViewModel(
                     // An old dictated sentence timing out isn't new speech: no hold, no dots.
                     if (text != speechExpiredText) {
                         val now = System.currentTimeMillis()
-                        manualHoldUntilMs = if (lastChangeBySpeech) speechHoldUntil(now) else now + MANUAL_HOLD_MS
+                        // Dictation timing whenever the field holds exactly what dictation wrote,
+                        // whatever touched it last (a stray field callback flipped the flag).
+                        val bySpeech = lastChangeBySpeech || text == speechFieldSet
+                        manualHoldUntilMs = if (bySpeech) speechHoldUntil(now) else now + MANUAL_HOLD_MS
                         if (!typingOn) { osc.typing = true; typingOn = true }
                     }
                 } else if (!manualHoldActive()) {
