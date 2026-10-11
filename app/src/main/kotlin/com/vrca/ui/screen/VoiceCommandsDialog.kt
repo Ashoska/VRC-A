@@ -71,6 +71,8 @@ internal fun VoiceCommandsDialog(
                 Text("Voice commands", style = MaterialTheme.typography.labelLarge)
                 ActionPill("On", filled = enabled, onClick = { onEnabled(true) })
                 ActionPill("Off", filled = !enabled, onClick = { onEnabled(false) })
+                // Hear the confirmation chime without saying a command (checks the volume).
+                ActionPill("Test sound", filled = false, onClick = { com.vrca.speech.CommandSounds.play(VoiceCommand.RESUME) })
             }
             Text(
                 "Say a command word on its own, after a short silence, as loud as you normally talk. " +
