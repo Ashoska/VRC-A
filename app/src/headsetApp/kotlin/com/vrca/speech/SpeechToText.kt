@@ -654,11 +654,33 @@ object SpeechToText {
         fun release()
     }
 
+    /**
+     * ONNX Runtime settings for the speech models, from a file sherpa-onnx reads when the
+     * provider is "cpu:<path>". Measured on the bench (English Large, the app's sherpa-onnx
+     * 1.13.8 / ONNX Runtime 1.28.2): no memory arena = ~190 MB less held after talking a
+     * while (the arena kept the biggest sentence's working memory: 794 vs 982 MB); no
+     * spinning = ~11% less CPU in total (idle threads busy-waited after every decode, next
+     * to VRChat); together ~7% slower per sentence. Plain "cpu" if the file can't be
+     * written: sherpa-onnx ends the whole process when it can't open a named config.
+     */
+    private fun runtimeProvider(ctx: Context): String = runCatching {
+        val f = java.io.File(ctx.filesDir, "stt/ort-session.cfg")
+        val body = "EnableCpuMemArena=0\n" +
+            "SessionConfig.session.intra_op.allow_spinning=0\n" +
+            "SessionConfig.session.inter_op.allow_spinning=0\n"
+        if (!f.isFile || f.readText() != body) { f.parentFile?.mkdirs(); f.writeText(body) }
+        if (f.canRead() && f.readText() == body && ':' !in f.absolutePath) "cpu:${f.absolutePath}" else "cpu"
+    }.getOrDefault("cpu")
+
     private fun phraseDecoder(ctx: Context, pack: SpeechCatalog.Pack, langCode: String): PhraseDecoder {
         // File names differ per pack (e.g. Parakeet ships int8 decoders, GigaAM fp32),
         // so resolve them from the catalog by prefix.
         fun p(prefix: String) = SpeechPacks.filePath(ctx, pack.id, pack.files.first { it.name.startsWith(prefix) }.name)
         fun pc(part: String) = SpeechPacks.filePath(ctx, pack.id, pack.files.first { it.name.contains(part) }.name)
+        val provider = runtimeProvider(ctx)
+        fun offline(config: OfflineRecognizerConfig, times: Boolean = true) =
+            offlineDecoder(config.copy(modelConfig = config.modelConfig.copy(provider = provider)), times)
+        fun online(model: OnlineModelConfig) = onlineDecoder(model.copy(provider = provider))
         return when (pack.kind) {
             SpeechCatalog.Kind.NEMO_TRANSDUCER -> offline(OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
@@ -742,7 +764,7 @@ object SpeechToText {
     }
 
     /** Streaming models (Kroko, small Russian/Chinese), fed one phrase at a time. */
-    private fun online(model: OnlineModelConfig): PhraseDecoder {
+    private fun onlineDecoder(model: OnlineModelConfig): PhraseDecoder {
         val rec = OnlineRecognizer(config = OnlineRecognizerConfig(
             featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80, dither = 0f),
             modelConfig = model,
@@ -766,7 +788,7 @@ object SpeechToText {
         }
     }
 
-    private fun offline(config: OfflineRecognizerConfig, times: Boolean = true): PhraseDecoder {
+    private fun offlineDecoder(config: OfflineRecognizerConfig, times: Boolean = true): PhraseDecoder {
         val rec = OfflineRecognizer(config = config)
         return object : PhraseDecoder {
             override fun hyp(seg: FloatArray): Hyp {

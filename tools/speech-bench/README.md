@@ -54,7 +54,16 @@ $PY tools/speech-bench/score.py $W/results
 
 # 5. Tiers of one language: are neighbouring sizes really different? (run with BENCH_LIMIT=200)
 $PY tools/speech-bench/compare.py $W/results de_de pk3,c180,kroko-de   # biggest first
+
+# 6. Memory + speed under ONNX Runtime settings (one fresh process per run; '-' = plain cpu)
+$PY tools/speech-bench/mem_probe.py $W/models/pk2en nemo_transducer \
+  "EnableCpuMemArena=0;SessionConfig.session.intra_op.allow_spinning=0;SessionConfig.session.inter_op.allow_spinning=0" \
+  $W/data/sets/clean
 ```
+
+`mem_probe.py` is how the app's runtime settings were chosen (`results-2026-10-11-memory.txt`):
+"held" (after 40 sentences) is what a model keeps while you're quiet, the number that decides
+whether Android closes VRC-A next to VRChat. `quant_int4.py` builds a 4-bit Parakeet encoder.
 
 `run.py` lists the engine kinds; a new model family = one `elif kind == ...` that builds
 `tr(x, iso)` (copy the nearest sherpa one). Prefer sherpa-onnx kinds — that's what the app
@@ -104,4 +113,6 @@ Canary-1B-v2 in sherpa format (won 21/25 European languages; ~1.9 GB RAM), a Kor
 under 1 GB that beats Whisper small's 4.0%, Hebrew, faster "other languages" than
 Omnilingual-1B, a single-file build of the Thai zipformer (7.9, beats Omnilingual-1B's 9.3),
 and models with token timestamps (live words lock in only with timestamps; Canary and
-Whisper re-read the whole sentence).
+Whisper re-read the whole sentence). 4-bit Large models (`quant_int4.py`): as accurate as int8
+for English, and should be ~150-200 MB lighter on ARM, but that needs measuring on a headset
+(x86 re-packs them bigger; see results-2026-10-11-memory.txt).

@@ -1,0 +1,40 @@
+Voice model memory, 2026-10-11 (mem_probe.py; sherpa-onnx 1.13.8 = the app's AAR, which bundles
+ONNX Runtime 1.28.2; desktop x86, 2 decode threads like the app). MB above the process baseline.
+"held" = still allocated after 40 mixed sentences, i.e. what the model keeps while you're quiet.
+Run-to-run noise: ~5 MB (default run repeated: 978 / 982).
+
+Settings go in a provider-config file (provider = "cpu:<file>"; keys: EnableCpuMemArena,
+EnableMemPattern, SessionConfig.<any ONNX Runtime session key>). The app now uses the first row
+marked APP for every model (stt/ort-session.cfg, SpeechToText.runtimeProvider).
+
+English Large (Parakeet TDT 0.6B v2 int8, 652 MB encoder file)
+  setting                                   loaded  peak  held  speed (RTF)  CPU/wall
+  default                                      769   978   978    0.092        2.08
+  no memory arena                              765   923   799    0.094        2.07
+  device allocator for weights                 765   974   974    0.090        2.08
+  no prepacking                                671   894   894    0.102        2.08
+  no memory patterns                           769   927   927    0.089        2.07
+  no spinning                                  769   978   978    0.097        1.71
+  APP: no arena + no spinning                  765   920   794    0.096        1.72
+  no arena + no spinning + no prepacking       671   836   710    0.109        1.74
+  After freeing the model ~627 MB stayed allocated in-process (glibc keeps freed memory;
+  Android's allocator returns more, but only ending the process guarantees it).
+
+English Large 4-bit (quant_int4.py: linear layers MatMulNBits block 32, convs int8; 452 MB file)
+  accuracy: 200 FLEURS en_us clips, int8 6.2% vs 4-bit 6.4% wrong, +0.3 pts 95% [-0.2, +0.7]: TIE
+  default                                      779   988   988    0.110        2.07
+  no arena + no spinning                       779   927   802    0.116        1.73
+  no arena + no spinning + no prepacking       478   642   519    0.268        1.85
+  Why no saving with prepacking: x86 MLAS re-packs 4-bit weights for its int8 kernels at ~0.75
+  bytes/weight (4-bit + fp32 scale + block sum). ARM64 with KleidiAI packs at ~0.56 B/weight
+  (4-bit + bf16 scale), so on the Quest it should land ~150-200 MB under int8 at similar
+  speed: only an on-headset run can confirm it.
+
+Canary 180M (English/French, int8; autoregressive decoder)
+  default                                      284   545   545    0.172        2.02
+  APP: no arena + no spinning                  290   441   317    0.175        1.70
+
+Kroko English (streaming zipformer, Small)
+  default                                      125   150   150    0.028        3.72
+  APP: no arena + no spinning                  124   138   138    0.034        1.32
+  (spinning burned most of the CPU of its many small runs: total CPU -56%)
