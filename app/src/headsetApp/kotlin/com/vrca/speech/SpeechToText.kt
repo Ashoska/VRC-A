@@ -343,6 +343,25 @@ object SpeechToText {
                 // lost their last words and replaced correct live words, until a restart).
                 var vadBase = 0L
                 val silence = FloatArray(pcm.size)
+                // Each read's RAW (pre-gain) voice level and where it starts, so a phrase's
+                // loudness is measured before the auto-volume. Dividing the gained audio by the
+                // gain at the phrase's end under-read short words (the gain was still rising
+                // through them): commands kept failing "quieter than your usual voice".
+                val lvlRing = FloatArray(SAMPLE_RATE * RING_SEC / pcm.size + 8)
+                val lvlPos = LongArray(lvlRing.size)
+                var lvlCount = 0L
+                fun rawVoiceLevel(from: Long, to: Long): Float {
+                    var sum = 0.0; var count = 0
+                    val n = minOf(lvlCount, lvlRing.size.toLong()).toInt()
+                    for (k in 0 until n) {
+                        val i = ((lvlCount - 1 - k) % lvlRing.size).toInt()
+                        val pos = lvlPos[i]
+                        if (pos < from) break // older than the phrase: done (newest first)
+                        val l = lvlRing[i]
+                        if (pos < to && l > 0f) { sum += l * l; count++ }
+                    }
+                    return if (count == 0) 0f else kotlin.math.sqrt(sum / count).toFloat()
+                }
                 // [flushEnd]: after flush(), the real end of the phrase cut short (the VAD's
                 // flush drops its last minSilenceDuration, which then held real speech).
                 fun drain(flushEnd: Long = -1L) {
@@ -354,7 +373,7 @@ object SpeechToText {
                         // phrases always reach the model. Still queued as "noise" so live
                         // words shown for it get taken back.
                         val dur = s.samples.size / SAMPLE_RATE.toFloat()
-                        val (voicedCount, voicedRms) = Voicing.voicedStats(s.samples)
+                        val voicedCount = Voicing.voicedWindows(s.samples)
                         val noise = voicedCount < level.minVoiced && dur < level.blipMaxSec
                         // A little audio before and after the VAD's cut (still in the ring):
                         // it reacts late and ends early, clipping soft first/last syllables.
@@ -367,7 +386,7 @@ object SpeechToText {
                         live.finalsQueued.incrementAndGet()
                         live.pending.set(null)
                         phrases.offer(Segment(padded, segStart, segEnd, noise, epoch, voicedCount, level.minVoiced,
-                            voicedRms / gain.current))
+                            rawVoiceLevel(segStart, segEnd)))
                         lastSegEnd = segEnd
                         phraseStart = -1L
                     }
@@ -388,6 +407,9 @@ object SpeechToText {
                     // This window's voice level before gain (compared with typicalLevel below).
                     val rawLevel = if (voiced) rms(f) else 0f
                     gain.apply(f, voiced, level.maxGain)
+                    lvlRing[(lvlCount % lvlRing.size).toInt()] = rawLevel
+                    lvlPos[(lvlCount % lvlRing.size).toInt()] = total
+                    lvlCount++
                     for (v in f) { ring[(total % ring.size).toInt()] = v; total++ }
                     // Listen trigger (a VRChat param, setGate): closed = hear nothing, but the
                     // model stays loaded and the mic + ring keep running, so reopening is instant.
@@ -711,7 +733,6 @@ object SpeechToText {
     private class Agc {
         private var level = 0.03f
         private var gain = 1f
-        val current: Float get() = gain
         fun apply(x: FloatArray, voiced: Boolean, maxGain: Float) {
             if (voiced) {
                 var sum = 0.0
