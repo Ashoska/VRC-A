@@ -178,7 +178,7 @@ object SpeechCatalog {
         ),
         Pack(
             id = "canary-180m",
-            title = "Canary 180M (English/Spanish/German/French)",
+            title = "Canary 180M (English, French)",
             kind = Kind.CANARY,
             files = listOf(
                 hf(CAN180, CAN180_REV, "encoder.int8.onnx", 132_678_643, "7a75b4e2a5857a6dcc0819503bbe3fad66943db4a3ccf21d3f27c633667d303f"),
@@ -401,10 +401,11 @@ object SpeechCatalog {
             Tier("canary-180m", "Medium", 16.7),
             Tier("kroko-en", "Small", 19.8),
         )),
+        // Re-measured on 200 FLEURS clips (tools/speech-bench/compare.py): Canary-180M tied
+        // Kroko-es (7.0 vs 7.1), so the lighter one is the only small size.
         Lang("es", "Spanish", "Español", listOf(
-            Tier("parakeet-25", "Large", 2.2),
-            Tier("canary-180m", "Medium", 4.3),
-            Tier("kroko-es", "Small", 5.8),
+            Tier("parakeet-25", "Large", 5.0),
+            Tier("kroko-es", "Small", 7.1),
         )),
         Lang("pt", "Portuguese", "Português", listOf(
             Tier("parakeet-25", "Large", 4.5),
@@ -416,10 +417,11 @@ object SpeechCatalog {
             Tier("gigaam3-ru", "Large", 6.2),
             Tier("ru-small", "Small", 14.1),
         )),
+        // Re-measured on 200 clips: Canary-180M (8.9) tied both neighbours, so it went
+        // (user-reported: Large and Medium showed the same accuracy).
         Lang("de", "German", "Deutsch", listOf(
-            Tier("parakeet-25", "Large", 6.0),
-            Tier("canary-180m", "Medium", 6.5),
-            Tier("kroko-de", "Small", 7.7),
+            Tier("parakeet-25", "Large", 8.4),
+            Tier("kroko-de", "Small", 9.9),
         )),
         Lang("fr", "French", "Français", listOf(
             Tier("canary-180m", "Large", 9.7),

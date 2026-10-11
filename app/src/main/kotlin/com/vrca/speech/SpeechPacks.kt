@@ -47,7 +47,11 @@ object SpeechPacks {
     fun selectedPackId(ctx: Context, langCode: String): String? {
         val lang = SpeechCatalog.lang(langCode) ?: return null
         val saved = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("tier_$langCode", null)
-        return lang.tier(saved).packId
+        lang.tiers.firstOrNull { it.packId == saved }?.let { return it.packId }
+        // A size no longer offered (tiers re-measured, e.g. German Medium): carry on with a
+        // size that's already downloaded instead of asking for a new download.
+        if (saved != null) lang.tiers.firstOrNull { isInstalled(ctx, it.packId) }?.let { return it.packId }
+        return lang.best.packId
     }
 
     fun selectedPack(ctx: Context, langCode: String): SpeechCatalog.Pack? =
