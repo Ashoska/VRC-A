@@ -75,6 +75,11 @@ object SpeechToText {
     private const val MIC_RETRY_MS = 100L
     private const val MIC_REOPEN_EVERY = 4
     private const val MIC_GIVE_UP_MS = 10_000L
+    /** Speech waiting to be decoded is capped at this much audio: a headset too busy to keep
+     *  up drops the oldest instead of building an ever-growing (ever later) backlog. */
+    private const val MAX_BACKLOG_SAMPLES = SAMPLE_RATE * 30L
+    /** On Stop, queued phrases get this long to finish before the rest is skipped. */
+    private const val DRAIN_WAIT_MS = 20_000L
 
     interface Listener {
         /**
@@ -103,6 +108,9 @@ object SpeechToText {
         fun onCommandRejected(command: VoiceCommand, miss: CommandMiss, heard: String) {}
         /** The mic stopped delivering audio and a new one was opened (it keeps listening). */
         fun onMicReconnected() {}
+        /** The headset couldn't decode as fast as you talked: the oldest waiting speech was
+         *  skipped (MAX_BACKLOG_SAMPLES). Reported once per session. */
+        fun onFellBehind() {}
     }
 
     @Volatile private var running = false
@@ -141,8 +149,10 @@ object SpeechToText {
         // user just tapped the mic, which is when Android allows this start).
         DictationService.start(app)
         val phrases = LinkedBlockingQueue<Segment>()
+        val queuedSamples = java.util.concurrent.atomic.AtomicLong(0) // audio waiting in [phrases]
         val live = LiveState()
         val captureDone = java.util.concurrent.atomic.AtomicBoolean(false)
+        val abandon = java.util.concurrent.atomic.AtomicBoolean(false) // Stop waited long enough
         val t = Thread({
             var rec: PhraseDecoder? = null
             var vad: Vad? = null
@@ -175,6 +185,7 @@ object SpeechToText {
                 ))
                 vad = newVad(level)
                 listener.onLoading(false)
+                if (!running) return@Thread // stopped while loading: nothing to listen for
                 runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
 
                 val r = rec
@@ -239,7 +250,8 @@ object SpeechToText {
                     // A command word waiting to see whether you carry on talking.
                     class Pending(val cmd: VoiceCommand, val seg: Segment, val raw: String, val pause: Float, val ms: Long, val at: Long)
                     var pending: Pending? = null
-                    while (!captureDone.get() || phrases.isNotEmpty()) {
+                    // One pass: a pending command, else the next finished phrase, else a live re-read.
+                    fun step() {
                         pending?.let { pc ->
                             when {
                                 // The wearer kept talking ("Pause! wait…"): conversation, in as text.
@@ -253,10 +265,11 @@ object SpeechToText {
                                 else -> { Thread.sleep(20); return@let }
                             }
                         }
-                        if (pending != null) continue
+                        if (pending != null) return
                         val seg = phrases.poll(50, TimeUnit.MILLISECONDS)
+                        if (seg != null) queuedSamples.addAndGet(-seg.samples.size.toLong())
                         if (seg == null) {
-                            val job = live.pending.getAndSet(null) ?: continue
+                            val job = live.pending.getAndSet(null) ?: return
                             val t0 = System.nanoTime()
                             val hyp = runCatching { r.hyp(normalize(job.samples)) }.getOrNull()
                             val ms = (System.nanoTime() - t0) / 1_000_000
@@ -282,7 +295,7 @@ object SpeechToText {
                                 partialShown = true
                                 listener.onPartial(text, pauseFrom(job.start))
                             }
-                            continue
+                            return
                         }
                         agreement = null; agreementFor = -1L
                         val stale = seg.epoch != epoch // spoken before Clear
@@ -309,7 +322,7 @@ object SpeechToText {
                             if (miss == null) {
                                 if (partialShown) { partialShown = false; listener.onFinal("", pause, ms) }
                                 pending = Pending(cmd, seg, raw, pause, ms, android.os.SystemClock.elapsedRealtime())
-                                continue
+                                return
                             }
                             // Say why, if it would have changed something (pause while paused wouldn't).
                             val wouldChange = when (cmd) {
@@ -320,6 +333,18 @@ object SpeechToText {
                             if (wouldChange) listener.onCommandRejected(cmd, miss, raw)
                         }
                         deliver(seg, raw, pause, ms)
+                    }
+                    try {
+                        while ((!captureDone.get() || phrases.isNotEmpty()) && !abandon.get()) {
+                            // One odd phrase (an unexpected model output) is skipped; it must never
+                            // end the decoder, which left speech piling up unheard, or crash the app.
+                            try { step() } catch (e: Throwable) { Log.w(TAG, "phrase skipped", e) }
+                        }
+                    } finally {
+                        // The decoder owns the model: freed only once nothing can be decoding with
+                        // it. Stop used to free it after a 15 s wait even if a decode was still
+                        // running, which can crash in native code.
+                        runCatching { r.release() }
                     }
                 }, "stt-decode").apply { isDaemon = true; start() }
 
@@ -351,13 +376,14 @@ object SpeechToText {
                 var phraseStart = -1L
                 var lastPartialAt = 0L
                 var lastSegEnd = 0L // VAD end of the last phrase: pre-roll never reaches before it
-                // The VAD counts samples from when it was built; vadBase = `total` then, so
-                // vadBase + its positions index the ring. It must be fed EVERY sample (silence
-                // while the gate is closed): skipping audio shifted every later phrase onto the
-                // wrong stretch of the ring (user-reported: after "pause"/"resume" finals
-                // lost their last words and replaced correct live words, until a restart).
+                var fellBehind = false // speech was skipped (reported once)
+                // The VAD counts samples from when it was built or last reset; vadBase = `total`
+                // at that sample, so vadBase + its positions index the ring. Every sample it gets
+                // must be counted: skipping audio without a reset shifted every later phrase onto
+                // the wrong stretch of the ring (user-reported: after "pause"/"resume" finals
+                // lost their last words and replaced correct live words, until a restart). While
+                // the gate is closed it gets nothing and is reset (+ new base) on reopening.
                 var vadBase = 0L
-                val silence = FloatArray(pcm.size)
                 // Each read's RAW (pre-gain) voice level and where it starts, so a phrase's
                 // loudness is measured before the auto-volume. Dividing the gained audio by the
                 // gain at the phrase's end under-read short words (the gain was still rising
@@ -400,6 +426,14 @@ object SpeechToText {
                             FloatArray((to - from).toInt()) { ring[((from + it) % ring.size).toInt()] } else s.samples
                         live.finalsQueued.incrementAndGet()
                         live.pending.set(null)
+                        // Too much speech still waiting (the headset can't keep up): the oldest goes,
+                        // so memory and the delay stay bounded and the chatbox stays current.
+                        while (queuedSamples.get() + padded.size > MAX_BACKLOG_SAMPLES) {
+                            val old = phrases.poll() ?: break
+                            queuedSamples.addAndGet(-old.samples.size.toLong())
+                            if (!old.noise && !fellBehind) { fellBehind = true; listener.onFellBehind() }
+                        }
+                        queuedSamples.addAndGet(padded.size.toLong())
                         phrases.offer(Segment(padded, segStart, segEnd, noise, epoch, voicedCount, level.minVoiced,
                             rawVoiceLevel(segStart, segEnd)))
                         lastSegEnd = segEnd
@@ -462,14 +496,14 @@ object SpeechToText {
                             // Noticed up to ~0.25 s late (OSCQuery poll): the pre-roll may reach
                             // back that far for the first word, never into the paused stretch.
                             lastSegEnd = maxOf(lastSegEnd, total - n - SAMPLE_RATE / 4)
+                            // A fresh detector from here: its sample count restarts at 0 (reset),
+                            // so this window's ring position is its new base.
+                            vad?.reset(); vadBase = total - n
                         }
                     }
-                    if (!open) {
-                        // Silence in place of the audio: keeps the VAD's count in step with the ring.
-                        vad?.acceptWaveform(if (n == silence.size) silence else FloatArray(n))
-                        drain()
-                        continue
-                    }
+                    // Nothing is heard: the detector isn't run at all (it used to get ~30 runs a
+                    // second of silence while paused, only to keep its count in step).
+                    if (!open) continue
                     vad?.acceptWaveform(f)
                     drain()
                     // "Hearing you" (and VRChat's typing dots) only for VOICED speech: on
@@ -526,9 +560,17 @@ object SpeechToText {
                 DictationService.stop(app)
                 runCatching { audio?.stop() }
                 runCatching { audio?.release() }
-                runCatching { decoder?.join(15_000) } // let queued phrases finish
                 runCatching { vad?.release() }
-                runCatching { rec?.release() }
+                val d = decoder
+                if (d == null) {
+                    runCatching { rec?.release() } // no decoder ever ran: the model is ours to free
+                } else {
+                    // Queued phrases finish first (words said right before Stop aren't lost); the
+                    // decoder frees the model as it ends. Past DRAIN_WAIT_MS the rest is skipped,
+                    // and only then is the session over (one model in memory at a time).
+                    runCatching { d.join(DRAIN_WAIT_MS) }
+                    if (d.isAlive) { abandon.set(true); runCatching { d.join() } }
+                }
                 if (capture === Thread.currentThread()) capture = null // fully stopped: may start again
                 listener.onStopped()
             }

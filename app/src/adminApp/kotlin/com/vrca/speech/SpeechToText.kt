@@ -22,6 +22,7 @@ object SpeechToText {
         fun onCommand(command: VoiceCommand) {}
         fun onCommandRejected(command: VoiceCommand, miss: CommandMiss, heard: String) {}
         fun onMicReconnected() {}
+        fun onFellBehind() {}
     }
 
     fun isListening(): Boolean = false
