@@ -2606,7 +2606,8 @@ class VrcaViewModel(
         speechLoading = true
         val started = SpeechToText.start(app.applicationContext, speechLanguage, object : SpeechToText.Listener {
             override fun onPartial(text: String, pauseBeforeSec: Float) {
-                viewModelScope.launch(Dispatchers.Main) { if (speechLearning == null) showSpeechPartial(text, pauseBeforeSec, local) }
+                // VRChat's own words spelled right ("VR chat" → VRChat, "chat box" → chatbox).
+                viewModelScope.launch(Dispatchers.Main) { if (speechLearning == null) showSpeechPartial(com.vrca.speech.SpeechVocab.fix(text), pauseBeforeSec, local) }
             }
             override fun onFinal(text: String, pauseBeforeSec: Float, decodeMs: Long) {
                 viewModelScope.launch(Dispatchers.Main) {
@@ -2618,7 +2619,8 @@ class VrcaViewModel(
                     }
                     // Live words on screen for this phrase: the final replaces them in place
                     // (an empty final takes them back). Otherwise it goes through the pacer.
-                    if (!finishSpeechPartial(text, local)) queueSpeechPhrase(text, pauseBeforeSec, local)
+                    val fixed = com.vrca.speech.SpeechVocab.fix(text)
+                    if (!finishSpeechPartial(fixed, local)) queueSpeechPhrase(fixed, pauseBeforeSec, local)
                 }
             }
             override fun onError(message: String) {
