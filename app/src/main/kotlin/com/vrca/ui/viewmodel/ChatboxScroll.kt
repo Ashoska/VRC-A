@@ -246,15 +246,16 @@ internal class CaptionPacer(
 /**
  * How long a dictated piece stays up: time to notice the bubble plus time to read it, so a
  * short "yeah" goes sooner and a long sentence gets longer (user: text disappeared too
- * fast, and short and long pieces got the same time). Slow on purpose (~10 characters a
- * second): in VR people glance at a bubble above someone's head, often while moving.
+ * fast, and short and long pieces got the same time). Slowish on purpose (~12 characters a
+ * second): in VR people glance at a bubble above someone's head, often while moving. Long
+ * pieces were trimmed a little after testing (0.1 s/char up to 25 s felt a bit long).
  * Wide CJK characters count double (each carries more than a Latin letter).
  */
 object ReadingTime {
     const val BASE_MS = 6_000L
-    const val PER_CHAR_MS = 100L
+    const val PER_CHAR_MS = 80L
     const val MIN_MS = 8_000L
-    const val MAX_MS = 25_000L
+    const val MAX_MS = 20_000L
 
     fun ms(text: String): Long {
         var units = 0
