@@ -17,6 +17,10 @@ Linux box with Python, never in the app. Results and decisions: `docs/systems/vo
    accurate; each lower tier must be a different, smaller model (less download AND less RAM;
    Dolphin base is the one exception: far smaller download at about SenseVoice's RAM) that is
    still ≤ ~25% wrong. A language only gets the tiers a decent smaller model exists for.
+   **Decide tiers on 200 clips, not 20**: 20 clips are only good to ±2–3 points. `compare.py`
+   (paired bootstrap) calls a neighbouring pair a tie when its 95% interval includes 0; a tie
+   keeps only the lighter model (two sizes showing the same % confuse users). See
+   `results-2026-10-11-tiers.txt`.
 5. **Ship exactly what was tested**: the app downloads single files from a pinned Hugging
    Face revision and checks SHA-256, so test those same files with the same sherpa-onnx
    version as the app's AAR.
@@ -47,6 +51,9 @@ MAX_JOBS=3 tools/speech-bench/queue.sh $W $W/jobs.txt  # results/<name>.json, lo
 
 # 4. Score
 $PY tools/speech-bench/score.py $W/results
+
+# 5. Tiers of one language: are neighbouring sizes really different? (run with BENCH_LIMIT=200)
+$PY tools/speech-bench/compare.py $W/results de_de pk3,c180,kroko-de   # biggest first
 ```
 
 `run.py` lists the engine kinds; a new model family = one `elif kind == ...` that builds

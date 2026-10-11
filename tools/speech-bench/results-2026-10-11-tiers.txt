@@ -1,0 +1,20 @@
+# Tier re-measure (2026-10-11): languages whose tiers were within ~2 points on 20 clips.
+# 200 FLEURS clips per language, sherpa-onnx 1.13.8, exact pinned app files, 1 thread.
+# Pairs: compare.py paired bootstrap, 95% interval of the error difference (2,000 resamples).
+# % wrong = WER (CER for Thai). Verdict: an interval including 0 is a tie -> keep the lighter.
+
+German      Parakeet-25 8.4 | Canary-180M 8.9 | Kroko-de 9.9
+            pk3->c180 +0.5 [-0.6,+1.6] TIE ; c180->kroko +1.0 [-0.1,+2.2] TIE ; pk3->kroko +1.5 [+0.0,+3.1] real
+            -> Large Parakeet-25, Small Kroko-de (Canary dropped)
+Spanish     Parakeet-25 5.0 | Canary-180M 7.0 | Kroko-es 7.1
+            pk3->c180 +2.1 [+1.0,+3.2] real ; c180->kroko +0.1 [-0.6,+0.7] TIE
+            -> Large Parakeet-25, Small Kroko-es (Canary dropped)
+Thai        Omnilingual-1B 12.4 | 8-lang streaming 19.0 | Dolphin base 17.7
+            om1b->ml8 +6.6 [+4.8,+8.8] real ; ml8->dolbase -1.4 [-4.0,+1.0] TIE (Dolphin lighter + better)
+            -> Large Omnilingual-1B, Small Dolphin base (streaming dropped)
+Indonesian  Omnilingual-1B 14.2 | 8-lang streaming 16.2 | Dolphin base 23.9
+            om1b->ml8 +2.0 [+0.4,+3.7] real ; ml8->dolbase +7.6 [+5.9,+9.6] real
+            -> all three kept
+
+RAM MB (one language): pk3 1002, kroko-de 158, kroko-es 272, ml8 443, dolbase 376, om1b 1717
+(c180 1063 = two recognizers, de + es)
