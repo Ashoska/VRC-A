@@ -361,7 +361,7 @@ object SpeechCatalog {
         ),
         Pack(
             id = "ml8-stream",
-            title = "8-language streaming (Thai, Indonesian)",
+            title = "8-language streaming (Indonesian)",
             kind = Kind.ONLINE_TRANSDUCER,
             files = listOf(
                 hf(ML8, ML8_REV, "encoder-$ML8_F.int8.onnx", 296_583_597, "f9001ed7a9e46d0294438c1a30cd7c72d1cc4bdd4e7880edbcda36f67081e32e"),
@@ -451,15 +451,17 @@ object SpeechCatalog {
             Tier("dolphin-base", "Small", 11.6),
         )),
         Lang("vi", "Vietnamese", "Tiếng Việt", listOf(Tier("zipformer-vi", "Standard", 10.8))),
+        // Re-measured on 200 clips: the 8-language streaming model (19.0) tied Dolphin base
+        // (17.7), which is lighter, so Thai has no Medium size.
         Lang("th", "Thai", "ไทย", listOf(
-            Tier("omnilingual-1b", "Large", 9.3),
-            Tier("ml8-stream", "Medium", 13.3),
-            Tier("dolphin-base", "Small", 14.2),
+            Tier("omnilingual-1b", "Large", 12.4),
+            Tier("dolphin-base", "Small", 17.7),
         )),
+        // Re-measured on 200 clips: all three differ for real (paired bootstrap).
         Lang("id", "Indonesian", "Bahasa Indonesia", listOf(
-            Tier("omnilingual-1b", "Large", 9.7),
-            Tier("ml8-stream", "Medium", 11.6),
-            Tier("dolphin-base", "Small", 16.7),
+            Tier("omnilingual-1b", "Large", 14.2),
+            Tier("ml8-stream", "Medium", 16.2),
+            Tier("dolphin-base", "Small", 23.9),
         )),
         Lang("hi", "Hindi", "हिन्दी", listOf(
             Tier("omnilingual-1b", "Large", 11.4),
