@@ -2653,6 +2653,11 @@ class VrcaViewModel(
                     speechNotice = "The microphone dropped out at ${clockTime(System.currentTimeMillis())} and reconnected by itself."
                 }
             }
+            override fun onFellBehind() {
+                viewModelScope.launch(Dispatchers.Main) {
+                    speechNotice = "At ${clockTime(System.currentTimeMillis())} the headset couldn't keep up, so some speech was skipped. A smaller voice model is faster."
+                }
+            }
             override fun onSpeechActive(active: Boolean) {
                 viewModelScope.launch(Dispatchers.Main) {
                     speechHearing = active

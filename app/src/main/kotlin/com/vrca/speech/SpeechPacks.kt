@@ -141,7 +141,8 @@ object SpeechPacks {
         if (installedPacks(ctx).isEmpty()) packDir(ctx, SpeechCatalog.VAD.id).deleteRecursively()
     }
 
-    /** Free the old Vosk models from the first voice-to-text build (up to ~200 MB). */
+    /** Free storage nothing uses: the old Vosk models from the first voice-to-text build
+     *  (up to ~200 MB), packs the catalog dropped, and abandoned half-downloads. */
     fun cleanupLegacy(ctx: Context) {
         ctx.filesDir.listFiles()?.forEach { f ->
             if (f.isDirectory && (f.name == "vosk-model" || f.name.startsWith("vosk-model-"))) f.deleteRecursively()
@@ -150,6 +151,17 @@ object SpeechPacks {
         // invisible in storage forever (Settings only lists catalog packs): delete them.
         baseDir(ctx).listFiles()?.forEach { d ->
             if (d.isDirectory && SpeechCatalog.pack(d.name) == null) d.deleteRecursively()
+        }
+        // Half-downloaded packs (a cancelled or failed download) are invisible too, up to
+        // ~1 GB each. Only the current language's chosen size can be resumed (its Install
+        // button), so any other unfinished pack was abandoned: delete it. The tiny voice
+        // detector stays (every language needs it).
+        if (downloading.get()) return
+        val keep = selectedPackId(ctx, selectedLanguage(ctx))
+        baseDir(ctx).listFiles()?.forEach { d ->
+            if (d.isDirectory && d.name != keep && d.name != SpeechCatalog.VAD.id &&
+                SpeechCatalog.pack(d.name) != null && !isInstalled(ctx, d.name)
+            ) d.deleteRecursively()
         }
     }
 
