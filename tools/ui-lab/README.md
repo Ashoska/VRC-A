@@ -22,7 +22,12 @@ including recompiling edited code; in live mode a command is ~0.4 s (code edits 
 | | |
 |---|---|
 | `shot <name>` | PNG of the whole screen, dialogs and menus drawn over it (dimmed) |
-| `tap <text> [#n]` / `long <text>` | click / long-press the n-th element whose text or icon description matches (or the switch beside that label) |
+| `tap <text> [#n]` / `long <text>` | click / long-press the n-th element whose text or icon description matches (or the switch beside that label). Runs the element's own action, so it reaches it even when something covers it; use `touch` to tap like a finger |
+| `touch <where> [hold MS]` / `press <where>` | a REAL tap / long press (700 ms): pointer events go to the window under the point (a dialog or open menu takes every touch, so a touch outside it closes it), then Compose's own hit testing picks the element. Says what it landed on, with `(!)` when something else covers the element, nothing there takes a touch, or a dialog on top got it |
+| `drag <where> to <where> [hold MS] [over MS] [stay MS]` | a real drag, a move every frame (`by dx,dy` in dp instead of a target; `->` instead of `to` when a label contains " to "). `hold` first for long-press drags (the Chatbox editor: `drag 1 to 3 hold 600`), `stay` rests before lifting (its 2 s hover-to-arm: `stay 2200`). Sliders report their new value |
+| `swipe up\|down\|left\|right [on <where>] [dist DP] [over MS]` | a quick flick the finger's way (`swipe up` scrolls a list down; flings like a device), from the element, else the middle of the biggest scroll area |
+| `hover <where>` / `hover off` | the headset pointer resting on something: hover highlights and anything else that reacts to hovering |
+| `targets [minDp] [name]` | every element that can be tapped right now: covered at its centre by another one, tiny (both sides < 32 dp), or small (a side < 48 dp; Compose widens small ones to 48 dp where nothing else is near, so worth a look rather than certain misses). With a name, also `<name>.png` with them boxed (red covered, orange tiny, yellow small) |
 | `type <value>` / `typein <field> \| <value>` | set the focused (or first) text field / the field whose label matches |
 | `scroll down\|up [n]` / `scrollto <text>` | scroll the main area / until the element is visible |
 | `back` | close the top dialog (BACK key to its window), else system back |
@@ -35,8 +40,16 @@ including recompiling edited code; in live mode a command is ~0.4 s (code edits 
 | `hide` | remove what `show` put up |
 | `record start <name> [ms]` … `record stop` | record an animation: a frame every `ms` of app time (default 32) through every `wait` and the settle after each action in between, then `<name>-frames.png` (a timestamped filmstrip, up to 24 frames in a grid: the motion readable as one image) and `<name>.gif` (real speed, loops; built from `<name>-frames/` by `gif.py`, which `ui.sh`/`uictl.sh` run afterwards). E.g. `record start expand; tap Manual Send; wait 300; record stop`. Dialogs fade and scale in/out like on a device (Robolectric skips window animations, so the lab emulates Android's 200 ms dialog animation); everything Compose animates is captured |
 
+`<where>` = `<text> [#n] [@fx,fy]` (a point inside that element's box as fractions, default its centre:
+`touch slider @0.8,0.5` sets a slider to ~80%) | `slider [#n]` (sliders have no text) | `x,y` (dp on screen).
+
+**Toasts:** Robolectric never draws them; the lab queues each like Android (2 s short, 3.5 s long, one at a
+time), draws it over everything (dark rounded box above the bottom edge, fading in and out) and names it in
+the result of the command that caused it (`... | toast "Not signed in to VRChat"`).
+
 **Presets:** in-world, offline, friends, incident, outage-minor, status-ok, alerts, no-alerts, sending,
-idle, warned, banned, auth-dead, logged-out, nowplaying, paused, ad, roster, roster-empty, manual, owner
+idle, warned, banned, auth-dead, logged-out, nowplaying, paused, ad, roster, roster-empty, manual,
+cycle (four cycle lines, to drag in the Chatbox editor), owner
 (opens the admin panel without the owner account — its data stays empty), osc-params (sample VRChat
 avatar params for the dictation Listen trigger).
 
@@ -66,7 +79,10 @@ chips and buttons (`tree` lists what's tappable).
 - Presets and toggles start fresh on every run.
 
 Not rendered: the Discord WebView, notifications, OSC, and the live VRChat connection (pipeline
-websocket) — use presets for what those would show.
+websocket) — use presets for what those would show. Drawing is software rendering, which skips elevation
+shadows; the app's are faint (a hardware-rendered roster screen differed by at most 24/255 per pixel), so
+this only matters if a design leans on shadows or blur (Robolectric's `HardwareRenderingScreenshot` worked
+in a test, ~0.2 s per window, if that's ever needed). No on-screen keyboard (`type` sets the text).
 
 ## How it works
 

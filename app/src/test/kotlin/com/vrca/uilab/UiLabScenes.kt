@@ -100,7 +100,7 @@ object UiLabScenes {
     val PRESETS = listOf(
         "in-world", "offline", "friends", "incident", "outage-minor", "status-ok", "alerts", "no-alerts",
         "sending", "idle", "warned", "banned", "auth-dead", "logged-out", "nowplaying", "paused", "ad",
-        "roster", "roster-empty", "manual", "owner", "osc-params",
+        "roster", "roster-empty", "manual", "cycle", "owner", "osc-params",
         "voice", "voice-listening", "voice-hearing", "voice-loading", "voice-stopping",
         "voice-paused", "voice-trigger", "voice-learning", "voice-teach-loading", "voice-downloading",
         "voice-stopped", "voice-restored"
@@ -225,6 +225,14 @@ object UiLabScenes {
                 }
             }.apply { isDaemon = true }.start()
             "manual" -> d.vm.onMessageTextChange(androidx.compose.ui.text.input.TextFieldValue("be right back, grabbing food"))
+            // Four cycle lines (the Chatbox tab's drag-and-drop editor needs rows to drag).
+            "cycle" -> {
+                val vm = d.vm
+                while (vm.cycleLines.isNotEmpty()) vm.removeCycleLine(vm.cycleLines.lastIndex)
+                listOf("Hello from VRC-A", "It's {time} for me", "Listening to {song}", "AFK soon").forEachIndexed { i, line ->
+                    vm.addCycleLine(); vm.updateCycleLine(i, line)
+                }
+            }
             else -> error("unknown preset \"$name\". Presets: ${PRESETS.joinToString()}")
         }
         return "preset $name"
