@@ -52,7 +52,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
@@ -80,6 +79,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.foundation.layout.aspectRatio
+import com.vrca.ui.common.PanelDialog
 import com.vrca.vrchat.AlertImageStore
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -2935,7 +2935,7 @@ private fun EventOccurrencesDialog(
         }
     }
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    PanelDialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         ElevatedCard(
             shape = MaterialTheme.shapes.large,
             colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -3230,7 +3230,7 @@ private fun InstanceListDialog(
     // usePlatformDefaultWidth = false lets the card span nearly the full screen
     // width (the default narrow dialog width was clipping world names + the
     // join/left time line). Padding keeps small margins on each side.
-    Dialog(
+    PanelDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {

@@ -907,7 +907,7 @@ internal fun UpdateDialog(
         onDispose { RichMediaStore.clearUpdateMedia(dialogMediaCtx) }
     }
 
-    androidx.compose.ui.window.Dialog(
+    com.vrca.ui.common.PanelDialog(
         onDismissRequest = { if (!forced) onDismiss() },
         properties = androidx.compose.ui.window.DialogProperties(
             usePlatformDefaultWidth = false,
