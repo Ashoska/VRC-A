@@ -3,6 +3,7 @@
 VRC-A (VRChat Assistant) is an Android companion app for VRChat: Kotlin, Jetpack Compose, Firebase Firestore, GitHub Actions CI.
 Three builds: **public** (`com.scrapw.chatbox`, kept for install continuity), **admin** (`BuildConfig.IS_ADMIN_BUILD`) and **headset** / Meta Quest (`com.gremlin.inc.headset`, `BuildConfig.IS_HEADSET_BUILD`).
 Source: `app/src/main/kotlin/com/vrca/` with packages `admin/ app/ data/ discord/ discordbot/ keepalive/ nowplaying/ osc/ overlay/ richcontent/ sync/ ui/ update/ vrchat/`. Worker: `cloudflare/avatar-db/`. CI: `.github/workflows/android.yml` (+ `speech-models.yml`, manual: builds hosted voice-model files). Rules: `firestore.rules`.
+Tools (`tools/`): `ui-lab/` (UI Lab scripts; its Kotlin is `app/src/test/kotlin/com/vrca/uilab/`), `cardinal-lab/` (its Kotlin: `app/src/test/kotlin/com/vrca/discordbot/lab/`), `speech-bench/` (voice-model tests). Both labs: `labs.md`.
 Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 
 ## How this file works (read first)
