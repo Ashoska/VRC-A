@@ -128,7 +128,9 @@ class UiLabTest {
         if (port != null) serve(driver, port) else {
             val script = System.getProperty("uilab.ui.script")?.let { f -> File(f).readText() }
                 ?: System.getProperty("uilab.ui.do") ?: "shot home"
-            driver.run(script).forEach { println("[uilab] $it") }
+            // Every line tagged: ui.sh only passes [uilab] lines through, so `tree`/`targets`
+            // used to show just their first line in one-shot runs.
+            driver.run(script).forEach { r -> r.lines().forEach { println("[uilab] $it") } }
         }
         println("[uilab] $qualifiers, done in ${System.currentTimeMillis() - t0} ms")
     }

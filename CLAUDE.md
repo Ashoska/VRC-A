@@ -47,7 +47,7 @@ This file is only the rules plus a **map**. The details of every feature and sys
 | `rich-content.md` | `RichDoc` engine, renderer, `RichMediaStore`, admin `RichDocEditor` + uploads, announcements surface, What's New, video/GIF playback |
 | `background-survival.md` | App-scoped ViewModel, headless revival, swipe vs OEM kill (`AppShutdown`), watchdog, safe foreground start, OEM guidance, wakelock + WiFi lock |
 | `storage.md` | Every cache/on-disk store and its cap or cleanup |
-| `labs.md` | UI Lab (`tools/ui-lab/`) and Cardinal Lab (`tools/cardinal-lab/`) |
+| `labs.md` | UI Lab (`tools/ui-lab/`: shots, recordings, real touch/press/drag/swipe/hover input, toasts, `targets` touch-target audit) and Cardinal Lab (`tools/cardinal-lab/`) |
 
 Other reference docs in `docs/`: `ui-revamp.md` (public UI + onboarding design spec; read before public UI work), `wake-word-plan.md` (hands-free wake word + fixed phrase list, not started; separate from the Cardinal AI), `cardinal-audit.md`, `account-system-plan.md`, `avatar-catalog-sharding-plan.md`, `backend-migration-plan.md`, `vrc-nexus-teardown.md`.
 
