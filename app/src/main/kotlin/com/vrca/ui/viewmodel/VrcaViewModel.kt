@@ -2353,6 +2353,12 @@ class VrcaViewModel(
     // on the headset can be told apart from the pause it waits for).
     var speechLastDecodeMs by mutableStateOf<Long?>(null)
         private set
+    // What that sentence cost: CPU time the app used decoding it, and the app's memory after
+    // (compare voice model sizes on the headset itself, e.g. English Large vs Large (light)).
+    var speechLastCpuMs by mutableStateOf<Long?>(null)
+        private set
+    var speechMemMb by mutableStateOf<Int?>(null)
+        private set
     /** Language whose pack is downloading, or null. */
     var speechDownloadingLang by mutableStateOf<String?>(null)
         private set
@@ -2610,6 +2616,7 @@ class VrcaViewModel(
         setManualScrollFlag(true)
         speechLocal = local
         speechLastDecodeMs = null
+        speechLastCpuMs = null; speechMemMb = null
         SpeechToText.setLive(speechLive)
         SpeechToText.setSensitivity(speechSensitivity)
         speechVoicePaused = false
@@ -2651,6 +2658,12 @@ class VrcaViewModel(
             override fun onMicReconnected() {
                 viewModelScope.launch(Dispatchers.Main) {
                     speechNotice = "The microphone dropped out at ${clockTime(System.currentTimeMillis())} and reconnected by itself."
+                }
+            }
+            override fun onDecodeCost(cpuMs: Long, memMb: Int) {
+                viewModelScope.launch(Dispatchers.Main) {
+                    speechLastCpuMs = cpuMs
+                    if (memMb > 0) speechMemMb = memMb
                 }
             }
             override fun onFellBehind() {

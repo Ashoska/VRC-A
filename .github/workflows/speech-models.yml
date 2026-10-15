@@ -1,0 +1,63 @@
+name: speech-models
+
+# Builds the voice-model files VRC-A hosts itself and uploads them to the "speech-models"
+# GitHub release (a pre-release: app updates come from Firestore, never from GitHub's
+# "latest release", so this can't be mistaken for one). Run it by hand: Actions ->
+# speech-models -> Run workflow. Today: English Large "light", the 4-bit Parakeet encoder
+# (tools/speech-bench/quant_int4.py; results in tools/speech-bench/results-2026-10-11-memory.txt).
+# Every tool and the source model are pinned, and the result must be byte-identical to the
+# file tested on the bench (the SHA-256 the app pins in SpeechCatalog), or nothing is uploaded.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  parakeet-en-int4:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Quantization tools (the versions the bench file was made with)
+        run: pip install onnxruntime==1.31.0 onnx==1.23.2 onnx-ir==1.0.0 numpy==2.4.6 ml_dtypes==0.6.0 protobuf==7.36.2
+
+      - name: Full-precision Parakeet TDT 0.6B v2 (pinned revision)
+        run: |
+          mkdir -p fp32
+          for f in encoder.onnx encoder.weights; do
+            curl -sSfL --retry 5 -o "fp32/$f" \
+              "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2/resolve/86891485dd8ad7cb28cb1aade45c3e23d0197c30/$f"
+          done
+          ls -l fp32
+
+      - name: Quantize the encoder to 4-bit
+        run: |
+          mkdir -p out
+          python tools/speech-bench/quant_int4.py fp32/encoder.onnx out/encoder.int4.onnx 32 2>&1 | grep -v "Quantization parameters for tensor"
+          rm -f out/encoder.int4.onnx.mm4.onnx out/encoder.int4.onnx.mm4.onnx.data
+
+      - name: Must match the file tested on the bench
+        run: |
+          ls -l out/encoder.int4.onnx
+          sha256sum out/encoder.int4.onnx
+          echo "d9a32055c140af20c0bfc065156d48abcc05011fcc8588a5811b160e2089d51d  out/encoder.int4.onnx" | sha256sum -c -
+
+      - name: Upload to the speech-models pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp out/encoder.int4.onnx parakeet-tdt-0.6b-v2-encoder.int4.onnx
+          if ! gh release view speech-models >/dev/null 2>&1; then
+            gh release create speech-models --prerelease --target "${GITHUB_SHA}" \
+              --title "Voice model files" \
+              --notes "Voice-to-text model files VRC-A downloads (not an app update). parakeet-tdt-0.6b-v2-encoder.int4.onnx: NVIDIA Parakeet TDT 0.6B v2 (CC-BY-4.0), via k2-fsa/sherpa-onnx, linear layers quantized to 4-bit by VRC-A (tools/speech-bench/quant_int4.py)."
+          fi
+          gh release upload speech-models parakeet-tdt-0.6b-v2-encoder.int4.onnx --clobber

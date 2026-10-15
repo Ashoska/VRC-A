@@ -63,3 +63,5 @@ PROPS+=("-Pui.qualifiers=$Q")
 mkdir -p "$ROOT/ui-shots"
 ./gradlew --console=plain :app:$TASK -PuiLab --tests 'com.vrca.uilab.UiLabTest' "${PROPS[@]}" 2>&1 \
   | grep --line-buffered -E '\[uilab\]|FAILED|^e: |Exception' | sed -u 's/^ *//' || true
+# Recordings (`record start/stop`) → <name>.gif from their frames.
+python3 "$ROOT/tools/ui-lab/gif.py" --all "$ROOT/ui-shots" || true

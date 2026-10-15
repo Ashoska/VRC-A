@@ -724,6 +724,16 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                                 )
                             }
                         }
+                        // What the last sentence cost, to compare voice model sizes on the headset
+                        // itself: CPU time used decoding it, and the app's memory now.
+                        val cpu = vm.speechLastCpuMs
+                        if (vm.speechListening && cpu != null) {
+                            Text(
+                                "CPU ${"%.1f".format(cpu / 1000f)} s" + (vm.speechMemMb?.let { " · app memory $it MB" } ?: ""),
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
                     }
                 }
                 when {

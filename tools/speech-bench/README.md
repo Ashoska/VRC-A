@@ -106,6 +106,10 @@ runs; onnx-asr / faster-whisper candidates only tell us whether a model is worth
 3. Compile all three flavors, check the picker in the UI Lab, update
    `docs/systems/voice-to-text.md` (tiers + shoot-out lines) and this folder's results file.
 4. A pack the catalog drops is deleted from devices automatically (`SpeechPacks.cleanupLegacy`).
+5. A file we make ourselves (e.g. `quant_int4.py`'s 4-bit encoder) is hosted on the repo's
+   `speech-models` pre-release: add a step to `.github/workflows/speech-models.yml` that
+   rebuilds it from pinned sources with pinned tools, checks its SHA-256 against the tested
+   file and uploads it; then pin that URL + SHA in `SpeechCatalog`.
 
 ## Ideas for the next round
 
