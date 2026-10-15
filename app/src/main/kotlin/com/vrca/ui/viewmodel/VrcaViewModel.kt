@@ -158,6 +158,10 @@ class VrcaViewModel(
         // Dictation Android stopped (closed VRC-A): the "stopped" sound only plays when the
         // stop was this recent (a late restart's sound out of nowhere would just confuse).
         private const val SPEECH_STOP_SOUND_MS = 5 * 60_000L
+        // How long the "stopped" sound waits for Android to restart the mic service first.
+        private const val SPEECH_BG_WAIT_MS = 20_000L
+        // testCloseApp: time to switch to VRChat before VRC-A closes itself.
+        private const val SPEECH_TEST_CLOSE_MS = 30_000L
 
         private const val META_STABLE_MS = 1_100L
         private const val META_CONFIRM_MOVE_MS = 900L
@@ -2733,18 +2737,87 @@ class VrcaViewModel(
     private fun checkSpeechAfterKill() {
         if (!speechSupported) return
         val ctx = app.applicationContext
-        val stopped = com.vrca.speech.DictationRestore.check(ctx) ?: return
-        speechNotice = speechStopText(stopped, back = false)
-        if (!stopped.resume) { com.vrca.speech.DictationRestore.clear(ctx); return }
+        val stopped = com.vrca.speech.DictationRestore.check(ctx)
+        speechKillChecked = true
+        if (stopped == null) { maybeResumeSpeechInBackground(); return }
+        speechNotice = speechStopText(stopped, SpeechBack.NO)
+        if (!stopped.resume) { com.vrca.speech.DictationRestore.clear(ctx); maybeResumeSpeechInBackground(); return }
         speechResume = stopped
         if (appOnScreen) { resumeSpeechAfterKill(); return }
-        // In VRChat the card can't be seen: the "stopped" sound tells you (once, if recent).
+        // In VRChat the card can't be seen: the "stopped" sound tells you (once, if recent) unless
+        // it comes back by itself first (Android restarting the mic service, below).
         if (stopped.fresh && System.currentTimeMillis() - stopped.atMs < SPEECH_STOP_SOUND_MS) {
             viewModelScope.launch {
-                delay(2_000L) // VRC-A may be opening right now: then it just comes back on
-                if (!appOnScreen && speechResume != null) com.vrca.speech.CommandSounds.stopped()
+                delay(SPEECH_BG_WAIT_MS)
+                if (!appOnScreen && speechResume != null && !speechBgTried) com.vrca.speech.CommandSounds.stopped()
             }
         }
+        maybeResumeSpeechInBackground()
+    }
+
+    // ---- Coming back without VRC-A on screen (test: testCloseApp) ----
+    // Android restarts the sticky mic service after it closed VRC-A; a start by the system may
+    // keep the mic where VRC-A starting it from the background never can. Only one try per kill.
+    private var speechKillChecked = false
+    private var speechBgTried = false
+
+    /** Both known (the kill check ran, the mic service reported its restart): put dictation
+     *  back in the background if the mic really hears, else say why and wait for VRC-A on screen. */
+    private fun maybeResumeSpeechInBackground() {
+        if (!speechSupported || !speechKillChecked) return
+        val back = com.vrca.speech.DictationRestore.micServiceBack.value ?: return
+        val ctx = app.applicationContext
+        val stopped = speechResume
+        if (stopped == null) {
+            // Nothing to put back (or it's already back): don't leave a restarted mic service up.
+            if (!speechListening && !speechLoading) SpeechToText.releaseMicService(ctx)
+            return
+        }
+        if (appOnScreen || speechBgTried) return // on screen: the normal path takes it
+        speechBgTried = true
+        fun blocked() {
+            speechNotice = speechStopText(stopped, SpeechBack.BLOCKED)
+            SpeechToText.releaseMicService(ctx)
+            if (!appOnScreen) com.vrca.speech.CommandSounds.stopped()
+        }
+        val micOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!back || !micOk) { blocked(); return }
+        viewModelScope.launch {
+            // Mic first: a silenced mic must never cost a model load under memory pressure.
+            val hears = kotlinx.coroutines.withContext(Dispatchers.IO) { SpeechToText.micHears() }
+            if (!hears) { blocked(); return@launch }
+            refreshSpeechModelReady {
+                if (speechResume == null || speechListening || speechLoading || speechStopping) return@refreshSpeechModelReady
+                if (!speechModelReady || isBanned) { blocked(); return@refreshSpeechModelReady }
+                speechResume = null
+                com.vrca.speech.DictationRestore.clear(ctx)
+                startDictation(stopped.local, restored = true)
+                if (speechListening) {
+                    speechNotice = speechStopText(stopped, SpeechBack.ITSELF)
+                    com.vrca.speech.CommandSounds.play(com.vrca.speech.VoiceCommand.RESUME)
+                } else {
+                    speechResume = stopped // e.g. not enough free memory yet: on screen, next time
+                    blocked()
+                }
+            }
+        }
+    }
+
+    /**
+     * Testers: VRC-A closes itself [SPEECH_TEST_CLOSE_MS] from now, the way Android does when the
+     * headset runs low on memory (its services restart, nothing is "swiped"), so the comeback can
+     * be checked without waiting hours for a real one. Switch to VRChat meanwhile.
+     */
+    fun testCloseApp() {
+        if (!speechSupported || !speechListening) return
+        val ctx = app.applicationContext
+        speechNotice = "Test: VRC-A closes itself in ${SPEECH_TEST_CLOSE_MS / 1000} s. Switch to VRChat now, keep talking, and see if voice to text comes back by itself."
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (!speechListening) return@postDelayed // stopped meanwhile: no test
+            com.vrca.speech.DictationRestore.markTest(ctx)
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }, SPEECH_TEST_CLOSE_MS)
     }
 
     /** VRC-A's screen shows (ON_RESUME) or not (ON_PAUSE); dictation Android stopped comes back then. */
@@ -2766,14 +2839,21 @@ class VrcaViewModel(
             if (!speechModelReady || isBanned || speechListening || speechLoading || speechStopping) return@refreshSpeechModelReady
             if (!appOnScreen) { speechResume = stopped; return@refreshSpeechModelReady } // left again: next time
             startDictation(stopped.local, restored = true)
-            if (speechListening) speechNotice = speechStopText(stopped, back = true)
+            if (speechListening) speechNotice = speechStopText(stopped, SpeechBack.OPENED)
         }
     }
 
-    private fun speechStopText(s: com.vrca.speech.DictationRestore.Stopped, back: Boolean): String =
+    private enum class SpeechBack { NO, OPENED, ITSELF, BLOCKED }
+
+    private fun speechStopText(s: com.vrca.speech.DictationRestore.Stopped, back: SpeechBack): String =
         "Stopped at ${clockTime(s.atMs)}: ${s.why}." +
             (if (s.lowMemory) " A smaller voice model uses less memory." else "") +
-            (if (back) " It came back on when you opened VRC-A." else " Tap the mic to start again.")
+            when (back) {
+                SpeechBack.NO -> " Tap the mic to start again."
+                SpeechBack.OPENED -> " It came back on when you opened VRC-A."
+                SpeechBack.ITSELF -> " It came back on by itself at ${clockTime(System.currentTimeMillis())}."
+                SpeechBack.BLOCKED -> " Android kept the microphone off in the background, so it comes back when you open VRC-A."
+            }
 
     private fun clockTime(ms: Long): String =
         java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(ms))
@@ -3673,8 +3753,12 @@ class VrcaViewModel(
             // makes the chatbox resume on its own — including headlessly, when a
             // service (KeepAliveService) recreated this ViewModel without any UI.
             restoreFeatureSession()
-            // Voice to text that was on when Android closed VRC-A: say why, put it back on screen.
+            // Voice to text that was on when Android closed VRC-A: say why, put it back (by itself
+            // if Android's restart of the mic service keeps the mic, else once VRC-A is on screen).
             checkSpeechAfterKill()
+            if (speechSupported) launch {
+                com.vrca.speech.DictationRestore.micServiceBack.collect { if (it != null) maybeResumeSpeechInBackground() }
+            }
             // Read-before-write: fetch the Firestore doc so admin edits
             // made while the user was offline aren't clobbered by our
             // app-open write. Toggles always start OFF per design, so we

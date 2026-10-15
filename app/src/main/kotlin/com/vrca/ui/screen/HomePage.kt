@@ -799,7 +799,8 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
             onCommands = { showCommands = true },
             onSelect = { code, packId -> showPicker = false; vm.selectSpeechLanguage(code, packId) },
             onRemove = { vm.deleteSpeechPack(it) },
-            onDismiss = { showPicker = false }
+            onDismiss = { showPicker = false },
+            onTestClose = if (vm.speechListening) ({ showPicker = false; vm.testCloseApp() }) else null,
         )
     }
     if (showCommands) {

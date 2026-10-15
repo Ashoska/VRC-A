@@ -592,6 +592,44 @@ object SpeechToText {
         running = false
     }
 
+    /**
+     * Does the mic deliver real sound right now? Opens it for ~1 s and checks it isn't being
+     * silenced: Android hands a background app without mic access a recording of pure zeros
+     * (a real mic always has some noise) and marks it silenced. Checked before a background
+     * resume reloads the model, so a blocked mic never costs a model load under memory pressure.
+     * Blocking; call off the main thread. Needs RECORD_AUDIO.
+     */
+    @SuppressLint("MissingPermission")
+    fun micHears(): Boolean {
+        val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        val a = runCatching {
+            AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, SAMPLE_RATE * 2))
+        }.getOrNull() ?: return false
+        try {
+            if (a.state != AudioRecord.STATE_INITIALIZED) return false
+            a.startRecording()
+            val buf = ShortArray(SAMPLE_RATE / 10)
+            var sound = false
+            val until = android.os.SystemClock.elapsedRealtime() + 1_200
+            while (android.os.SystemClock.elapsedRealtime() < until) {
+                val n = a.read(buf, 0, buf.size)
+                if (n < 0) return false
+                for (i in 0 until n) if (buf[i].toInt() != 0) { sound = true; break }
+            }
+            val silenced = android.os.Build.VERSION.SDK_INT >= 29 && a.activeRecordingConfiguration?.isClientSilenced == true
+            Log.i(TAG, "mic check: sound=$sound silenced=$silenced")
+            return sound && !silenced
+        } catch (t: Throwable) {
+            Log.w(TAG, "mic check failed", t); return false
+        } finally {
+            runCatching { a.stop() }; runCatching { a.release() }
+        }
+    }
+
+    /** Stop the mic service when Android restarted it but dictation isn't coming back. */
+    fun releaseMicService(ctx: Context) = DictationService.stop(ctx.applicationContext)
+
     /** A VAD phrase: [samples] padded with a little audio before/after (soft first and last
      *  syllables), [start]/[end] = the VAD's own bounds (pauses are measured on those),
      *  noise = too little voice to decode, [epoch] = discardPending() count when queued. */

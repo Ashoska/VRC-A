@@ -41,4 +41,7 @@ object SpeechToText {
     }
 
     fun stop() {}
+    fun micHears(): Boolean = false
+    @Suppress("UNUSED_PARAMETER")
+    fun releaseMicService(ctx: Context) {}
 }

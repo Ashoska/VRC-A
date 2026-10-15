@@ -30,7 +30,22 @@ object DictationRestore {
     private const val KEY_WHY = "restore_why"
     private const val KEY_LOW_MEM = "restore_low_memory"
     private const val KEY_RESUME = "restore_resume"
-    private val KEYS = listOf(KEY_ON, KEY_PID, KEY_BOOT, KEY_LOCAL, KEY_AT, KEY_WHY, KEY_LOW_MEM, KEY_RESUME)
+    private const val KEY_TEST = "restore_test"
+    private val KEYS = listOf(KEY_ON, KEY_PID, KEY_BOOT, KEY_LOCAL, KEY_AT, KEY_WHY, KEY_LOW_MEM, KEY_RESUME, KEY_TEST)
+
+    /**
+     * After Android closes VRC-A it restarts the mic service itself (it's sticky). A start by
+     * the system may be allowed the mic where VRC-A starting it from the background never is:
+     * the service reports here whether it got back into the foreground (true) or Android
+     * refused (false); the view model then checks the mic really hears before reloading the
+     * model (SpeechToText.micHears). null = no restart seen in this process.
+     */
+    val micServiceBack = kotlinx.coroutines.flow.MutableStateFlow<Boolean?>(null)
+
+    /** The owner's test (close VRC-A on purpose): the next stop note says so. */
+    fun markTest(ctx: Context) {
+        runCatching { prefs(ctx).edit().putBoolean(KEY_TEST, true).commit() }
+    }
 
     /** Back on only if VRC-A is opened within this long of the stop (never hours later). */
     const val RESUME_WINDOW_MS = 30 * 60_000L
@@ -95,7 +110,7 @@ object DictationRestore {
         if (p.getInt(KEY_BOOT, -1) != bootCount(ctx)) { clear(ctx); return null } // headset restarted
         var fresh = false
         if (p.getBoolean(KEY_ON, false)) {
-            val exit = exitReason(ctx, p.getInt(KEY_PID, -1))
+            val exit = exitReason(ctx, p.getInt(KEY_PID, -1), test = p.getBoolean(KEY_TEST, false))
             p.edit().putBoolean(KEY_ON, false)
                 .putLong(KEY_AT, exit?.atMs ?: System.currentTimeMillis())
                 .putString(KEY_WHY, exit?.why ?: "Android closed VRC-A")
@@ -115,11 +130,12 @@ object DictationRestore {
     }.getOrNull()
 
     /** How process [pid] ended, in words, from Android's exit record (null before Android 11). */
-    private fun exitReason(ctx: Context, pid: Int): Exit? =
-        if (pid > 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) runCatching { exitReason30(ctx, pid) }.getOrNull() else null
+    private fun exitReason(ctx: Context, pid: Int, test: Boolean): Exit? =
+        if (pid > 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) runCatching { exitReason30(ctx, pid, test) }.getOrNull()
+        else if (test) Exit(System.currentTimeMillis(), "the test closed VRC-A", false, true) else null
 
     @RequiresApi(Build.VERSION_CODES.R)
-    private fun exitReason30(ctx: Context, pid: Int): Exit? {
+    private fun exitReason30(ctx: Context, pid: Int, test: Boolean): Exit? {
         val am = ctx.getSystemService(ActivityManager::class.java) ?: return null
         val e = am.getHistoricalProcessExitReasons(ctx.packageName, pid, 1).firstOrNull() ?: return null
         val kb = if (e.pss > 0) e.pss else e.rss
@@ -132,19 +148,22 @@ object DictationRestore {
             else -> "VRC-A was in the background"
         }
         val used = if (kb > 0) " (it was using ${size(kb)}; $rank)" else " ($rank)"
-        val why = when (e.reason) {
-            ApplicationExitInfo.REASON_LOW_MEMORY -> "the headset ran low on memory and closed VRC-A$used"
-            ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE -> "VRC-A crashed$used"
-            ApplicationExitInfo.REASON_ANR -> "VRC-A froze and Android closed it"
-            ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "Android closed VRC-A for using too much in the background"
-            ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "the microphone permission was changed"
-            ApplicationExitInfo.REASON_USER_REQUESTED, ApplicationExitInfo.REASON_USER_STOPPED -> "VRC-A was force-stopped"
-            ApplicationExitInfo.REASON_PACKAGE_UPDATED, ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE -> "VRC-A was updated"
-            // Anything else (a plain kill signal, …): Android's own words, for the next report.
-            else -> "Android closed VRC-A$used" + (e.description?.trim()?.takeIf { it.isNotEmpty() }?.let { " [${it.take(60)}]" } ?: "")
+        val why = when {
+            test -> "the test closed VRC-A$used"
+            else -> when (e.reason) {
+                ApplicationExitInfo.REASON_LOW_MEMORY -> "the headset ran low on memory and closed VRC-A$used"
+                ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE -> "VRC-A crashed$used"
+                ApplicationExitInfo.REASON_ANR -> "VRC-A froze and Android closed it"
+                ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "Android closed VRC-A for using too much in the background"
+                ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "the microphone permission was changed"
+                ApplicationExitInfo.REASON_USER_REQUESTED, ApplicationExitInfo.REASON_USER_STOPPED -> "VRC-A was force-stopped"
+                ApplicationExitInfo.REASON_PACKAGE_UPDATED, ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE -> "VRC-A was updated"
+                // Anything else (a plain kill signal, …): Android's own words, for the next report.
+                else -> "Android closed VRC-A$used" + (e.description?.trim()?.takeIf { it.isNotEmpty() }?.let { " [${it.take(60)}]" } ?: "")
+            }
         }
         // Force-stopped on purpose: leave it off.
-        val resume = e.reason != ApplicationExitInfo.REASON_USER_REQUESTED && e.reason != ApplicationExitInfo.REASON_USER_STOPPED
+        val resume = test || (e.reason != ApplicationExitInfo.REASON_USER_REQUESTED && e.reason != ApplicationExitInfo.REASON_USER_STOPPED)
         return Exit(e.timestamp, why, e.reason == ApplicationExitInfo.REASON_LOW_MEMORY, resume)
     }
 
