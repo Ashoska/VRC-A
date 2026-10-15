@@ -33,7 +33,7 @@ including recompiling edited code; in live mode a command is ~0.4 s (code edits 
 | `show <name> [args]` | screens normally behind a gate, see below |
 | `root screen\|app` | draw the main screen (default) or the full app with its boot/ToS/onboarding/update gates |
 | `hide` | remove what `show` put up |
-| `record start <name> [ms]` … `record stop` | record an animation: a frame every `ms` of app time (default 32) through every `wait` and the settle after each action in between, then `<name>-frames.png` (a timestamped filmstrip, up to 24 frames in a grid: the motion readable as one image) and `<name>.gif` (real speed, loops; built from `<name>-frames/` by `gif.py`, which `ui.sh`/`uictl.sh` run afterwards). E.g. `record start expand; tap Manual Send; wait 300; record stop`. Dialogs appear without their fade (Robolectric doesn't run window animations); everything Compose animates is captured |
+| `record start <name> [ms]` … `record stop` | record an animation: a frame every `ms` of app time (default 32) through every `wait` and the settle after each action in between, then `<name>-frames.png` (a timestamped filmstrip, up to 24 frames in a grid: the motion readable as one image) and `<name>.gif` (real speed, loops; built from `<name>-frames/` by `gif.py`, which `ui.sh`/`uictl.sh` run afterwards). E.g. `record start expand; tap Manual Send; wait 300; record stop`. Dialogs fade and scale in/out like on a device (Robolectric skips window animations, so the lab emulates Android's 200 ms dialog animation); everything Compose animates is captured |
 
 **Presets:** in-world, offline, friends, incident, outage-minor, status-ok, alerts, no-alerts, sending,
 idle, warned, banned, auth-dead, logged-out, nowplaying, paused, ad, roster, roster-empty, manual, owner

@@ -84,6 +84,8 @@ class UiLabDriver(
             val frameStart = System.nanoTime()
             looper.idleFor(Duration.ofMillis(FRAME_MS))
             layoutRoots()
+            clockMs += FRAME_MS
+            trackWindows()
             rec?.let { r -> r.appMs += FRAME_MS; if (r.appMs - r.lastAt >= r.everyMs) capture(r) }
             left -= FRAME_MS
             val spentMs = (System.nanoTime() - frameStart) / 1_000_000
@@ -175,9 +177,13 @@ class UiLabDriver(
         for (win in wins) {
             if (win === main) continue
             val p = win.params
-            if (p.flags and WindowManager.LayoutParams.FLAG_DIM_BEHIND != 0) {
-                c.drawColor(Color.argb((p.dimAmount.coerceIn(0f, 1f) * 255).toInt(), 0, 0, 0))
-            }
+            // A dialog window that just opened is still animating in (see trackWindows).
+            val dialog = p.type == WindowManager.LayoutParams.TYPE_APPLICATION
+            val age = clockMs - (shownAt[win.view] ?: LONG_AGO)
+            val t = if (dialog && age in 0 until WINDOW_ANIM_MS) age.toFloat() / WINDOW_ANIM_MS else 1f
+            val k = 1f - (1f - t) * (1f - t) // decelerate
+            val dim = if (p.flags and WindowManager.LayoutParams.FLAG_DIM_BEHIND != 0) p.dimAmount.coerceIn(0f, 1f) else 0f
+            if (dim > 0f) c.drawColor(Color.argb((dim * k * 255).toInt(), 0, 0, 0))
             val vw = win.view.width; val vh = win.view.height
             val g = p.gravity
             val hg = g and Gravity.HORIZONTAL_GRAVITY_MASK
@@ -192,9 +198,63 @@ class UiLabDriver(
                 Gravity.BOTTOM -> h - vh - p.y
                 else -> (h - vh) / 2 + p.y
             }
-            c.save(); c.translate(x.toFloat(), y.toFloat()); win.view.draw(c); c.restore()
+            if (dialog) {
+                // Drawn on its own layer: faded/scaled as it animates, and kept for its exit.
+                val layer = Bitmap.createBitmap(vw, vh, Bitmap.Config.ARGB_8888)
+                win.view.draw(Canvas(layer))
+                lastDrawn.put(win.view, Snapshot(layer, x, y, dim))?.bmp?.recycle()
+                drawLayer(c, layer, x, y, scale = 0.9f + 0.1f * k, alpha = k)
+            } else {
+                c.save(); c.translate(x.toFloat(), y.toFloat()); win.view.draw(c); c.restore()
+            }
+        }
+        // Dialogs that just closed, still animating out on top (Robolectric removed them at once).
+        for (l in leaving) {
+            val q = ((clockMs - l.at).toFloat() / WINDOW_ANIM_MS).coerceIn(0f, 1f)
+            val a = 1f - q * q // accelerate
+            if (l.snap.dim > 0f) c.drawColor(Color.argb((l.snap.dim * a * 255).toInt(), 0, 0, 0))
+            drawLayer(c, l.snap.bmp, l.snap.x, l.snap.y, scale = 1f - 0.1f * q, alpha = a)
         }
         return bmp to wins.size
+    }
+
+    // ------------------------------------------- window animations (emulated)
+    // Robolectric adds and removes windows instantly; a device animates a dialog's window in
+    // and out (Android's dialog_enter / dialog_exit: fade + 90%→100% scale over 200 ms,
+    // decelerating in, accelerating out, the dim behind fading with it). Emulated on the
+    // lab's own clock so recordings show it; a plain `shot` comes after an action's 400 ms
+    // settle, when it has finished. Compose popups (menus) animate inside Compose already.
+
+    /** App time: [FRAME_MS] per frame of [settle]. */
+    private var clockMs = 0L
+    /** When each window (other than the activity's) first showed. */
+    private val shownAt = java.util.IdentityHashMap<View, Long>()
+    private class Snapshot(val bmp: Bitmap, val x: Int, val y: Int, val dim: Float)
+    /** Each open dialog's last rendered look, drawn while it animates out once it's gone. */
+    private val lastDrawn = java.util.IdentityHashMap<View, Snapshot>()
+    private class Leaving(val snap: Snapshot, val at: Long)
+    private val leaving = mutableListOf<Leaving>()
+    private var tracking = false
+
+    /** Every frame: note windows that appeared (start their enter animation) and dialogs that
+     *  closed (start their exit from the last rendered look). Windows already up when the lab
+     *  starts count as long open. */
+    private fun trackWindows() {
+        val views = windows().map { it.view }.filter { it !== act.window.decorView }
+        if (!tracking) { views.forEach { shownAt[it] = LONG_AGO }; tracking = true }
+        views.forEach { shownAt.putIfAbsent(it, clockMs) }
+        val gone = shownAt.keys.filter { k -> views.none { it === k } }
+        gone.forEach { v -> shownAt.remove(v); lastDrawn.remove(v)?.let { leaving += Leaving(it, clockMs) } }
+        leaving.removeAll { l -> (clockMs - l.at >= WINDOW_ANIM_MS).also { if (it) l.snap.bmp.recycle() } }
+    }
+
+    private fun drawLayer(c: Canvas, b: Bitmap, x: Int, y: Int, scale: Float, alpha: Float) {
+        val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+        paint.alpha = (alpha * 255).toInt().coerceIn(0, 255)
+        val m = android.graphics.Matrix()
+        m.postScale(scale, scale, b.width / 2f, b.height / 2f)
+        m.postTranslate(x.toFloat(), y.toFloat())
+        c.drawBitmap(b, m, paint)
     }
 
     // -------------------------------------------------------------- recording
@@ -517,6 +577,9 @@ class UiLabDriver(
     companion object {
         const val SETTLE_AFTER_ACTION_MS = 400L
         private const val FRAME_MS = 16L
+        // Android's dialog window animation (config_shortAnimTime), emulated for dialogs.
+        private const val WINDOW_ANIM_MS = 200L
+        private const val LONG_AGO = Long.MIN_VALUE / 4
         // Recording: frame size, how many are kept, and the filmstrip's grid.
         private const val MAX_FRAME_SIDE = 1024
         private const val MAX_FRAMES = 240
