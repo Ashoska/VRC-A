@@ -111,6 +111,9 @@ object SpeechToText {
         /** The headset couldn't decode as fast as you talked: the oldest waiting speech was
          *  skipped (MAX_BACKLOG_SAMPLES). Reported once per session. */
         fun onFellBehind() {}
+        /** What the last finished sentence cost: CPU time the whole app used while it was
+         *  decoded (ONNX Runtime's worker threads included) and the app's memory (RSS) after. */
+        fun onDecodeCost(cpuMs: Long, memMb: Int) {}
     }
 
     @Volatile private var running = false
@@ -300,8 +303,11 @@ object SpeechToText {
                         agreement = null; agreementFor = -1L
                         val stale = seg.epoch != epoch // spoken before Clear
                         val t0 = System.nanoTime()
+                        val cpu0 = Process.getElapsedCpuTime()
                         val raw = if (seg.noise || stale) "" else runCatching { r.text(normalize(seg.samples)) }.getOrElse { Log.w(TAG, "decode", it); "" }
                         val ms = (System.nanoTime() - t0) / 1_000_000
+                        // The card's cost readout (compare model sizes on the headset itself).
+                        if (!seg.noise && !stale) listener.onDecodeCost(Process.getElapsedCpuTime() - cpu0, appMemoryMb())
                         val pause = pauseFrom(seg.start)
                         // A command word on its own, after a quiet moment, clearly voiced and
                         // as loud as you normally talk: wait to see you don't carry on.
@@ -804,6 +810,13 @@ object SpeechToText {
             override fun release() = rec.release()
         }
     }
+
+    /** The app's resident memory (VmRSS) in MB, 0 if unreadable. */
+    private fun appMemoryMb(): Int = runCatching {
+        java.io.File("/proc/self/status").useLines { lines ->
+            lines.first { it.startsWith("VmRSS:") }.split(Regex("\\s+"))[1].toInt() / 1024
+        }
+    }.getOrDefault(0)
 
     private fun rms(x: FloatArray): Float {
         var sum = 0.0

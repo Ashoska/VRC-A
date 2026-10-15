@@ -25,6 +25,11 @@ English Large 4-bit (quant_int4.py: linear layers MatMulNBits block 32, convs in
   default                                      779   988   988    0.110        2.07
   no arena + no spinning                       779   927   802    0.116        1.73
   no arena + no spinning + no prepacking       478   642   519    0.268        1.85
+  More accuracy (2026-10-11, run.py + compare.py): casual talk (150 clips) 14.2 vs 13.4, talking over
+  background chatter (100) 4.0 vs 4.0, clean audiobook (100) 1.6 vs 1.8: all TIES.
+  Emulated ARM (qemu-aarch64 -cpu cortex-a76, sherpa-onnx v1.13.8 linux-aarch64 build, app settings,
+  one 11.5 s clip, same text from both): int8 ~950 MB (peak 975), 4-bit ~726 MB (peak 760): -220 MB.
+  Emulated speed isn't real, but 4-bit took ~2x as long there: check on the headset (card CPU readout).
   Why no saving with prepacking: x86 MLAS re-packs 4-bit weights for its int8 kernels at ~0.75
   bytes/weight (4-bit + fp32 scale + block sum). ARM64 with KleidiAI packs at ~0.56 B/weight
   (4-bit + bf16 scale), so on the Quest it should land ~150-200 MB under int8 at similar

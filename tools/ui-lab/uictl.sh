@@ -6,3 +6,6 @@ PORT=${UILAB_PORT:-18760}
 if [[ "${1:-}" == quit ]]; then curl -s "http://127.0.0.1:$PORT/quit"; echo; exit; fi
 body=$(printf '%s\n' "$@")
 curl -s --max-time 600 -X POST --data-binary "$body" "http://127.0.0.1:$PORT/run"; echo
+# Recordings (`record start/stop`) → <name>.gif from their frames.
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+case "$body" in *record*) python3 "$ROOT/tools/ui-lab/gif.py" --all "$ROOT/ui-shots" || true ;; esac

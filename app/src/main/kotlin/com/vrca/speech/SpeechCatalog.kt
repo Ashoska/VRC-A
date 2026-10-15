@@ -163,6 +163,27 @@ object SpeechCatalog {
             ramMb = 1000,
             credit = "NVIDIA Parakeet TDT 0.6B v2 (CC-BY-4.0)",
         ),
+        // English Large "light": the same model with its linear layers stored at 4 bits
+        // (tools/speech-bench/quant_int4.py), hosted on our own "speech-models" release (built
+        // and verified by .github/workflows/speech-models.yml). Tied with Large on 550 clips
+        // (FLEURS 6.4 vs 6.2, casual 13.4 vs 14.2, chatter 4.0 vs 4.0, clean 1.8 vs 1.6) and
+        // ~220 MB lighter on ARM (emulated Quest-class CPU); maybe slower per sentence, which is
+        // what the card's CPU readout is for. Decoder/joiner/tokens are Large's own files.
+        Pack(
+            id = "parakeet-en-light",
+            title = "Parakeet (English, light)",
+            kind = Kind.NEMO_TRANSDUCER,
+            files = listOf(
+                PackFile("encoder.int4.onnx",
+                    "https://github.com/Ashoska/VRC-A/releases/download/speech-models/parakeet-tdt-0.6b-v2-encoder.int4.onnx",
+                    452_133_165, "d9a32055c140af20c0bfc065156d48abcc05011fcc8588a5811b160e2089d51d"),
+                hf(PK_EN, PK_EN_REV, "decoder.int8.onnx", 7_257_753, "b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e"),
+                hf(PK_EN, PK_EN_REV, "joiner.int8.onnx", 1_739_080, "7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2"),
+                hf(PK_EN, PK_EN_REV, "tokens.txt", 9_384, "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"),
+            ),
+            ramMb = 780,
+            credit = "NVIDIA Parakeet TDT 0.6B v2 (CC-BY-4.0), 4-bit by VRC-A",
+        ),
         Pack(
             id = "parakeet-25",
             title = "Parakeet (European)",
@@ -398,6 +419,8 @@ object SpeechCatalog {
     val languages: List<Lang> = listOf(
         Lang("en", "English", "English", listOf(
             Tier("parakeet-en", "Large", 7.8),
+            // Same accuracy as Large (a tie on 550 clips), less memory: on test next to it.
+            Tier("parakeet-en-light", "Large (light)", 7.8),
             Tier("canary-180m", "Medium", 16.7),
             Tier("kroko-en", "Small", 19.8),
         )),

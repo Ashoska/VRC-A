@@ -47,6 +47,11 @@ import java.time.Duration
  *                               (boot, ToS, onboarding and update gates included)
  *   show <name> [args]          a screen/dialog that's normally gated (see UiLabScenes.SHOWS)
  *   hide                        remove what `show` put on top
+ *   record start <name> [ms]    capture a frame every [ms] (default 32) of app time from now on
+ *                               (every `wait`, and the settle after each action) …
+ *   record stop                 … then write <name>-frames.png (a timestamped filmstrip: the
+ *                               animation readable as one image) + <name>-frames/ (every frame;
+ *                               ui.sh / uictl.sh turn it into <name>.gif at real speed)
  */
 class UiLabDriver(
     val act: ComponentActivity,
@@ -79,6 +84,7 @@ class UiLabDriver(
             val frameStart = System.nanoTime()
             looper.idleFor(Duration.ofMillis(FRAME_MS))
             layoutRoots()
+            rec?.let { r -> r.appMs += FRAME_MS; if (r.appMs - r.lastAt >= r.everyMs) capture(r) }
             left -= FRAME_MS
             val spentMs = (System.nanoTime() - frameStart) / 1_000_000
             if (spentMs < FRAME_MS) Thread.sleep(FRAME_MS - spentMs)
@@ -127,9 +133,10 @@ class UiLabDriver(
             "root" -> { overlay.value = null; base.value = arg.ifBlank { "screen" }; "root $arg" }
             "show" -> UiLabScenes.show(this, arg)
             "hide" -> { overlay.value = null; if (base.value.startsWith("show:")) base.value = "screen"; "hidden" }
+            "record" -> record(arg)
             else -> error("unknown command: $cmd")
         }
-        if (cmd !in setOf("wait", "shot", "tree", "get")) settle(SETTLE_AFTER_ACTION_MS)
+        if (cmd !in setOf("wait", "shot", "tree", "get", "record")) settle(SETTLE_AFTER_ACTION_MS)
         return r.toString()
     }
 
@@ -149,6 +156,16 @@ class UiLabDriver(
     }
 
     fun shot(name: String): String {
+        val (bmp, count) = render()
+        val f = File(outDir, if (name.endsWith(".png")) name else "$name.png")
+        f.parentFile?.mkdirs()
+        f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        return "shot ${f.absolutePath} (${bmp.width}x${bmp.height}, $count window${if (count == 1) "" else "s"})"
+    }
+
+    /** Everything on screen as one bitmap: the activity, then every other window over it in
+     *  z-order at its position (dialogs dimmed behind as on a device). */
+    private fun render(): Pair<Bitmap, Int> {
         val wins = windows()
         val main = wins.firstOrNull { it.view === act.window.decorView } ?: error("activity window not attached")
         val w = main.view.width; val h = main.view.height
@@ -177,10 +194,93 @@ class UiLabDriver(
             }
             c.save(); c.translate(x.toFloat(), y.toFloat()); win.view.draw(c); c.restore()
         }
-        val f = File(outDir, if (name.endsWith(".png")) name else "$name.png")
-        f.parentFile?.mkdirs()
-        f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        return "shot ${f.absolutePath} (${w}x$h, ${wins.size} window${if (wins.size == 1) "" else "s"})"
+        return bmp to wins.size
+    }
+
+    // -------------------------------------------------------------- recording
+
+    /** Frames being captured (`record start`): app time since start, and when the last frame was. */
+    private class Recording(val name: String, val everyMs: Long) {
+        val frames = mutableListOf<Bitmap>()
+        val times = mutableListOf<Long>()
+        var appMs = 0L
+        var lastAt = 0L
+    }
+    private var rec: Recording? = null
+
+    private fun record(arg: String): String {
+        val parts = arg.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        return when (parts.firstOrNull()) {
+            "start" -> {
+                val name = parts.getOrNull(1) ?: error("record start <name> [everyMs]")
+                val every = (parts.getOrNull(2)?.toLongOrNull() ?: 32L).coerceAtLeast(FRAME_MS)
+                rec = Recording(name, every).also { capture(it) } // the "before" frame
+                "recording $name every $every ms"
+            }
+            "stop" -> {
+                val r = rec ?: error("not recording")
+                rec = null
+                val frames = File(outDir, "${r.name}-frames").also { writeFrames(it, r) }
+                val sheet = File(outDir, "${r.name}-frames.png").also { writeFilmstrip(it, r) }
+                r.frames.forEach { it.recycle() }
+                "recorded ${r.times.size} frames over ${r.appMs} ms: ${sheet.absolutePath} (+ ${r.name}.gif from ${frames.name}/)"
+            }
+            else -> error("record start <name> [everyMs] | record stop")
+        }
+    }
+
+    /** One frame, scaled so its long side is at most [MAX_FRAME_SIDE] (a GIF at full headset
+     *  resolution is tens of MB). Stops adding past [MAX_FRAMES]. */
+    private fun capture(r: Recording) {
+        r.lastAt = r.appMs
+        if (r.frames.size >= MAX_FRAMES) return
+        val (full, _) = render()
+        val k = minOf(1f, MAX_FRAME_SIDE.toFloat() / maxOf(full.width, full.height))
+        val frame = if (k < 1f) Bitmap.createScaledBitmap(full, (full.width * k).toInt(), (full.height * k).toInt(), true)
+            .also { full.recycle() } else full
+        r.frames += frame
+        r.times += r.appMs
+    }
+
+    /** Every frame as `<name>-frames/0000.png…` + `times.txt` (app ms of each); `gif.py` (run by
+     *  ui.sh / uictl.sh afterwards) makes the GIF from them. The unit-test classpath is the
+     *  Android SDK's, which has no javax.imageio/java.awt to write a GIF here. */
+    private fun writeFrames(dir: File, r: Recording) {
+        dir.deleteRecursively(); dir.mkdirs()
+        r.frames.forEachIndexed { i, bmp ->
+            File(dir, "%04d.png".format(i)).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        File(dir, "times.txt").writeText(r.times.joinToString("\n", postfix = "\n"))
+    }
+
+    /** All frames (evenly thinned to [SHEET_FRAMES]) in a grid, each stamped with its app time:
+     *  the whole animation in one image, so it can be checked frame by frame. */
+    private fun writeFilmstrip(file: File, r: Recording) {
+        if (r.frames.isEmpty()) return
+        val n = r.frames.size
+        val pick = if (n <= SHEET_FRAMES) (0 until n).toList()
+            else (0 until SHEET_FRAMES).map { it * (n - 1) / (SHEET_FRAMES - 1) }.distinct()
+        val first = r.frames[0]
+        val cw = SHEET_CELL_W
+        val ch = (first.height * cw.toFloat() / first.width).toInt()
+        val cols = minOf(SHEET_COLS, pick.size)
+        val rows = (pick.size + cols - 1) / cols
+        val gap = 6
+        val sheet = Bitmap.createBitmap(cols * (cw + gap) + gap, rows * (ch + gap) + gap, Bitmap.Config.ARGB_8888)
+        val c = Canvas(sheet)
+        c.drawColor(Color.rgb(24, 24, 28))
+        val label = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 22f }
+        val tag = android.graphics.Paint().apply { color = Color.argb(190, 0, 0, 0) }
+        pick.forEachIndexed { k, i ->
+            val x = gap + (k % cols) * (cw + gap)
+            val y = gap + (k / cols) * (ch + gap)
+            c.drawBitmap(r.frames[i], null, android.graphics.Rect(x, y, x + cw, y + ch), null)
+            val text = "+${r.times[i]} ms"
+            c.drawRect(x.toFloat(), y.toFloat(), x + label.measureText(text) + 12f, y + 30f, tag)
+            c.drawText(text, x + 6f, y + 23f, label)
+        }
+        file.outputStream().use { sheet.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        sheet.recycle()
     }
 
     // -------------------------------------------------------------- semantics
@@ -417,5 +517,11 @@ class UiLabDriver(
     companion object {
         const val SETTLE_AFTER_ACTION_MS = 400L
         private const val FRAME_MS = 16L
+        // Recording: frame size, how many are kept, and the filmstrip's grid.
+        private const val MAX_FRAME_SIDE = 1024
+        private const val MAX_FRAMES = 240
+        private const val SHEET_FRAMES = 24
+        private const val SHEET_COLS = 4
+        private const val SHEET_CELL_W = 480
     }
 }
