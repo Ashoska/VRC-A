@@ -6,19 +6,17 @@
 
   M1 (flavor scaffold): force the launcher activity into LANDSCAPE so the app
   opens in Quest's 16:10 "monitor" panel (default 1024x640 dp) instead of a
-  tall phone shape. Content stays width-responsive (see VrcaScreen framing) so
-  a user resizing the panel toward the 384x500 dp minimum never looks broken.
+  tall phone shape.
 
-  RESIZABLE — the app must FILL whatever panel size Horizon gives it.
-  Previously this set android:resizeableActivity="false" + min/maxAspectRatio
-  to "lock" the panel, but Horizon OS owns 2D-panel resize and ignores those
-  flags — and worse, a NON-resizable activity gets letterboxed: when the user
-  enlarged the panel, Android rendered the app at its fixed size top-anchored
-  and padded the rest with the grey window background (the "big empty grey area
-  below the nav bar when resized" bug). Horizon also reverts a user's resize to
-  the default panel on its own, so locking bought nothing. So the activity is
-  now RESIZABLE: the responsive Compose layout (VrcaScreen monitor framing + the
-  Home 3/2/1-column thresholds) reflows to fill any size, with NO letterbox.
+  resizeableActivity stays "true": the app must FILL whatever panel size Horizon
+  gives it. Previously this set android:resizeableActivity="false" + min/max
+  AspectRatio to "lock" the panel, but Horizon OS owns 2D-panel resize and
+  ignores those flags — and worse, a NON-resizable activity gets letterboxed:
+  when the user enlarged the panel, Android rendered the app at its fixed size
+  top-anchored and padded the rest with the grey window background (the "big
+  empty grey area below the nav bar when resized" bug). The panel is fixed with
+  the Horizon flags on MainActivity below instead, and FixedPanel (VrcaTheme)
+  keeps the 1024x640 layout at any size Horizon still gives it: a resize zooms.
   The base MainActivity already declares configChanges for screenSize/
   screenLayout/smallestScreenSize, so a resize relayouts in place (no Activity
   recreation / flicker while dragging). screenOrientation stays landscape so it
@@ -61,11 +59,29 @@
         android:usesCleartextTraffic="true"
         android:extractNativeLibs="true"
         tools:node="merge">
+        <!-- Fixed panel (user request: the window shouldn't be resizable). Horizon lets users
+             resize any Android panel, so: the default size (Meta's <layout>) with a floor
+             close to it; the Horizon shell flags for no free resizing and a locked 16:10 shape
+             (com.oculus.vrshell.*: not in Meta's public docs, seen in Meta's forum answers and
+             apps' manifests; device-test whether this Horizon version honours them); and if a
+             resize still happens, the app keeps its 1024x640 layout and zooms (FixedPanel). -->
         <activity
             android:name=".app.MainActivity"
             android:screenOrientation="sensorLandscape"
             android:resizeableActivity="true"
-            tools:node="merge" />
+            tools:node="merge">
+            <layout
+                android:defaultWidth="1024dp"
+                android:defaultHeight="640dp"
+                android:minWidth="896dp"
+                android:minHeight="560dp" />
+            <meta-data
+                android:name="com.oculus.vrshell.supports_free_resizing"
+                android:value="false" />
+            <meta-data
+                android:name="com.oculus.vrshell.free_resizing_lock_aspect_ratio"
+                android:value="true" />
+        </activity>
 
         <!-- Runs only while dictation is on (see DictationService). -->
         <service

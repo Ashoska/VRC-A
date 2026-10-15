@@ -148,9 +148,12 @@ fun VrcaTheme(
         shapes = AppShapes
     ) {
         // Headset build: kill the stuck-hover highlight (Quest laser hover-exit is
-        // unreliable). Other builds render the content unchanged.
+        // unreliable), and keep the default panel layout at any window size (FixedPanel:
+        // a resize zooms instead of reflowing). Other builds render the content unchanged.
         if (BuildConfig.IS_HEADSET_BUILD) {
-            CompositionLocalProvider(LocalRippleTheme provides NoHoverRippleTheme, content = content)
+            CompositionLocalProvider(LocalRippleTheme provides NoHoverRippleTheme) {
+                com.vrca.ui.common.FixedPanel(content)
+            }
         } else {
             content()
         }

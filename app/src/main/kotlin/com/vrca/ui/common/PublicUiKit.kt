@@ -56,7 +56,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.Image
 import com.vrca.ui.theme.SlimeError
@@ -397,7 +396,7 @@ fun TutorialImage(
 
     val zoomFile = file
     if (fullscreen && zoomFile != null) {
-        Dialog(
+        PanelDialog(
             onDismissRequest = { fullscreen = false },
             properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {

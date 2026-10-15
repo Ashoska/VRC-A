@@ -56,8 +56,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.vrca.ui.common.PanelDialog
 import kotlinx.coroutines.launch
 
 /**
@@ -338,7 +338,7 @@ private fun RichImage(
     }
 
     if (fullscreen) {
-        Dialog(
+        PanelDialog(
             onDismissRequest = { fullscreen = false },
             properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {
