@@ -75,6 +75,8 @@ internal fun SpeechLanguageDialog(
     onSelect: (code: String, packId: String) -> Unit,
     onRemove: (packId: String) -> Unit,
     onDismiss: () -> Unit,
+    /** Testers, while listening: close VRC-A on a timer as if Android had (null = hidden). */
+    onTestClose: (() -> Unit)? = null,
 ) {
     var removing by remember { mutableStateOf<SpeechCatalog.Pack?>(null) }
     var editingListen by remember { mutableStateOf(false) }
@@ -94,6 +96,7 @@ internal fun SpeechLanguageDialog(
             SensitivityRow(sensitivity, onSensitivity)
             ListenRow(listenParam, listenWhenOn, onChange = { editingListen = true })
             CommandsRow(commandsOn, commandWords, onChange = onCommands)
+            if (onTestClose != null) TestCloseRow(onTestClose)
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val paneHeight = if (maxHeight.value.isFinite()) minOf(440.dp, maxHeight) else 440.dp
                 val list: @Composable (Modifier) -> Unit = { m ->
@@ -181,6 +184,19 @@ private fun CommandsRow(on: Boolean, words: Map<com.vrca.speech.VoiceCommand, Li
             style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
         ActionPill("Change", filled = false, onClick = onChange)
+    }
+}
+
+/** Testers: does voice to text come back by itself after Android closes VRC-A? (No waiting
+ *  hours for a real low-memory kill: VRC-A closes itself the same way, 30 s after the tap.) */
+@Composable
+private fun TestCloseRow(onTest: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Test", style = MaterialTheme.typography.labelLarge)
+        Text("Close VRC-A in 30 s, like the headset does when it runs low on memory",
+            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        ActionPill("Start", filled = false, onClick = onTest)
     }
 }
 

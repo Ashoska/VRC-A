@@ -25,9 +25,18 @@ import com.vrca.R
  * itself stays in [SpeechToText] (any component of the app may record while it runs).
  * A game in front that holds the mic itself may still take priority (Android's input
  * sharing rules), which only a device test can show.
+ *
+ * Sticky: when Android closes VRC-A mid-dictation it restarts this service itself, and a start
+ * by the system may keep the mic where VRC-A starting it from the background can't; the app
+ * then checks the mic really hears before reloading the model (DictationRestore.micServiceBack).
  */
 class DictationService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
+
+    // Already in the foreground: a later start (dictation resuming after Android restarted this
+    // service) must not call startForeground again from the background, where it can be refused
+    // and the refusal would stop the very service that's keeping the mic.
+    private var foreground = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -36,12 +45,19 @@ class DictationService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val ok = try {
+        // No intent = Android restarting this sticky service after it closed VRC-A mid-dictation.
+        val restarted = intent == null
+        if (restarted && (com.vrca.app.AppShutdown.isManualKillFresh(this) || com.vrca.app.AppShutdown.isSwipedAway(this))) {
+            stopSelf() // closed on purpose (swipe): never come back
+            return START_NOT_STICKY
+        }
+        val ok = foreground || try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             } else {
                 startForeground(NOTIF_ID, notification())
             }
+            foreground = true
             true
         } catch (t: Throwable) {
             // Not allowed now (e.g. started from the background): dictation still works
@@ -49,8 +65,19 @@ class DictationService : Service() {
             Log.w(TAG, "mic foreground service refused", t)
             false
         }
-        if (!ok) stopSelf()
-        return START_NOT_STICKY
+        if (restarted) {
+            // Tell the app (its view model comes back with KeepAliveService; make sure) whether
+            // Android let the mic service back into the foreground: it then checks the mic really
+            // hears before reloading the model (DictationRestore.micServiceBack).
+            Log.i(TAG, "restarted by Android after VRC-A was closed; foreground=$ok")
+            runCatching { (application as? com.vrca.app.VrcaApplication)?.ensureRuntimeViewModel() }
+            DictationRestore.micServiceBack.value = ok
+        }
+        if (!ok) { stopSelf(); return START_NOT_STICKY }
+        // Sticky: if Android closes VRC-A mid-dictation it restarts this service itself, which may
+        // be allowed the mic in the background where VRC-A starting it never is. A normal Stop
+        // stops the service (stopped services aren't restarted).
+        return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
