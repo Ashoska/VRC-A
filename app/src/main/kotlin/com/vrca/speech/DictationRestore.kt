@@ -123,17 +123,25 @@ object DictationRestore {
         val am = ctx.getSystemService(ActivityManager::class.java) ?: return null
         val e = am.getHistoricalProcessExitReasons(ctx.packageName, pid, 1).firstOrNull() ?: return null
         val kb = if (e.pss > 0) e.pss else e.rss
-        val used = if (kb > 0) " (it was using ${size(kb)})" else ""
+        // How Android ranked VRC-A when it ended it: settles whether the headset treats it as a
+        // background app while VRChat is in front (user question), straight from the system.
+        val rank = when {
+            e.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND -> "VRC-A was on screen"
+            e.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND_SERVICE -> "VRC-A was in the background, kept running by its services"
+            e.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE -> "VRC-A was visible but not in front"
+            else -> "VRC-A was in the background"
+        }
+        val used = if (kb > 0) " (it was using ${size(kb)}; $rank)" else " ($rank)"
         val why = when (e.reason) {
             ApplicationExitInfo.REASON_LOW_MEMORY -> "the headset ran low on memory and closed VRC-A$used"
-            ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE -> "VRC-A crashed"
+            ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE -> "VRC-A crashed$used"
             ApplicationExitInfo.REASON_ANR -> "VRC-A froze and Android closed it"
             ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "Android closed VRC-A for using too much in the background"
             ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "the microphone permission was changed"
             ApplicationExitInfo.REASON_USER_REQUESTED, ApplicationExitInfo.REASON_USER_STOPPED -> "VRC-A was force-stopped"
             ApplicationExitInfo.REASON_PACKAGE_UPDATED, ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE -> "VRC-A was updated"
             // Anything else (a plain kill signal, …): Android's own words, for the next report.
-            else -> "Android closed VRC-A" + (e.description?.trim()?.takeIf { it.isNotEmpty() }?.let { " (${it.take(60)})" } ?: "")
+            else -> "Android closed VRC-A$used" + (e.description?.trim()?.takeIf { it.isNotEmpty() }?.let { " [${it.take(60)}]" } ?: "")
         }
         // Force-stopped on purpose: leave it off.
         val resume = e.reason != ApplicationExitInfo.REASON_USER_REQUESTED && e.reason != ApplicationExitInfo.REASON_USER_STOPPED
