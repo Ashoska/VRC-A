@@ -150,7 +150,7 @@ object DictationRestore {
     private fun exitReason30(ctx: Context, pid: Int, test: Boolean): Exit? {
         val am = ctx.getSystemService(ActivityManager::class.java) ?: return null
         val e = am.getHistoricalProcessExitReasons(ctx.packageName, pid, 1).firstOrNull() ?: return null
-        val kb = if (e.pss > 0) e.pss else e.rss
+
         // How Android ranked VRC-A when it ended it: settles whether the headset treats it as a
         // background app while VRChat is in front (user question), straight from the system.
         val rank = when {
@@ -159,7 +159,15 @@ object DictationRestore {
             e.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE -> "VRC-A was visible but not in front"
             else -> "VRC-A was in the background"
         }
-        val used = if (kb > 0) " (it was using ${size(kb)}; $rank)" else " ($rank)"
+        // PSS when Android has a recent sample (shared libraries split between the apps using
+        // them: the real figure); else its resident figure, which counts them in full, so only an
+        // upper bound (one test showed 819 MB, the next "1.2 GB" without saying which it was).
+        val mem = when {
+            e.pss > 0 -> "it was using ${size(e.pss)}; "
+            e.rss > 0 -> "up to ${size(e.rss)} in memory; "
+            else -> ""
+        }
+        val used = " ($mem$rank)"
         val why = when {
             test -> "the test closed VRC-A$used"
             else -> when (e.reason) {
