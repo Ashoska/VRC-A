@@ -849,12 +849,10 @@ object SpeechToText {
         }
     }
 
-    /** The app's resident memory (VmRSS) in MB, 0 if unreadable. */
-    private fun appMemoryMb(): Int = runCatching {
-        java.io.File("/proc/self/status").useLines { lines ->
-            lines.first { it.startsWith("VmRSS:") }.split(Regex("\\s+"))[1].toInt() / 1024
-        }
-    }.getOrDefault(0)
+    /** The app's memory in MB as Android counts it (PSS: shared libraries split between the apps
+     *  using them, the figure its exit record shows); RSS counted them in full (1.5 GB shown for an
+     *  app Android measured at 819 MB, user-reported). 0 if unreadable. */
+    private fun appMemoryMb(): Int = runCatching { (android.os.Debug.getPss() / 1024).toInt() }.getOrDefault(0)
 
     private fun rms(x: FloatArray): Float {
         var sum = 0.0
