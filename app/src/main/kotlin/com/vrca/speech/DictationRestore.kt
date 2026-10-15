@@ -42,6 +42,18 @@ object DictationRestore {
      */
     val micServiceBack = kotlinx.coroutines.flow.MutableStateFlow<Boolean?>(null)
 
+    /**
+     * What happened in the background after the kill, in this process, with times: VRC-A came
+     * back without its screen, Android restarted the mic service (allowed the foreground or not),
+     * the mic check, the reload. Shown in the note when VRC-A is opened, so one test shows how
+     * far the comeback got (an empty list: nothing came back before VRC-A was opened).
+     */
+    private val bgSteps = java.util.concurrent.CopyOnWriteArrayList<String>()
+    fun bgStep(text: String) {
+        bgSteps += java.text.SimpleDateFormat("H:mm:ss", Locale.getDefault()).format(java.util.Date()) + " " + text
+    }
+    fun bgSteps(): List<String> = bgSteps.toList()
+
     /** The owner's test (close VRC-A on purpose): the next stop note says so. */
     fun markTest(ctx: Context) {
         runCatching { prefs(ctx).edit().putBoolean(KEY_TEST, true).commit() }

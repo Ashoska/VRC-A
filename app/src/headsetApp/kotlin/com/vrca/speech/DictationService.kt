@@ -70,6 +70,7 @@ class DictationService : Service() {
             // Android let the mic service back into the foreground: it then checks the mic really
             // hears before reloading the model (DictationRestore.micServiceBack).
             Log.i(TAG, "restarted by Android after VRC-A was closed; foreground=$ok")
+            DictationRestore.bgStep(if (ok) "Android restarted the mic service" else "Android restarted the mic service but refused it the foreground")
             runCatching { (application as? com.vrca.app.VrcaApplication)?.ensureRuntimeViewModel() }
             DictationRestore.micServiceBack.value = ok
         }

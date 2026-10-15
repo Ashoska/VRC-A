@@ -2740,6 +2740,7 @@ class VrcaViewModel(
         val stopped = com.vrca.speech.DictationRestore.check(ctx)
         speechKillChecked = true
         if (stopped == null) { maybeResumeSpeechInBackground(); return }
+        if (stopped.fresh && !appOnScreen) com.vrca.speech.DictationRestore.bgStep("VRC-A came back without its screen")
         speechNotice = speechStopText(stopped, SpeechBack.NO)
         if (!stopped.resume) { com.vrca.speech.DictationRestore.clear(ctx); maybeResumeSpeechInBackground(); return }
         speechResume = stopped
@@ -2782,10 +2783,12 @@ class VrcaViewModel(
         }
         val micOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.RECORD_AUDIO) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!micOk) com.vrca.speech.DictationRestore.bgStep("no microphone permission")
         if (!back || !micOk) { blocked(); return }
         viewModelScope.launch {
             // Mic first: a silenced mic must never cost a model load under memory pressure.
             val hears = kotlinx.coroutines.withContext(Dispatchers.IO) { SpeechToText.micHears() }
+            com.vrca.speech.DictationRestore.bgStep(if (hears) "the mic hears sound" else "the mic was silent (Android muted it)")
             if (!hears) { blocked(); return@launch }
             refreshSpeechModelReady {
                 if (speechResume == null || speechListening || speechLoading || speechStopping) return@refreshSpeechModelReady
@@ -2794,9 +2797,11 @@ class VrcaViewModel(
                 com.vrca.speech.DictationRestore.clear(ctx)
                 startDictation(stopped.local, restored = true)
                 if (speechListening) {
+                    com.vrca.speech.DictationRestore.bgStep("dictation restarted")
                     speechNotice = speechStopText(stopped, SpeechBack.ITSELF)
                     com.vrca.speech.CommandSounds.play(com.vrca.speech.VoiceCommand.RESUME)
                 } else {
+                    com.vrca.speech.DictationRestore.bgStep("dictation couldn't restart (${speechError ?: "unknown"})")
                     speechResume = stopped // e.g. not enough free memory yet: on screen, next time
                     blocked()
                 }
@@ -2850,10 +2855,18 @@ class VrcaViewModel(
             (if (s.lowMemory) " A smaller voice model uses less memory." else "") +
             when (back) {
                 SpeechBack.NO -> " Tap the mic to start again."
-                SpeechBack.OPENED -> " It came back on when you opened VRC-A."
+                SpeechBack.OPENED -> " It came back on when you opened VRC-A." + speechBgStory()
                 SpeechBack.ITSELF -> " It came back on by itself at ${clockTime(System.currentTimeMillis())}."
-                SpeechBack.BLOCKED -> " Android kept the microphone off in the background, so it comes back when you open VRC-A."
+                SpeechBack.BLOCKED -> " Android kept the microphone off in the background, so it comes back when you open VRC-A." + speechBgStory()
             }
+
+    /** The background comeback's steps (DictationRestore.bgSteps), for the note: shows exactly how
+     *  far it got before VRC-A was opened. */
+    private fun speechBgStory(): String {
+        val steps = com.vrca.speech.DictationRestore.bgSteps()
+        return if (steps.isEmpty()) " Nothing came back in the background before that."
+        else " In the background: " + steps.joinToString("; ") + "."
+    }
 
     private fun clockTime(ms: Long): String =
         java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(ms))
