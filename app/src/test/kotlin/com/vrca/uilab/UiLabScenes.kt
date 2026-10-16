@@ -360,7 +360,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "iconpick", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -383,7 +383,7 @@ object UiLabScenes {
 
     /**
      * `show boot live`: a scripted boot with the checks running AT THE SAME TIME (each finishes at
-     * its own pace; VRChat sign-in is slowest), then every Status state: VRChat issues → maintenance,
+     * its own pace; VRChat sign-in is slowest; rows in dependency order), then every Status state: VRChat issues → maintenance,
      * our servers down, Wi-Fi lost, and all coming back. For recording the state animations.
      */
     @Composable
@@ -395,10 +395,10 @@ object UiLabScenes {
         // label, starts at, finishes at, final state, final note, blocking
         data class Row(val label: String, val start: Long, val end: Long, val state: String, val note: String?, val blocking: Boolean)
         val rows = listOf(
-            Row("VRChat sign-in", 0, 2600, "Done", "SignedIn", false),
             Row("Device session", 0, 700, "Done", "Connected", true),
             Row("Terms of Service", 700, 1100, "Done", "Accepted", true),   // needs the device session
             Row("Account standing", 700, 1500, "Done", "Good", true),       // needs the device session
+            Row("VRChat sign-in", 0, 2600, "Done", "SignedIn", false),
             Row("Discord", 0, 2000, "Done", "Connected", false),
             Row("VRChat on this headset", 0, 250, "Skipped", "NotOpen", false),
             Row("Updates", 0, 900, "Done", "UpToDate", false)
@@ -429,66 +429,30 @@ object UiLabScenes {
         )
     }
 
-    /** TEMP `show iconpick`: candidate left icons for four Starting up rows, each shown in a real row. */
-    @Composable
-    private fun iconPick() {
-        val I = androidx.compose.material.icons.Icons.Filled
-        val sets = listOf(
-            "Device session" to listOf("Devices (now)" to I.Devices, "Key" to I.Key, "Fingerprint" to I.Fingerprint, "Verified user" to I.VerifiedUser, "Badge" to I.Badge, "Login" to I.Login),
-            "Terms of Service" to listOf("Document (now)" to I.Description, "Gavel" to I.Gavel, "Article" to I.Article, "Policy" to I.Policy, "Handshake" to I.Handshake, "Checklist" to I.AssignmentTurnedIn),
-            "VRChat on this headset" to listOf("Headphones (now)" to I.Headset, "3D / AR box" to I.ViewInAr, "Controller" to I.SportsEsports, "Panorama" to I.Vrpano, "Compass" to I.Explore, "Eye" to I.Visibility),
-            "Updates" to listOf("Phone + arrow (now)" to I.SystemUpdate, "Download" to I.Download, "Cloud download" to I.CloudDownload, "Refresh clock" to I.Update, "Upgrade" to I.Upgrade, "New badge" to I.NewReleases)
-        )
-        val G = com.vrca.ui.theme.GremlinColors
-        androidx.compose.foundation.layout.Column(
-            androidx.compose.ui.Modifier.fillMaxSize().background(G.Backdrop).padding(horizontal = 28.dp, vertical = 22.dp),
-            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(16.dp)
-        ) {
-            sets.forEach { (row, options) ->
-                androidx.compose.foundation.layout.Column {
-                    androidx.compose.material3.Text(row, color = G.Text, style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
-                    androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(6.dp))
-                    androidx.compose.foundation.layout.Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
-                        options.forEach { (name, icon) ->
-                            androidx.compose.foundation.layout.Row(
-                                androidx.compose.ui.Modifier.weight(1f).height(38.dp)
-                                    .background(G.Card, androidx.compose.foundation.shape.RoundedCornerShape(12.dp)).padding(horizontal = 10.dp),
-                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                            ) {
-                                androidx.compose.material3.Icon(icon, null, tint = G.TextMuted, modifier = androidx.compose.ui.Modifier.size(17.dp))
-                                androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.width(9.dp))
-                                androidx.compose.material3.Text(name, color = G.Text, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, maxLines = 1)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /** `show boot [mid|error|done|incident|updated|intro] [none]`: a sample state + backdrop. */
     @Composable
     private fun bootSample(rest: String) {
         val I = androidx.compose.material.icons.Icons.Filled
         val icons = mapOf(
-            "VRChat sign-in" to I.Person, "Device session" to I.Devices, "Terms of Service" to I.Description,
-            "Account standing" to I.Shield, "Discord" to androidx.compose.ui.graphics.vector.ImageVector.vectorResource(com.vrca.R.drawable.ic_discord),
-            "VRChat on this headset" to I.Headset, "Updates" to I.SystemUpdate
+            "Device session" to com.vrca.app.BootIcons.DeviceSession, "Terms of Service" to com.vrca.app.BootIcons.Terms,
+            "Account standing" to com.vrca.app.BootIcons.Account, "VRChat sign-in" to com.vrca.app.BootIcons.VrchatSignIn,
+            "Discord" to androidx.compose.ui.graphics.vector.ImageVector.vectorResource(com.vrca.R.drawable.ic_discord),
+            "VRChat on this headset" to com.vrca.app.BootIcons.VrchatHere, "Updates" to com.vrca.app.BootIcons.Updates
         )
         fun c(l: String, st: com.vrca.app.BootState, d: com.vrca.app.BootNote? = null, b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b, icons[l])
         val v = rest.substringBefore(' ').ifBlank { "mid" }
         val backdrop = if (rest.substringAfter(' ', "") == "none") com.vrca.app.BootBackdrop.None else com.vrca.app.BootBackdrop.Lanes
         val Nt = com.vrca.app.BootNote::class.java.enumConstants!!.associateBy { it.name }
-        // [VRChat sign-in, Device session, Terms, Account standing, Discord, headset, Updates] as State:Note
-        fun rows(vararg s: String) = listOf("VRChat sign-in", "Device session", "Terms of Service", "Account standing", "Discord", "VRChat on this headset", "Updates")
+        // [Device session, Terms, Account standing, VRChat sign-in, Discord, headset, Updates] as State:Note
+        fun rows(vararg s: String) = listOf("Device session", "Terms of Service", "Account standing", "VRChat sign-in", "Discord", "VRChat on this headset", "Updates")
             .mapIndexed { n, l ->
                 val (st, note) = (s[n] + ":").split(":")
-                c(l, com.vrca.app.BootState.valueOf(st), Nt[note], n in 1..3)
+                c(l, com.vrca.app.BootState.valueOf(st), Nt[note], n in 0..2)
             }
         val checks = when (v) {
-            "error" -> rows("Working", "Failed:CantConnect", "Waiting", "Waiting", "Done:Connected", "Skipped:NotOpen", "Done:UpToDate")
-            "done", "incident", "updated", "offline" -> rows("Done:SignedIn", "Done:Connected", "Done:Accepted", "Done:Good", "Done:Connected", "Done:Found", "Done:UpToDate")
-            else -> rows("Working", "Done:Connected", "Done:Accepted", "Working", "Working", "Skipped:NotOpen", "Done:UpToDate")
+            "error" -> rows("Failed:CantConnect", "Waiting", "Waiting", "Working", "Done:Connected", "Skipped:NotOpen", "Done:UpToDate")
+            "done", "incident", "updated", "offline" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Done:SignedIn", "Done:Connected", "Done:Found", "Done:UpToDate")
+            else -> rows("Done:Connected", "Done:Accepted", "Working", "Working", "Working", "Skipped:NotOpen", "Done:UpToDate")
         }
         if (v == "live") { bootLive(::c); return }
         val status = com.vrca.app.BootStatus(
@@ -526,7 +490,6 @@ object UiLabScenes {
         val rest = arg.substringAfter(' ', "")
         when (name) {
             "boot" -> bootSample(rest)
-            "iconpick" -> iconPick()
             "crash" -> CrashScreen(
                 crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",
                 onClear = {}, onContinue = {}

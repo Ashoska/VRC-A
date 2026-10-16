@@ -1,5 +1,13 @@
 package com.vrca.app
 
+import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.ViewInAr
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
@@ -833,4 +841,64 @@ fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
         else -> InternetLink.WiFi
     }
     return link to (caps.linkDownstreamBandwidthKbps / 1000).coerceAtLeast(0)
+}
+
+/** The Starting up rows' left icons (Discord's comes from R.drawable.ic_discord). */
+object BootIcons {
+    val DeviceSession: ImageVector get() = VrHeadset
+    val Terms: ImageVector get() = Icons.AutoMirrored.Filled.Article
+    val Account: ImageVector get() = Icons.Filled.Shield
+    val VrchatSignIn: ImageVector get() = Icons.Filled.Person
+    val VrchatHere: ImageVector get() = Icons.Filled.ViewInAr
+    val Updates: ImageVector get() = Icons.Filled.Download
+
+    /**
+     * A VR headset (Material has none): goggles with two lens cut-outs and a nose notch, and the
+     * head strap arcing over the top. Drawn on Material's 24-unit grid, filled, so it sits with the stock icons.
+     */
+    val VrHeadset: ImageVector by lazy {
+        ImageVector.Builder("VrHeadset", 24.dp, 24.dp, 24f, 24f).apply {
+            // Head strap over the top.
+            path(
+                stroke = SolidColor(Color.Black), strokeLineWidth = 1.8f,
+                strokeLineCap = androidx.compose.ui.graphics.StrokeCap.Round
+            ) {
+                moveTo(5.5f, 7f)
+                curveTo(7f, 3.2f, 17f, 3.2f, 18.5f, 7f)
+            }
+            path(fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd) {
+                // Body, its bottom edge dipping up round the nose.
+                moveTo(5f, 7f)
+                horizontalLineTo(19f)
+                arcTo(3f, 3f, 0f, false, true, 22f, 10f)
+                verticalLineTo(16f)
+                arcTo(3f, 3f, 0f, false, true, 19f, 19f)
+                horizontalLineTo(15.2f)
+                curveTo(14.3f, 19f, 13.7f, 16.2f, 12f, 16.2f)
+                curveTo(10.3f, 16.2f, 9.7f, 19f, 8.8f, 19f)
+                horizontalLineTo(5f)
+                arcTo(3f, 3f, 0f, false, true, 2f, 16f)
+                verticalLineTo(10f)
+                arcTo(3f, 3f, 0f, false, true, 5f, 7f)
+                close()
+                // Lenses (holes).
+                lens(4.4f)
+                lens(13.4f)
+            }
+        }.build()
+    }
+
+    private fun androidx.compose.ui.graphics.vector.PathBuilder.lens(left: Float) {
+        val top = 9.4f; val w = 6.2f; val h = 4.6f; val r = 1.6f
+        moveTo(left + r, top)
+        horizontalLineTo(left + w - r)
+        arcTo(r, r, 0f, false, true, left + w, top + r)
+        verticalLineTo(top + h - r)
+        arcTo(r, r, 0f, false, true, left + w - r, top + h)
+        horizontalLineTo(left + r)
+        arcTo(r, r, 0f, false, true, left, top + h - r)
+        verticalLineTo(top + r)
+        arcTo(r, r, 0f, false, true, left + r, top)
+        close()
+    }
 }
