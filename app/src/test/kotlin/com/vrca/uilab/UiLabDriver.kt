@@ -313,6 +313,16 @@ class UiLabDriver(
     }
     private var rec: Recording? = null
 
+    /** A full-screen `show` stands in for that screen opening fresh (like an app launch), so a
+     *  recording started just before it must not keep the previous screen as its first frame:
+     *  that frame never happens on a device (the user saw Home flash before the boot intro). */
+    fun startRecordingFresh() {
+        val r = rec ?: return
+        if (r.frames.size == 1) {
+            r.frames.removeAt(0).recycle(); r.times.removeAt(0)
+        }
+    }
+
     private fun record(arg: String): String {
         val parts = arg.split(Regex("\\s+")).filter { it.isNotEmpty() }
         return when (parts.firstOrNull()) {

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ launch screen on the Gremlin backdrop, so it hands off to the boot intro
+         (logo alone on the same navy) without a colour flash. -->
+    <style name="Theme.Chatbox" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/gremlin_backdrop</item>
+        <item name="android:colorBackground">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:windowSplashScreenBackground">@color/gremlin_backdrop</item>
+    </style>
+</resources>

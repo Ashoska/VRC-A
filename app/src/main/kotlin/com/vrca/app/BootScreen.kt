@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -70,6 +71,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.neverEqualPolicy
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
@@ -177,8 +179,23 @@ fun BootScreen(
     val logoIn = remember { Animatable(if (playIntro) 0f else 1f) }
     val settle = remember { Animatable(if (playIntro) 0f else 1f) }
     val contentIn = remember { Animatable(if (playIntro) 0f else 1f) }
-    var rootCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
-    var logoCenterY by remember { mutableStateOf(Float.NaN) }
+    // Each part opens on its own (the SAO idea, not a copy): a panel draws a bright line that
+    // stretches out from its centre and unfolds from it; then its pieces widen out one by one.
+    val start = if (playIntro) 0f else 1f
+    val panelL = remember { Animatable(start) }
+    val panelR = remember { Animatable(start) }
+    val partsL = remember { Animatable(start) }
+    val partsR = remember { Animatable(start) }
+    // Both coordinates are kept and the logo's centre is derived from them here. Computing it in
+    // the logo's own callback needed the box's callback to have run first (their order isn't
+    // guaranteed), which could leave the intro waiting on a blank screen until something moved.
+    var rootCoords by remember { mutableStateOf<LayoutCoordinates?>(null, neverEqualPolicy()) }
+    var logoCoords by remember { mutableStateOf<LayoutCoordinates?>(null, neverEqualPolicy()) }
+    val logoCenterY = run {
+        val r = rootCoords; val l = logoCoords
+        if (r != null && l != null && r.isAttached && l.isAttached) r.localPositionOf(l, Offset.Zero).y + l.size.height / 2f
+        else Float.NaN
+    }
     // Start once the logo's final slot is known, so the first frame already has it at the centre.
     val placed = !logoCenterY.isNaN()
     LaunchedEffect(placed) {
@@ -187,7 +204,15 @@ fun BootScreen(
         delay(420)
         launch { settle.animateTo(1f, tween(760, easing = FastOutSlowInEasing)) }
         delay(300)
-        contentIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
+        launch { contentIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing)) }
+        delay(220)
+        launch { panelL.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
+        delay(130)
+        launch { panelR.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
+        delay(470)
+        launch { partsL.animateTo(1f, tween(700)) }
+        delay(130)
+        partsR.animateTo(1f, tween(700))
     }
     val rise = with(LocalDensity.current) { 22.dp.toPx() }
     val contentLayer = Modifier.graphicsLayer {
@@ -208,20 +233,14 @@ fun BootScreen(
             ) {
                 BootLogo(
                     breathing = working && settle.value >= 1f,
+                    // From INTRO_SCALE at the screen's centre down to 1x in its slot.
+                    introScale = { (INTRO_SCALE + (1f - INTRO_SCALE) * settle.value) * (0.9f + 0.1f * logoIn.value) },
+                    fadeIn = logoIn.value,
                     modifier = Modifier
-                        .onGloballyPositioned { c ->
-                            rootCoords?.let { r ->
-                                logoCenterY = r.localPositionOf(c, Offset.Zero).y + c.size.height / 2f
-                            }
-                        }
+                        .onGloballyPositioned { logoCoords = it }
                         .graphicsLayer {
-                            // From the screen's centre at INTRO_SCALE down to its slot at 1x.
-                            val t = settle.value
                             val startDy = if (logoCenterY.isNaN()) 0f else boxHeightPx / 2f - logoCenterY
-                            translationY = startDy * (1f - t)
-                            val s = (INTRO_SCALE + (1f - INTRO_SCALE) * t) * (0.9f + 0.1f * logoIn.value)
-                            scaleX = s; scaleY = s
-                            alpha = logoIn.value
+                            translationY = startDy * (1f - settle.value)
                         }
                 )
                 Spacer(Modifier.height(14.dp))
@@ -238,19 +257,27 @@ fun BootScreen(
                 Spacer(Modifier.height(16.dp))
                 if (wide) {
                     Row(
-                        contentLayer.widthIn(max = 900.dp).fillMaxWidth().height(358.dp),
+                        Modifier.widthIn(max = 900.dp).fillMaxWidth().height(358.dp),
                         horizontalArrangement = Arrangement.spacedBy(18.dp)
                     ) {
-                        LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.weight(1.2f).fillMaxHeight())
-                        StatusPanel(status, Modifier.weight(1f).fillMaxHeight())
+                        Unfold({ panelL.value }, Modifier.weight(1.2f).fillMaxHeight()) {
+                            LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxSize(), partsL.value)
+                        }
+                        Unfold({ panelR.value }, Modifier.weight(1f).fillMaxHeight()) {
+                            StatusPanel(status, Modifier.fillMaxSize(), partsR.value)
+                        }
                     }
                 } else {
                     Column(
-                        contentLayer.widthIn(max = 460.dp).fillMaxWidth(),
+                        Modifier.widthIn(max = 460.dp).fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxWidth().height(330.dp))
-                        StatusPanel(status, Modifier.fillMaxWidth().height(250.dp))
+                        Unfold({ panelL.value }, Modifier.fillMaxWidth().height(330.dp)) {
+                            LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxSize(), partsL.value)
+                        }
+                        Unfold({ panelR.value }, Modifier.fillMaxWidth().height(250.dp)) {
+                            StatusPanel(status, Modifier.fillMaxSize(), partsR.value)
+                        }
                     }
                 }
             }
@@ -290,26 +317,43 @@ private const val INTRO_SCALE = 2.1f
  * silhouette copy offset below it as its drop layer. Breathes softly while checks run.
  */
 @Composable
-private fun BootLogo(breathing: Boolean, modifier: Modifier = Modifier) {
+private fun BootLogo(breathing: Boolean, introScale: () -> Float, fadeIn: Float, modifier: Modifier = Modifier) {
     val pulse = rememberInfiniteTransition(label = "bootPulse")
     val breath by pulse.animateFloat(
         initialValue = 1f, targetValue = 0.72f,
         animationSpec = infiniteRepeatable(tween(1300), RepeatMode.Reverse), label = "bootBreath"
     )
+    // Ease the breath in/out instead of switching it on: switching jumped the alpha to wherever
+    // the pulse happened to be, a visible flash the moment the intro logo landed.
+    val breathWeight by animateFloatAsState(if (breathing) 1f else 0f, tween(700), label = "breathWeight")
     // vrca_logo_bar: the logo cropped to its drawing (the full asset is ~35% empty margin).
     val logo = ImageBitmap.imageResource(com.vrca.R.drawable.vrca_logo_bar)
-    Box(modifier) {
-        Image(
-            bitmap = logo, contentDescription = null, filterQuality = FilterQuality.High,
-            colorFilter = ColorFilter.tint(DropLayer.copy(alpha = 0.55f)),
-            modifier = Modifier.height(104.dp).offset(y = 5.dp)
-        )
-        Image(
-            bitmap = logo, contentDescription = "VRC-A", filterQuality = FilterQuality.High,
-            modifier = Modifier.height(104.dp).alpha(if (breathing) breath else 1f)
-        )
+    // The slot is LOGO_HEIGHT tall, but the logo is laid out at its biggest (intro) size and only
+    // ever scaled DOWN: scaling a small one up showed a blurry logo that snapped sharp on landing.
+    Box(modifier.height(LOGO_HEIGHT), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.requiredHeight(LOGO_HEIGHT * INTRO_SCALE).graphicsLayer {
+                val s = introScale() / INTRO_SCALE
+                scaleX = s; scaleY = s
+            }
+        ) {
+            Image(
+                bitmap = logo, contentDescription = null, filterQuality = FilterQuality.High,
+                colorFilter = ColorFilter.tint(DropLayer.copy(alpha = 0.55f)),
+                modifier = Modifier.fillMaxHeight().offset(y = 5.dp * INTRO_SCALE).alpha(fadeIn)
+            )
+            Image(
+                bitmap = logo, contentDescription = "VRC-A", filterQuality = FilterQuality.High,
+                // The fade sits on the images themselves, not on the oversized box around them:
+                // a see-through layer whose content spills past its bounds drew nothing in the
+                // UI Lab's software renderer (the intro's fade-in recorded as blank).
+                modifier = Modifier.fillMaxHeight().alpha(fadeIn * (1f - (1f - breath) * breathWeight))
+            )
+        }
     }
 }
+
+private val LOGO_HEIGHT = 104.dp
 
 /** One-glance summary under the name: Starting up / Ready / Needs attention. */
 @Composable
@@ -331,6 +375,54 @@ private fun StatusPill(checks: List<BootCheck>, error: String?) {
         Spacer(Modifier.width(8.dp))
         Text(text, style = MaterialTheme.typography.labelLarge, color = color, fontWeight = FontWeight.SemiBold)
     }
+}
+
+/** Split of a part's [Unfold] progress: the line stretches out, then the part opens from it. */
+private const val LINE_SHARE = 0.42f
+
+/**
+ * Opens one part the SAO way: a bright line stretches out sideways from the part's centre, the
+ * part unfolds up and down from that line, and the line fades as it does. [progress] 0..1.
+ */
+@Composable
+private fun Unfold(progress: () -> Float, modifier: Modifier, content: @Composable () -> Unit) {
+    Box(modifier) {
+        Box(
+            Modifier.fillMaxSize().graphicsLayer {
+                val p = progress()
+                val line = (p / LINE_SHARE).coerceIn(0f, 1f)
+                val open = ((p - LINE_SHARE) / (1f - LINE_SHARE)).coerceIn(0f, 1f)
+                scaleX = line
+                scaleY = 0.015f + 0.985f * open
+                alpha = if (line > 0f) 1f else 0f
+            }
+        ) { content() }
+        Box(
+            Modifier.matchParentSize().graphicsLayer {
+                val p = progress()
+                val line = (p / LINE_SHARE).coerceIn(0f, 1f)
+                val open = ((p - LINE_SHARE) / (1f - LINE_SHARE)).coerceIn(0f, 1f)
+                scaleX = line
+                alpha = line * (1f - open)
+            },
+            contentAlignment = Alignment.Center
+        ) {
+            Box(Modifier.fillMaxWidth().height(2.dp).background(GremlinColors.AccentSoft, CircleShape))
+        }
+    }
+}
+
+/** How far piece [i] of [n] has appeared when its panel's pieces are [reveal] (0..1) through. */
+private fun stagger(reveal: Float, i: Int, n: Int): Float {
+    val span = 0.45f
+    val start = if (n <= 1) 0f else (1f - span) * i / (n - 1)
+    return ((reveal - start) / span).coerceIn(0f, 1f)
+}
+
+/** A piece widening out from its middle as it appears. */
+private fun Modifier.widenIn(a: Float) = graphicsLayer {
+    scaleX = 0.2f + 0.8f * a
+    alpha = a
 }
 
 @Composable
@@ -357,13 +449,15 @@ private fun LoadingPanel(
     retryInSec: Int?,
     onRetry: () -> Unit,
     onContinue: (() -> Unit)?,
-    modifier: Modifier
+    modifier: Modifier,
+    reveal: Float = 1f
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val finished = checks.count { it.state in Settled }
+    val pieces = checks.size + 3 // header, segment bar, each check, the buttons
     Layer(modifier) {
         Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 16.dp)) {
-            PanelHeader(Icons.Filled.RocketLaunch, "Starting up") {
+            Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { PanelHeader(Icons.Filled.RocketLaunch, "Starting up") {
                 Text(
                     "$finished/${checks.size}",
                     style = MaterialTheme.typography.labelLarge,
@@ -371,10 +465,13 @@ private fun LoadingPanel(
                     modifier = Modifier.background(GremlinColors.Card, CircleShape)
                         .padding(horizontal = 10.dp, vertical = 3.dp)
                 )
-            }
+            } }
             Spacer(Modifier.height(12.dp))
             // One segment per check, coloured by its state: the whole boot readable at a glance.
-            Row(Modifier.fillMaxWidth().height(5.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                Modifier.fillMaxWidth().height(5.dp).widenIn(stagger(reveal, 1, pieces)),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 checks.forEach { c ->
                     val seg by animateColorAsState(
                         if (c.state == BootState.Waiting) GremlinColors.Raised else c.state.tone(accent), label = "seg"
@@ -384,11 +481,15 @@ private fun LoadingPanel(
             }
             Spacer(Modifier.height(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                checks.forEach { BootCheckTile(it) }
+                checks.forEachIndexed { i, c -> BootCheckTile(c, Modifier.widenIn(stagger(reveal, 2 + i, pieces))) }
             }
             if (error != null) {
                 Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    Modifier.widenIn(stagger(reveal, pieces - 1, pieces)),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     Button(onClick = onRetry) {
                         Text(if (retryInSec != null) "Retry in ${retryInSec}s" else "Retry")
                     }
@@ -403,14 +504,14 @@ private fun LoadingPanel(
 
 /** A check as a layer-2 tile: category icon, label, reason, and its state mark on the right. */
 @Composable
-private fun BootCheckTile(check: BootCheck) {
+private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier) {
     val accent = MaterialTheme.colorScheme.primary
     val tone = check.state.tone(accent)
     val dim = check.state == BootState.Waiting
     val active = check.state == BootState.Working || check.state == BootState.Failed
     val edge by animateColorAsState(if (active) tone.copy(alpha = 0.7f) else Color.Transparent, label = "tileEdge")
     Row(
-        Modifier.fillMaxWidth().height(31.dp).clip(RoundedCornerShape(10.dp))
+        modifier.fillMaxWidth().height(31.dp).clip(RoundedCornerShape(10.dp))
             .background(if (dim) GremlinColors.Card.copy(alpha = 0.5f) else GremlinColors.Card)
             .border(1.dp, edge, RoundedCornerShape(10.dp))
             .padding(start = 10.dp, end = 8.dp),
@@ -497,18 +598,18 @@ private fun InfoCard(modifier: Modifier = Modifier, edge: Color = Color.Transpar
 }
 
 @Composable
-private fun StatusPanel(status: BootStatus, modifier: Modifier) {
+private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 1f) {
     val accent = MaterialTheme.colorScheme.primary
     Layer(modifier) {
         Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 16.dp)) {
-            PanelHeader(Icons.Filled.Insights, "Status")
+            Box(Modifier.widenIn(stagger(reveal, 0, 4))) { PanelHeader(Icons.Filled.Insights, "Status") }
             Spacer(Modifier.height(12.dp))
             val vrcTone = when (status.vrchatOk) {
                 true -> GremlinColors.Positive
                 false -> GremlinColors.Caution
                 null -> GremlinColors.Inactive
             }
-            InfoCard(Modifier.fillMaxWidth(), edge = if (status.vrchatOk == false) vrcTone.copy(alpha = 0.6f) else Color.Transparent) {
+            InfoCard(Modifier.fillMaxWidth().widenIn(stagger(reveal, 1, 4)), edge = if (status.vrchatOk == false) vrcTone.copy(alpha = 0.6f) else Color.Transparent) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.Public, null, tint = vrcTone, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(10.dp))
@@ -530,7 +631,7 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier) {
             }
             Spacer(Modifier.height(10.dp))
             if (status.updatedTo != null) {
-                InfoCard(Modifier.fillMaxWidth().weight(1f), edge = accent.copy(alpha = 0.45f)) {
+                InfoCard(Modifier.fillMaxWidth().weight(1f).widenIn(stagger(reveal, 2, 4)), edge = accent.copy(alpha = 0.45f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.AutoAwesome, null, tint = accent, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
@@ -563,7 +664,7 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier) {
             }
             // Hidden until it's a number worth showing, so a fresh install never sees "0".
             if (status.lifetimeSends >= 100) {
-                InfoCard(Modifier.fillMaxWidth()) {
+                InfoCard(Modifier.fillMaxWidth().widenIn(stagger(reveal, 3, 4))) {
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text(
                             String.format(java.util.Locale.US, "%,d", status.lifetimeSends),

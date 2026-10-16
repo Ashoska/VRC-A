@@ -7,4 +7,7 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- GremlinColors.Backdrop: the window behind the app, so Android's launch screen hands off
+         to the boot intro without a black-to-navy flash. -->
+    <color name="gremlin_backdrop">#FF06101C</color>
 </resources>

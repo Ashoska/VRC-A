@@ -336,7 +336,7 @@ object UiLabScenes {
             val step = arg.substringAfter(' ', "0").trim().toIntOrNull() ?: 0
             OnboardingPrefs.saveStep(d.app, step)
         }
-        if (name in FULL) { d.overlay.value = null; d.base.value = "show:$arg" } else d.overlay.value = arg
+        if (name in FULL) { d.overlay.value = null; d.base.value = "show:$arg"; d.startRecordingFresh() } else d.overlay.value = arg
         return "show $arg"
     }
 
