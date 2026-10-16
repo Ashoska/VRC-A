@@ -422,8 +422,7 @@ internal fun BootRevealOverlay() {
     ) {
         if (BootReveal.withLogo) {
             androidx.compose.foundation.Image(
-                androidx.compose.ui.graphics.ImageBitmap.imageResource(com.vrca.R.drawable.vrca_logo_bar), null,
-                filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
+                androidx.compose.ui.res.painterResource(com.vrca.R.drawable.vrca_logo_vector), null,
                 modifier = androidx.compose.ui.Modifier.align(androidx.compose.ui.Alignment.TopCenter)
                     .padding(top = 4.dp).height(56.dp)
             )

@@ -28,3 +28,13 @@ sides); the drawing is resampled to 900 px and blurred slightly before tracing (
 
 Path data is tiny (a symbol is typically 1-3 KB of text, no image stored), drawn live at any panel
 zoom. Ask for: one simple outline drawing, no shading/colour/text, transparent or plain background.
+
+## Logo trace
+
+`logo_trace.py` turns the VRC-A logo (`source/vrca_logo_bar.png`, white on transparent) into the
+vector drawable the app uses, so it stays sharp at any size:
+
+```bash
+pip install potracer
+python3 tools/symbol-lab/logo_trace.py tools/symbol-lab/source/vrca_logo_bar.png app/src/main/res/drawable/vrca_logo_vector.xml
+```

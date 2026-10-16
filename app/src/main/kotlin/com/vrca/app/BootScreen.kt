@@ -83,11 +83,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.res.imageResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -235,9 +234,9 @@ private fun Layer(
 }
 
 /**
- * The boot screen: the logo on its plate, a live status pill, then two panels side by side:
- * what's loading (left) and status / what's new (right). On a narrow phone the panels stack.
- * Panels keep a fixed height so nothing jumps when a row changes or an error shows.
+ * The headset boot screen (driven by HeadsetBoot): the logo over the Status card on the left, the
+ * checklist on the right, the Retry / Sign in pill underneath. Laid out on the fixed 1024x640dp
+ * panel; rows are fixed-height and say one fixed word each, so nothing moves when a row changes.
  */
 @Composable
 fun BootScreen(
@@ -266,7 +265,6 @@ fun BootScreen(
     /** Non-null while VRChat needs signing in: shows a "Sign in to VRChat" pill under the panels. */
     onSignIn: (() -> Unit)? = null
 ) {
-    val working = checks.any { it.state == BootState.Working }
     // Intro, in three beats: the logo fades/grows in at the centre, holds, then settles up into
     // the layout while everything else rises in underneath it. Skipped = all at their end values.
     val logoIn = remember { Animatable(if (playIntro) 0f else 1f) }
@@ -334,20 +332,16 @@ fun BootScreen(
             Modifier.fillMaxSize().background(GremlinColors.Backdrop).onGloballyPositioned { rootCoords = it }
         ) {
             BootBackdropLayer(backdrop, alpha = { contentIn.value * (1f - exitP.value) }, modifier = Modifier.matchParentSize())
-            val wide = maxWidth >= 720.dp
             val boxW = constraints.maxWidth.toFloat()
             val boxH = constraints.maxHeight.toFloat()
-            // The logo: from the screen's centre to its slot. Phone: starts INTRO_SCALE big and shrinks
-            // as it rises. Headset: one size, it just slides left (user: shrinking isn't needed there,
-            // a straight slide reads cleaner).
-            val startScale = if (wide) 1f else INTRO_SCALE
+            // The logo: from the screen's centre to its slot, one size the whole way (user: a
+            // straight slide reads cleaner than shrinking as it moves).
             val logo: @Composable (Dp) -> Unit = { height ->
                 BootLogo(
                     height = height,
-                    maxScale = startScale,
                     introScale = {
                         val toBar = if (exitToTopBar) 1f + (TOP_BAR_LOGO_HEIGHT / height - 1f) * exitP.value else 1f
-                        (startScale + (1f - startScale) * settle.value) * (0.9f + 0.1f * logoIn.value) * toBar
+                        (0.9f + 0.1f * logoIn.value) * toBar
                     },
                     fadeIn = logoIn.value * (if (exitToTopBar) 1f else 1f - exitP.value),
                     modifier = Modifier
@@ -366,20 +360,8 @@ fun BootScreen(
                         }
                 )
             }
-            val nameAndPill: @Composable () -> Unit = {
-                Column(contentLayer, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        "VRChat Assistant",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = GremlinColors.Text
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    StatusPill(checks, error)
-                }
-            }
-            if (wide) {
-                // Headset: logo and the Status card on the left; the checklist on the right. Both
+            run {
+                // Logo and the Status card on the left; the checklist on the right. Both
                 // panels wrap their content (no empty strips) and sit bottom-aligned so their lower
                 // edges line up; the pair is centred on the screen. On an error, Retry / Continue
                 // anyway open up underneath, meeting at the gap between the two panels.
@@ -403,7 +385,7 @@ fun BootScreen(
                         }
                     }
                     Unfold({ panelL.value }, Modifier.weight(1.15f)) {
-                        LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxWidth(), partsL.value, roomy = true, userName = userName)
+                        LoadingPanel(checks, Modifier.fillMaxWidth(), partsL.value, userName = userName)
                     }
                 }
                 // Kept while it animates away (onSignIn is already null by then).
@@ -429,28 +411,6 @@ fun BootScreen(
                     }
                 }
                 }
-            } else {
-                Column(
-                    Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 18.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    logo(LOGO_HEIGHT)
-                    Spacer(Modifier.height(14.dp))
-                    nameAndPill()
-                    Spacer(Modifier.height(16.dp))
-                    Column(
-                        Modifier.widthIn(max = 460.dp).fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        Unfold({ panelL.value }, Modifier.fillMaxWidth().height(330.dp)) {
-                            LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxSize(), partsL.value, userName = userName)
-                        }
-                        Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
-                            StatusPanel(status, Modifier.fillMaxWidth(), partsR.value)
-                        }
-                    }
-                }
             }
             Text(
                 "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
@@ -468,36 +428,31 @@ private val TOP_BAR_CENTER_Y = 32.dp
 private const val EXIT_FOLD_MS = 420
 private const val EXIT_LOGO_MS = 700
 
-/** How big the logo starts in the intro, relative to its final size. */
-private const val INTRO_SCALE = 2.1f
-
 /**
  * The logo on its own (no tile: a speech bubble inside a box read oddly), with a flat
  * silhouette copy offset below it as its drop layer. Steady: a "breathing" fade while checks ran
- * was removed (it read as the logo blipping brighter and dimmer; the status pill shows progress).
+ * was removed (it read as the logo blipping brighter and dimmer).
  */
 @Composable
-private fun BootLogo(height: Dp, maxScale: Float, introScale: () -> Float, fadeIn: Float, modifier: Modifier = Modifier) {
-    // vrca_logo_bar: the logo cropped to its drawing (the full asset is ~35% empty margin).
-    val logo = ImageBitmap.imageResource(com.vrca.R.drawable.vrca_logo_bar)
-    // Sized by the slot's height, not the bitmap's own pixel size (which capped it at ~214dp wide).
-    val aspect = logo.width.toFloat() / logo.height
-    // The slot is LOGO_HEIGHT tall, but the logo is laid out at its biggest (intro) size and only
-    // ever scaled DOWN: scaling a small one up showed a blurry logo that snapped sharp on landing.
+private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: Float, modifier: Modifier = Modifier) {
+    // The logo as a vector (vrca_logo_vector, traced by tools/symbol-lab/logo_trace.py): sharp at any size, which
+    // matters on the headset where the whole panel zooms when its window is resized.
+    val logo = painterResource(com.vrca.R.drawable.vrca_logo_vector)
+    val aspect = logo.intrinsicSize.width / logo.intrinsicSize.height
     Box(modifier.height(height), contentAlignment = Alignment.Center) {
         Box(
-            Modifier.requiredHeight(height * maxScale).graphicsLayer {
-                val s = introScale() / maxScale
+            Modifier.requiredHeight(height).graphicsLayer {
+                val s = introScale()
                 scaleX = s; scaleY = s
             }
         ) {
             Image(
-                bitmap = logo, contentDescription = null, filterQuality = FilterQuality.High,
+                painter = logo, contentDescription = null,
                 colorFilter = ColorFilter.tint(DropLayer.copy(alpha = 0.55f)),
-                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).offset(y = 5.dp * maxScale).alpha(fadeIn)
+                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).offset(y = 5.dp).alpha(fadeIn)
             )
             Image(
-                bitmap = logo, contentDescription = "VRC-A", filterQuality = FilterQuality.High,
+                painter = logo, contentDescription = "VRC-A",
                 // The fade sits on the images themselves, not on the oversized box around them:
                 // a see-through layer whose content spills past its bounds drew nothing in the
                 // UI Lab's software renderer (the intro's fade-in recorded as blank).
@@ -507,36 +462,13 @@ private fun BootLogo(height: Dp, maxScale: Float, introScale: () -> Float, fadeI
     }
 }
 
-private val LOGO_HEIGHT = 104.dp
-/** Headset: the logo has the whole left column, so it's bigger. */
+/** The logo has the whole left column; sized so its top lines up with the checklist's. */
 private val WIDE_LOGO_HEIGHT = 238.dp
 private val WIDE_LOGO_GAP = 8.dp
 /** Headset row height, shared by check rows and status rows so both panels match. */
 private val WIDE_ROW_HEIGHT = 38.dp
 /** Headset gap between the left column and the checklist; the error buttons meet across it. */
 private val WIDE_GAP = 28.dp
-
-/** One-glance summary under the name: Starting up / Ready / Needs attention. */
-@Composable
-private fun StatusPill(checks: List<BootCheck>, error: String?) {
-    val accent = MaterialTheme.colorScheme.primary
-    val (text, tone) = when {
-        error != null || checks.any { it.state == BootState.Failed } -> "Needs attention" to GremlinColors.Negative
-        checks.all { it.state in Settled } -> "Ready" to GremlinColors.Positive
-        else -> "Starting up" to accent
-    }
-    val color by animateColorAsState(tone, label = "bootPill")
-    Row(
-        Modifier.clip(CircleShape).background(color.copy(alpha = 0.14f))
-            .border(1.dp, color.copy(alpha = 0.45f), CircleShape)
-            .padding(horizontal = 14.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(Modifier.size(8.dp).background(color, CircleShape))
-        Spacer(Modifier.width(8.dp))
-        Text(text, style = MaterialTheme.typography.labelLarge, color = color, fontWeight = FontWeight.SemiBold)
-    }
-}
 
 /** Split of a part's [Unfold] progress: the line stretches out, then the part opens from it. */
 private const val LINE_SHARE = 0.42f
@@ -662,60 +594,22 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?) {
     }
 }
 
+/** The checklist: the header, then one row per check. Wraps its rows (no fixed height). */
 @Composable
-private fun PanelHeader(icon: ImageVector, title: String, trailing: @Composable () -> Unit = {}) {
-    val accent = MaterialTheme.colorScheme.primary
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            Modifier.size(30.dp).background(accent.copy(alpha = 0.16f), RoundedCornerShape(9.dp)),
-            contentAlignment = Alignment.Center
-        ) { Icon(icon, null, tint = accent, modifier = Modifier.size(18.dp)) }
-        Spacer(Modifier.width(10.dp))
-        Text(
-            title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
-            color = GremlinColors.Text, modifier = Modifier.weight(1f)
-        )
-        trailing()
-    }
-}
-
-@Composable
-private fun LoadingPanel(
-    checks: List<BootCheck>,
-    error: String?,
-    retryInSec: Int?,
-    onRetry: () -> Unit,
-    onContinue: (() -> Unit)?,
-    modifier: Modifier,
-    reveal: Float = 1f,
-    /** Headset right column: bigger rows, more space between, and the panel wraps its rows. */
-    roomy: Boolean = false,
-    userName: String? = null
-) {
-    val pieces = checks.size + 2 // the header, each check, then the buttons
+private fun LoadingPanel(checks: List<BootCheck>, modifier: Modifier, reveal: Float = 1f, userName: String? = null) {
+    val pieces = checks.size + 1 // the header, then each check
     // A row shows "waiting" until it has fully appeared, so a check that finished during the intro
     // still lands its tick on screen instead of arriving already ticked.
     val checks = checks.mapIndexed { i, c ->
         if (stagger(reveal, 1 + i, pieces) < 1f) c.copy(state = BootState.Waiting, note = null) else c
     }
     Layer(modifier) {
-        Column(Modifier.then(if (roomy) Modifier.fillMaxWidth() else Modifier.fillMaxSize()).padding(horizontal = 18.dp, vertical = 16.dp)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
             Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { BootHeader(checks, userName) }
             Spacer(Modifier.height(14.dp))
-            Column(if (roomy) Modifier else Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (roomy) 8.dp else 4.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 checks.forEachIndexed { i, c ->
-                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, 1 + i, pieces)), height = if (roomy) WIDE_ROW_HEIGHT else 31.dp)
-                }
-            }
-            // Headset: the buttons sit under both panels instead (see BootScreen).
-            if (error != null && !roomy) {
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    Modifier.widenIn(stagger(reveal, pieces - 1, pieces)),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    ActionPill(retryInSec, onRetry, onContinue)
+                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, 1 + i, pieces)), height = WIDE_ROW_HEIGHT)
                 }
             }
         }
