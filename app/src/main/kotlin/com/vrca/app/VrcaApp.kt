@@ -122,10 +122,10 @@ import java.security.SecureRandom
  */
 @Composable
 fun VrcaApp() {
-    // Headset: the boot screen's last beat (BootReveal) draws on top of the app as it appears.
+    // The boot screen's last beat (BootReveal) draws on top of the app as it appears.
     androidx.compose.foundation.layout.Box {
         VrcaAppContent()
-        if (BuildConfig.IS_HEADSET_BUILD) BootRevealOverlay()
+        BootRevealOverlay()
     }
 }
 
@@ -197,14 +197,10 @@ private fun VrcaAppContent() {
     LaunchedEffect(bootOk) {
         if (bootOk) bootPrefs.edit().putInt(LAST_BOOT_VERSION_KEY, BuildConfig.VERSION_CODE).apply()
     }
-    var bootWorking by remember { mutableStateOf(false) }
-    var bootError by remember { mutableStateOf<String?>(null) }
-    var bootAttempt by remember { mutableStateOf(0) } // increments on Retry
-
-    // Headset: the new boot screen (BootScreen.kt) runs every check itself, side by side, and
-    // covers the ban check + VRChat presence too, so the phase-2 screen below is skipped there.
-    if (!bootOk && BuildConfig.IS_HEADSET_BUILD) {
-        HeadsetBoot(onDone = { toTopBar ->
+    // The boot screen (BootScreen.kt, run by AppBoot.kt) does every boot check itself, side by
+    // side: the device session, terms, the ban check, the VRChat session, updates and the rest.
+    if (!bootOk) {
+        AppBoot(onDone = { toTopBar ->
             // The app appears underneath and the boot screen's backdrop fades off it (no hard cut).
             BootReveal.start(withLogo = toTopBar)
             bootOk = true
@@ -212,97 +208,19 @@ private fun VrcaAppContent() {
         return
     }
 
-    if (!bootOk) {
-        BootstrapScreen(
-            working = bootWorking,
-            error = bootError,
-            onRetry = {
-                bootOk = false
-                bootWorking = false
-                bootError = null
-                bootAttempt += 1
-            }
-        )
-
-        // Run bootstrap once per attempt.
-        LaunchedEffect(bootAttempt) {
-            if (bootOk || bootWorking) return@LaunchedEffect
-            bootWorking = true
-            bootError = null
-
-            try {
-                val startMs = System.currentTimeMillis()
-                // 30s (was 20s) so the now per-attempt-bounded anon-auth retry loop
-                // has room to cycle through a couple of hung cold-start attempts and
-                // still succeed rather than being cut off. The common case (one hung
-                // attempt) recovers in ~6.5s; this only matters for repeated hangs.
-                kotlinx.coroutines.withTimeout(30_000L) {
-                    bootstrapFirebaseAndCache(ctx)
-                }
-                // Warm VRChat presence DURING the Device-session stage if already
-                // logged in: fire the pipeline now so it's connecting in parallel
-                // and is "pretty much good" by the time Account status runs. This
-                // replaces the old fixed 5s wait with real work. A logged-out /
-                // new user has no session to warm, so hold a short 3s floor
-                // instead so the boot screen doesn't flash by before onboarding.
-                if (VrchatAuthManager.isLoggedIn(ctx)) {
-                    startPipelineWarmup(ctx)
-                } else {
-                    // New user (onboarding not complete): spend the boot-screen time
-                    // PREFETCHING the on-demand OSC tutorial images (no longer bundled
-                    // in the APK) so the tutorial shows them instantly. This replaces
-                    // the old fixed "fake wait" with real work. Capped so a slow / no
-                    // network never hangs boot — the tutorial step re-downloads any
-                    // that missed.
-                    if (!com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)) {
-                        withTimeoutOrNull(TUTORIAL_PREFETCH_CAP_MS) {
-                            com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx)
-                        }
-                    }
-                    // Floor so the boot screen doesn't flash by before onboarding
-                    // (covers the cached / existing-logged-out case where the prefetch
-                    // returns instantly).
-                    val elapsed = System.currentTimeMillis() - startMs
-                    if (elapsed < NEW_USER_BOOT_FLOOR_MS) {
-                        kotlinx.coroutines.delay(NEW_USER_BOOT_FLOOR_MS - elapsed)
-                    }
-                }
-                bootOk = true
-            } catch (t: kotlinx.coroutines.TimeoutCancellationException) {
-                bootError = "Couldn't reach server. Check your connection and try again."
-            } catch (t: Throwable) {
-                bootError = sanitizeBackendRefs((t.message ?: t.toString()).take(4000))
-            } finally {
-                bootWorking = false
-            }
-        }
-        return
-    }
-
     /* -------------------------
        Phase 1 ban check (device hash + auth UID)
-       Runs immediately after bootstrap. Does NOT show ban screen yet -
-       waits for VRChat login so we can capture the alt VRChat ID first.
+       Does NOT show the ban screen yet - waits for VRChat login so we can capture the
+       alt VRChat ID first. A boot that just ran already did it (reused, no second read);
+       on a warm resume (no boot screen) it runs here without holding the UI.
        ------------------------- */
 
-    // Headset boot already ran the ban check: reuse its result (no second read).
-    val headsetBooted = BuildConfig.IS_HEADSET_BUILD && !warmResume
-    var phase1BanId   by remember { mutableStateOf(if (headsetBooted) HeadsetBootResults.banId else null) }
-    // On a WARM resume the phase-2 loading screen is skipped entirely (these seed
-    // true), but the ban-check LaunchedEffect below STILL runs (its key `bootOk` is
-    // true from the first composition, so it fires once) so phase1BanId is populated
-    // and the ban gate downstream still works — we just don't block the UI on it.
-    var phase1Checked by remember { mutableStateOf(warmResume || (headsetBooted && HeadsetBootResults.banChecked)) }
-    // "Account status" now represents the ban/moderation check AND VRChat presence
-    // readiness. A logged-out user has no presence to wait for, so it starts ready;
-    // a warm resume means the pipeline is already connected, so it starts ready too.
-    var presenceReady by remember { mutableStateOf(warmResume || headsetBooted || !VrchatAuthManager.isLoggedIn(ctx)) }
-    // Holds the boot screen a beat after both land so its green "Account status"
-    // tick is actually visible before the screen hands off to the app.
-    var phase1HoldDone by remember { mutableStateOf(warmResume || headsetBooted) }
+    val booted = !warmResume
+    var phase1BanId by remember { mutableStateOf(if (booted) BootResults.banId else null) }
+    var phase1Checked by remember { mutableStateOf(booted && BootResults.banChecked) }
 
     LaunchedEffect(bootOk) {
-        if (!bootOk || phase1Checked && headsetBooted) return@LaunchedEffect
+        if (!bootOk || phase1Checked) return@LaunchedEffect
         val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
         val deviceHash = prefs.getString("device_id_hash", "") ?: ""
         val authUid    = prefs.getString("auth_uid", "") ?: ""
@@ -311,39 +229,6 @@ private fun VrcaAppContent() {
             phase1BanId = result.banId  // null if clean
         }
         phase1Checked = true
-    }
-
-    // If logged in, wait for the pipeline (warmed during Device session) to
-    // connect so Account status reflects real presence — capped so a dead
-    // session / bad network can never hang boot; it just proceeds.
-    LaunchedEffect(bootOk) {
-        if (!bootOk || presenceReady) return@LaunchedEffect
-        withTimeoutOrNull(PRESENCE_WARM_CAP_MS) {
-            VrchatPipelineState.isConnectedFlow.first { it }
-        }
-        presenceReady = true
-    }
-
-    val accountReady = phase1Checked && presenceReady
-
-    LaunchedEffect(accountReady) {
-        if (accountReady) {
-            kotlinx.coroutines.delay(450)
-            phase1HoldDone = true
-        }
-    }
-
-    if (bootOk && (!accountReady || !phase1HoldDone)) {
-        // Same screen as the bootstrap so the whole boot reads as one
-        // continuous loading experience instead of dropping to a bare spinner.
-        BootstrapScreen(
-            working = true,
-            error = null,
-            onRetry = {},
-            phase = 2,
-            accountChecked = accountReady
-        )
-        return
     }
 
     /* -------------------------
@@ -452,7 +337,7 @@ private fun VrcaAppContent() {
         LaunchedEffect(Unit) {
             // The headset boot's Updates row already asked; reuse that answer.
             // Taken once: a later Activity re-create must ask again, not reuse a stale answer.
-            releaseCheckResult = HeadsetBootResults.takeRelease()
+            releaseCheckResult = BootResults.takeRelease()
                 ?: checkFirestoreRelease(BuildConfig.VERSION_CODE, deviceHash)
         }
 
@@ -1130,11 +1015,6 @@ private const val REMOTE_PREFS_FILE = "vrca_remote"
 /** vrca_remote pref: the app version that last got past boot (the boot screen shows once per update). */
 private const val LAST_BOOT_VERSION_KEY = "last_boot_version_code"
 
-/** Floor for a NEW / logged-out user's boot screen (no VRChat presence to warm),
- *  so it doesn't flash by on the way to onboarding. A logged-in user has no floor
- *  — the real presence-warm below paces the boot instead of a fake wait. */
-private const val NEW_USER_BOOT_FLOOR_MS = 3_000L
-
 /** Cap on the new-user boot-time prefetch of the on-demand OSC tutorial images —
  *  a slow / no network never hangs boot; the tutorial step downloads any that
  *  missed with its own spinner. */
@@ -1148,11 +1028,6 @@ internal const val TUTORIAL_PREFETCH_CAP_MS = 8_000L
  *  manual Retry (now warm) worked instantly. Bounding each attempt lets the loop
  *  abandon a hung call and retry within the boot window, self-healing the blip. */
 private const val ANON_AUTH_ATTEMPT_MS = 6_000L
-
-/** Cap on how long "Account status" waits for the VRChat pipeline to connect
- *  (presence warm) before proceeding — a dead session / bad network must never
- *  hang boot; it just hands off and the app deals with it. */
-private const val PRESENCE_WARM_CAP_MS = 5_000L
 
 /** Start the VRChat pipeline foreground service to begin warming presence during
  *  the Device-session boot stage (only called when already logged in). The app
@@ -1421,297 +1296,6 @@ internal fun sanitizeBackendRefs(text: String): String = text
     // Then any remaining brand tokens, e.g. "FirebaseFirestoreException:
     // PERMISSION_DENIED" -> "server: PERMISSION_DENIED".
     .replace(Regex("""Fire(base|store)\w*""", RegexOption.IGNORE_CASE), "server")
-
-/**
- * Process-level one-shot VRChat platform status for the boot checklist. Held
- * OUTSIDE the composable because BootstrapScreen is composed twice during a
- * normal boot (the bootstrap gate, then the phase-1 ban check) \u2014 local state
- * would refetch and flash the row back to "checking" between the two.
- * stateOf: 0 = checking, 1 = all operational, 2 = issues, 3 = unreachable.
- */
-private object BootVrcStatus {
-    val state = mutableStateOf(0)
-    val detail = mutableStateOf("")
-    val fetchStarted = java.util.concurrent.atomic.AtomicBoolean(false)
-}
-
-private suspend fun fetchBootVrcStatus() = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-    try {
-        val conn = java.net.URL("https://status.vrchat.com/api/v2/summary.json")
-            .openConnection() as java.net.HttpURLConnection
-        conn.connectTimeout = 6000
-        conn.readTimeout = 6000
-        conn.useCaches = false
-        val body = conn.inputStream.bufferedReader().use { it.readText() }
-        conn.disconnect()
-        val status = org.json.JSONObject(body).optJSONObject("status")
-        val indicator = status?.optString("indicator", "none") ?: "none"
-        if (indicator == "none" || indicator.isBlank()) {
-            BootVrcStatus.state.value = 1
-        } else {
-            BootVrcStatus.detail.value =
-                status?.optString("description", "")?.takeIf { it.isNotBlank() }
-                    ?: "VRChat is having platform issues"
-            BootVrcStatus.state.value = 2
-        }
-    } catch (_: Throwable) {
-        BootVrcStatus.state.value = 3
-    }
-}
-
-/** One row of the boot checklist. state: 0 = pending, 1 = active (spinner),
- *  2 = done (green check), 3 = warn (amber !), 4 = unknown (grey ?). */
-@Composable
-private fun BootCheckRow(label: String, state: Int, detail: String = "") {
-    val colors = MaterialTheme.colorScheme
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-            when (state) {
-                1 -> CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp
-                )
-                2 -> Surface(shape = CircleShape, color = GremlinColors.Positive, modifier = Modifier.size(18.dp)) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(13.dp), tint = Color.Black)
-                    }
-                }
-                3 -> Surface(shape = CircleShape, color = GremlinColors.Caution, modifier = Modifier.size(18.dp)) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("!", color = Color.Black, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                    }
-                }
-                4 -> Surface(shape = CircleShape, color = colors.onSurfaceVariant.copy(alpha = 0.35f), modifier = Modifier.size(18.dp)) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("?", color = colors.surface, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                    }
-                }
-                else -> Surface(
-                    shape = CircleShape,
-                    color = colors.onSurfaceVariant.copy(alpha = 0.15f),
-                    modifier = Modifier.size(10.dp)
-                ) {}
-            }
-        }
-        Column(Modifier.padding(start = 12.dp)) {
-            Text(
-                label,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (state == 0) colors.onSurfaceVariant.copy(alpha = 0.6f) else colors.onSurface
-            )
-            if (detail.isNotBlank()) {
-                Text(
-                    detail,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (state == 3) GremlinColors.Caution else colors.onSurfaceVariant
-                )
-            }
-        }
-    }
-}
-
-@Composable
-internal fun BootstrapScreen(
-    working: Boolean,
-    error: String?,
-    onRetry: () -> Unit,
-    phase: Int = 1,
-    // True once the phase-1 account/device check has finished cleanly — lets the
-    // "Account status" row show a green tick (otherwise it only ever spins, because
-    // finishing the check immediately dismisses the boot screen).
-    accountChecked: Boolean = false
-) {
-    val colors = MaterialTheme.colorScheme
-    // Soft vertical wash: theme background into a faint primary tint at the
-    // bottom. Gives the screen depth without fighting the dark theme.
-    val gradient = Brush.verticalGradient(
-        0f to colors.background,
-        0.55f to colors.background,
-        1f to lerp(colors.background, colors.primary, 0.12f)
-    )
-
-    // Gentle breathing pulse on the logo while working.
-    val pulse = rememberInfiniteTransition(label = "bootPulse")
-    val logoScale by pulse.animateFloat(
-        initialValue = 1f,
-        targetValue = if (working) 1.06f else 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1400),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "bootLogoScale"
-    )
-
-    // Kick off the one-shot VRChat platform status check. Process-level guard:
-    // the second BootstrapScreen composition (ban check) must not refetch.
-    LaunchedEffect(Unit) {
-        if (BootVrcStatus.fetchStarted.compareAndSet(false, true)) {
-            fetchBootVrcStatus()
-        }
-    }
-
-    Surface {
-        Box(Modifier.fillMaxSize().background(gradient)) {
-            Column(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    // Monitor-shape framing: center the boot content in a comfortable
-                    // column on a wide Quest panel (a phone stays under the cap, so it
-                    // fills as before). Matches the main app's centered framing.
-                    .widthIn(max = 520.dp)
-                    .align(Alignment.Center)
-                    .padding(28.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                // The VRC-A chibi logo (drawable-nodpi/vrca_logo, a 512px copy of
-                // the same character art as the launcher icon), clipped circular by
-                // the Surface shape. This is a DEDICATED high-res asset — NOT the
-                // small @mipmap/ic_launcher (48-192px), which would upscale and blur
-                // at this ~136dp boot size on high-density phones.
-                Surface(
-                    shape = CircleShape,
-                    color = colors.primary.copy(alpha = 0.10f),
-                    modifier = Modifier
-                        .size(136.dp)
-                        .scale(logoScale)
-                ) {
-                    // The square icon art ends in a hard horizontal edge inside
-                    // the circle (the padding keeps the "VRC-A" text clear of
-                    // the clip, but exposes the art's flat bottom). Fade the
-                    // last stretch out so the character blends into the tinted
-                    // circle instead of looking chopped off.
-                    Image(
-                        painter = painterResource(com.vrca.R.drawable.vrca_logo),
-                        contentDescription = null,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(12.dp)
-                            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                            .drawWithContent {
-                                drawContent()
-                                drawRect(
-                                    brush = Brush.verticalGradient(
-                                        0.72f to Color.Black,
-                                        1f to Color.Transparent
-                                    ),
-                                    blendMode = BlendMode.DstIn
-                                )
-                            }
-                    )
-                }
-
-                Spacer(Modifier.height(20.dp))
-
-                Text(
-                    "VRC-A",
-                    style = MaterialTheme.typography.displaySmall,
-                    fontWeight = FontWeight.Bold,
-                    color = colors.primary,
-                    textAlign = TextAlign.Center
-                )
-                Text(
-                    "VRChat Assistant",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = colors.onSurfaceVariant,
-                    textAlign = TextAlign.Center
-                )
-
-                Spacer(Modifier.height(28.dp))
-
-                // Boot checklist: the real phases, with live per-row states.
-                Surface(
-                    shape = MaterialTheme.shapes.large,
-                    color = colors.surfaceVariant.copy(alpha = 0.5f),
-                    modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth()
-                ) {
-                    Column(
-                        Modifier.padding(horizontal = 18.dp, vertical = 16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        BootCheckRow(
-                            label = "Device session",
-                            state = when {
-                                phase >= 2 -> 2
-                                error != null -> 3
-                                else -> 1
-                            }
-                        )
-                        val vrcState by BootVrcStatus.state
-                        val vrcDetail by BootVrcStatus.detail
-                        BootCheckRow(
-                            label = "VRChat systems",
-                            state = when (vrcState) {
-                                1 -> 2
-                                2 -> 3
-                                3 -> 4
-                                else -> 1
-                            },
-                            detail = when (vrcState) {
-                                1 -> "All systems operational"
-                                2 -> vrcDetail
-                                3 -> "Couldn't check status"
-                                else -> ""
-                            }
-                        )
-                        BootCheckRow(
-                            label = "Account status",
-                            state = when {
-                                accountChecked -> 2
-                                phase >= 2 -> 1
-                                else -> 0
-                            }
-                        )
-                    }
-                }
-
-                // Lifetime stat line (hidden until it's a number worth showing,
-                // so a fresh install never sees "0 chatbox updates").
-                val lifetimeSends = remember { ChatboxStats.totalSends() }
-                if (error == null && lifetimeSends >= 100) {
-                    Spacer(Modifier.height(20.dp))
-                    Text(
-                        "You've sent ${String.format(java.util.Locale.US, "%,d", lifetimeSends)} chatbox updates",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.onSurfaceVariant.copy(alpha = 0.8f),
-                        textAlign = TextAlign.Center
-                    )
-                }
-
-                if (error != null) {
-                    Spacer(Modifier.height(18.dp))
-
-                    ElevatedCard(modifier = Modifier.widthIn(max = 520.dp)) {
-                        Column(
-                            Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text("Startup error", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                error,
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
-
-                    Spacer(Modifier.height(12.dp))
-                    Button(onClick = onRetry) { Text("Retry") }
-                }
-            }
-
-            // Version footer pinned to the bottom edge.
-            Text(
-                "v${BuildConfig.VERSION_NAME}",
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.onSurfaceVariant.copy(alpha = 0.6f),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 18.dp)
-            )
-        }
-    }
-}
 
 @Composable
 internal fun CrashScreen(

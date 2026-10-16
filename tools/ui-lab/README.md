@@ -62,7 +62,7 @@ The engine itself can't run on the JVM. Expand Manual Send to see the row:
 `ui.sh run headset "preset voice-loading; tap Manual Send; shot v"`.
 
 **Shows:** update, update-optional, whatsnew, confirm, confirm-destructive, timezone (dialogs);
-boot [2|error|done], crash, banned [reason], tos, onboarding <step 0-7>, login [nocancel] (full screens).
+boot [mid|error|done|incident|offline|signin|vrcdown|live|livefail|demo] [none] (samples), headsetboot [onboarded] (the real boot run), crash, banned [reason], tos, onboarding <step 0-7>, login [nocancel] (full screens).
 
 Everything else is reached the way a user gets there: tap through the tabs, sub-tabs, cards,
 chips and buttons (`tree` lists what's tappable).

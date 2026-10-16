@@ -42,10 +42,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * What the headset boot found, handed to [VrcaApp] so the gates after boot reuse it instead of
+ * What the boot found, handed to [VrcaApp] so the gates after boot reuse it instead of
  * repeating the same reads (the ban check, the release check).
  */
-internal object HeadsetBootResults {
+internal object BootResults {
     /** True once Account standing ran; [banId] is then the phase-1 ban id (null = clean). */
     @Volatile var banChecked = false
     @Volatile var banId: String? = null
@@ -63,23 +63,35 @@ private enum class Row(val label: String, val blocking: Boolean) {
     VrchatSignIn("VRChat sign-in", true),
     Discord("Discord", false),
     VrchatHere("VRChat on this headset", false),
-    Updates("Updates", true)
+    Updates("Updates", true);
+
+    /** Rows a build doesn't have: the VRChat log is only on the headset, and the admin build
+     *  never checks for updates. */
+    val inThisBuild: Boolean
+        get() = when (this) {
+            VrchatHere -> BuildConfig.IS_HEADSET_BUILD
+            Updates -> !BuildConfig.IS_ADMIN_BUILD
+            else -> true
+        }
 }
+
+/** This build's rows, in screen order. */
+private val ROWS = Row.entries.filter { it.inThisBuild }
 
 private data class RowState(val state: BootState = BootState.Waiting, val note: BootNote? = null)
 
 /**
- * The headset's boot: every check starts at once (Terms of Service and Account standing wait for
+ * The app's boot (every build): every check starts at once (Terms of Service and Account standing wait for
  * the device session, which they need), each row shows where its check is, and boot hands off when
  * the blocking rows (device session, terms, account, updates) have finished, the screen has fully
  * opened and the Ready sweep has played. The other rows can still be finishing when it opens.
  *
- * A failed device session shows Retry (counting down to an automatic retry) and, when this headset
+ * A failed device session shows Retry (counting down to an automatic retry) and, when this device
  * has signed in before, Continue anyway. Nothing here writes; reads are the ones boot already did
  * (sign-in, ban check, release check) plus one `config/app` read for the terms row.
  */
 @Composable
-internal fun HeadsetBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
+internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
     val ctx = LocalContext.current
     val rows = remember { mutableStateListOf(*Array(Row.entries.size) { RowState() }) }
     var status by remember { mutableStateOf(BootStatus()) }
@@ -92,7 +104,7 @@ internal fun HeadsetBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
     var showLogin by remember { mutableStateOf(false) }
     // Boot may go on once every blocking row has settled without failing (a failed device session
     // waits on Retry, a failed VRChat sign-in waits on signing in).
-    val blockingDone = tutorialDone && Row.entries.filter { it.blocking }.all { rows[it.ordinal].state in SETTLED }
+    val blockingDone = tutorialDone && ROWS.filter { it.blocking }.all { rows[it.ordinal].state in SETTLED }
     val signInNeeded = rows[Row.VrchatSignIn.ordinal].let { it.state == BootState.Failed && it.note == BootNote.SignInNeeded }
     // VRChat's status-page answer, once it's in (the sign-in row needs it to judge a failure).
     suspend fun vrchatStatus(): ServiceState =
@@ -131,7 +143,7 @@ internal fun HeadsetBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
             // Rows that don't need the device session start straight away.
             launch { vrchatSignIn(ctx, { vrchatStatus() }) { s, n -> set(Row.VrchatSignIn, s, n) } }
             launch { discord(ctx) { s, n -> set(Row.Discord, s, n) } }
-            launch { vrchatHere { s, n -> set(Row.VrchatHere, s, n) } }
+            if (Row.VrchatHere.inThisBuild) launch { vrchatHere { s, n -> set(Row.VrchatHere, s, n) } }
             val worker = async(Dispatchers.IO) { AvatarGlobalDb.fetchHealth() != null }
 
             set(Row.Device, BootState.Working)
@@ -164,17 +176,17 @@ internal fun HeadsetBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
                 if (result == null) {
                     set(Row.Account, BootState.Warn, BootNote.CantConnect)
                 } else {
-                    HeadsetBootResults.banId = result.banId
-                    HeadsetBootResults.banChecked = true
+                    BootResults.banId = result.banId
+                    BootResults.banChecked = true
                     // A ban is shown by the ban gate after boot; here it's just noted.
                     if (result.isBanned) set(Row.Account, BootState.Warn, BootNote.Restricted)
                     else set(Row.Account, BootState.Done, BootNote.Good)
                 }
             }
-            val updates = launch {
+            val updates = if (!Row.Updates.inThisBuild) null else launch {
                 set(Row.Updates, BootState.Working)
                 val r = withTimeoutOrNull(10_000L) { checkFirestoreRelease(BuildConfig.VERSION_CODE, deviceHash) }
-                HeadsetBootResults.release = r?.takeIf { it !is ReleaseCheckResult.Failed }
+                BootResults.release = r?.takeIf { it !is ReleaseCheckResult.Failed }
                 when (r) {
                     ReleaseCheckResult.UpToDate -> set(Row.Updates, BootState.Done, BootNote.UpToDate)
                     is ReleaseCheckResult.UpdateAvailable -> set(Row.Updates, BootState.Warn, BootNote.UpdateReady)
@@ -188,7 +200,7 @@ internal fun HeadsetBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
                     withTimeoutOrNull(TUTORIAL_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx) }
                 }
             }
-            terms.join(); account.join(); updates.join(); tutorial.join()
+            terms.join(); account.join(); updates?.join(); tutorial.join()
             tutorialDone = true
         }
     }
@@ -218,13 +230,14 @@ internal fun HeadsetBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
     }
     // The logo only flies into the top bar when the main app is what opens next; a terms, sign-in,
     // first-run or ban screen comes first otherwise, so it just fades out there.
-    val toMainApp = exiting && rows[Row.Terms.ordinal].state == BootState.Done &&
+    // (Headset only: the phone/admin top bar shows the name in words, not the logo.)
+    val toMainApp = exiting && BuildConfig.IS_HEADSET_BUILD && rows[Row.Terms.ordinal].state == BootState.Done &&
         rows[Row.Account.ordinal].note != BootNote.Restricted &&
         VrchatAuthManager.isLoggedIn(ctx) && com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
 
     androidx.compose.foundation.layout.Box {
     BootScreen(
-        checks = Row.entries.map { r ->
+        checks = ROWS.map { r ->
             val s = rows[r.ordinal]
             BootCheck(r.label, s.state, s.note, r.blocking, icons[r])
         },
@@ -244,7 +257,7 @@ internal fun HeadsetBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
     if (showLogin) {
         androidx.compose.material3.Surface(androidx.compose.ui.Modifier.fillMaxSize(), color = com.vrca.ui.theme.GremlinColors.Backdrop) {
             com.vrca.vrchat.VrchatLoginScreen(
-                pendingBanId = HeadsetBootResults.banId,
+                pendingBanId = BootResults.banId,
                 onCancel = { showLogin = false }
             ) { _, _ ->
                 showLogin = false

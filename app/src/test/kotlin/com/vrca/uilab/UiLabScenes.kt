@@ -35,7 +35,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import com.vrca.app.BannedScreen
-import com.vrca.app.BootstrapScreen
 import com.vrca.app.BootState as S
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Headset
@@ -426,7 +425,8 @@ object UiLabScenes {
         )
         var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(0L) }
         androidx.compose.runtime.LaunchedEffect(Unit) { while (now < 12000) { kotlinx.coroutines.delay(50); now += 50 } }
-        val checks = rows.map { r ->
+        val shownRows = rows.filter { com.vrca.BuildConfig.IS_HEADSET_BUILD || it.label != "VRChat on this headset" }
+        val checks = shownRows.map { r ->
             when {
                 now < r.start -> c(r.label, B["Waiting"]!!, null, r.blocking)
                 now < r.end -> c(r.label, B["Working"]!!, null, r.blocking)
@@ -440,7 +440,7 @@ object UiLabScenes {
             error = if (fail && now >= 900) "Can't connect" else null, retryInSec = if (fail && now >= 900) 5 else null,
             onContinue = if (fail && now >= 900) ({}) else null, playIntro = demo,
             // demo: after Ready, the way out (logo into the top bar), then the app itself.
-            exit = demo && now >= 8100, exitToTopBar = true, onExited = toApp,
+            exit = demo && now >= 8100, exitToTopBar = com.vrca.BuildConfig.IS_HEADSET_BUILD, onExited = toApp,
             backdrop = com.vrca.app.BootBackdrop.Lanes, userName = "Ashoska"
         )
     }
@@ -464,7 +464,7 @@ object UiLabScenes {
             .mapIndexed { n, l ->
                 val (st, note) = (s[n] + ":").split(":")
                 c(l, com.vrca.app.BootState.valueOf(st), Nt[note], n in 0..2)
-            }
+            }.filter { com.vrca.BuildConfig.IS_HEADSET_BUILD || it.label != "VRChat on this headset" }
         val checks = when (v) {
             "error" -> rows("Failed:CantConnect", "Waiting", "Waiting", "Working", "Done:Connected", "Skipped:NotOpen", "Done:UpToDate")
             "signin" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Failed:SignInNeeded", "Skipped:Off", "Done:Found", "Done:UpToDate")
@@ -509,14 +509,14 @@ object UiLabScenes {
         val name = arg.substringBefore(' ')
         val rest = arg.substringAfter(' ', "")
         when (name) {
-            "boot" -> bootSample(rest) { com.vrca.app.BootReveal.start(withLogo = true); d.base.value = "screen" }
+            "boot" -> bootSample(rest) { com.vrca.app.BootReveal.start(withLogo = com.vrca.BuildConfig.IS_HEADSET_BUILD); d.base.value = "screen" }
             // The REAL headset boot runner (its checks run against the lab, so it shows what fails offline).
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.
                 val ctx = androidx.compose.ui.platform.LocalContext.current
                 if (rest == "onboarded") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
-                com.vrca.app.HeadsetBoot(onDone = { _ -> })
+                com.vrca.app.AppBoot(onDone = { _ -> })
             }
             "crash" -> CrashScreen(
                 crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",

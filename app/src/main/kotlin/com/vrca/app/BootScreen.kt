@@ -19,6 +19,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.background
@@ -49,6 +52,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.foundation.clickable
@@ -332,6 +336,9 @@ fun BootScreen(
             Modifier.fillMaxSize().background(GremlinColors.Backdrop).onGloballyPositioned { rootCoords = it }
         ) {
             BootBackdropLayer(backdrop, alpha = { contentIn.value * (1f - exitP.value) }, modifier = Modifier.matchParentSize())
+            // Wide = the headset panel (or a tablet); a phone gets the stacked column.
+            val wide = maxWidth >= 720.dp && maxHeight >= 560.dp
+            val screenH = maxHeight
             val boxW = constraints.maxWidth.toFloat()
             val boxH = constraints.maxHeight.toFloat()
             // The logo: from the screen's centre to its slot, one size the whole way (user: a
@@ -360,9 +367,23 @@ fun BootScreen(
                         }
                 )
             }
-            run {
-                // Logo and the Status card on the left; the checklist on the right. Both
-                // panels wrap their content (no empty strips) and sit bottom-aligned so their lower
+            val versionText: @Composable (Modifier) -> Unit = { m ->
+                Text(
+                    "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = GremlinColors.TextMuted.copy(alpha = 0.85f),
+                    modifier = m.then(contentLayer)
+                )
+            }
+            val pills: @Composable () -> Unit = {
+                BootPills(
+                    error, retryInSec, onRetry, onContinue, onSignIn,
+                    seamAt = if (wide) { width, gap -> ((width - gap) * 0.85f / 2f + gap / 2f).toInt() } else null
+                )
+            }
+            if (wide) {
+                // Headset (or any wide screen): logo and the Status card on the left; the checklist
+                // on the right. Both panels wrap their content (no empty strips) and sit bottom-aligned so their lower
                 // edges line up; the pair is centred on the screen. On an error, Retry / Continue
                 // anyway open up underneath, meeting at the gap between the two panels.
                 Column(Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 32.dp, vertical = 22.dp)) {
@@ -388,36 +409,78 @@ fun BootScreen(
                         LoadingPanel(checks, Modifier.fillMaxWidth(), partsL.value, userName = userName)
                     }
                 }
-                // Kept while it animates away (onSignIn is already null by then).
-                var lastSignIn by remember { mutableStateOf<(() -> Unit)?>(null) }
-                if (onSignIn != null) lastSignIn = onSignIn
-                AnimatedVisibility(error != null || onSignIn != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                    // The pill's seam (where Retry meets Continue anyway) sits on the centre of the gap
-                    // between the two panels: Retry under the left one, Continue under the right.
-                    Layout(
-                        content = {
-                            val signIn = lastSignIn
-                            if (error == null && signIn != null) SignInPill(signIn) else ActionPill(retryInSec, onRetry, onContinue)
-                        },
-                        modifier = Modifier.fillMaxWidth().padding(top = 20.dp)
-                    ) { measurables, constraints ->
-                        val pill = measurables.first().measure(constraints.copy(minWidth = 0))
-                        val gap = WIDE_GAP.roundToPx()
-                        val gapCentre = ((constraints.maxWidth - gap) * 0.85f / 2f + gap / 2f).toInt()
-                        layout(constraints.maxWidth, pill.height) {
-                            val seam = pill[PillSeam].takeIf { it != AlignmentLine.Unspecified } ?: (pill.width / 2)
-                            pill.place((gapCentre - seam).coerceIn(0, constraints.maxWidth - pill.width), 0)
-                        }
-                    }
+                pills()
                 }
+            } else {
+                // Phone: one column, logo, Status, checklist, then the pill, centred; it scrolls
+                // only if a short screen can't fit it all.
+                // On a short phone the pill can open below the fold: scroll down to it when it does.
+                val scroll = rememberScrollState()
+                val pillUp = error != null || onSignIn != null
+                LaunchedEffect(pillUp) {
+                    if (pillUp) { delay(250); scroll.animateScrollTo(scroll.maxValue) }
+                }
+                Column(
+                    Modifier.fillMaxSize().verticalScroll(scroll)
+                        .heightIn(min = maxHeight).padding(horizontal = 16.dp, vertical = 20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    // A short phone gets a smaller logo and tighter rows so it all still fits.
+                    val compact = screenH < 760.dp
+                    val rowH = if (compact) 32.dp else WIDE_ROW_HEIGHT
+                    val rowGap = if (compact) 6.dp else 8.dp
+                    logo(if (compact) PHONE_LOGO_HEIGHT_COMPACT else PHONE_LOGO_HEIGHT)
+                    Spacer(Modifier.height(PHONE_GAP + 4.dp))
+                    Column(Modifier.widthIn(max = PHONE_MAX_WIDTH).fillMaxWidth()) {
+                        Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
+                            StatusPanel(status, Modifier.fillMaxWidth(), partsR.value, rowHeight = rowH, rowGap = rowGap)
+                        }
+                        Spacer(Modifier.height(PHONE_GAP))
+                        Unfold({ panelL.value }, Modifier.fillMaxWidth()) {
+                            LoadingPanel(checks, Modifier.fillMaxWidth(), partsL.value, userName = userName, rowHeight = rowH, rowGap = rowGap)
+                        }
+                        pills()
+                    }
+                    // Phone: the version sits under everything (a corner overlay would cover rows).
+                    Spacer(Modifier.height(10.dp))
+                    versionText(Modifier)
                 }
             }
-            Text(
-                "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
-                style = MaterialTheme.typography.labelMedium,
-                color = GremlinColors.TextMuted.copy(alpha = 0.85f),
-                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 10.dp).then(contentLayer)
-            )
+            if (wide) versionText(Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 10.dp))
+        }
+    }
+}
+
+/**
+ * Retry / Continue anyway (a failed device session) or Sign in to VRChat, opening under the panels.
+ * [seamAt] places the pill: on the headset its seam (where Retry meets Continue anyway) sits on the
+ * gap between the two panels; on a phone it's centred.
+ */
+@Composable
+private fun BootPills(
+    error: String?, retryInSec: Int?, onRetry: () -> Unit, onContinue: (() -> Unit)?,
+    onSignIn: (() -> Unit)?, seamAt: ((width: Int, gap: Int) -> Int)?
+) {
+    // Kept while it animates away (onSignIn is already null by then).
+    var lastSignIn by remember { mutableStateOf<(() -> Unit)?>(null) }
+    if (onSignIn != null) lastSignIn = onSignIn
+    AnimatedVisibility(error != null || onSignIn != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+        Layout(
+            content = {
+                val signIn = lastSignIn
+                if (error == null && signIn != null) SignInPill(signIn) else ActionPill(retryInSec, onRetry, onContinue)
+            },
+            modifier = Modifier.fillMaxWidth().padding(top = 20.dp)
+        ) { measurables, constraints ->
+            val pill = measurables.first().measure(constraints.copy(minWidth = 0))
+            val x = if (seamAt == null) (constraints.maxWidth - pill.width) / 2 else {
+                val seam = pill[PillSeam].takeIf { it != AlignmentLine.Unspecified } ?: (pill.width / 2)
+                seamAt(constraints.maxWidth, WIDE_GAP.roundToPx()) - seam
+            }
+            layout(constraints.maxWidth, pill.height) {
+                pill.place(x.coerceIn(0, (constraints.maxWidth - pill.width).coerceAtLeast(0)), 0)
+            }
         }
     }
 }
@@ -465,6 +528,11 @@ private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: Float, modifie
 /** The logo has the whole left column; sized so its top lines up with the checklist's. */
 private val WIDE_LOGO_HEIGHT = 238.dp
 private val WIDE_LOGO_GAP = 8.dp
+/** Phone: the logo above the cards, the gap between pieces, and how wide the cards may get. */
+private val PHONE_LOGO_HEIGHT = 150.dp
+private val PHONE_LOGO_HEIGHT_COMPACT = 104.dp
+private val PHONE_GAP = 12.dp
+private val PHONE_MAX_WIDTH = 480.dp
 /** Headset row height, shared by check rows and status rows so both panels match. */
 private val WIDE_ROW_HEIGHT = 38.dp
 /** Headset gap between the left column and the checklist; the error buttons meet across it. */
@@ -596,7 +664,10 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?) {
 
 /** The checklist: the header, then one row per check. Wraps its rows (no fixed height). */
 @Composable
-private fun LoadingPanel(checks: List<BootCheck>, modifier: Modifier, reveal: Float = 1f, userName: String? = null) {
+private fun LoadingPanel(
+    checks: List<BootCheck>, modifier: Modifier, reveal: Float = 1f, userName: String? = null,
+    rowHeight: Dp = WIDE_ROW_HEIGHT, rowGap: Dp = 8.dp
+) {
     val pieces = checks.size + 1 // the header, then each check
     // A row shows "waiting" until it has fully appeared, so a check that finished during the intro
     // still lands its tick on screen instead of arriving already ticked.
@@ -607,9 +678,9 @@ private fun LoadingPanel(checks: List<BootCheck>, modifier: Modifier, reveal: Fl
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
             Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { BootHeader(checks, userName) }
             Spacer(Modifier.height(14.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(rowGap)) {
                 checks.forEachIndexed { i, c ->
-                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, 1 + i, pieces)), height = WIDE_ROW_HEIGHT)
+                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, 1 + i, pieces)), height = rowHeight)
                 }
             }
         }
@@ -795,11 +866,11 @@ private fun ServiceRow(icon: ImageVector, name: String, text: String, mark: Mark
 
 /** Is VRChat up, and are our own servers up. Wraps its rows (no fixed height). */
 @Composable
-private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 1f, rowHeight: Dp = 31.dp) {
+private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 1f, rowHeight: Dp = WIDE_ROW_HEIGHT, rowGap: Dp = 8.dp) {
     Layer(modifier) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
             // No header (user): the rows speak for themselves.
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(rowGap)) {
                 // Same as the checklist: a row says "Checking..." until it has fully appeared.
                 val net = if (stagger(reveal, 0, 3) < 1f) InternetLink.Checking else status.internet
                 ServiceRow(
@@ -892,7 +963,8 @@ fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
 
 /** The Starting up rows' left icons (Discord's comes from R.drawable.ic_discord). */
 object BootIcons {
-    val DeviceSession: ImageVector get() = VrHeadset
+    /** The device itself: a VR headset on the headset build, a phone otherwise. */
+    val DeviceSession: ImageVector get() = if (BuildConfig.IS_HEADSET_BUILD) VrHeadset else Icons.Filled.PhoneAndroid
     val Terms: ImageVector get() = Icons.AutoMirrored.Filled.Article
     val Account: ImageVector get() = Icons.Filled.Shield
     val VrchatSignIn: ImageVector get() = Icons.Filled.Person
