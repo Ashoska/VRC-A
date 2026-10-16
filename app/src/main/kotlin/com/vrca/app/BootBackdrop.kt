@@ -1,217 +1,206 @@
 package com.vrca.app
 
-import androidx.compose.foundation.Canvas
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.unit.dp
 import com.vrca.ui.theme.GremlinColors
 import kotlin.math.PI
+import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.random.Random
 
-/** The boot screen's back wall. Two looks being tried (user's brainstorm, 2026-10-16). */
-enum class BootBackdrop {
-    None,
-    /** WhatsApp-style: thin line doodles tiled over the whole wall, faint, at small random tilts. */
-    Doodles,
-    /** A fixed set of bigger flat characters peeking in from the bottom edge and corners. */
-    Crowd
+/** The boot screen's back wall. */
+enum class BootBackdrop { None, Lanes }
+
+/**
+ * One symbol of the back wall: a line drawing in a unit box (0..1 on both axes), drawn with a
+ * [SymbolPen]. Nothing is stored as an image; the wall is built live from [BootSymbols.all].
+ */
+class BootSymbol(val name: String, val weight: Int = 1, val draw: SymbolPen.() -> Unit)
+
+/** Drawing helpers for a symbol, in unit-box coordinates; [s] is the box size in px. */
+class SymbolPen(private val scope: DrawScope, private val s: Float, private val ink: Color, private val width: Float) {
+    private val line = Stroke(width = width, cap = StrokeCap.Round, join = StrokeJoin.Round)
+    fun line(x1: Float, y1: Float, x2: Float, y2: Float) =
+        scope.drawLine(ink, Offset(x1 * s, y1 * s), Offset(x2 * s, y2 * s), width, StrokeCap.Round)
+    fun dot(x: Float, y: Float, r: Float) = scope.drawCircle(ink, r * s, Offset(x * s, y * s))
+    fun ring(x: Float, y: Float, r: Float) = scope.drawCircle(ink, r * s, Offset(x * s, y * s), style = line)
+    fun oval(l: Float, t: Float, r: Float, b: Float) =
+        scope.drawOval(ink, Offset(l * s, t * s), Size((r - l) * s, (b - t) * s), style = line)
+    fun path(build: PathPen.() -> Unit) = scope.drawPath(PathPen(s).apply(build).path, ink, style = line)
+}
+
+/** Path building in unit coordinates. */
+class PathPen(private val s: Float) {
+    val path = Path()
+    fun moveTo(x: Float, y: Float) = path.moveTo(x * s, y * s)
+    fun lineTo(x: Float, y: Float) = path.lineTo(x * s, y * s)
+    fun quadTo(cx: Float, cy: Float, x: Float, y: Float) = path.quadraticBezierTo(cx * s, cy * s, x * s, y * s)
+    fun close() = path.close()
 }
 
 /**
- * The community motifs (fish bone from the Kipfel beanie, the cheese joke, a Gnarpy, a kitty) plus
- * small fillers, drawn as simple line art in code. Stand-ins: the user may replace the characters
- * with their own drawings. Every motif draws inside a unit box scaled to [s] px, top-left at 0,0.
+ * The symbols on the wall: the community's own (the user's picks, 2026-10-16; generic fillers were
+ * dropped). To add one, add a [BootSymbol] to [all]; [BootSymbol.weight] makes it show up more or
+ * less often.
  */
-private enum class Motif { FishBone, Cheese, Gnarpy, Kitty, Sparkle, Heart, Note, Bubble, Headset, Dot }
+object BootSymbols {
+    /** The fish bone from the Kipfel beanie. */
+    val FishBone = BootSymbol("fish bone") {
+        path { moveTo(0.18f, 0.5f); lineTo(0.04f, 0.34f); lineTo(0.04f, 0.66f); close() }
+        line(0.18f, 0.5f, 0.7f, 0.5f)
+        for (x in listOf(0.3f, 0.42f, 0.54f)) { line(x, 0.5f, x + 0.07f, 0.32f); line(x, 0.5f, x + 0.07f, 0.68f) }
+        oval(0.66f, 0.36f, 0.96f, 0.64f)
+        dot(0.86f, 0.47f, 0.028f)
+    }
 
-@Composable
-fun BootBackdropLayer(style: BootBackdrop, modifier: Modifier = Modifier.fillMaxSize()) {
-    if (style == BootBackdrop.None) return
-    Canvas(modifier) {
-        when (style) {
-            BootBackdrop.Doodles -> drawDoodles()
-            BootBackdrop.Crowd -> drawCrowd()
-            BootBackdrop.None -> Unit
+    /** The community's cheese joke: an emoji-style wedge. */
+    val Cheese = BootSymbol("cheese") {
+        path {
+            moveTo(0.06f, 0.54f); lineTo(0.92f, 0.30f); lineTo(0.94f, 0.54f)
+            lineTo(0.94f, 0.76f); lineTo(0.06f, 0.76f); close()
         }
+        line(0.06f, 0.54f, 0.94f, 0.54f)
+        ring(0.28f, 0.66f, 0.05f); ring(0.55f, 0.66f, 0.04f); ring(0.78f, 0.63f, 0.045f); ring(0.7f, 0.44f, 0.03f)
     }
-}
 
-/** Tiled doodle sheet. Deterministic (same layout every open), one cell per motif. */
-private fun DrawScope.drawDoodles() {
-    val cell = 78.dp.toPx()
-    val ink = GremlinColors.Edge.copy(alpha = 0.6f)
-    val stroke = 1.6.dp.toPx()
-    // Characters more often than fillers, so the wall reads as "ours".
-    val pool = listOf(
-        Motif.FishBone, Motif.Cheese, Motif.Gnarpy, Motif.Kitty,
-        Motif.Sparkle, Motif.FishBone, Motif.Heart, Motif.Cheese, Motif.Note,
-        Motif.Kitty, Motif.Bubble, Motif.Gnarpy, Motif.Headset, Motif.Dot
-    )
-    val cols = (size.width / cell).toInt() + 2
-    val rows = (size.height / cell).toInt() + 2
-    for (r in 0 until rows) for (c in 0 until cols) {
-        val h = hash(r * 131 + c * 17 + 7)
-        val motif = pool[(h % pool.size).toInt()]
-        val small = motif == Motif.Dot || motif == Motif.Sparkle || motif == Motif.Heart || motif == Motif.Note
-        val s = cell * (if (small) 0.34f else 0.62f) * (0.85f + (h shr 8 and 0xFF) / 255f * 0.3f)
-        // Brick offset every other row + jitter, so it never looks like a grid.
-        val x = c * cell + (if (r % 2 == 1) cell / 2 else 0f) + ((h shr 16 and 0xFF) / 255f - 0.5f) * cell * 0.3f - cell / 2
-        val y = r * cell + ((h shr 24 and 0xFF) / 255f - 0.5f) * cell * 0.3f - cell / 2
-        val deg = ((h shr 4 and 0xFF) / 255f - 0.5f) * 50f
-        translate(x + (cell - s) / 2, y + (cell - s) / 2) {
-            rotate(deg, pivot = Offset(s / 2, s / 2)) { drawMotif(motif, s, ink, null, stroke) }
-        }
-    }
-}
-
-/** A set layout: characters peeking up from the bottom edge, props in the top corners. */
-private fun DrawScope.drawCrowd() {
-    val fill = GremlinColors.Panel
-    val ink = GremlinColors.Edge
-    val stroke = 2.dp.toPx()
-    val w = size.width; val h = size.height
-    fun put(m: Motif, cx: Float, cy: Float, sizeDp: Float, deg: Float = 0f) {
-        val s = sizeDp.dp.toPx()
-        translate(cx - s / 2, cy - s / 2) {
-            rotate(deg, pivot = Offset(s / 2, s / 2)) { drawMotif(m, s, ink, fill, stroke) }
-        }
-    }
-    // The crowd peeks in from the side edges (the panels cover the middle and the bottom),
-    // half off-screen, tilted toward the content as if watching the boot.
-    put(Motif.Gnarpy, w * 0.015f, h * 0.50f, 150f, 28f)
-    put(Motif.Kitty, w * 0.02f, h * 0.86f, 130f, 18f)
-    put(Motif.Kitty, w * 0.985f, h * 0.48f, 130f, -22f)
-    put(Motif.Gnarpy, w * 0.985f, h * 0.84f, 150f, -26f)
-    // Props up top, tucked into the corners.
-    put(Motif.FishBone, w * 0.08f, h * 0.12f, 120f, -24f)
-    put(Motif.Cheese, w * 0.92f, h * 0.12f, 110f, 14f)
-    put(Motif.Sparkle, w * 0.2f, h * 0.27f, 30f)
-    put(Motif.Sparkle, w * 0.8f, h * 0.29f, 24f)
-    put(Motif.Heart, w * 0.31f, h * 0.12f, 24f, -12f)
-    put(Motif.Note, w * 0.7f, h * 0.15f, 28f, 10f)
-}
-
-/** Draws [m] in an [s]-px box: [ink] outline, plus a flat [fill] under it when given. */
-private fun DrawScope.drawMotif(m: Motif, s: Float, ink: Color, fill: Color?, stroke: Float) {
-    val line = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round)
-    fun p(x: Float, y: Float) = Offset(x * s, y * s)
-    fun shape(path: Path) {
-        if (fill != null) drawPath(path, fill, style = Fill)
-        drawPath(path, ink, style = line)
-    }
-    fun seg(x1: Float, y1: Float, x2: Float, y2: Float) = drawLine(ink, p(x1, y1), p(x2, y2), stroke, StrokeCap.Round)
-    fun dot(x: Float, y: Float, r: Float) = drawCircle(ink, r * s, p(x, y))
-    fun ring(x: Float, y: Float, r: Float) {
-        if (fill != null) drawCircle(fill, r * s, p(x, y))
-        drawCircle(ink, r * s, p(x, y), style = line)
-    }
-    when (m) {
-        Motif.FishBone -> {
-            // Tail fin, spine, ribs, and a round head with an eye.
-            shape(Path().apply { moveTo(0.18f * s, 0.5f * s); lineTo(0.04f * s, 0.34f * s); lineTo(0.04f * s, 0.66f * s); close() })
-            seg(0.18f, 0.5f, 0.7f, 0.5f)
-            for (x in listOf(0.3f, 0.42f, 0.54f)) { seg(x, 0.5f, x + 0.07f, 0.32f); seg(x, 0.5f, x + 0.07f, 0.68f) }
-            shape(Path().apply { addOval(androidx.compose.ui.geometry.Rect(0.66f * s, 0.36f * s, 0.96f * s, 0.64f * s)) })
-            dot(0.86f, 0.47f, 0.028f)
-        }
-        Motif.Cheese -> {
-            // Emoji-style wedge: top face, front face, holes.
-            shape(Path().apply {
-                moveTo(0.06f * s, 0.54f * s); lineTo(0.92f * s, 0.30f * s); lineTo(0.94f * s, 0.54f * s)
-                lineTo(0.94f * s, 0.76f * s); lineTo(0.06f * s, 0.76f * s); close()
-            })
-            seg(0.06f, 0.54f, 0.94f, 0.54f)
-            ring(0.28f, 0.66f, 0.05f); ring(0.55f, 0.66f, 0.04f); ring(0.78f, 0.63f, 0.045f); ring(0.7f, 0.44f, 0.03f)
-        }
-        Motif.Kitty -> {
-            // Sitting cat: body, tail, head with ears, face.
-            shape(Path().apply { addOval(androidx.compose.ui.geometry.Rect(0.26f * s, 0.44f * s, 0.74f * s, 0.94f * s)) })
-            val tail = Path().apply { moveTo(0.7f * s, 0.84f * s); quadraticBezierTo(0.98f * s, 0.84f * s, 0.88f * s, 0.56f * s) }
-            drawPath(tail, ink, style = line)
-            shape(Path().apply {
-                moveTo(0.32f * s, 0.36f * s); lineTo(0.33f * s, 0.08f * s); lineTo(0.46f * s, 0.2f * s)
-                lineTo(0.54f * s, 0.2f * s); lineTo(0.67f * s, 0.08f * s); lineTo(0.68f * s, 0.36f * s)
-                quadraticBezierTo(0.68f * s, 0.52f * s, 0.5f * s, 0.52f * s)
-                quadraticBezierTo(0.32f * s, 0.52f * s, 0.32f * s, 0.36f * s); close()
-            })
-            dot(0.43f, 0.33f, 0.022f); dot(0.57f, 0.33f, 0.022f)
-            seg(0.47f, 0.42f, 0.5f, 0.44f); seg(0.5f, 0.44f, 0.53f, 0.42f)
-        }
-        Motif.Gnarpy -> {
-            // Spiky round body with cat ears, two antennae, :3 face, whiskers, stubby legs.
-            seg(0.42f, 0.24f, 0.36f, 0.04f); seg(0.58f, 0.24f, 0.64f, 0.04f)
-            dot(0.36f, 0.04f, 0.035f); dot(0.64f, 0.04f, 0.035f)
-            seg(0.4f, 0.86f, 0.38f, 0.97f); seg(0.6f, 0.86f, 0.62f, 0.97f)
-            val body = Path()
+    /** A Gnarpy (stand-in drawing): spiky body, cat ears, antennae, :3 face, whiskers. */
+    val Gnarpy = BootSymbol("gnarpy") {
+        line(0.42f, 0.24f, 0.36f, 0.04f); line(0.58f, 0.24f, 0.64f, 0.04f)
+        dot(0.36f, 0.04f, 0.035f); dot(0.64f, 0.04f, 0.035f)
+        line(0.4f, 0.86f, 0.38f, 0.97f); line(0.6f, 0.86f, 0.62f, 0.97f)
+        path {
             val n = 18
             for (i in 0..n) {
                 val a = (i.toFloat() / n) * 2 * PI - PI / 2
                 val r = if (i % 2 == 0) 0.37f else 0.31f
                 val x = 0.5f + r * cos(a).toFloat(); val y = 0.56f + r * 0.92f * sin(a).toFloat()
-                if (i == 0) body.moveTo(x * s, y * s) else body.lineTo(x * s, y * s)
+                if (i == 0) moveTo(x, y) else lineTo(x, y)
             }
-            body.close()
-            shape(body)
-            shape(Path().apply { moveTo(0.24f * s, 0.36f * s); lineTo(0.22f * s, 0.16f * s); lineTo(0.38f * s, 0.26f * s); close() })
-            shape(Path().apply { moveTo(0.76f * s, 0.36f * s); lineTo(0.78f * s, 0.16f * s); lineTo(0.62f * s, 0.26f * s); close() })
-            dot(0.4f, 0.52f, 0.03f); dot(0.6f, 0.52f, 0.03f)
-            // ":3" mouth
-            drawPath(Path().apply {
-                moveTo(0.42f * s, 0.6f * s); quadraticBezierTo(0.46f * s, 0.66f * s, 0.5f * s, 0.6f * s)
-                quadraticBezierTo(0.54f * s, 0.66f * s, 0.58f * s, 0.6f * s)
-            }, ink, style = line)
-            seg(0.2f, 0.58f, 0.06f, 0.54f); seg(0.2f, 0.62f, 0.06f, 0.66f)
-            seg(0.8f, 0.58f, 0.94f, 0.54f); seg(0.8f, 0.62f, 0.94f, 0.66f)
+            close()
         }
-        Motif.Sparkle -> shape(Path().apply {
-            moveTo(0.5f * s, 0f); quadraticBezierTo(0.56f * s, 0.44f * s, s, 0.5f * s)
-            quadraticBezierTo(0.56f * s, 0.56f * s, 0.5f * s, s); quadraticBezierTo(0.44f * s, 0.56f * s, 0f, 0.5f * s)
-            quadraticBezierTo(0.44f * s, 0.44f * s, 0.5f * s, 0f); close()
-        })
-        Motif.Heart -> shape(Path().apply {
-            moveTo(0.5f * s, 0.9f * s)
-            cubicTo(0.05f * s, 0.6f * s, 0.05f * s, 0.15f * s, 0.5f * s, 0.32f * s)
-            cubicTo(0.95f * s, 0.15f * s, 0.95f * s, 0.6f * s, 0.5f * s, 0.9f * s); close()
-        })
-        Motif.Note -> {
-            ring(0.32f, 0.78f, 0.14f)
-            seg(0.46f, 0.78f, 0.46f, 0.1f)
-            seg(0.46f, 0.1f, 0.8f, 0.24f)
-        }
-        Motif.Bubble -> {
-            shape(Path().apply {
-                addRoundRect(androidx.compose.ui.geometry.RoundRect(0.06f * s, 0.14f * s, 0.94f * s, 0.7f * s, 0.18f * s, 0.18f * s))
-            })
-            shape(Path().apply { moveTo(0.26f * s, 0.68f * s); lineTo(0.22f * s, 0.9f * s); lineTo(0.44f * s, 0.68f * s) })
-            dot(0.32f, 0.42f, 0.04f); dot(0.5f, 0.42f, 0.04f); dot(0.68f, 0.42f, 0.04f)
-        }
-        Motif.Headset -> {
-            // VR headset: visor with two lenses and a strap.
-            seg(0.04f, 0.46f, 0.1f, 0.46f); seg(0.9f, 0.46f, 0.96f, 0.46f)
-            shape(Path().apply {
-                addRoundRect(androidx.compose.ui.geometry.RoundRect(0.1f * s, 0.28f * s, 0.9f * s, 0.68f * s, 0.14f * s, 0.14f * s))
-            })
-            ring(0.33f, 0.48f, 0.09f); ring(0.67f, 0.48f, 0.09f)
-        }
-        Motif.Dot -> ring(0.5f, 0.5f, 0.16f)
+        path { moveTo(0.24f, 0.36f); lineTo(0.22f, 0.16f); lineTo(0.38f, 0.26f) }
+        path { moveTo(0.76f, 0.36f); lineTo(0.78f, 0.16f); lineTo(0.62f, 0.26f) }
+        dot(0.4f, 0.52f, 0.03f); dot(0.6f, 0.52f, 0.03f)
+        path { moveTo(0.42f, 0.6f); quadTo(0.46f, 0.66f, 0.5f, 0.6f); quadTo(0.54f, 0.66f, 0.58f, 0.6f) }
+        line(0.2f, 0.58f, 0.06f, 0.54f); line(0.2f, 0.62f, 0.06f, 0.66f)
+        line(0.8f, 0.58f, 0.94f, 0.54f); line(0.8f, 0.62f, 0.94f, 0.66f)
     }
+
+    /** A sitting kitty. */
+    val Kitty = BootSymbol("kitty") {
+        oval(0.26f, 0.44f, 0.74f, 0.94f)
+        path { moveTo(0.7f, 0.84f); quadTo(0.98f, 0.84f, 0.88f, 0.56f) }
+        path {
+            moveTo(0.32f, 0.36f); lineTo(0.33f, 0.08f); lineTo(0.46f, 0.2f)
+            lineTo(0.54f, 0.2f); lineTo(0.67f, 0.08f); lineTo(0.68f, 0.36f)
+            quadTo(0.68f, 0.52f, 0.5f, 0.52f); quadTo(0.32f, 0.52f, 0.32f, 0.36f); close()
+        }
+        dot(0.43f, 0.33f, 0.022f); dot(0.57f, 0.33f, 0.022f)
+        line(0.47f, 0.42f, 0.5f, 0.44f); line(0.5f, 0.44f, 0.53f, 0.42f)
+    }
+
+    val all: List<BootSymbol> = listOf(FishBone, Cheese, Gnarpy, Kitty)
 }
 
-/** Small integer hash (stable across runs) for the doodle layout. */
-private fun hash(v: Int): Long {
-    var x = v.toLong() * 0x9E3779B1L
-    x = x xor (x ushr 15); x *= 0x85EBCA77L; x = x xor (x ushr 13)
-    return x and 0xFFFFFFFFL
+/** One symbol's slot in a lane: which symbol, where along the lane, and its little tilt/size. */
+private class Slot(val symbol: BootSymbol, val x: Float, val dy: Float, val deg: Float, val scale: Float)
+
+/** A lane: a looping strip of slots that slides sideways at [speed] px/s (negative = left). */
+private class Lane(val slots: List<Slot>, val length: Float, val speed: Float)
+
+private val LANE_HEIGHT = 76.dp
+private val SYMBOL_SIZE = 46.dp
+
+/**
+ * The back wall as lanes of symbols, like traffic lanes: each row slides sideways at its own slow
+ * speed, neighbouring rows in opposite directions. The order is shuffled every open, so the wall
+ * never looks the same twice. Built live from [BootSymbols.all]; the layout is made once per size
+ * (drawWithCache) and each frame only moves it.
+ */
+@Composable
+fun BootBackdropLayer(style: BootBackdrop, modifier: Modifier = Modifier.fillMaxSize()) {
+    if (style == BootBackdrop.None) return
+    val seed = remember { Random.nextInt() }
+    val clock = rememberInfiniteTransition(label = "lanes")
+    // Seconds, looping every 10 min (far longer than a boot screen is ever up).
+    val t: State<Float> = clock.animateFloat(
+        0f, 600f, infiniteRepeatable(tween(600_000, easing = LinearEasing)), label = "laneClock"
+    )
+    Box(
+        modifier.drawWithCache {
+            val laneH = LANE_HEIGHT.toPx()
+            val sym = SYMBOL_SIZE.toPx()
+            val lanes = buildLanes(seed, size.width, size.height, laneH, sym, density)
+            val ink = GremlinColors.Edge.copy(alpha = 0.6f)
+            val width = 1.6.dp.toPx()
+            onDrawBehind {
+                val now = t.value
+                lanes.forEachIndexed { row, lane ->
+                    val y = row * laneH + (laneH - sym) / 2 - laneH / 2
+                    // Slide, wrapped to the lane's loop so it never runs out.
+                    val shift = ((lane.speed * now) % lane.length + lane.length) % lane.length
+                    val copies = ceil(size.width / lane.length).toInt() + 2
+                    for (k in -1 until copies) for (slot in lane.slots) {
+                        val x = slot.x + shift + (k - 1) * lane.length
+                        if (x < -sym * 2 || x > size.width + sym) continue
+                        val s = sym * slot.scale
+                        translate(x, y + slot.dy) {
+                            rotate(slot.deg, pivot = Offset(s / 2, s / 2)) {
+                                SymbolPen(this, s, ink, width).apply(slot.symbol.draw)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+}
+
+private fun buildLanes(seed: Int, w: Float, h: Float, laneH: Float, sym: Float, density: Float): List<Lane> {
+    val rnd = Random(seed)
+    val pool = BootSymbols.all.flatMap { s -> List(s.weight.coerceAtLeast(1)) { s } }
+    val rows = (h / laneH).toInt() + 2
+    return List(rows) { row ->
+        val slots = mutableListOf<Slot>()
+        var x = 0f
+        var last: BootSymbol? = null
+        // A loop a bit wider than the screen, so the repeat isn't noticeable.
+        while (x < w * 1.3f) {
+            var pick = pool[rnd.nextInt(pool.size)]
+            if (pick == last && pool.size > 1) pick = pool[rnd.nextInt(pool.size)] // fewer twins
+            last = pick
+            slots += Slot(
+                symbol = pick, x = x,
+                dy = (rnd.nextFloat() - 0.5f) * laneH * 0.22f,
+                deg = (rnd.nextFloat() - 0.5f) * 36f,
+                scale = 0.85f + rnd.nextFloat() * 0.3f
+            )
+            x += sym * (1.55f + rnd.nextFloat() * 0.6f)
+        }
+        // 9..17 dp/s, alternating direction lane to lane.
+        val speed = (9f + rnd.nextFloat() * 8f) * density * (if (row % 2 == 0) 1f else -1f)
+        Lane(slots, x, speed)
+    }
 }

@@ -347,7 +347,7 @@ object UiLabScenes {
         RichBlock.Text("Thanks for testing! *More soon.*")
     )).toJson()
 
-    /** `show boot [mid|error|done|incident|updated|intro] [doodles|crowd|none]`: a sample state + backdrop. */
+    /** `show boot [mid|error|done|incident|updated|intro] [none]`: a sample state + backdrop. */
     @Composable
     private fun bootSample(rest: String) {
         val I = androidx.compose.material.icons.Icons.Filled
@@ -357,11 +357,7 @@ object UiLabScenes {
         )
         fun c(l: String, st: com.vrca.app.BootState, d: String = "", b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b, icons[l])
         val v = rest.substringBefore(' ').ifBlank { "mid" }
-        val backdrop = when (rest.substringAfter(' ', "")) {
-            "crowd" -> com.vrca.app.BootBackdrop.Crowd
-            "none" -> com.vrca.app.BootBackdrop.None
-            else -> com.vrca.app.BootBackdrop.Doodles
-        }
+        val backdrop = if (rest.substringAfter(' ', "") == "none") com.vrca.app.BootBackdrop.None else com.vrca.app.BootBackdrop.Lanes
         val checks = when (v) {
             "error" -> listOf(
                 c("Server session", S.Failed, "Couldn't reach the server", true), c("VRChat sign-in", S.Done),

@@ -173,7 +173,7 @@ fun BootScreen(
     /** Open on the logo alone, big and centred, then glide it into place as the panels arrive. */
     playIntro: Boolean = true,
     /** The back wall's decoration (BootBackdrop.kt); faded in with the intro. */
-    backdrop: BootBackdrop = BootBackdrop.Doodles
+    backdrop: BootBackdrop = BootBackdrop.Lanes
 ) {
     val working = checks.any { it.state == BootState.Working }
     // Intro, in three beats: the logo fades/grows in at the centre, holds, then settles up into
