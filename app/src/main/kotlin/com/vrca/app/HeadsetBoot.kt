@@ -51,6 +51,8 @@ internal object HeadsetBootResults {
     @Volatile var banId: String? = null
     /** The Updates row's release check, or null if it didn't finish. */
     @Volatile var release: ReleaseCheckResult? = null
+    /** The release check, handed over once (then cleared so it can't go stale). */
+    fun takeRelease(): ReleaseCheckResult? = release.also { release = null }
 }
 
 /** The checklist rows, in screen order (dependency order: the device session comes first). */

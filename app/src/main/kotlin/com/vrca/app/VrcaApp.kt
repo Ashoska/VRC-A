@@ -451,7 +451,8 @@ private fun VrcaAppContent() {
 
         LaunchedEffect(Unit) {
             // The headset boot's Updates row already asked; reuse that answer.
-            releaseCheckResult = HeadsetBootResults.release?.takeIf { BuildConfig.IS_HEADSET_BUILD }
+            // Taken once: a later Activity re-create must ask again, not reuse a stale answer.
+            releaseCheckResult = HeadsetBootResults.takeRelease()
                 ?: checkFirestoreRelease(BuildConfig.VERSION_CODE, deviceHash)
         }
 
