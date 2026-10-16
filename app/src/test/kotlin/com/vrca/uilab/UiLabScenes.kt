@@ -1,17 +1,5 @@
 package com.vrca.uilab
 
-import androidx.compose.material.icons.filled.SignalCellularAlt
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Router
-import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.Public
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.background
-import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -341,7 +329,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "statusicons", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -405,48 +393,6 @@ object UiLabScenes {
         )
     }
 
-    /** TEMP `show statusicons [live]`: the Status card's left-icon ideas side by side. */
-    @Composable
-    private fun statusIcons(rest: String) {
-        val I = androidx.compose.material.icons.Icons.Filled
-        val V = com.vrca.app.ServiceState::class.java.enumConstants!!.associateBy { it.name }
-        val L = com.vrca.app.InternetLink::class.java.enumConstants!!.associateBy { it.name }
-        fun g(i: androidx.compose.ui.graphics.vector.ImageVector) = com.vrca.app.RowGlyph.Vector(i)
-        val looks = listOf(
-            "Now" to com.vrca.app.StatusLook(),
-            "Signal bars · sparkle · cloud" to com.vrca.app.StatusLook(g(I.SignalCellularAlt), g(I.AutoAwesome), g(I.Cloud)),
-            "Router · speech bubble · database" to com.vrca.app.StatusLook(g(I.Router), g(I.ChatBubble), g(I.Storage)),
-            "Tiles · animated Wi-Fi · globe · VRC-A logo" to com.vrca.app.StatusLook(com.vrca.app.RowGlyph.AnimatedWifi, g(I.Public), com.vrca.app.RowGlyph.Logo, tiles = true)
-        )
-        // [net, vrchat, servers, holdMs]
-        val steps = if (rest.startsWith("live")) listOf(
-            listOf("Checking", "Checking", "Checking", "2200"), listOf("WiFi", "Online", "Online", "1400"),
-            listOf("WiFi", "Issues", "Online", "1200"), listOf("WiFi", "Issues", "Down", "1200"),
-            listOf("None", "Issues", "Down", "1400"), listOf("WiFi", "Online", "Online", "1600")
-        ) else listOf(listOf("WiFi", "Issues", "Online", "0"))
-        var k by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
-        androidx.compose.runtime.LaunchedEffect(Unit) { for (n in steps.indices) { k = n; kotlinx.coroutines.delay(steps[n][3].toLong()) } }
-        val st = steps[k]
-        val status = com.vrca.app.BootStatus(L[st[0]]!!, if (st[0] == "WiFi") 240 else 0, V[st[1]]!!, V[st[2]]!!)
-        androidx.compose.foundation.layout.Box(
-            androidx.compose.ui.Modifier.fillMaxSize().background(com.vrca.ui.theme.GremlinColors.Backdrop).padding(28.dp)
-        ) {
-            androidx.compose.foundation.layout.Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(22.dp)) {
-                looks.chunked(2).forEach { pair ->
-                    androidx.compose.foundation.layout.Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(28.dp)) {
-                        pair.forEach { (title, look) ->
-                            androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.weight(1f)) {
-                                androidx.compose.material3.Text(title, color = com.vrca.ui.theme.GremlinColors.TextMuted, style = androidx.compose.material3.MaterialTheme.typography.labelLarge)
-                                androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(8.dp))
-                                com.vrca.app.StatusCardPreview(status, look, androidx.compose.ui.Modifier.fillMaxWidth())
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /** `show boot [mid|error|done|incident|updated|intro] [none]`: a sample state + backdrop. */
     @Composable
     private fun bootSample(rest: String) {
@@ -508,7 +454,6 @@ object UiLabScenes {
         val rest = arg.substringAfter(' ', "")
         when (name) {
             "boot" -> bootSample(rest)
-            "statusicons" -> statusIcons(rest)
             "crash" -> CrashScreen(
                 crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",
                 onClear = {}, onContinue = {}
