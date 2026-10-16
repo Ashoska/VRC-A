@@ -12,6 +12,13 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
+# Cloud sessions started outside the repo folder never run the SessionStart hook, so the first
+# lab run had no Android SDK. Install it here when it's missing (the hook is idempotent).
+SDK=$(sed -n 's/^sdk.dir=//p' local.properties 2>/dev/null || true)
+if [[ "${CLAUDE_CODE_REMOTE:-}" == true && ! -d "${SDK:-${ANDROID_HOME:-$HOME/android-sdk}}/platforms/android-34" ]]; then
+  CLAUDE_PROJECT_DIR="$ROOT" bash "$ROOT/.claude/hooks/session-start.sh" 2>&1 | tail -1
+fi
+[[ -n "${ANDROID_HOME:-}" ]] || export ANDROID_HOME="$HOME/android-sdk"
 [[ $# -ge 2 ]] || { sed -n '2,13p' "$0"; exit 2; }
 MODE=$1; VARIANT=$2; shift 2
 case "$VARIANT" in
@@ -62,6 +69,6 @@ PROPS+=("-Pui.qualifiers=$Q")
 [[ -n "$DO" ]] && PROPS+=("-Pui.do=$DO")
 mkdir -p "$ROOT/ui-shots"
 ./gradlew --console=plain :app:$TASK -PuiLab --tests 'com.vrca.uilab.UiLabTest' "${PROPS[@]}" 2>&1 \
-  | grep --line-buffered -E '\[uilab\]|FAILED|^e: |Exception' | sed -u 's/^ *//' || true
+  | grep --line-buffered -E '\[uilab\]|FAILED|^e: |Exception|Could not (resolve|get|HEAD)|Received status code|SDK location' | sed -u 's/^ *//' || true
 # Recordings (`record start/stop`) → <name>.gif from their frames.
 python3 "$ROOT/tools/ui-lab/gif.py" --all "$ROOT/ui-shots" || true
