@@ -36,7 +36,19 @@ enum class BootBackdrop { None, Lanes }
  * One symbol of the back wall: a line drawing in a unit box (0..1 on both axes), drawn with a
  * [SymbolPen]. Nothing is stored as an image; the wall is built live from [BootSymbols.all].
  */
-class BootSymbol(val name: String, val weight: Int = 1, val draw: SymbolPen.() -> Unit)
+class BootSymbol(val name: String, val weight: Int = 1, val draw: SymbolPen.() -> Unit) {
+    companion object {
+        /**
+         * A symbol straight from an SVG drawing: paste the `d` of each `<path>` (outline drawings;
+         * fills are drawn as outlines). [viewBox] is the drawing's square viewBox size (the
+         * community guide asks for 100x100). How community submissions get added.
+         */
+        fun fromSvg(name: String, vararg pathData: String, viewBox: Float = 100f, weight: Int = 1): BootSymbol {
+            val paths = pathData.map { androidx.compose.ui.graphics.vector.PathParser().parsePathString(it).toPath() }
+            return BootSymbol(name, weight) { svg(paths, viewBox) }
+        }
+    }
+}
 
 /** Drawing helpers for a symbol, in unit-box coordinates; [s] is the box size in px. */
 class SymbolPen(private val scope: DrawScope, private val s: Float, private val ink: Color, private val width: Float) {
@@ -48,6 +60,15 @@ class SymbolPen(private val scope: DrawScope, private val s: Float, private val 
     fun oval(l: Float, t: Float, r: Float, b: Float) =
         scope.drawOval(ink, Offset(l * s, t * s), Size((r - l) * s, (b - t) * s), style = line)
     fun path(build: PathPen.() -> Unit) = scope.drawPath(PathPen(s).apply(build).path, ink, style = line)
+    /** SVG paths drawn in a [viewBox]-sized square, scaled to the symbol box. The stroke is
+     *  divided by the scale so every symbol keeps the same line weight. */
+    fun svg(paths: List<Path>, viewBox: Float) {
+        val k = s / viewBox
+        val scaled = Stroke(width = width / k, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        scope.drawContext.transform.scale(k, k, Offset.Zero)
+        paths.forEach { scope.drawPath(it, ink, style = scaled) }
+        scope.drawContext.transform.scale(1f / k, 1f / k, Offset.Zero)
+    }
 }
 
 /** Path building in unit coordinates. */
@@ -61,8 +82,9 @@ class PathPen(private val s: Float) {
 
 /**
  * The symbols on the wall: the community's own (the user's picks, 2026-10-16; generic fillers were
- * dropped). To add one, add a [BootSymbol] to [all]; [BootSymbol.weight] makes it show up more or
- * less often.
+ * dropped). To add one, add a [BootSymbol] to [all]: hand-drawn with a [SymbolPen], or a community
+ * drawing via [BootSymbol.fromSvg] (guide: 100x100 viewBox, outline only, about 4px lines).
+ * [BootSymbol.weight] makes it show up more or less often.
  */
 object BootSymbols {
     /** The fish bone from the Kipfel beanie. */
@@ -170,9 +192,10 @@ private class Wall(private val seed: Int) {
                 var pick = pool[rnd.nextInt(pool.size)]
                 if (pick == last && pool.size > 1) pick = pool[rnd.nextInt(pool.size)] // fewer twins
                 last = pick
-                val size = sym * (0.7f + rnd.nextFloat() * 0.6f)
+                val size = sym * (0.78f + rnd.nextFloat() * 0.5f)
                 picks += Triple(pick, size, x)
-                x += size * (1.25f + rnd.nextFloat() * 1.9f) * (if (rnd.nextFloat() < 0.15f) 1.8f else 1f)
+                // Even-ish spacing; now and then a wider gap (rare, so no stretch of wall goes empty).
+                x += size * (1.2f + rnd.nextFloat() * 1.1f) * (if (rnd.nextFloat() < 0.08f) 1.5f else 1f)
             }
             // Stretch the lane to exactly the world width, so it wraps seamlessly.
             val stretch = world / x
@@ -228,8 +251,8 @@ private class Wall(private val seed: Int) {
     }
 }
 
-private val LANE_HEIGHT = 76.dp
-private val SYMBOL_SIZE = 46.dp
+private val LANE_HEIGHT = 86.dp
+private val SYMBOL_SIZE = 58.dp
 
 /**
  * The back wall: lanes of symbols drifting sideways like traffic, neighbouring lanes at their own
