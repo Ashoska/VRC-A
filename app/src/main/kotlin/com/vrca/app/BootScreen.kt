@@ -19,6 +19,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -350,11 +351,9 @@ fun BootScreen(
                     ) {
                         // Just the logo up here (user: no "VRChat Assistant" title or status pill;
                         // the checklist already shows how boot is going).
-                        // The logo art has empty room under it, so it's nudged down to sit close above
-                        // the Status card (user: the gap looked big). Offset, not layout: the slot keeps
-                        // its size and the intro still lands on it (its position includes the offset).
-                        Box(Modifier.offset(y = 26.dp)) { logo(WIDE_LOGO_HEIGHT) }
-                        Spacer(Modifier.height(14.dp))
+                        // Sized so its top lines up with the checklist's top (user), just above Status.
+                        logo(WIDE_LOGO_HEIGHT)
+                        Spacer(Modifier.height(WIDE_LOGO_GAP))
                         Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
                             StatusPanel(status, Modifier.fillMaxWidth(), partsR.value, rowHeight = WIDE_ROW_HEIGHT)
                         }
@@ -425,6 +424,8 @@ private const val INTRO_SCALE = 2.1f
 private fun BootLogo(height: Dp, maxScale: Float, introScale: () -> Float, fadeIn: Float, modifier: Modifier = Modifier) {
     // vrca_logo_bar: the logo cropped to its drawing (the full asset is ~35% empty margin).
     val logo = ImageBitmap.imageResource(com.vrca.R.drawable.vrca_logo_bar)
+    // Sized by the slot's height, not the bitmap's own pixel size (which capped it at ~214dp wide).
+    val aspect = logo.width.toFloat() / logo.height
     // The slot is LOGO_HEIGHT tall, but the logo is laid out at its biggest (intro) size and only
     // ever scaled DOWN: scaling a small one up showed a blurry logo that snapped sharp on landing.
     Box(modifier.height(height), contentAlignment = Alignment.Center) {
@@ -437,14 +438,14 @@ private fun BootLogo(height: Dp, maxScale: Float, introScale: () -> Float, fadeI
             Image(
                 bitmap = logo, contentDescription = null, filterQuality = FilterQuality.High,
                 colorFilter = ColorFilter.tint(DropLayer.copy(alpha = 0.55f)),
-                modifier = Modifier.fillMaxHeight().offset(y = 5.dp * maxScale).alpha(fadeIn)
+                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).offset(y = 5.dp * maxScale).alpha(fadeIn)
             )
             Image(
                 bitmap = logo, contentDescription = "VRC-A", filterQuality = FilterQuality.High,
                 // The fade sits on the images themselves, not on the oversized box around them:
                 // a see-through layer whose content spills past its bounds drew nothing in the
                 // UI Lab's software renderer (the intro's fade-in recorded as blank).
-                modifier = Modifier.fillMaxHeight().alpha(fadeIn)
+                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).alpha(fadeIn)
             )
         }
     }
@@ -452,7 +453,8 @@ private fun BootLogo(height: Dp, maxScale: Float, introScale: () -> Float, fadeI
 
 private val LOGO_HEIGHT = 104.dp
 /** Headset: the logo has the whole left column, so it's bigger. */
-private val WIDE_LOGO_HEIGHT = 236.dp
+private val WIDE_LOGO_HEIGHT = 238.dp
+private val WIDE_LOGO_GAP = 8.dp
 /** Headset row height, shared by check rows and status rows so both panels match. */
 private val WIDE_ROW_HEIGHT = 38.dp
 /** Headset gap between the left column and the checklist; the error buttons meet across it. */
