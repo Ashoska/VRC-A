@@ -19,6 +19,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -504,20 +505,26 @@ private fun Unfold(progress: () -> Float, modifier: Modifier, content: @Composab
                 alpha = if (line > 0f) 1f else 0f
             }
         ) { content() }
+        // The line splits in two as the part opens: one rides its top edge, one its bottom edge,
+        // fading as they go, so nothing is ever left across the middle (a single line that faded
+        // in place either lingered there or blinked out as the part started to open).
         Box(
-            Modifier.matchParentSize().graphicsLayer {
+            Modifier.matchParentSize().drawBehind {
                 val p = progress()
                 val line = (p / LINE_SHARE).coerceIn(0f, 1f)
                 val open = ((p - LINE_SHARE) / (1f - LINE_SHARE)).coerceIn(0f, 1f)
-                scaleX = line
-                // Gone within the first fifth of the opening: fading over the whole opening left a
-                // purple line lingering across the middle of the half-open panel.
-                alpha = line * (1f - open * 5f).coerceAtLeast(0f)
-            },
-            contentAlignment = Alignment.Center
-        ) {
-            Box(Modifier.fillMaxWidth().height(2.dp).background(GremlinColors.AccentSoft, CircleShape))
-        }
+                val a = line * (1f - open)
+                if (a <= 0f) return@drawBehind
+                val w = size.width * line
+                val x0 = (size.width - w) / 2f
+                val half = size.height / 2f * (0.015f + 0.985f * open)
+                val stroke = 2.dp.toPx()
+                val c = GremlinColors.AccentSoft.copy(alpha = a)
+                for (y in listOf(size.height / 2f - half, size.height / 2f + half)) {
+                    drawLine(c, Offset(x0, y), Offset(x0 + w, y), strokeWidth = stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                }
+            }
+        )
     }
 }
 
