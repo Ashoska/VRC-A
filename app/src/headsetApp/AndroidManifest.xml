@@ -60,11 +60,13 @@
         android:extractNativeLibs="true"
         tools:node="merge">
         <!-- Fixed panel (user request: the window shouldn't be resizable). Horizon lets users
-             resize any Android panel, so: the default size (Meta's <layout>) with a floor
-             close to it; the Horizon shell flags for no free resizing and a locked 16:10 shape
-             (com.oculus.vrshell.*: not in Meta's public docs, seen in Meta's forum answers and
-             apps' manifests; device-test whether this Horizon version honours them); and if a
-             resize still happens, the app keeps its 1024x640 layout and zooms (FixedPanel). -->
+             resize any Android panel (Meta's docs: "Users can resize panels freely"; no lock
+             exists), so: the default size (Meta's <layout>) is also the MINIMUM, so the panel
+             can only be made bigger, never smaller than 1024x640; a bigger panel just zooms the
+             app's 1024x640 layout (FixedPanel). The com.oculus.vrshell.* flags (not in Meta's
+             public docs, seen in Meta's forum answers and apps' manifests) were device-tested
+             on 2026-10-16: Horizon ignores supports_free_resizing=false (the panel still
+             resized). Kept in case a later Horizon honours them; harmless otherwise. -->
         <activity
             android:name=".app.MainActivity"
             android:screenOrientation="sensorLandscape"
@@ -73,8 +75,8 @@
             <layout
                 android:defaultWidth="1024dp"
                 android:defaultHeight="640dp"
-                android:minWidth="896dp"
-                android:minHeight="560dp" />
+                android:minWidth="1024dp"
+                android:minHeight="640dp" />
             <meta-data
                 android:name="com.oculus.vrshell.supports_free_resizing"
                 android:value="false" />
