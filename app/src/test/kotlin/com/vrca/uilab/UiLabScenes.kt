@@ -387,7 +387,7 @@ object UiLabScenes {
      * our servers down, Wi-Fi lost, and all coming back. For recording the state animations.
      */
     @Composable
-    private fun bootLive(c: (String, com.vrca.app.BootState, com.vrca.app.BootNote?, Boolean) -> com.vrca.app.BootCheck) {
+    private fun bootLive(c: (String, com.vrca.app.BootState, com.vrca.app.BootNote?, Boolean) -> com.vrca.app.BootCheck, fail: Boolean = false) {
         val B = com.vrca.app.BootState::class.java.enumConstants!!.associateBy { it.name }
         val N = com.vrca.app.BootNote::class.java.enumConstants!!.associateBy { it.name }
         val V = com.vrca.app.ServiceState::class.java.enumConstants!!.associateBy { it.name }
@@ -395,9 +395,9 @@ object UiLabScenes {
         // label, starts at, finishes at, final state, final note, blocking
         data class Row(val label: String, val start: Long, val end: Long, val state: String, val note: String?, val blocking: Boolean)
         val rows = listOf(
-            Row("Device session", 0, 700, "Done", "Connected", true),
-            Row("Terms of Service", 700, 1100, "Done", "Accepted", true),   // needs the device session
-            Row("Account standing", 700, 1500, "Done", "Good", true),       // needs the device session
+            if (fail) Row("Device session", 0, 900, "Failed", "CantConnect", true) else Row("Device session", 0, 700, "Done", "Connected", true),
+            Row("Terms of Service", if (fail) 99999 else 700, 1100, "Done", "Accepted", true),   // needs the device session
+            Row("Account standing", if (fail) 99999 else 700, 1500, "Done", "Good", true),       // needs the device session
             Row("VRChat sign-in", 0, 2600, "Done", "SignedIn", false),
             Row("Discord", 0, 2000, "Done", "Connected", false),
             Row("VRChat on this headset", 0, 250, "Skipped", "NotOpen", false),
@@ -424,7 +424,8 @@ object UiLabScenes {
         com.vrca.app.BootScreen(
             checks,
             com.vrca.app.BootStatus(L[net]!!, if (net == "WiFi") 240 else 0, V[vrc]!!, V[srv]!!),
-            error = null, retryInSec = null, onContinue = null, playIntro = false,
+            error = if (fail && now >= 900) "Can't connect" else null, retryInSec = if (fail && now >= 900) 5 else null,
+            onContinue = if (fail && now >= 900) ({}) else null, playIntro = false,
             backdrop = com.vrca.app.BootBackdrop.Lanes, userName = "Ashoska"
         )
     }
@@ -454,7 +455,7 @@ object UiLabScenes {
             "done", "incident", "updated", "offline" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Done:SignedIn", "Done:Connected", "Done:Found", "Done:UpToDate")
             else -> rows("Done:Connected", "Done:Accepted", "Working", "Working", "Working", "Skipped:NotOpen", "Done:UpToDate")
         }
-        if (v == "live") { bootLive(::c); return }
+        if (v == "live" || v == "livefail") { bootLive(::c, fail = v == "livefail"); return }
         val status = com.vrca.app.BootStatus(
             internet = if (v == "offline") com.vrca.app.InternetLink.None else com.vrca.app.InternetLink.WiFi,
             internetMbps = if (v == "offline") 0 else 240,

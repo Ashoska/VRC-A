@@ -407,8 +407,8 @@ fun BootScreen(
             }
             Text(
                 "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
-                style = MaterialTheme.typography.labelSmall,
-                color = GremlinColors.TextMuted.copy(alpha = 0.55f),
+                style = MaterialTheme.typography.labelMedium,
+                color = GremlinColors.TextMuted.copy(alpha = 0.85f),
                 modifier = Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 10.dp).then(contentLayer)
             )
         }
@@ -561,6 +561,17 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?) {
     val pulse by rememberInfiniteTransition(label = "segPulse").animateFloat(
         0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "segPulseA"
     )
+    // The Ready moment: when the last check settles, a light sweeps along the bar left to right
+    // and the count chip pops, so even a very fast boot visibly "lands".
+    val done = checks.isNotEmpty() && checks.all { it.state in Settled } && checks.none { it.state == BootState.Failed }
+    val sweep = remember { Animatable(-2f) }
+    val chipPop = remember { Animatable(1f) }
+    LaunchedEffect(done) {
+        if (!done) { sweep.snapTo(-2f); return@LaunchedEffect }
+        launch { chipPop.animateTo(1.18f, tween(140)); chipPop.animateTo(1f, spring(dampingRatio = 0.4f)) }
+        sweep.snapTo(-1f)
+        sweep.animateTo(checks.size + 1f, tween(650, easing = FastOutSlowInEasing))
+    }
     Column {
         Row(Modifier.height(30.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -571,12 +582,12 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?) {
             Text(
                 "$finished/${checks.size}",
                 style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
-                modifier = Modifier.background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
+                modifier = Modifier.scale(chipPop.value).background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
             )
         }
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth().height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            checks.forEach { c ->
+            checks.forEachIndexed { i, c ->
                 val seg by animateColorAsState(
                     when (c.state) {
                         BootState.Waiting -> GremlinColors.Raised
@@ -586,7 +597,13 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?) {
                     label = "seg"
                 )
                 val a = if (c.state == BootState.Working) pulse else 1f
-                Box(Modifier.weight(1f).fillMaxHeight().background(seg.copy(alpha = seg.alpha * a), CircleShape))
+                // How much of the Ready sweep is on this segment right now (0..1).
+                val glow = (1f - kotlin.math.abs(sweep.value - i - 0.5f)).coerceIn(0f, 1f)
+                val color = androidx.compose.ui.graphics.lerp(seg.copy(alpha = seg.alpha * a), GremlinColors.Text, glow * 0.75f)
+                Box(
+                    Modifier.weight(1f).fillMaxHeight().graphicsLayer { scaleY = 1f + glow * 0.6f }
+                        .background(color, CircleShape)
+                )
             }
         }
     }
@@ -654,8 +671,16 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
     val tone = check.state.tone(accent)
     val dim = check.state == BootState.Waiting
     val edge = rowEdge(check.state.mark(), tone)
+    // A row that fails gives one short sideways shake, so the eye goes straight to it.
+    val shake = remember { Animatable(0f) }
+    LaunchedEffect(check.state) {
+        if (check.state == BootState.Failed) {
+            for (x in listOf(10f, -8f, 5f, -3f, 0f)) shake.animateTo(x, tween(55))
+        }
+    }
     Row(
-        modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
+        modifier.graphicsLayer { translationX = shake.value * density }
+            .fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
             .background(if (dim) GremlinColors.Card.copy(alpha = 0.5f) else GremlinColors.Card)
             .border(1.dp, edge, RoundedCornerShape(10.dp))
             .padding(start = 10.dp, end = 8.dp),
