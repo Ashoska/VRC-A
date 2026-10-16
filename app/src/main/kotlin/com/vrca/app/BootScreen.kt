@@ -171,7 +171,9 @@ fun BootScreen(
     onRetry: () -> Unit = {},
     onContinue: (() -> Unit)? = null,
     /** Open on the logo alone, big and centred, then glide it into place as the panels arrive. */
-    playIntro: Boolean = true
+    playIntro: Boolean = true,
+    /** The back wall's decoration (BootBackdrop.kt); faded in with the intro. */
+    backdrop: BootBackdrop = BootBackdrop.Doodles
 ) {
     val working = checks.any { it.state == BootState.Working }
     // Intro, in three beats: the logo fades/grows in at the centre, holds, then settles up into
@@ -223,7 +225,7 @@ fun BootScreen(
         BoxWithConstraints(
             Modifier.fillMaxSize().background(GremlinColors.Backdrop).onGloballyPositioned { rootCoords = it }
         ) {
-            Box(Modifier.matchParentSize().graphicsLayer { alpha = contentIn.value }) { BackdropLayers() }
+            Box(Modifier.matchParentSize().graphicsLayer { alpha = contentIn.value }) { BootBackdropLayer(backdrop) }
             val wide = maxWidth >= 720.dp
             val boxHeightPx = constraints.maxHeight.toFloat()
             Column(
@@ -289,15 +291,6 @@ fun BootScreen(
             )
         }
     }
-}
-
-/**
- * The back wall's decoration, drawn behind everything and faded in with the intro.
- * Empty on purpose: the user is designing their own (the first-pass tilted slabs were removed).
- * Their design goes here; keep it flat layers, no gradients (GremlinColors, ui-kit.md).
- */
-@Composable
-private fun BoxScope.BackdropLayers() {
 }
 
 /** How big the logo starts in the intro, relative to its final size. */

@@ -347,7 +347,7 @@ object UiLabScenes {
         RichBlock.Text("Thanks for testing! *More soon.*")
     )).toJson()
 
-    /** `show boot [mid|error|done|incident|updated]`: the boot screen in a sample state. */
+    /** `show boot [mid|error|done|incident|updated|intro] [doodles|crowd|none]`: a sample state + backdrop. */
     @Composable
     private fun bootSample(rest: String) {
         val I = androidx.compose.material.icons.Icons.Filled
@@ -356,7 +356,12 @@ object UiLabScenes {
             "VRChat connection" to I.Wifi, "VRChat on this headset" to I.Headset, "Updates" to I.SystemUpdate
         )
         fun c(l: String, st: com.vrca.app.BootState, d: String = "", b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b, icons[l])
-        val v = rest.ifBlank { "mid" }
+        val v = rest.substringBefore(' ').ifBlank { "mid" }
+        val backdrop = when (rest.substringAfter(' ', "")) {
+            "crowd" -> com.vrca.app.BootBackdrop.Crowd
+            "none" -> com.vrca.app.BootBackdrop.None
+            else -> com.vrca.app.BootBackdrop.Doodles
+        }
         val checks = when (v) {
             "error" -> listOf(
                 c("Server session", S.Failed, "Couldn't reach the server", true), c("VRChat sign-in", S.Done),
@@ -383,7 +388,8 @@ object UiLabScenes {
             error = if (v == "error") "Couldn't reach the server" else null,
             retryInSec = if (v == "error") 5 else null,
             onContinue = if (v == "error") ({}) else null,
-            playIntro = v == "intro"
+            playIntro = v == "intro",
+            backdrop = backdrop
         )
     }
 
