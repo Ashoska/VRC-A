@@ -5,6 +5,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import com.vrca.app.BannedScreen
 import com.vrca.app.BootstrapScreen
+import com.vrca.app.BootState as S
 import com.vrca.app.CrashScreen
 import com.vrca.app.TosGate
 import com.vrca.app.UpdateDialog
@@ -340,6 +341,40 @@ object UiLabScenes {
         RichBlock.Text("Thanks for testing! *More soon.*")
     )).toJson()
 
+    /** `show boot [mid|error|done|incident|updated]`: the boot screen in a sample state. */
+    @Composable
+    private fun bootSample(rest: String) {
+        fun c(l: String, st: com.vrca.app.BootState, d: String = "", b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b)
+        val v = rest.ifBlank { "mid" }
+        val checks = when (v) {
+            "error" -> listOf(
+                c("Server session", S.Failed, "Couldn't reach the server", true), c("VRChat sign-in", S.Done),
+                c("Account standing", S.Waiting, b = true), c("VRChat connection", S.Background, "Connecting"),
+                c("VRChat on this headset", S.Skipped, "VRChat not open"), c("Updates", S.Done, "Up to date"))
+            "done", "incident", "updated" -> listOf(
+                c("Server session", S.Done, b = true), c("VRChat sign-in", S.Done, "Signed in"),
+                c("Account standing", S.Done, "Good", true), c("VRChat connection", S.Done, "Online"),
+                c("VRChat on this headset", S.Done, "Found"), c("Updates", S.Done, "Up to date"))
+            else -> listOf(
+                c("Server session", S.Done, b = true), c("VRChat sign-in", S.Done, "Signed in"),
+                c("Account standing", S.Working, b = true), c("VRChat connection", S.Working, "Connecting"),
+                c("VRChat on this headset", S.Skipped, "VRChat not open"), c("Updates", S.Waiting))
+        }
+        val status = com.vrca.app.BootStatus(
+            vrchatOk = if (v == "incident") false else if (v == "mid") null else true,
+            vrchatDetail = if (v == "incident") "Investigating login issues on Quest" else "",
+            updatedTo = if (v == "updated") "1.2.80" else null,
+            updateNotes = if (v == "updated") listOf("New boot screen", "Logo in the top bar", "Faster start-up") else emptyList(),
+            lifetimeSends = 12840
+        )
+        com.vrca.app.BootScreen(
+            checks, status,
+            error = if (v == "error") "Couldn't reach the server" else null,
+            retryInSec = if (v == "error") 5 else null,
+            onContinue = if (v == "error") ({}) else null
+        )
+    }
+
     @Composable
     fun Root(d: UiLabDriver) {
         Box {
@@ -358,10 +393,7 @@ object UiLabScenes {
         val name = arg.substringBefore(' ')
         val rest = arg.substringAfter(' ', "")
         when (name) {
-            "boot" -> BootstrapScreen(
-                working = rest != "error", error = if (rest == "error") "Couldn't reach the server. Check your connection." else null,
-                onRetry = {}, phase = if (rest == "2") 2 else 1, accountChecked = rest == "done"
-            )
+            "boot" -> bootSample(rest)
             "crash" -> CrashScreen(
                 crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",
                 onClear = {}, onContinue = {}
