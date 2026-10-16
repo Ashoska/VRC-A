@@ -184,6 +184,13 @@ fun VrcaApp() {
     var bootError by remember { mutableStateOf<String?>(null) }
     var bootAttempt by remember { mutableStateOf(0) } // increments on Retry
 
+    // Headset: the new boot screen (BootScreen.kt) runs every check itself, side by side, and
+    // covers the ban check + VRChat presence too, so the phase-2 screen below is skipped there.
+    if (!bootOk && BuildConfig.IS_HEADSET_BUILD) {
+        HeadsetBoot(onDone = { bootOk = true })
+        return
+    }
+
     if (!bootOk) {
         BootstrapScreen(
             working = bootWorking,
@@ -257,22 +264,24 @@ fun VrcaApp() {
        waits for VRChat login so we can capture the alt VRChat ID first.
        ------------------------- */
 
-    var phase1BanId   by remember { mutableStateOf<String?>(null) }
+    // Headset boot already ran the ban check: reuse its result (no second read).
+    val headsetBooted = BuildConfig.IS_HEADSET_BUILD && !warmResume
+    var phase1BanId   by remember { mutableStateOf(if (headsetBooted) HeadsetBootResults.banId else null) }
     // On a WARM resume the phase-2 loading screen is skipped entirely (these seed
     // true), but the ban-check LaunchedEffect below STILL runs (its key `bootOk` is
     // true from the first composition, so it fires once) so phase1BanId is populated
     // and the ban gate downstream still works — we just don't block the UI on it.
-    var phase1Checked by remember { mutableStateOf(warmResume) }
+    var phase1Checked by remember { mutableStateOf(warmResume || (headsetBooted && HeadsetBootResults.banChecked)) }
     // "Account status" now represents the ban/moderation check AND VRChat presence
     // readiness. A logged-out user has no presence to wait for, so it starts ready;
     // a warm resume means the pipeline is already connected, so it starts ready too.
-    var presenceReady by remember { mutableStateOf(warmResume || !VrchatAuthManager.isLoggedIn(ctx)) }
+    var presenceReady by remember { mutableStateOf(warmResume || headsetBooted || !VrchatAuthManager.isLoggedIn(ctx)) }
     // Holds the boot screen a beat after both land so its green "Account status"
     // tick is actually visible before the screen hands off to the app.
-    var phase1HoldDone by remember { mutableStateOf(warmResume) }
+    var phase1HoldDone by remember { mutableStateOf(warmResume || headsetBooted) }
 
     LaunchedEffect(bootOk) {
-        if (!bootOk) return@LaunchedEffect
+        if (!bootOk || phase1Checked && headsetBooted) return@LaunchedEffect
         val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
         val deviceHash = prefs.getString("device_id_hash", "") ?: ""
         val authUid    = prefs.getString("auth_uid", "") ?: ""
@@ -420,7 +429,9 @@ fun VrcaApp() {
         var lastGlobalCode by remember { mutableStateOf(0L) }
 
         LaunchedEffect(Unit) {
-            releaseCheckResult = checkFirestoreRelease(BuildConfig.VERSION_CODE, deviceHash)
+            // The headset boot's Updates row already asked; reuse that answer.
+            releaseCheckResult = HeadsetBootResults.release?.takeIf { BuildConfig.IS_HEADSET_BUILD }
+                ?: checkFirestoreRelease(BuildConfig.VERSION_CODE, deviceHash)
         }
 
         // Real-time detection: snapshot listener on releases/{deviceHash}
@@ -1102,7 +1113,7 @@ private const val NEW_USER_BOOT_FLOOR_MS = 3_000L
 /** Cap on the new-user boot-time prefetch of the on-demand OSC tutorial images —
  *  a slow / no network never hangs boot; the tutorial step downloads any that
  *  missed with its own spinner. */
-private const val TUTORIAL_PREFETCH_CAP_MS = 8_000L
+internal const val TUTORIAL_PREFETCH_CAP_MS = 8_000L
 
 /** Per-attempt timeout for the cold-start anonymous sign-in (and the bootstrap
  *  Firestore writes). On a fresh first boot signInAnonymously()/the first
@@ -1123,7 +1134,7 @@ private const val PRESENCE_WARM_CAP_MS = 5_000L
  *  is foregrounded here so the FGS start is allowed; the service itself uses
  *  startForegroundSafely, and a duplicate ACTION_START from the normal post-login
  *  flow is coalesced — so this can't double-start or crash. */
-private fun startPipelineWarmup(ctx: Context) {
+internal fun startPipelineWarmup(ctx: Context) {
     val deviceHash = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
         .getString("device_id_hash", "") ?: ""
     val intent = Intent(ctx, VrchatPipelineService::class.java).apply {
@@ -1153,7 +1164,7 @@ private object RemoteKeys {
  *
  * No writes to devices/{deviceHash} here.
  */
-private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
+internal suspend fun bootstrapFirebaseAndCache(ctx: Context) {
     val auth = FirebaseAuth.getInstance()
     if (auth.currentUser == null) {
         // Anonymous sign-in is the ONE hard network dependency of boot — the
@@ -1830,7 +1841,7 @@ internal fun BannedScreen(reason: String) {
     }
 }
 
-private object TosPrefs {
+internal object TosPrefs {
     private const val FILE = "vrca_tos"
     private const val KEY_ACCEPTED_VERSION = "accepted_version"
     private const val KEY_ACCEPTED_AT_MS = "accepted_at_ms"

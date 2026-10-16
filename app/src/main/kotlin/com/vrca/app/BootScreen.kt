@@ -112,6 +112,9 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.rememberUpdatedState
 import com.vrca.BuildConfig
 import com.vrca.ui.theme.GremlinColors
 
@@ -144,6 +147,7 @@ enum class BootNote(val text: String) {
     UpdateReady("Update ready"),
     Connected("Connected"),
     Off("Off"),
+    NoAccess("No log access"),
     Accepted("Accepted"),
     NewTerms("New terms"),
     CantConnect("Can't connect"),
@@ -247,7 +251,9 @@ fun BootScreen(
     /** The back wall's decoration (BootBackdrop.kt); faded in with the intro. */
     backdrop: BootBackdrop = BootBackdrop.Lanes,
     /** The VRChat display name for the checklist's "Welcome back" title; null before sign-in. */
-    userName: String? = null
+    userName: String? = null,
+    /** Called once the intro has finished and every row is on screen (right away without an intro). */
+    onShown: () -> Unit = {}
 ) {
     val working = checks.any { it.state == BootState.Working }
     // Intro, in three beats: the logo fades/grows in at the centre, holds, then settles up into
@@ -290,6 +296,11 @@ fun BootScreen(
         launch { partsL.animateTo(1f, tween(700)) }
         delay(130)
         partsR.animateTo(1f, tween(700))
+    }
+    val shownCallback by rememberUpdatedState(onShown)
+    LaunchedEffect(Unit) {
+        snapshotFlow { partsL.value >= 1f && partsR.value >= 1f }.first { it }
+        shownCallback()
     }
     val rise = with(LocalDensity.current) { 22.dp.toPx() }
     val contentLayer = Modifier.graphicsLayer {
@@ -640,6 +651,11 @@ private fun LoadingPanel(
     userName: String? = null
 ) {
     val pieces = checks.size + 2 // the header, each check, then the buttons
+    // A row shows "waiting" until it has fully appeared, so a check that finished during the intro
+    // still lands its tick on screen instead of arriving already ticked.
+    val checks = checks.mapIndexed { i, c ->
+        if (stagger(reveal, 1 + i, pieces) < 1f) c.copy(state = BootState.Waiting, note = null) else c
+    }
     Layer(modifier) {
         Column(Modifier.then(if (roomy) Modifier.fillMaxWidth() else Modifier.fillMaxSize()).padding(horizontal = 18.dp, vertical = 16.dp)) {
             Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { BootHeader(checks, userName) }
@@ -848,7 +864,8 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
             // No header (user): the rows speak for themselves.
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val net = status.internet
+                // Same as the checklist: a row says "Checking..." until it has fully appeared.
+                val net = if (stagger(reveal, 0, 3) < 1f) InternetLink.Checking else status.internet
                 ServiceRow(
                     if (net == InternetLink.None) Icons.Filled.WifiOff else Icons.Filled.Wifi, "Internet",
                     if (status.internetMbps > 0 && net != InternetLink.None && net != InternetLink.Checking)
@@ -862,9 +879,9 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
                 )
                 for ((i, row) in listOf(
                     // Both service rows share the server icon (user): they're both "is that server up".
-                    Triple(Icons.Filled.Dns, "VRChat", status.vrchat),
+                    Triple(Icons.Filled.Dns, "VRChat", if (stagger(reveal, 1, 3) < 1f) ServiceState.Checking else status.vrchat),
                     // Never names the backend (public UI rule): just "VRC-A servers".
-                    Triple(Icons.Filled.Dns, "VRC-A servers", status.servers)
+                    Triple(Icons.Filled.Dns, "VRC-A servers", if (stagger(reveal, 2, 3) < 1f) ServiceState.Checking else status.servers)
                 ).withIndex()) {
                     val (icon, name, state) = row
                     ServiceRow(icon, name, state.text, state.mark(), Modifier.widenIn(stagger(reveal, 1 + i, 3)), rowHeight)

@@ -360,7 +360,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -387,14 +387,24 @@ object UiLabScenes {
      * our servers down, Wi-Fi lost, and all coming back. For recording the state animations.
      */
     @Composable
-    private fun bootLive(c: (String, com.vrca.app.BootState, com.vrca.app.BootNote?, Boolean) -> com.vrca.app.BootCheck, fail: Boolean = false) {
+    private fun bootLive(c: (String, com.vrca.app.BootState, com.vrca.app.BootNote?, Boolean) -> com.vrca.app.BootCheck, fail: Boolean = false, demo: Boolean = false) {
         val B = com.vrca.app.BootState::class.java.enumConstants!!.associateBy { it.name }
         val N = com.vrca.app.BootNote::class.java.enumConstants!!.associateBy { it.name }
         val V = com.vrca.app.ServiceState::class.java.enumConstants!!.associateBy { it.name }
         val L = com.vrca.app.InternetLink::class.java.enumConstants!!.associateBy { it.name }
         // label, starts at, finishes at, final state, final note, blocking
         data class Row(val label: String, val start: Long, val end: Long, val state: String, val note: String?, val blocking: Boolean)
-        val rows = listOf(
+        // `demo`: a slowed-down, all-good boot WITH the intro, for showing testers (rows tick one
+        // by one after the screen opens, then Ready).
+        val rows = if (demo) listOf(
+            Row("Device session", 2600, 3800, "Done", "Connected", true),
+            Row("Terms of Service", 3800, 4700, "Done", "Accepted", true),
+            Row("Account standing", 3800, 5400, "Done", "Good", true),
+            Row("VRChat sign-in", 2600, 7200, "Done", "SignedIn", false),
+            Row("Discord", 2600, 6300, "Done", "Connected", false),
+            Row("VRChat on this headset", 2600, 3200, "Done", "Found", false),
+            Row("Updates", 3800, 5900, "Done", "UpToDate", true)
+        ) else listOf(
             if (fail) Row("Device session", 0, 900, "Failed", "CantConnect", true) else Row("Device session", 0, 700, "Done", "Connected", true),
             Row("Terms of Service", if (fail) 99999 else 700, 1100, "Done", "Accepted", true),   // needs the device session
             Row("Account standing", if (fail) 99999 else 700, 1500, "Done", "Good", true),       // needs the device session
@@ -404,7 +414,10 @@ object UiLabScenes {
             Row("Updates", 0, 900, "Done", "UpToDate", false)
         )
         // Status: at this time → internet, vrchat, servers.
-        val status = listOf(
+        val status = if (demo) listOf(
+            0L to Triple("Checking", "Checking", "Checking"), 2900L to Triple("WiFi", "Checking", "Checking"),
+            3900L to Triple("WiFi", "Checking", "Online"), 4600L to Triple("WiFi", "Online", "Online")
+        ) else listOf(
             0L to Triple("Checking", "Checking", "Checking"), 300L to Triple("WiFi", "Checking", "Checking"),
             700L to Triple("WiFi", "Checking", "Online"), 1200L to Triple("WiFi", "Online", "Online"),
             3600L to Triple("WiFi", "Issues", "Online"), 4500L to Triple("WiFi", "Maintenance", "Online"),
@@ -412,7 +425,7 @@ object UiLabScenes {
             7300L to Triple("WiFi", "Online", "Online")
         )
         var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(0L) }
-        androidx.compose.runtime.LaunchedEffect(Unit) { while (now < 9000) { kotlinx.coroutines.delay(50); now += 50 } }
+        androidx.compose.runtime.LaunchedEffect(Unit) { while (now < 12000) { kotlinx.coroutines.delay(50); now += 50 } }
         val checks = rows.map { r ->
             when {
                 now < r.start -> c(r.label, B["Waiting"]!!, null, r.blocking)
@@ -425,7 +438,7 @@ object UiLabScenes {
             checks,
             com.vrca.app.BootStatus(L[net]!!, if (net == "WiFi") 240 else 0, V[vrc]!!, V[srv]!!),
             error = if (fail && now >= 900) "Can't connect" else null, retryInSec = if (fail && now >= 900) 5 else null,
-            onContinue = if (fail && now >= 900) ({}) else null, playIntro = false,
+            onContinue = if (fail && now >= 900) ({}) else null, playIntro = demo,
             backdrop = com.vrca.app.BootBackdrop.Lanes, userName = "Ashoska"
         )
     }
@@ -455,7 +468,7 @@ object UiLabScenes {
             "done", "incident", "updated", "offline" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Done:SignedIn", "Done:Connected", "Done:Found", "Done:UpToDate")
             else -> rows("Done:Connected", "Done:Accepted", "Working", "Working", "Working", "Skipped:NotOpen", "Done:UpToDate")
         }
-        if (v == "live" || v == "livefail") { bootLive(::c, fail = v == "livefail"); return }
+        if (v == "live" || v == "livefail" || v == "demo") { bootLive(::c, fail = v == "livefail", demo = v == "demo"); return }
         val status = com.vrca.app.BootStatus(
             internet = if (v == "offline") com.vrca.app.InternetLink.None else com.vrca.app.InternetLink.WiFi,
             internetMbps = if (v == "offline") 0 else 240,
@@ -491,6 +504,8 @@ object UiLabScenes {
         val rest = arg.substringAfter(' ', "")
         when (name) {
             "boot" -> bootSample(rest)
+            // The REAL headset boot runner (its checks run against the lab, so it shows what fails offline).
+            "headsetboot" -> com.vrca.app.HeadsetBoot(onDone = {})
             "crash" -> CrashScreen(
                 crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",
                 onClear = {}, onContinue = {}
