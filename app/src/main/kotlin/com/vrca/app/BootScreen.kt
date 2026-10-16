@@ -728,7 +728,7 @@ private fun rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean = true): 
 
 /** One service in the Status panel: icon, name, its fixed state word and a coloured dot. Built like a check row. */
 @Composable
-private fun ServiceRow(icon: ImageVector, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp) {
+private fun ServiceRow(glyph: RowGlyph, link: InternetLink?, tile: Boolean, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp) {
     val target = when (mark) {
         Mark.Done -> GremlinColors.Positive
         Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
@@ -746,7 +746,7 @@ private fun ServiceRow(icon: ImageVector, name: String, text: String, mark: Mark
             .padding(start = 10.dp, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Crossfade(icon, label = "serviceIcon") { Icon(it, null, tint = tone, modifier = Modifier.size(17.dp)) }
+        RowGlyphView(glyph, link, tone, tile)
         Spacer(Modifier.width(10.dp))
         Text(
             name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.Text,
@@ -762,14 +762,14 @@ private fun ServiceRow(icon: ImageVector, name: String, text: String, mark: Mark
 
 /** Is VRChat up, and are our own servers up. Wraps its rows (no fixed height). */
 @Composable
-private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 1f, rowHeight: Dp = 31.dp) {
+private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 1f, rowHeight: Dp = 31.dp, look: StatusLook = StatusLook()) {
     Layer(modifier) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
             // No header (user): the rows speak for themselves.
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 val net = status.internet
                 ServiceRow(
-                    if (net == InternetLink.None) Icons.Filled.WifiOff else Icons.Filled.Wifi, "Internet",
+                    look.internet, net, look.tiles, "Internet",
                     if (status.internetMbps > 0 && net != InternetLink.None && net != InternetLink.Checking)
                         "${net.text} · ${status.internetMbps.coerceAtMost(9999)} Mbps" else net.text,
                     when (net) {
@@ -780,12 +780,12 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
                     Modifier.widenIn(stagger(reveal, 0, 3)), rowHeight
                 )
                 for ((i, row) in listOf(
-                    Triple(Icons.Filled.Public, "VRChat", status.vrchat),
+                    Triple(look.vrchat, "VRChat", status.vrchat),
                     // Never names the backend (public UI rule): just "VRC-A servers".
-                    Triple(Icons.Filled.Dns, "VRC-A servers", status.servers)
+                    Triple(look.servers, "VRC-A servers", status.servers)
                 ).withIndex()) {
                     val (icon, name, state) = row
-                    ServiceRow(icon, name, state.text, state.mark(), Modifier.widenIn(stagger(reveal, 1 + i, 3)), rowHeight)
+                    ServiceRow(icon, null, look.tiles, name, state.text, state.mark(), Modifier.widenIn(stagger(reveal, 1 + i, 3)), rowHeight)
                 }
             }
         }
@@ -853,4 +853,84 @@ fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
         else -> InternetLink.WiFi
     }
     return link to (caps.linkDownstreamBandwidthKbps / 1000).coerceAtLeast(0)
+}
+
+/** Which left-hand icon a Status row draws. [Logo] = the VRC-A logo; [AnimatedWifi] = drawn Wi-Fi arcs. */
+internal sealed interface RowGlyph {
+    data class Vector(val icon: ImageVector) : RowGlyph
+    data object Logo : RowGlyph
+    data object AnimatedWifi : RowGlyph
+}
+
+/** TEMP (lab comparison): the Status card's left icons and whether they sit in tinted tiles. */
+internal data class StatusLook(
+    val internet: RowGlyph = RowGlyph.Vector(Icons.Filled.Wifi),
+    val vrchat: RowGlyph = RowGlyph.Vector(Icons.Filled.Public),
+    val servers: RowGlyph = RowGlyph.Vector(Icons.Filled.Dns),
+    val tiles: Boolean = false
+)
+
+/** TEMP (lab comparison): one Status card drawn with [look]. */
+@Composable
+internal fun StatusCardPreview(status: BootStatus, look: StatusLook, modifier: Modifier) {
+    StatusPanel(status, modifier, rowHeight = WIDE_ROW_HEIGHT, look = look)
+}
+
+@Composable
+private fun RowGlyphView(glyph: RowGlyph, link: InternetLink?, tint: Color, tile: Boolean) {
+    val inner: @Composable () -> Unit = {
+        when (glyph) {
+            is RowGlyph.Vector -> {
+                val icon = if (link == InternetLink.None && glyph.icon == Icons.Filled.Wifi) Icons.Filled.WifiOff else glyph.icon
+                Crossfade(icon, label = "rowIcon") { Icon(it, null, tint = tint, modifier = Modifier.size(if (tile) 16.dp else 17.dp)) }
+            }
+            RowGlyph.Logo -> Image(
+                ImageBitmap.imageResource(com.vrca.R.drawable.vrca_logo_bar), null,
+                colorFilter = ColorFilter.tint(tint), filterQuality = FilterQuality.High,
+                modifier = Modifier.height(if (tile) 14.dp else 15.dp)
+            )
+            RowGlyph.AnimatedWifi -> WifiGlyph(link ?: InternetLink.Checking, tint, Modifier.size(if (tile) 16.dp else 17.dp))
+        }
+    }
+    if (tile) {
+        Box(Modifier.size(26.dp).background(tint.copy(alpha = 0.16f), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) { inner() }
+    } else {
+        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) { inner() }
+    }
+}
+
+/**
+ * Wi-Fi drawn as a dot and three arcs. Checking: the arcs light up one after another, like a
+ * signal being found. Connected: all lit. Offline: dimmed with a slash through.
+ */
+@Composable
+private fun WifiGlyph(link: InternetLink, tint: Color, modifier: Modifier) {
+    val sweep by rememberInfiniteTransition(label = "wifi").animateFloat(
+        0f, 4f, infiniteRepeatable(tween(1400, easing = androidx.compose.animation.core.LinearEasing)), label = "wifiSweep"
+    )
+    androidx.compose.foundation.Canvas(modifier) {
+        val w = size.width
+        val cx = w / 2f
+        val base = size.height * 0.86f
+        val stroke = androidx.compose.ui.graphics.drawscope.Stroke(w * 0.11f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        for (i in 0..3) {
+            val a = when (link) {
+                InternetLink.Checking -> if (i <= sweep.toInt()) 1f else 0.25f
+                InternetLink.None -> 0.35f
+                else -> 1f
+            }
+            if (i == 0) {
+                drawCircle(tint.copy(alpha = a), radius = w * 0.08f, center = Offset(cx, base - w * 0.04f))
+            } else {
+                val r = w * (0.06f + 0.22f * i)
+                drawArc(
+                    tint.copy(alpha = a), startAngle = 225f, sweepAngle = 90f, useCenter = false,
+                    topLeft = Offset(cx - r, base - r), size = androidx.compose.ui.geometry.Size(r * 2, r * 2), style = stroke
+                )
+            }
+        }
+        if (link == InternetLink.None) {
+            drawLine(tint, Offset(w * 0.14f, size.height * 0.14f), Offset(w * 0.86f, size.height * 0.86f), strokeWidth = w * 0.11f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        }
+    }
 }
