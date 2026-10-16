@@ -225,7 +225,7 @@ fun BootScreen(
         BoxWithConstraints(
             Modifier.fillMaxSize().background(GremlinColors.Backdrop).onGloballyPositioned { rootCoords = it }
         ) {
-            Box(Modifier.matchParentSize().graphicsLayer { alpha = contentIn.value }) { BootBackdropLayer(backdrop) }
+            BootBackdropLayer(backdrop, alpha = { contentIn.value }, modifier = Modifier.matchParentSize())
             val wide = maxWidth >= 720.dp
             val boxHeightPx = constraints.maxHeight.toFloat()
             Column(

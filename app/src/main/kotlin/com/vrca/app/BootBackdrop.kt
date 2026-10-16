@@ -1,17 +1,16 @@
 package com.vrca.app
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.State
 import androidx.compose.runtime.remember
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -21,11 +20,11 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.unit.dp
 import com.vrca.ui.theme.GremlinColors
 import kotlin.math.PI
-import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.random.Random
@@ -124,83 +123,163 @@ object BootSymbols {
     val all: List<BootSymbol> = listOf(FishBone, Cheese, Gnarpy, Kitty)
 }
 
-/** One symbol's slot in a lane: which symbol, where along the lane, and its little tilt/size. */
-private class Slot(val symbol: BootSymbol, val x: Float, val dy: Float, val deg: Float, val scale: Float)
+/**
+ * One symbol on the wall, as a small physics body: it drifts at its lane's speed, a spring pulls
+ * it back to its lane's height, and it bounces off any symbol it touches (they never overlap).
+ */
+private class Sprite(
+    val symbol: BootSymbol, var x: Float, var y: Float, val laneY: Float, val laneSpeed: Float,
+    val size: Float, val deg: Float, val mirror: Boolean, val phase: Float
+) {
+    var vx = laneSpeed
+    var vy = 0f
+    /** Collision radius: the drawing fills most of its box. */
+    val r = size * 0.46f
+}
 
-/** A lane: a looping strip of slots that slides sideways at [speed] px/s (negative = left). */
-private class Lane(val slots: List<Slot>, val length: Float, val speed: Float)
+/** The wall's state: built once per size (shuffled each open), then stepped every frame. */
+private class Wall(private val seed: Int) {
+    var sprites: List<Sprite> = emptyList(); private set
+    private var builtFor = 0L
+    private var w = 0f
+    private var margin = 0f
+
+    fun ensure(width: Float, height: Float, density: Float) {
+        val key = (width.toLong() shl 32) or height.toLong()
+        if (key == builtFor) return
+        builtFor = key
+        val rnd = Random(seed)
+        val sym = SYMBOL_SIZE.value * density
+        val laneH = LANE_HEIGHT.value * density
+        w = width; margin = sym * 1.5f
+        val world = width + 2 * margin
+        val pool = BootSymbols.all.flatMap { b -> List(b.weight.coerceAtLeast(1)) { b } }
+        val out = mutableListOf<Sprite>()
+        // Rows of uneven height, from just above the top edge to just below the bottom.
+        var y = -laneH * 0.3f
+        while (y < height + laneH * 0.3f) {
+            val rowH = laneH * (0.8f + rnd.nextFloat() * 0.5f)
+            val laneY = y + rowH / 2
+            // 6..20 dp/s, direction random per lane.
+            val speed = (6f + rnd.nextFloat() * 14f) * density * (if (rnd.nextBoolean()) 1f else -1f)
+            // Spaced so lane-mates (which move together) never touch, with now and then a big gap.
+            val picks = mutableListOf<Triple<BootSymbol, Float, Float>>() // symbol, size, x along lane
+            var x = 0f
+            var last: BootSymbol? = null
+            while (x < world - sym) {
+                var pick = pool[rnd.nextInt(pool.size)]
+                if (pick == last && pool.size > 1) pick = pool[rnd.nextInt(pool.size)] // fewer twins
+                last = pick
+                val size = sym * (0.7f + rnd.nextFloat() * 0.6f)
+                picks += Triple(pick, size, x)
+                x += size * (1.25f + rnd.nextFloat() * 1.9f) * (if (rnd.nextFloat() < 0.15f) 1.8f else 1f)
+            }
+            // Stretch the lane to exactly the world width, so it wraps seamlessly.
+            val stretch = world / x
+            for ((pick, size, at) in picks) {
+                out += Sprite(
+                    symbol = pick, x = -margin + at * stretch, y = laneY + (rnd.nextFloat() - 0.5f) * rowH * 0.5f,
+                    laneY = laneY, laneSpeed = speed, size = size,
+                    deg = (rnd.nextFloat() - 0.5f) * 140f, mirror = rnd.nextBoolean(), phase = rnd.nextFloat() * 6.283f
+                )
+            }
+            y += rowH
+        }
+        sprites = out
+    }
+
+    fun step(dt: Float) {
+        if (dt <= 0f || sprites.isEmpty()) return
+        val world = w + 2 * margin
+        for (p in sprites) {
+            // Ease back to the lane's speed and height (springy, damped).
+            p.vx += (p.laneSpeed - p.vx) * 1.6f * dt
+            p.vy += ((p.laneY - p.y) * 3.5f - p.vy * 2.4f) * dt
+            p.x += p.vx * dt
+            p.y += p.vy * dt
+            if (p.x < -margin) p.x += world else if (p.x >= w + margin) p.x -= world
+        }
+        // Bounce: push touching pairs apart and swap the part of their velocity along the hit.
+        val list = sprites
+        for (i in list.indices) {
+            val a = list[i]
+            for (j in i + 1 until list.size) {
+                val b = list[j]
+                val dx = b.x - a.x
+                val min = a.r + b.r
+                if (dx > min || dx < -min) continue
+                val dy = b.y - a.y
+                if (dy > min || dy < -min) continue
+                val d2 = dx * dx + dy * dy
+                if (d2 >= min * min || d2 < 0.0001f) continue
+                val d = kotlin.math.sqrt(d2)
+                val nx = dx / d; val ny = dy / d
+                val push = (min - d) / 2
+                a.x -= nx * push; a.y -= ny * push
+                b.x += nx * push; b.y += ny * push
+                val vn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny
+                if (vn < 0f) {
+                    val k = -(1f + 0.7f) * vn / 2
+                    a.vx -= k * nx; a.vy -= k * ny
+                    b.vx += k * nx; b.vy += k * ny
+                }
+            }
+        }
+    }
+}
 
 private val LANE_HEIGHT = 76.dp
 private val SYMBOL_SIZE = 46.dp
 
 /**
- * The back wall as lanes of symbols, like traffic lanes: each row slides sideways at its own slow
- * speed, neighbouring rows in opposite directions. The order is shuffled every open, so the wall
- * never looks the same twice. Built live from [BootSymbols.all]; the layout is made once per size
- * (drawWithCache) and each frame only moves it.
+ * The back wall: lanes of symbols drifting sideways like traffic, neighbouring lanes at their own
+ * speeds and directions; symbols that meet bounce off each other, then settle back into their lane.
+ * Shuffled every open and built live from [BootSymbols.all] (nothing stored). [alpha] fades it
+ * (applied to the ink, not a layer: this layer draws past its bounds into a resized panel's
+ * margins, and a see-through layer would clip that).
  */
 @Composable
-fun BootBackdropLayer(style: BootBackdrop, modifier: Modifier = Modifier.fillMaxSize()) {
+fun BootBackdropLayer(style: BootBackdrop, alpha: () -> Float = { 1f }, modifier: Modifier = Modifier.fillMaxSize()) {
     if (style == BootBackdrop.None) return
     val seed = remember { Random.nextInt() }
-    val clock = rememberInfiniteTransition(label = "lanes")
-    // Seconds, looping every 10 min (far longer than a boot screen is ever up).
-    val t: State<Float> = clock.animateFloat(
-        0f, 600f, infiniteRepeatable(tween(600_000, easing = LinearEasing)), label = "laneClock"
-    )
+    val wall = remember { Wall(seed) }
+    var frame by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(wall) {
+        var last = 0L
+        while (true) {
+            withFrameNanos { now ->
+                // Capped step: a hitch (or the app pausing) can't fling everything across the wall.
+                val dt = if (last == 0L) 0f else ((now - last) / 1e9f).coerceAtMost(0.05f)
+                last = now
+                wall.step(dt)
+                frame = now
+            }
+        }
+    }
     Box(
-        modifier.drawWithCache {
-            val laneH = LANE_HEIGHT.toPx()
-            val sym = SYMBOL_SIZE.toPx()
-            val lanes = buildLanes(seed, size.width, size.height, laneH, sym, density)
-            val ink = GremlinColors.Edge.copy(alpha = 0.6f)
+        modifier.drawBehind {
+            frame // redraw every frame
+            val a = alpha()
+            if (a <= 0f) return@drawBehind
+            wall.ensure(size.width, size.height, density)
+            val ink = GremlinColors.Edge.copy(alpha = 0.6f * a)
             val width = 1.6.dp.toPx()
-            onDrawBehind {
-                val now = t.value
-                lanes.forEachIndexed { row, lane ->
-                    val y = row * laneH + (laneH - sym) / 2 - laneH / 2
-                    // Slide, wrapped to the lane's loop so it never runs out.
-                    val shift = ((lane.speed * now) % lane.length + lane.length) % lane.length
-                    val copies = ceil(size.width / lane.length).toInt() + 2
-                    for (k in -1 until copies) for (slot in lane.slots) {
-                        val x = slot.x + shift + (k - 1) * lane.length
-                        if (x < -sym * 2 || x > size.width + sym) continue
-                        val s = sym * slot.scale
-                        translate(x, y + slot.dy) {
-                            rotate(slot.deg, pivot = Offset(s / 2, s / 2)) {
-                                SymbolPen(this, s, ink, width).apply(slot.symbol.draw)
-                            }
+            val bob = 3.dp.toPx()
+            val t = frame / 1e9f
+            for (p in wall.sprites) {
+                val s = p.size
+                if (p.x < -s || p.x > size.width + s) continue
+                // Each symbol's own slow sway and bob on top of the physics.
+                val sway = 8f * sin(0.9f * t + p.phase)
+                val lift = bob * sin(0.7f * t + p.phase * 1.7f)
+                translate(p.x - s / 2, p.y - s / 2 + lift) {
+                    rotate(p.deg + sway, pivot = Offset(s / 2, s / 2)) {
+                        scale(if (p.mirror) -1f else 1f, 1f, pivot = Offset(s / 2, s / 2)) {
+                            SymbolPen(this, s, ink, width).apply(p.symbol.draw)
                         }
                     }
                 }
             }
         }
     )
-}
-
-private fun buildLanes(seed: Int, w: Float, h: Float, laneH: Float, sym: Float, density: Float): List<Lane> {
-    val rnd = Random(seed)
-    val pool = BootSymbols.all.flatMap { s -> List(s.weight.coerceAtLeast(1)) { s } }
-    val rows = (h / laneH).toInt() + 2
-    return List(rows) { row ->
-        val slots = mutableListOf<Slot>()
-        var x = 0f
-        var last: BootSymbol? = null
-        // A loop a bit wider than the screen, so the repeat isn't noticeable.
-        while (x < w * 1.3f) {
-            var pick = pool[rnd.nextInt(pool.size)]
-            if (pick == last && pool.size > 1) pick = pool[rnd.nextInt(pool.size)] // fewer twins
-            last = pick
-            slots += Slot(
-                symbol = pick, x = x,
-                dy = (rnd.nextFloat() - 0.5f) * laneH * 0.22f,
-                deg = (rnd.nextFloat() - 0.5f) * 36f,
-                scale = 0.85f + rnd.nextFloat() * 0.3f
-            )
-            x += sym * (1.55f + rnd.nextFloat() * 0.6f)
-        }
-        // 9..17 dp/s, alternating direction lane to lane.
-        val speed = (9f + rnd.nextFloat() * 8f) * density * (if (row % 2 == 0) 1f else -1f)
-        Lane(slots, x, speed)
-    }
 }
