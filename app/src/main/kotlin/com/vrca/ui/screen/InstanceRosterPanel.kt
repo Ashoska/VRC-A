@@ -1,5 +1,6 @@
 package com.vrca.ui.screen
 
+import com.vrca.ui.theme.GremlinColors
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -251,8 +252,8 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                     ),
                     // You = purple (pinned top), friends = yellow, everyone else default.
                     color = when {
-                        m.isSelf -> androidx.compose.ui.graphics.Color(0xFFB388FF)
-                        m.isFriend -> androidx.compose.ui.graphics.Color(0xFFFFD54F)
+                        m.isSelf -> GremlinColors.Highlight.Self
+                        m.isFriend -> GremlinColors.Highlight.Friend
                         else -> MaterialTheme.colorScheme.onSurface
                     },
                     maxLines = 1,
@@ -532,11 +533,11 @@ private fun CloneButton(
  *  offline·unknown grey). */
 private fun rosterStatusColor(status: String): androidx.compose.ui.graphics.Color =
     when (status.lowercase()) {
-        "active" -> androidx.compose.ui.graphics.Color(0xFF4CAF50)
-        "join me" -> androidx.compose.ui.graphics.Color(0xFF2196F3)
-        "ask me" -> androidx.compose.ui.graphics.Color(0xFFFF9800)
-        "busy" -> androidx.compose.ui.graphics.Color(0xFFE53935)
-        else -> androidx.compose.ui.graphics.Color(0xFF9E9E9E)
+        "active" -> GremlinColors.Status.Online
+        "join me" -> GremlinColors.Status.JoinMe
+        "ask me" -> GremlinColors.Status.AskMe
+        "busy" -> GremlinColors.Status.Busy
+        else -> GremlinColors.Status.Offline
     }
 
 /** VRChat status → human label (shown only when there's no free-text status description). */
@@ -605,9 +606,9 @@ private fun TrustCornerBadge(trustRank: String, ring: androidx.compose.ui.graphi
 @Composable
 private fun PlatformCornerBadge(platform: String, ring: androidx.compose.ui.graphics.Color) {
     val tint = when (platform) {
-        "PC" -> androidx.compose.ui.graphics.Color(0xFF2196F3)
-        "Quest" -> androidx.compose.ui.graphics.Color(0xFF3DDC84)
-        "iOS" -> androidx.compose.ui.graphics.Color(0xFFE0E0E0)
+        "PC" -> GremlinColors.Platform.Pc
+        "Quest" -> GremlinColors.Platform.Quest
+        "iOS" -> GremlinColors.Platform.Ios
         else -> return
     }
     Surface(shape = CircleShape, color = ring, modifier = Modifier.size(15.dp)) {
@@ -634,12 +635,12 @@ private fun PlatformCornerBadge(platform: String, ring: androidx.compose.ui.grap
  *  from the label): veteran="Trusted User" purple, trusted="Known User" orange, known="User" green,
  *  basic="New User" blue, none="Visitor" grey; legend="Veteran" gold. */
 private fun rosterTrustColor(rank: String): androidx.compose.ui.graphics.Color = when {
-    rank.contains("legend") -> androidx.compose.ui.graphics.Color(0xFFFFD000)
-    rank.contains("veteran") -> androidx.compose.ui.graphics.Color(0xFF8B5CF6)
-    rank.contains("trusted") -> androidx.compose.ui.graphics.Color(0xFFF0803C)
-    rank.contains("known") -> androidx.compose.ui.graphics.Color(0xFF2BCF5C)
-    rank.contains("basic") -> androidx.compose.ui.graphics.Color(0xFF1F6FEB)
-    else -> androidx.compose.ui.graphics.Color(0xFFB0B8C4)
+    rank.contains("legend") -> GremlinColors.Trust.Veteran
+    rank.contains("veteran") -> GremlinColors.Trust.TrustedUser
+    rank.contains("trusted") -> GremlinColors.Trust.KnownUser
+    rank.contains("known") -> GremlinColors.Trust.User
+    rank.contains("basic") -> GremlinColors.Trust.NewUser
+    else -> GremlinColors.Trust.Visitor
 }
 
 /**
@@ -650,9 +651,9 @@ private fun rosterTrustColor(rank: String): androidx.compose.ui.graphics.Color =
 @Composable
 internal fun PlatformSymbol(platform: String) {
     val tint = when (platform) {
-        "PC" -> androidx.compose.ui.graphics.Color(0xFF2196F3)   // Windows blue
-        "Quest" -> androidx.compose.ui.graphics.Color(0xFF3DDC84) // Android brand green
-        "iOS" -> androidx.compose.ui.graphics.Color(0xFFE0E0E0)   // Apple light grey
+        "PC" -> GremlinColors.Platform.Pc   // Windows blue
+        "Quest" -> GremlinColors.Platform.Quest // Android brand green
+        "iOS" -> GremlinColors.Platform.Ios   // Apple light grey
         else -> return
     }
     Surface(

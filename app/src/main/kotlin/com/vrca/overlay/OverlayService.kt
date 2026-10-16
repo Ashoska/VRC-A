@@ -43,7 +43,7 @@ import com.vrca.app.VrcaApplication
 import com.vrca.overlay.ui.ButtonOverlay
 import com.vrca.overlay.ui.MessengerOverlay
 import com.vrca.ui.viewmodel.VrcaViewModel
-import com.vrca.ui.theme.OverlayTheme
+import com.vrca.ui.theme.GremlinOverlayTheme
 import kotlin.math.roundToInt
 
 class OverlayService : Service() {
@@ -199,7 +199,7 @@ class OverlayService : Service() {
     @SuppressLint("ClickableViewAccessibility")
     private fun initOverlay() {
         buttonComposeView.setContent {
-            OverlayTheme {
+            GremlinOverlayTheme {
                 OverlayDraggableContainer {
                     ButtonOverlay {
                         switchOverlay(Window.MESSENGER)
@@ -227,7 +227,7 @@ class OverlayService : Service() {
                     viewModel(viewModelStoreOwner = appOwner, factory = VrcaViewModel.Factory)
                 }
 
-            OverlayTheme {
+            GremlinOverlayTheme {
                 MessengerOverlay(chatboxViewModel) {
                     switchOverlay(Window.BUTTON)
                 }

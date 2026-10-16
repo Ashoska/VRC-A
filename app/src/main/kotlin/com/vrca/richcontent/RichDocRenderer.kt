@@ -1,5 +1,6 @@
 package com.vrca.richcontent
 
+import com.vrca.ui.theme.GremlinColors
 import android.content.Context
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -239,9 +240,9 @@ private fun RichText(raw: String, style: TextStyle, color: Color) {
 @Composable
 private fun RichCallout(block: RichBlock.Callout) {
     val accent = when (block.tone.lowercase()) {
-        "success" -> Color(0xFF22C55E)          // clear green
-        "warn", "warning" -> Color(0xFFF4511E)  // red-orange (reads as a warning)
-        else -> Color(0xFF3B82F6)               // clear blue (info)
+        "success" -> GremlinColors.Callout.Success          // clear green
+        "warn", "warning" -> GremlinColors.Callout.Warning  // red-orange (reads as a warning)
+        else -> GremlinColors.Callout.Info               // clear blue (info)
     }
     Surface(
         shape = RoundedCornerShape(12.dp),

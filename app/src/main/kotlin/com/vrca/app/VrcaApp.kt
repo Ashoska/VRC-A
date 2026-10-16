@@ -1,5 +1,6 @@
 package com.vrca.app
 
+import com.vrca.ui.theme.GremlinColors
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -1434,12 +1435,12 @@ private fun BootCheckRow(label: String, state: Int, detail: String = "") {
                     modifier = Modifier.size(16.dp),
                     strokeWidth = 2.dp
                 )
-                2 -> Surface(shape = CircleShape, color = Color(0xFF2BCF5C), modifier = Modifier.size(18.dp)) {
+                2 -> Surface(shape = CircleShape, color = GremlinColors.Positive, modifier = Modifier.size(18.dp)) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(13.dp), tint = Color.Black)
                     }
                 }
-                3 -> Surface(shape = CircleShape, color = Color(0xFFFFB74D), modifier = Modifier.size(18.dp)) {
+                3 -> Surface(shape = CircleShape, color = GremlinColors.Caution, modifier = Modifier.size(18.dp)) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("!", color = Color.Black, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                     }
@@ -1466,7 +1467,7 @@ private fun BootCheckRow(label: String, state: Int, detail: String = "") {
                 Text(
                     detail,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (state == 3) Color(0xFFFFB74D) else colors.onSurfaceVariant
+                    color = if (state == 3) GremlinColors.Caution else colors.onSurfaceVariant
                 )
             }
         }

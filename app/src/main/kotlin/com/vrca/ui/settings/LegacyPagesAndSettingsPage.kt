@@ -900,7 +900,7 @@ private fun DebugPage(vm: VrcaViewModel) {
 }
 
 // -------------------------
-// NEW: SlimeVR-like Settings page (UI-only, uses existing VM + SettingsStates)
+// NEW: sectioned Settings page (UI-only, uses existing VM + SettingsStates)
 // -------------------------
 
 private enum class SettingsSection(val title: String) {
@@ -925,7 +925,7 @@ fun SettingsPage(
     val overlayState = SettingsStates.overlayState()
 
     PageContainer {
-        // Section chooser (SlimeVR left list vibe, but mobile-friendly)
+        // Section chooser (left list, mobile-friendly)
         ElevatedCard {
             Row(
                 modifier = Modifier

@@ -1,5 +1,6 @@
 package com.vrca.ui.screen
 
+import com.vrca.ui.theme.GremlinColors
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
@@ -375,7 +376,7 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Canvas(Modifier.size(6.dp)) {
                                         drawCircle(
-                                            color = if (rpcOn) Color(0xFF4CAF50) else Color(0xFF9E9E9E)
+                                            color = if (rpcOn) GremlinColors.Positive else GremlinColors.Inactive
                                         )
                                     }
                                     Spacer(Modifier.width(4.dp))
@@ -622,10 +623,10 @@ internal object PinnedSectionState {
 private fun presenceStatusColor(p: VrchatAuthManager.VrcUserPresence?): Color =
     if (p?.isOnlineInVRChat == true) {
         when (p.status) {
-            "ask me" -> Color(0xFFFF9800)
-            "busy"   -> Color(0xFFF44336)
-            "join me" -> Color(0xFF2196F3)
-            else     -> Color(0xFF4CAF50)
+            "ask me" -> GremlinColors.Status.AskMe
+            "busy"   -> GremlinColors.Status.Busy
+            "join me" -> GremlinColors.Status.JoinMe
+            else     -> GremlinColors.Status.Online
         }
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant
@@ -660,13 +661,13 @@ private fun prettyPlatform(platform: String): String = when (platform) {
 private data class TrustBadge(val label: String, val color: Color)
 
 private fun trustBadge(rank: String): TrustBadge? = when (rank) {
-    "system_trust_legend"  -> TrustBadge("Veteran", Color(0xFFFFD000))
-    "system_trust_veteran" -> TrustBadge("Trusted User", Color(0xFFB18FE4))
-    "system_trust_trusted" -> TrustBadge("Known User", Color(0xFFFF7B42))
-    "system_trust_known"   -> TrustBadge("User", Color(0xFF2BCF5C))
-    "system_trust_basic"   -> TrustBadge("New User", Color(0xFF1778FF))
+    "system_trust_legend"  -> TrustBadge("Veteran", GremlinColors.Trust.Veteran)
+    "system_trust_veteran" -> TrustBadge("Trusted User", GremlinColors.Trust.TrustedUser)
+    "system_trust_trusted" -> TrustBadge("Known User", GremlinColors.Trust.KnownUser)
+    "system_trust_known"   -> TrustBadge("User", GremlinColors.Trust.User)
+    "system_trust_basic"   -> TrustBadge("New User", GremlinColors.Trust.NewUser)
     "" -> null
-    else -> TrustBadge("Visitor", Color(0xFFCCCCCC))
+    else -> TrustBadge("Visitor", GremlinColors.Trust.Visitor)
 }
 
 /** The user's OWN avatar: VRChat+ profile picture loaded through the
@@ -1046,11 +1047,11 @@ private fun PerfBadge(r: com.vrca.vrchat.AvatarSearch.Result) {
         else -> return
     }
     val (label, color) = when (rank) {
-        0 -> "Excellent" to Color(0xFF3CCF4E)
-        1 -> "Good" to Color(0xFF8CC63F)
-        2 -> "Medium" to Color(0xFFFFC107)
-        3 -> "Poor" to Color(0xFFFF7B42)
-        else -> "Very Poor" to Color(0xFFE53935)
+        0 -> "Excellent" to GremlinColors.Performance.Excellent
+        1 -> "Good" to GremlinColors.Performance.Good
+        2 -> "Medium" to GremlinColors.Performance.Medium
+        3 -> "Poor" to GremlinColors.Performance.Poor
+        else -> "Very Poor" to GremlinColors.Performance.VeryPoor
     }
     Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp), color = color.copy(alpha = 0.18f)) {
         Text(
@@ -1286,8 +1287,8 @@ private fun LazyListScope.inAppAlertSection(
             // (unfollowed) events stay grouped together in Pinned (if the group is
             // manually pinned) or Other notifications. Un-following an event drops it
             // back into the remainder group automatically.
-            val gold = Color(0xFFFFC64B)
-            val silver = Color(0xFFC7CDD9)
+            val gold = GremlinColors.Medal.Gold
+            val silver = GremlinColors.Medal.Silver
             val signedUpCards = ArrayList<Pair<String, InAppAlertGroup>>()
             val pinnedCards = ArrayList<Pair<String, InAppAlertGroup>>()
             val removedCards = ArrayList<Pair<String, InAppAlertGroup>>()
@@ -1488,10 +1489,10 @@ private fun formatRelativeTime(timestampMs: Long, nowMs: Long = System.currentTi
 }
 
 private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString> {
-    val removedColor = Color(0xFFEF5350)
-    val addedColor = Color(0xFF4CAF50)
-    val neutralColor = Color(0xFFB0B0B0)
-    val movedColor = Color(0xFFB388FF) // purple — line was moved, not added/removed
+    val removedColor = GremlinColors.Change.Removed
+    val addedColor = GremlinColors.Change.Added
+    val neutralColor = GremlinColors.Change.Neutral
+    val movedColor = GremlinColors.Change.Moved // purple — line was moved, not added/removed
 
     // Diff at the LINE level, not the word level. Bios are usually multi-line
     // lists; word-level LCS matched common words ("the", "my", "get") across
@@ -1630,9 +1631,9 @@ private fun AlertGroupCard(
     // SILVER, DELETED-from-VRChat = RED; all three get an accent bar/border + a
     // pill. Signed-up/pinned are protected from dismissal; a removed card is
     // dismissable (swipe the dead event away). (No emoji — pin is PushPin.)
-    val gold = Color(0xFFFFC64B)
-    val silver = Color(0xFFC7CDD9)
-    val red = Color(0xFFE05561)
+    val gold = GremlinColors.Medal.Gold
+    val silver = GremlinColors.Medal.Silver
+    val red = GremlinColors.Alert
     // A removed card is styled special (red) but stays dismissable, so it is NOT
     // part of `special` (which gates dismissal protection below).
     val special = signedUp || pinned
@@ -2028,7 +2029,7 @@ private fun AlertGroupCard(
                                         "BEFORE",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFFEF5350)
+                                        color = GremlinColors.Negative
                                     )
                                     Spacer(Modifier.height(3.dp))
                                     Text(
@@ -2043,7 +2044,7 @@ private fun AlertGroupCard(
                                         "AFTER",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF4CAF50)
+                                        color = GremlinColors.Positive
                                     )
                                     Spacer(Modifier.height(3.dp))
                                     Text(
@@ -2168,8 +2169,8 @@ private fun AlertEventBody(
     val startingSoon = event.startsAtMs - nowMs < 2L * 60 * 60 * 1000
     val (phaseLabel, phaseColor) = when (phase) {
         EventPhase.UPCOMING -> "Starts ${formatRelativeTime(event.startsAtMs, nowMs)}" to
-            (if (startingSoon) Color(0xFFFFB300) else MaterialTheme.colorScheme.primary)
-        EventPhase.LIVE -> "Live now" to Color(0xFF4CAF50)
+            (if (startingSoon) GremlinColors.Caution else MaterialTheme.colorScheme.primary)
+        EventPhase.LIVE -> "Live now" to GremlinColors.Positive
         EventPhase.ENDED -> "Ended" to MaterialTheme.colorScheme.outline
     }
     // The status/category/access chips render either ON the banner's bottom scrim
@@ -2186,8 +2187,8 @@ private fun AlertEventBody(
         event.accessType?.let {
             val label = it.replaceFirstChar { c -> c.uppercase() }
             val color = when (it.lowercase()) {
-                "public" -> Color(0xFF4CAF50)
-                "group" -> Color(0xFFAB47BC)
+                "public" -> GremlinColors.Access.Public
+                "group" -> GremlinColors.Access.Group
                 else -> MaterialTheme.colorScheme.outline
             }
             EventMetaChip(
@@ -2478,7 +2479,7 @@ private fun AlertEventBody(
                 if (event.removed) {
                     Spacer(Modifier.height(8.dp))
                     Surface(
-                        color = Color(0xFFE05561).copy(alpha = 0.14f),
+                        color = GremlinColors.Alert.copy(alpha = 0.14f),
                         shape = MaterialTheme.shapes.small,
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -2489,12 +2490,12 @@ private fun AlertEventBody(
                         ) {
                             Icon(
                                 Icons.Filled.EventBusy, null,
-                                tint = Color(0xFFE05561), modifier = Modifier.size(16.dp)
+                                tint = GremlinColors.Alert, modifier = Modifier.size(16.dp)
                             )
                             Text(
                                 "This event was removed from VRChat",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = Color(0xFFE05561)
+                                color = GremlinColors.Alert
                             )
                         }
                     }
@@ -2695,9 +2696,9 @@ private fun PlatformSymbols(csv: String?, overlay: Boolean) {
     ) {
         for (p in platforms) {
             val tint = when (p) {
-                "pc" -> Color(0xFF2196F3)      // Windows blue
-                "android" -> Color(0xFF3DDC84) // Android brand green
-                else -> Color(0xFFE0E0E0)      // Apple light grey
+                "pc" -> GremlinColors.Platform.Pc      // Windows blue
+                "android" -> GremlinColors.Platform.Quest // Android brand green
+                else -> GremlinColors.Platform.Ios      // Apple light grey
             }
             Surface(
                 shape = CircleShape,
@@ -2989,7 +2990,7 @@ private fun EventOccurrencesDialog(
                 when {
                     allRemoved -> Text(
                         "This event series was removed from VRChat.",
-                        style = MaterialTheme.typography.bodyMedium, color = Color(0xFFE05561))
+                        style = MaterialTheme.typography.bodyMedium, color = GremlinColors.Alert)
                     occs.isEmpty() && !loading -> Text(
                         "No upcoming occurrences.",
                         style = MaterialTheme.typography.bodyMedium,
@@ -3019,8 +3020,8 @@ private fun OccurrenceRow(
     busy: Boolean,
     onToggle: () -> Unit
 ) {
-    val red = Color(0xFFE05561)
-    val green = Color(0xFF4CAF50)
+    val red = GremlinColors.Alert
+    val green = GremlinColors.Positive
     val following = occ.following == true
     val phase = eventPhase(occ.startsAtMs, occ.endsAtMs, nowMs)
     val accent = when {
@@ -3340,10 +3341,10 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
         info?.groupId ?: ""
     )
     val typeColor = when (typeInfo.label) {
-        "Public" -> Color(0xFF4CAF50)
-        "Friends", "Friends+" -> Color(0xFF42A5F5)
-        "Group" -> Color(0xFFAB47BC)
-        "Invite", "Invite+" -> Color(0xFFFFB300)
+        "Public" -> GremlinColors.Access.Public
+        "Friends", "Friends+" -> GremlinColors.Access.Friends
+        "Group" -> GremlinColors.Access.Group
+        "Invite", "Invite+" -> GremlinColors.Access.Invite
         else -> MaterialTheme.colorScheme.outline
     }
     Surface(
@@ -3454,13 +3455,13 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                         }
                         val (statusText, statusColor) = when {
                             isOpen && (info?.players ?: 0) == 0 ->
-                                "Empty" to Color(0xFFEF5350)
+                                "Empty" to GremlinColors.Negative
                             isOpen ->
-                                "${info?.players ?: 0}/${info?.capacity ?: 0} players" to Color(0xFF4CAF50)
+                                "${info?.players ?: 0}/${info?.capacity ?: 0} players" to GremlinColors.Positive
                             status == VrchatAuthManager.InstanceStatus.CLOSED ->
-                                "Closed" to Color(0xFFEF5350)
+                                "Closed" to GremlinColors.Negative
                             status == VrchatAuthManager.InstanceStatus.INACCESSIBLE ->
-                                "Locked" to Color(0xFFFFB300)
+                                "Locked" to GremlinColors.Caution
                             else ->
                                 "Checking" to MaterialTheme.colorScheme.outline
                         }

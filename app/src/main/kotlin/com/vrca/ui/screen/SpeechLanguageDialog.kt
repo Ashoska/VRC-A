@@ -1,5 +1,6 @@
 package com.vrca.ui.screen
 
+import com.vrca.ui.theme.GremlinColors
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -467,11 +468,11 @@ private fun TierCard(
 @Composable
 private fun QualityBadge(t: SpeechCatalog.Tier) {
     val c = when (t.quality) {
-        SpeechCatalog.Quality.EXCELLENT -> Color(0xFF26C6DA)
-        SpeechCatalog.Quality.GREAT -> Color(0xFF4CAF50)
-        SpeechCatalog.Quality.GOOD -> Color(0xFF42A5F5)
-        SpeechCatalog.Quality.OK -> Color(0xFFFFB300)
-        SpeechCatalog.Quality.EXPERIMENTAL -> Color(0xFF9E9E9E)
+        SpeechCatalog.Quality.EXCELLENT -> GremlinColors.Quality.Excellent
+        SpeechCatalog.Quality.GREAT -> GremlinColors.Quality.Great
+        SpeechCatalog.Quality.GOOD -> GremlinColors.Quality.Good
+        SpeechCatalog.Quality.OK -> GremlinColors.Quality.Ok
+        SpeechCatalog.Quality.EXPERIMENTAL -> GremlinColors.Quality.Experimental
     }
     Surface(shape = MaterialTheme.shapes.small, color = c.copy(alpha = 0.2f)) {
         Text("${t.quality.label} · ${t.accuracy}%", color = c, style = MaterialTheme.typography.labelMedium,

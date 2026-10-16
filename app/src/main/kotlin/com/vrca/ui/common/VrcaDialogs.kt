@@ -47,7 +47,7 @@ import androidx.compose.ui.window.DialogProperties
 
 /**
  * The shared card shell every VRC-A popup is built on, so confirms / pickers /
- * editors all read with the same Slime visual identity as [com.vrca.app] UpdateDialog
+ * editors all read with the same Gremlin visual identity as [com.vrca.app] UpdateDialog
  * and the VRChat InstanceListDialog: a near-full-width [ElevatedCard] (deep surface,
  * rounded `large` corners, 6dp elevation) instead of a stock M3 AlertDialog. Use this
  * for new dialogs rather than `AlertDialog`.

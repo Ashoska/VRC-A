@@ -398,7 +398,7 @@ private fun CompletedGateCard(text: String) {
             Icon(
                 Icons.Filled.CheckCircle,
                 contentDescription = null,
-                tint = com.vrca.ui.theme.SlimeSuccess
+                tint = com.vrca.ui.theme.GremlinColors.Success
             )
             Text(text, style = MaterialTheme.typography.bodyMedium)
         }
@@ -676,7 +676,7 @@ private fun PermissionRow(
             }
             if (granted) {
                 Icon(Icons.Filled.Check, contentDescription = "Granted",
-                    tint = com.vrca.ui.theme.SlimeSuccess)
+                    tint = com.vrca.ui.theme.GremlinColors.Success)
             } else {
                 OutlinedButton(onClick = onRequest) { Text("Grant") }
             }

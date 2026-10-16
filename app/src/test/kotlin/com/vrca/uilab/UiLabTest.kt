@@ -10,7 +10,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.vrca.app.VrcaApplication
 import com.vrca.ui.theme.ThemeMode
-import com.vrca.ui.theme.VrcaTheme
+import com.vrca.ui.theme.GremlinTheme
 import com.vrca.ui.viewmodel.VrcaViewModel
 import org.junit.Assume
 import org.junit.Test
@@ -116,7 +116,7 @@ class UiLabTest {
         org.robolectric.shadows.ShadowChoreographer.setFrameDelay(Duration.ofMillis(16))
         val act = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
         val driver = UiLabDriver(act, app, vm, outDir)
-        act.setContent { VrcaTheme(themeMode = ThemeMode.Dark) { UiLabScenes.Root(driver) } }
+        act.setContent { GremlinTheme(themeMode = ThemeMode.Dark) { UiLabScenes.Root(driver) } }
         driver.settle(settleMs)
 
         if (System.getProperty("uilab.ui.firestore") == "real") {

@@ -53,7 +53,7 @@ fun ThemeMode.isDark(systemIsDark: Boolean): Boolean = when (this) {
     ThemeMode.Dark -> true
 }
 
-private val AppShapes = Shapes(
+private val GremlinShapes = Shapes(
     extraSmall = RoundedCornerShape(10.dp),
     small = RoundedCornerShape(14.dp),
     medium = RoundedCornerShape(18.dp),
@@ -61,33 +61,33 @@ private val AppShapes = Shapes(
     extraLarge = RoundedCornerShape(28.dp)
 )
 
-private val SlimeDark = darkColorScheme(
-    primary = SlimePurple,
+private val GremlinDark = darkColorScheme(
+    primary = GremlinColors.Accent,
     onPrimary = Color(0xFF120B2A),
 
-    secondary = SlimePurple2,
+    secondary = GremlinColors.AccentSoft,
     onSecondary = Color(0xFF130B2C),
 
-    tertiary = SlimePurple2,
+    tertiary = GremlinColors.AccentSoft,
     onTertiary = Color(0xFF130B2C),
 
-    background = SlimeBg,
-    onBackground = SlimeText,
+    background = GremlinColors.Backdrop,
+    onBackground = GremlinColors.Text,
 
-    surface = SlimeSurface,
-    onSurface = SlimeText,
+    surface = GremlinColors.Panel,
+    onSurface = GremlinColors.Text,
 
-    surfaceVariant = SlimeSurface2,
-    onSurfaceVariant = SlimeMuted,
+    surfaceVariant = GremlinColors.Card,
+    onSurfaceVariant = GremlinColors.TextMuted,
 
-    outline = SlimeOutline,
-    outlineVariant = SlimeOutline.copy(alpha = 0.7f),
+    outline = GremlinColors.Edge,
+    outlineVariant = GremlinColors.Edge.copy(alpha = 0.7f),
 
-    error = SlimeError,
+    error = GremlinColors.Error,
     onError = Color(0xFF2B0C0C)
 )
 
-private val SlimeLight = lightColorScheme(
+private val GremlinLight = lightColorScheme(
     primary = Color(0xFF5A3BFF),
     onPrimary = Color.White,
 
@@ -113,10 +113,11 @@ private val SlimeLight = lightColorScheme(
     onError = Color.White
 )
 
+/** Gremlin, VRC-A's own design system: colours in [GremlinColors], plus shapes and type. */
 @Composable
-fun VrcaTheme(
+fun GremlinTheme(
     themeMode: ThemeMode = ThemeMode.System,
-    dynamicColor: Boolean = false, // IMPORTANT: OFF by default to match Slime theme
+    dynamicColor: Boolean = false, // OFF: the app always uses the Gremlin palette
     content: @Composable () -> Unit
 ) {
     val systemDark = isSystemInDarkTheme()
@@ -127,8 +128,8 @@ fun VrcaTheme(
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> SlimeDark
-        else -> SlimeLight
+        darkTheme -> GremlinDark
+        else -> GremlinLight
     }
 
     val view = LocalView.current
@@ -144,8 +145,8 @@ fun VrcaTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography,
-        shapes = AppShapes
+        typography = GremlinTypography,
+        shapes = GremlinShapes
     ) {
         // Headset build: kill the stuck-hover highlight (Quest laser hover-exit is
         // unreliable), and keep the default panel layout at any window size (FixedPanel:
@@ -161,7 +162,7 @@ fun VrcaTheme(
 }
 
 @Composable
-fun OverlayTheme(
+fun GremlinOverlayTheme(
     themeMode: ThemeMode = ThemeMode.System,
     dynamicColor: Boolean = false,
     content: @Composable () -> Unit
@@ -174,13 +175,13 @@ fun OverlayTheme(
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> SlimeDark
-        else -> SlimeLight
+        darkTheme -> GremlinDark
+        else -> GremlinLight
     }
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography,
+        typography = GremlinTypography,
         shapes = MaterialTheme.shapes,
         content = content
     )
