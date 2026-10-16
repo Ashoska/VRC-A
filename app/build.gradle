@@ -201,6 +201,9 @@ android {
         unitTests {
             includeAndroidResources = project.hasProperty('cardinalLab') || project.hasProperty('uiLab')
             all { t ->
+                // Robolectric downloads its android-all jar at test time from repo1.maven.org, which
+                // rate-limits (HTTP 429) cloud sessions; the same mirror settings.gradle uses.
+                t.systemProperty 'robolectric.dependency.repo.url', 'https://maven-central.storage-download.googleapis.com/maven2/'
                 // UI Lab (tools/ui-lab): renders real screens to PNGs on the JVM. Only with -PuiLab.
                 if (!project.hasProperty('uiLab')) {
                     t.exclude '**/uilab/**'
