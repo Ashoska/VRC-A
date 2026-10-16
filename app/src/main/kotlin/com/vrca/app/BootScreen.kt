@@ -291,22 +291,13 @@ fun BootScreen(
     }
 }
 
-/** Big tilted flat cards peeking in from the corners: the back wall gets depth, not emptiness. */
+/**
+ * The back wall's decoration, drawn behind everything and faded in with the intro.
+ * Empty on purpose: the user is designing their own (the first-pass tilted slabs were removed).
+ * Their design goes here; keep it flat layers, no gradients (GremlinColors, ui-kit.md).
+ */
 @Composable
 private fun BoxScope.BackdropLayers() {
-    val tint = GremlinColors.Panel.copy(alpha = 0.55f)
-    val edge = GremlinColors.Edge.copy(alpha = 0.35f)
-    @Composable
-    fun Slab(align: Alignment, x: Dp, y: Dp, w: Dp, h: Dp, deg: Float) {
-        Box(
-            Modifier.align(align).offset(x, y).rotate(deg).size(w, h)
-                .background(tint, RoundedCornerShape(40.dp))
-                .border(1.dp, edge, RoundedCornerShape(40.dp))
-        )
-    }
-    Slab(Alignment.TopStart, (-120).dp, (-90).dp, 380.dp, 260.dp, -14f)
-    Slab(Alignment.BottomEnd, 140.dp, 110.dp, 420.dp, 280.dp, -14f)
-    Slab(Alignment.BottomStart, (-170).dp, 150.dp, 300.dp, 220.dp, 10f)
 }
 
 /** How big the logo starts in the intro, relative to its final size. */
