@@ -3,7 +3,7 @@
 VRC-A (VRChat Assistant) is an Android companion app for VRChat: Kotlin, Jetpack Compose, Firebase Firestore, GitHub Actions CI.
 Three builds: **public** (`com.scrapw.chatbox`, kept for install continuity), **admin** (`BuildConfig.IS_ADMIN_BUILD`) and **headset** / Meta Quest (`com.gremlin.inc.headset`, `BuildConfig.IS_HEADSET_BUILD`).
 Source: `app/src/main/kotlin/com/vrca/` with packages `admin/ app/ data/ discord/ discordbot/ keepalive/ nowplaying/ osc/ overlay/ richcontent/ sync/ ui/ update/ vrchat/`. Worker: `cloudflare/avatar-db/`. CI: `.github/workflows/android.yml` (+ `speech-models.yml`, manual: builds hosted voice-model files; `catalog-rebuild.yml`, scheduled: rebuilds the avatar search index + `db.json` backup in R2). Rules: `firestore.rules`.
-Tools (`tools/`): `ui-lab/` (UI Lab scripts; its Kotlin is `app/src/test/kotlin/com/vrca/uilab/`), `cardinal-lab/` (its Kotlin: `app/src/test/kotlin/com/vrca/discordbot/lab/`), `speech-bench/` (voice-model tests). Both labs: `labs.md`.
+Tools (`tools/`): `ui-lab/` (UI Lab scripts; its Kotlin is `app/src/test/kotlin/com/vrca/uilab/`), `cardinal-lab/` (its Kotlin: `app/src/test/kotlin/com/vrca/discordbot/lab/`), `speech-bench/` (voice-model tests), `symbol-lab/` (fan drawing → boot-wall symbol). Labs: `labs.md`.
 Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 
 ## How this file works (read first)
@@ -48,7 +48,7 @@ This file is only the rules plus a **map**. The details of every feature and sys
 | `rich-content.md` | `RichDoc` engine, renderer, `RichMediaStore`, admin `RichDocEditor` + uploads, announcements surface, What's New, video/GIF playback |
 | `background-survival.md` | App-scoped ViewModel, headless revival, swipe vs OEM kill (`AppShutdown`), watchdog, safe foreground start, OEM guidance, wakelock + WiFi lock |
 | `storage.md` | Every cache/on-disk store and its cap or cleanup |
-| `labs.md` | UI Lab (`tools/ui-lab/`: shots, recordings, real touch/press/drag/swipe/hover input, toasts, `targets` touch-target audit) and Cardinal Lab (`tools/cardinal-lab/`) |
+| `labs.md` | UI Lab (`tools/ui-lab/`: shots, recordings, real touch/press/drag/swipe/hover input, toasts, `targets` touch-target audit), Cardinal Lab (`tools/cardinal-lab/`), Symbol Lab (`tools/symbol-lab/`: drawing → `BootSymbol.fromSvg`) |
 
 Other reference docs in `docs/`: `ui-revamp.md` (public UI + onboarding design spec; read before public UI work), `wake-word-plan.md` (hands-free wake word + fixed phrase list, not started; separate from the Cardinal AI), `cardinal-audit.md`, `account-system-plan.md`, `avatar-catalog-sharding-plan.md`, `backend-migration-plan.md`, `vrc-nexus-teardown.md`.
 
