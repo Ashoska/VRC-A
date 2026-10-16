@@ -9,6 +9,12 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.imageResource
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -71,7 +77,7 @@ private data class RowState(val state: BootState = BootState.Waiting, val note: 
  * (sign-in, ban check, release check) plus one `config/app` read for the terms row.
  */
 @Composable
-internal fun HeadsetBoot(onDone: () -> Unit) {
+internal fun HeadsetBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
     val ctx = LocalContext.current
     val rows = remember { mutableStateListOf(*Array(Row.entries.size) { RowState() }) }
     var status by remember { mutableStateOf(BootStatus()) }
@@ -229,7 +235,7 @@ internal fun HeadsetBoot(onDone: () -> Unit) {
         onShown = { shown = true },
         exit = exiting,
         exitToTopBar = toMainApp,
-        onExited = onDone,
+        onExited = { onDone(toMainApp) },
         onSignIn = if (signInNeeded && error == null) ({ showLogin = true }) else null
     )
     // Sign in right here, over the boot screen (which stays underneath, so it doesn't replay).
@@ -383,3 +389,44 @@ private suspend fun fetchVrchatPlatform(): ServiceState = withContext(Dispatcher
         ServiceState.Issues
     }
 }
+
+/**
+ * The hand-off from the headset boot screen to the app: for a moment after boot the boot backdrop
+ * stays on top of the app and fades away, so the app fades in rather than cutting in. When the logo
+ * flew into the top bar, a copy of it holds there (the app's own top-bar logo is right underneath
+ * in the same spot) until the fade is done, so it never blinks.
+ */
+internal object BootReveal {
+    val active = mutableStateOf(false)
+    var withLogo = false
+        private set
+    fun start(withLogo: Boolean) { this.withLogo = withLogo; active.value = true }
+    fun end() { active.value = false }
+}
+
+@Composable
+internal fun BootRevealOverlay() {
+    if (!BootReveal.active.value) return
+    val fade = remember { androidx.compose.animation.core.Animatable(1f) }
+    LaunchedEffect(Unit) {
+        fade.animateTo(0f, androidx.compose.animation.core.tween(REVEAL_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        BootReveal.end()
+    }
+    androidx.compose.foundation.layout.Box(
+        androidx.compose.ui.Modifier.fillMaxSize()
+            .background(com.vrca.ui.theme.GremlinColors.Backdrop.copy(alpha = fade.value))
+            // Swallow taps while it's up (it's only ~half a second).
+            .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } }
+    ) {
+        if (BootReveal.withLogo) {
+            androidx.compose.foundation.Image(
+                androidx.compose.ui.graphics.ImageBitmap.imageResource(com.vrca.R.drawable.vrca_logo_bar), null,
+                filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
+                modifier = androidx.compose.ui.Modifier.align(androidx.compose.ui.Alignment.TopCenter)
+                    .padding(top = 4.dp).height(56.dp)
+            )
+        }
+    }
+}
+
+private const val REVEAL_MS = 650

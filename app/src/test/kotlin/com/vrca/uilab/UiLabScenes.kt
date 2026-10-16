@@ -500,6 +500,7 @@ object UiLabScenes {
                 else -> VrcaScreen(chatboxViewModel = d.vm, discordInvite = "https://discord.gg/example")
             }
             d.overlay.value?.let { Overlay(d, it) }
+            com.vrca.app.BootRevealOverlay()
         }
     }
 
@@ -508,9 +509,9 @@ object UiLabScenes {
         val name = arg.substringBefore(' ')
         val rest = arg.substringAfter(' ', "")
         when (name) {
-            "boot" -> bootSample(rest) { d.base.value = "screen" }
+            "boot" -> bootSample(rest) { com.vrca.app.BootReveal.start(withLogo = true); d.base.value = "screen" }
             // The REAL headset boot runner (its checks run against the lab, so it shows what fails offline).
-            "headsetboot" -> com.vrca.app.HeadsetBoot(onDone = {})
+            "headsetboot" -> com.vrca.app.HeadsetBoot(onDone = { _ -> })
             "crash" -> CrashScreen(
                 crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",
                 onClear = {}, onContinue = {}

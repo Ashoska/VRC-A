@@ -122,6 +122,15 @@ import java.security.SecureRandom
  */
 @Composable
 fun VrcaApp() {
+    // Headset: the boot screen's last beat (BootReveal) draws on top of the app as it appears.
+    androidx.compose.foundation.layout.Box {
+        VrcaAppContent()
+        if (BuildConfig.IS_HEADSET_BUILD) BootRevealOverlay()
+    }
+}
+
+@Composable
+private fun VrcaAppContent() {
     val ctx = LocalContext.current
 
     /* -------------------------
@@ -195,7 +204,11 @@ fun VrcaApp() {
     // Headset: the new boot screen (BootScreen.kt) runs every check itself, side by side, and
     // covers the ban check + VRChat presence too, so the phase-2 screen below is skipped there.
     if (!bootOk && BuildConfig.IS_HEADSET_BUILD) {
-        HeadsetBoot(onDone = { bootOk = true })
+        HeadsetBoot(onDone = { toTopBar ->
+            // The app appears underneath and the boot screen's backdrop fades off it (no hard cut).
+            BootReveal.start(withLogo = toTopBar)
+            bootOk = true
+        })
         return
     }
 
