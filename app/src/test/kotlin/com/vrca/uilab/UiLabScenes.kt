@@ -6,6 +6,12 @@ import androidx.compose.runtime.LaunchedEffect
 import com.vrca.app.BannedScreen
 import com.vrca.app.BootstrapScreen
 import com.vrca.app.BootState as S
+import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Headset
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Cloud
 import com.vrca.app.CrashScreen
 import com.vrca.app.TosGate
 import com.vrca.app.UpdateDialog
@@ -344,7 +350,12 @@ object UiLabScenes {
     /** `show boot [mid|error|done|incident|updated]`: the boot screen in a sample state. */
     @Composable
     private fun bootSample(rest: String) {
-        fun c(l: String, st: com.vrca.app.BootState, d: String = "", b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b)
+        val I = androidx.compose.material.icons.Icons.Filled
+        val icons = mapOf(
+            "Server session" to I.Cloud, "VRChat sign-in" to I.Person, "Account standing" to I.Shield,
+            "VRChat connection" to I.Wifi, "VRChat on this headset" to I.Headset, "Updates" to I.SystemUpdate
+        )
+        fun c(l: String, st: com.vrca.app.BootState, d: String = "", b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b, icons[l])
         val v = rest.ifBlank { "mid" }
         val checks = when (v) {
             "error" -> listOf(
