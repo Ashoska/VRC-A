@@ -264,10 +264,12 @@ fun BootScreen(
                 }
             }
             if (wide) {
-                // Headset: logo, name, pill and the Status card on the left; the checklist on the right.
+                // Headset: logo and the Status card on the left; the checklist on the right. Both
+                // panels wrap their content (no empty strips) and sit bottom-aligned so their lower
+                // edges line up; the pair is centred on the screen.
                 Row(
-                    Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 22.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                    Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 32.dp, vertical = 22.dp),
+                    verticalAlignment = Alignment.Bottom,
                     horizontalArrangement = Arrangement.spacedBy(28.dp)
                 ) {
                     Column(
@@ -278,12 +280,12 @@ fun BootScreen(
                         // the checklist already shows how boot is going).
                         logo(WIDE_LOGO_HEIGHT)
                         Spacer(Modifier.height(28.dp))
-                        Unfold({ panelR.value }, Modifier.fillMaxWidth().height(250.dp)) {
-                            StatusPanel(status, Modifier.fillMaxSize(), partsR.value)
+                        Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
+                            StatusPanel(status, Modifier.fillMaxWidth(), partsR.value, fit = true)
                         }
                     }
-                    Unfold({ panelL.value }, Modifier.weight(1.15f).height(540.dp)) {
-                        LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxSize(), partsL.value, roomy = true)
+                    Unfold({ panelL.value }, Modifier.weight(1.15f)) {
+                        LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxWidth(), partsL.value, roomy = true)
                     }
                 }
             } else {
@@ -393,7 +395,7 @@ private const val LINE_SHARE = 0.42f
 private fun Unfold(progress: () -> Float, modifier: Modifier, content: @Composable () -> Unit) {
     Box(modifier) {
         Box(
-            Modifier.fillMaxSize().graphicsLayer {
+            Modifier.graphicsLayer {
                 val p = progress()
                 val line = (p / LINE_SHARE).coerceIn(0f, 1f)
                 val open = ((p - LINE_SHARE) / (1f - LINE_SHARE)).coerceIn(0f, 1f)
@@ -456,14 +458,14 @@ private fun LoadingPanel(
     onContinue: (() -> Unit)?,
     modifier: Modifier,
     reveal: Float = 1f,
-    /** Taller panel (headset right column): bigger rows, more space between. */
+    /** Headset right column: bigger rows, more space between, and the panel wraps its rows. */
     roomy: Boolean = false
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val finished = checks.count { it.state in Settled }
     val pieces = checks.size + 3 // header, segment bar, each check, the buttons
     Layer(modifier) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 16.dp)) {
+        Column(Modifier.then(if (roomy) Modifier.fillMaxWidth() else Modifier.fillMaxSize()).padding(horizontal = 18.dp, vertical = 16.dp)) {
             Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { PanelHeader(Icons.Filled.RocketLaunch, "Starting up") {
                 Text(
                     "$finished/${checks.size}",
@@ -487,7 +489,7 @@ private fun LoadingPanel(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (roomy) 10.dp else 4.dp)) {
+            Column(if (roomy) Modifier else Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (roomy) 10.dp else 4.dp)) {
                 checks.forEachIndexed { i, c ->
                     BootCheckTile(c, Modifier.widenIn(stagger(reveal, 2 + i, pieces)), height = if (roomy) 48.dp else 31.dp)
                 }
@@ -607,10 +609,16 @@ private fun InfoCard(modifier: Modifier = Modifier, edge: Color = Color.Transpar
 }
 
 @Composable
-private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 1f) {
+private fun StatusPanel(
+    status: BootStatus,
+    modifier: Modifier,
+    reveal: Float = 1f,
+    /** Wrap the cards (headset) instead of filling a fixed-height panel. */
+    fit: Boolean = false
+) {
     val accent = MaterialTheme.colorScheme.primary
     Layer(modifier) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 16.dp)) {
+        Column(Modifier.then(if (fit) Modifier.fillMaxWidth() else Modifier.fillMaxSize()).padding(horizontal = 18.dp, vertical = 16.dp)) {
             Box(Modifier.widenIn(stagger(reveal, 0, 4))) { PanelHeader(Icons.Filled.Insights, "Status") }
             Spacer(Modifier.height(12.dp))
             val vrcTone = when (status.vrchatOk) {
@@ -640,7 +648,7 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
             }
             Spacer(Modifier.height(10.dp))
             if (status.updatedTo != null) {
-                InfoCard(Modifier.fillMaxWidth().weight(1f).widenIn(stagger(reveal, 2, 4)), edge = accent.copy(alpha = 0.45f)) {
+                InfoCard(Modifier.fillMaxWidth().then(if (fit) Modifier else Modifier.weight(1f)).widenIn(stagger(reveal, 2, 4)), edge = accent.copy(alpha = 0.45f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.AutoAwesome, null, tint = accent, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
@@ -668,7 +676,7 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
                     }
                 }
                 Spacer(Modifier.height(10.dp))
-            } else {
+            } else if (!fit) {
                 Spacer(Modifier.weight(1f))
             }
             // Hidden until it's a number worth showing, so a fresh install never sees "0".
