@@ -357,7 +357,6 @@ object UiLabScenes {
         )
         fun c(l: String, st: com.vrca.app.BootState, d: String = "", b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b, icons[l])
         val v = rest.substringBefore(' ').ifBlank { "mid" }
-        com.vrca.app.bootActionStyle = Regex("""\bstyle(\d)""").find(rest)?.groupValues?.get(1)?.toInt() ?: 0
         val backdrop = if (rest.substringAfter(' ', "") == "none") com.vrca.app.BootBackdrop.None else com.vrca.app.BootBackdrop.Lanes
         val checks = when (v) {
             "error" -> listOf(
