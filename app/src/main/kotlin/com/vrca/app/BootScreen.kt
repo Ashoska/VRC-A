@@ -298,10 +298,19 @@ fun BootScreen(
                     }
                 }
                 AnimatedVisibility(error != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                    Row(Modifier.fillMaxWidth().padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(WIDE_GAP)) {
-                        Box(Modifier.weight(0.85f), contentAlignment = Alignment.CenterEnd) { RetryButton(retryInSec, onRetry) }
-                        Box(Modifier.weight(1.15f), contentAlignment = Alignment.CenterStart) {
-                            if (onContinue != null) ContinueButton(onContinue)
+                    when (bootActionStyle) {
+                        1 -> Box(Modifier.fillMaxWidth().padding(top = 18.dp)) { ActionBar(error ?: "", retryInSec, onRetry, onContinue) }
+                        2 -> Box(Modifier.fillMaxWidth().padding(top = 20.dp), contentAlignment = Alignment.Center) { ActionPill(retryInSec, onRetry, onContinue) }
+                        3 -> Row(Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.spacedBy(WIDE_GAP)) {
+                            ActionTile(Icons.Filled.Refresh, "Retry", if (retryInSec != null) "Trying again in ${retryInSec}s" else "Try the checks again", true, onRetry, Modifier.weight(0.85f))
+                            if (onContinue != null) ActionTile(Icons.AutoMirrored.Filled.ArrowForward, "Continue anyway", "Open the app now, fix it later", false, onContinue, Modifier.weight(1.15f))
+                            else Spacer(Modifier.weight(1.15f))
+                        }
+                        else -> Row(Modifier.fillMaxWidth().padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(WIDE_GAP)) {
+                            Box(Modifier.weight(0.85f), contentAlignment = Alignment.CenterEnd) { RetryButton(retryInSec, onRetry) }
+                            Box(Modifier.weight(1.15f), contentAlignment = Alignment.CenterStart) {
+                                if (onContinue != null) ContinueButton(onContinue)
+                            }
                         }
                     }
                 }
@@ -709,3 +718,99 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
     }
 }
 
+
+/** TEMP (lab comparison): which error-action design the headset shows. */
+internal var bootActionStyle = 0
+
+/** Idea 1: one bar under both panels: what went wrong on the left, the two actions on the right. */
+@Composable
+private fun ActionBar(error: String, retryInSec: Int?, onRetry: () -> Unit, onContinue: (() -> Unit)?) {
+    val bad = GremlinColors.Negative
+    Layer(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), edge = bad.copy(alpha = 0.45f)) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(34.dp).background(bad.copy(alpha = 0.16f), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.PriorityHigh, null, tint = bad, modifier = Modifier.size(19.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(error, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    if (retryInSec != null) "Trying again in ${retryInSec}s" else "Not retrying on its own",
+                    style = MaterialTheme.typography.bodySmall, color = GremlinColors.TextMuted
+                )
+            }
+            if (onContinue != null) {
+                Row(
+                    Modifier.height(40.dp).clip(RoundedCornerShape(12.dp)).clickable(onClick = onContinue).padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Continue anyway", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = GremlinColors.TextMuted)
+                }
+                Spacer(Modifier.width(6.dp))
+            }
+            Row(
+                Modifier.height(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary)
+                    .clickable(onClick = onRetry).padding(horizontal = 18.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Filled.Refresh, null, tint = GremlinColors.Backdrop, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Retry now", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = GremlinColors.Backdrop)
+            }
+        }
+    }
+}
+
+/** Idea 2: one joined pill under the gap; Retry's countdown drains as a ring round its icon. */
+@Composable
+private fun ActionPill(retryInSec: Int?, onRetry: () -> Unit, onContinue: (() -> Unit)?) {
+    val accent = MaterialTheme.colorScheme.primary
+    Layer(Modifier.height(50.dp), shape = CircleShape, color = GremlinColors.Raised, drop = 4.dp) {
+        Row(Modifier.fillMaxHeight().padding(5.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.fillMaxHeight().clip(CircleShape).background(accent).clickable(onClick = onRetry).padding(start = 8.dp, end = 20.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(
+                        progress = ((retryInSec ?: 0) / 10f).coerceIn(0f, 1f),
+                        modifier = Modifier.fillMaxSize(), strokeWidth = 2.5.dp,
+                        color = GremlinColors.Backdrop, trackColor = GremlinColors.Backdrop.copy(alpha = 0.18f)
+                    )
+                    Text("${retryInSec ?: ""}", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = GremlinColors.Backdrop)
+                }
+                Spacer(Modifier.width(10.dp))
+                Text("Retry", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Backdrop)
+            }
+            if (onContinue != null) {
+                Row(
+                    Modifier.fillMaxHeight().clip(CircleShape).clickable(onClick = onContinue).padding(start = 18.dp, end = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Continue anyway", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text)
+                    Spacer(Modifier.width(8.dp))
+                    Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = GremlinColors.TextMuted, modifier = Modifier.size(18.dp))
+                }
+            }
+        }
+    }
+}
+
+/** Idea 3: a tile under each panel, built like the panel headers (icon badge, title, small line). */
+@Composable
+private fun ActionTile(icon: ImageVector, title: String, line: String, primary: Boolean, onClick: () -> Unit, modifier: Modifier) {
+    val accent = MaterialTheme.colorScheme.primary
+    Layer(modifier.clip(RoundedCornerShape(16.dp)).clickable(onClick = onClick), shape = RoundedCornerShape(16.dp), edge = if (primary) accent.copy(alpha = 0.6f) else GremlinColors.Edge) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(34.dp).background(if (primary) accent else GremlinColors.Raised, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center
+            ) { Icon(icon, null, tint = if (primary) GremlinColors.Backdrop else GremlinColors.Text, modifier = Modifier.size(19.dp)) }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text)
+                Text(line, style = MaterialTheme.typography.bodySmall, color = GremlinColors.TextMuted)
+            }
+        }
+    }
+}
