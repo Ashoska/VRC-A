@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
@@ -46,7 +47,6 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Remove
@@ -119,8 +119,14 @@ data class BootCheck(
     val icon: ImageVector? = null
 )
 
-/** Status panel: VRChat's platform status and our own servers'. Null while still checking. */
+/**
+ * Status panel: the headset's internet, VRChat's platform status and our own servers'. Null while
+ * still checking. Every detail is shown on ONE line (cut with "..."), so rows never grow.
+ */
 data class BootStatus(
+    val internetOk: Boolean? = null,
+    /** When connected: the link and its speed, e.g. "Wi-Fi · 120 Mbps" (see [internetStatus]). */
+    val internetDetail: String = "",
     val vrchatOk: Boolean? = null,
     val vrchatDetail: String = "",
     /** The app's own backend (sync, avatar search). */
@@ -571,9 +577,10 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium,
             color = if (dim) GremlinColors.TextMuted.copy(alpha = 0.5f) else GremlinColors.Text,
-            maxLines = 1
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
         )
-        Spacer(Modifier.weight(1f).width(10.dp))
+        Spacer(Modifier.width(10.dp))
         if (check.detail.isNotBlank()) {
             Text(
                 check.detail,
@@ -647,11 +654,14 @@ private fun ServiceRow(icon: ImageVector, name: String, ok: Boolean?, detail: St
     ) {
         Icon(icon, null, tint = tone, modifier = Modifier.size(17.dp))
         Spacer(Modifier.width(10.dp))
-        Text(name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.Text, maxLines = 1)
-        Spacer(Modifier.weight(1f).width(10.dp))
+        Text(
+            name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.Text,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(10.dp))
         Text(
             when (ok) {
-                true -> "Online"
+                true -> detail.ifBlank { "Online" }
                 false -> detail.ifBlank { "Having issues" }
                 null -> "Checking..."
             },
@@ -670,9 +680,9 @@ private fun ServiceRow(icon: ImageVector, name: String, ok: Boolean?, detail: St
 private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 1f, rowHeight: Dp = 31.dp) {
     Layer(modifier) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
-            Box(Modifier.widenIn(stagger(reveal, 0, 3))) { PanelHeader(Icons.Filled.Insights, "Status") }
-            Spacer(Modifier.height(12.dp))
+            // No header (user): the rows speak for themselves.
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ServiceRow(Icons.Filled.Wifi, "Internet", status.internetOk, status.internetDetail, Modifier.widenIn(stagger(reveal, 0, 3)), rowHeight)
                 ServiceRow(Icons.Filled.Public, "VRChat", status.vrchatOk, status.vrchatDetail, Modifier.widenIn(stagger(reveal, 1, 3)), rowHeight)
                 // Never names the backend (public UI rule): just "VRC-A servers".
                 ServiceRow(Icons.Filled.Dns, "VRC-A servers", status.serversOk, status.serversDetail, Modifier.widenIn(stagger(reveal, 2, 3)), rowHeight)
@@ -729,4 +739,22 @@ private val PillSeam = VerticalAlignmentLine(::minOf)
 private fun Modifier.reportSeam() = layout { measurable, constraints ->
     val p = measurable.measure(constraints)
     layout(p.width, p.height, mapOf(PillSeam to p.width)) { p.place(0, 0) }
+}
+
+/**
+ * The internet row's state: false + "Not connected" with no validated network, else true + the
+ * link type and Android's estimate of its download speed (Wi-Fi link rate when that's all we have).
+ */
+fun internetStatus(context: android.content.Context): Pair<Boolean, String> {
+    val cm = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return false to "Not connected"
+    val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+    if (caps == null || !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return false to "Not connected"
+    val kind = when {
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "Mobile data"
+        else -> "Connected"
+    }
+    val mbps = caps.linkDownstreamBandwidthKbps / 1000
+    return true to if (mbps > 0) "$kind · $mbps Mbps" else kind
 }

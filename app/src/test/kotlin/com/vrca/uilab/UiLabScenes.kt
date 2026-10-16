@@ -9,6 +9,7 @@ import com.vrca.app.BootState as S
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Headset
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Cloud
@@ -353,7 +354,7 @@ object UiLabScenes {
         val I = androidx.compose.material.icons.Icons.Filled
         val icons = mapOf(
             "Server session" to I.Cloud, "VRChat sign-in" to I.Person, "Account standing" to I.Shield,
-            "VRChat connection" to I.Wifi, "VRChat on this headset" to I.Headset, "Updates" to I.SystemUpdate
+            "VRChat connection" to I.Link, "VRChat on this headset" to I.Headset, "Updates" to I.SystemUpdate
         )
         fun c(l: String, st: com.vrca.app.BootState, d: String = "", b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b, icons[l])
         val v = rest.substringBefore(' ').ifBlank { "mid" }
@@ -363,7 +364,7 @@ object UiLabScenes {
                 c("Server session", S.Failed, "Couldn't reach the server", true), c("VRChat sign-in", S.Done),
                 c("Account standing", S.Waiting, b = true), c("VRChat connection", S.Background, "Connecting"),
                 c("VRChat on this headset", S.Skipped, "VRChat not open"), c("Updates", S.Done, "Up to date"))
-            "done", "incident", "updated" -> listOf(
+            "done", "incident", "updated", "offline" -> listOf(
                 c("Server session", S.Done, b = true), c("VRChat sign-in", S.Done, "Signed in"),
                 c("Account standing", S.Done, "Good", true), c("VRChat connection", S.Done, "Online"),
                 c("VRChat on this headset", S.Done, "Found"), c("Updates", S.Done, "Up to date"))
@@ -375,6 +376,8 @@ object UiLabScenes {
         val status = com.vrca.app.BootStatus(
             vrchatOk = if (v == "incident") false else if (v == "mid") null else true,
             vrchatDetail = if (v == "incident") "Investigating login issues on Quest" else "",
+            internetOk = if (v == "offline") false else true,
+            internetDetail = if (v == "offline") "Not connected" else "Wi-Fi · 240 Mbps",
             serversOk = if (v == "mid") null else if (v == "error") false else true,
             serversDetail = if (v == "error") "Can't reach them" else ""
         )
