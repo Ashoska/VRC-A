@@ -387,7 +387,7 @@ object UiLabScenes {
      * our servers down, Wi-Fi lost, and all coming back. For recording the state animations.
      */
     @Composable
-    private fun bootLive(c: (String, com.vrca.app.BootState, com.vrca.app.BootNote?, Boolean) -> com.vrca.app.BootCheck, fail: Boolean = false, demo: Boolean = false) {
+    private fun bootLive(c: (String, com.vrca.app.BootState, com.vrca.app.BootNote?, Boolean) -> com.vrca.app.BootCheck, fail: Boolean = false, demo: Boolean = false, toApp: () -> Unit = {}) {
         val B = com.vrca.app.BootState::class.java.enumConstants!!.associateBy { it.name }
         val N = com.vrca.app.BootNote::class.java.enumConstants!!.associateBy { it.name }
         val V = com.vrca.app.ServiceState::class.java.enumConstants!!.associateBy { it.name }
@@ -439,13 +439,15 @@ object UiLabScenes {
             com.vrca.app.BootStatus(L[net]!!, if (net == "WiFi") 240 else 0, V[vrc]!!, V[srv]!!),
             error = if (fail && now >= 900) "Can't connect" else null, retryInSec = if (fail && now >= 900) 5 else null,
             onContinue = if (fail && now >= 900) ({}) else null, playIntro = demo,
+            // demo: after Ready, the way out (logo into the top bar), then the app itself.
+            exit = demo && now >= 8100, exitToTopBar = true, onExited = toApp,
             backdrop = com.vrca.app.BootBackdrop.Lanes, userName = "Ashoska"
         )
     }
 
     /** `show boot [mid|error|done|incident|updated|intro] [none]`: a sample state + backdrop. */
     @Composable
-    private fun bootSample(rest: String) {
+    private fun bootSample(rest: String, toApp: () -> Unit = {}) {
         val I = androidx.compose.material.icons.Icons.Filled
         val icons = mapOf(
             "Device session" to com.vrca.app.BootIcons.DeviceSession, "Terms of Service" to com.vrca.app.BootIcons.Terms,
@@ -468,7 +470,7 @@ object UiLabScenes {
             "done", "incident", "updated", "offline" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Done:SignedIn", "Done:Connected", "Done:Found", "Done:UpToDate")
             else -> rows("Done:Connected", "Done:Accepted", "Working", "Working", "Working", "Skipped:NotOpen", "Done:UpToDate")
         }
-        if (v == "live" || v == "livefail" || v == "demo") { bootLive(::c, fail = v == "livefail", demo = v == "demo"); return }
+        if (v == "live" || v == "livefail" || v == "demo") { bootLive(::c, fail = v == "livefail", demo = v == "demo", toApp = toApp); return }
         val status = com.vrca.app.BootStatus(
             internet = if (v == "offline") com.vrca.app.InternetLink.None else com.vrca.app.InternetLink.WiFi,
             internetMbps = if (v == "offline") 0 else 240,
@@ -503,7 +505,7 @@ object UiLabScenes {
         val name = arg.substringBefore(' ')
         val rest = arg.substringAfter(' ', "")
         when (name) {
-            "boot" -> bootSample(rest)
+            "boot" -> bootSample(rest) { d.base.value = "screen" }
             // The REAL headset boot runner (its checks run against the lab, so it shows what fails offline).
             "headsetboot" -> com.vrca.app.HeadsetBoot(onDone = {})
             "crash" -> CrashScreen(

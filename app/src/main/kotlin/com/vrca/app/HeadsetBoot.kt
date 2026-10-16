@@ -184,12 +184,18 @@ internal fun HeadsetBoot(onDone: () -> Unit) {
 
     // Hand off once the blocking rows are done AND the screen has fully opened, after the Ready
     // sweep has had time to play (so the ticks are seen landing, even on a fast boot).
+    var exiting by remember { mutableStateOf(false) }
     LaunchedEffect(blockingDone, shown) {
         if (blockingDone && shown) {
             delay(READY_HOLD_MS)
-            onDone()
+            exiting = true
         }
     }
+    // The logo only flies into the top bar when the main app is what opens next; a terms, sign-in,
+    // first-run or ban screen comes first otherwise, so it just fades out there.
+    val toMainApp = exiting && rows[Row.Terms.ordinal].state == BootState.Done &&
+        rows[Row.Account.ordinal].note != BootNote.Restricted &&
+        VrchatAuthManager.isLoggedIn(ctx) && com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
 
     BootScreen(
         checks = Row.entries.map { r ->
@@ -200,9 +206,12 @@ internal fun HeadsetBoot(onDone: () -> Unit) {
         error = error,
         retryInSec = retryIn,
         onRetry = { attempt++ },
-        onContinue = if (everSignedIn) ({ onDone() }) else null,
+        onContinue = if (everSignedIn) ({ exiting = true }) else null,
         userName = userName,
-        onShown = { shown = true }
+        onShown = { shown = true },
+        exit = exiting,
+        exitToTopBar = toMainApp,
+        onExited = onDone
     )
 }
 

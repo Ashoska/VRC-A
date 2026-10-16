@@ -175,11 +175,19 @@ fun VrcaApp() {
         ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
             .getString("auth_uid", "").orEmpty().isNotBlank()
     }
+    // The first open after an app update shows it too (an update kills the process, so the
+    // next open would otherwise drop straight in). The version that last finished boot is
+    // stored below; a missing value on a prior-used install counts as "just updated" once.
+    val bootPrefs = remember { ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE) }
+    val justUpdated = remember { bootPrefs.getInt(LAST_BOOT_VERSION_KEY, 0) != BuildConfig.VERSION_CODE }
     // A boot-launch is a genuine cold start → show the boot screen too (not just
     // swipe-reopen / first install).
-    val warmResume = remember { !(openedFromSwipe || openedFromBoot || !everBootstrapped) }
+    val warmResume = remember { !(openedFromSwipe || openedFromBoot || !everBootstrapped || justUpdated) }
 
     var bootOk by remember { mutableStateOf(warmResume) }
+    LaunchedEffect(bootOk) {
+        if (bootOk) bootPrefs.edit().putInt(LAST_BOOT_VERSION_KEY, BuildConfig.VERSION_CODE).apply()
+    }
     var bootWorking by remember { mutableStateOf(false) }
     var bootError by remember { mutableStateOf<String?>(null) }
     var bootAttempt by remember { mutableStateOf(0) } // increments on Retry
@@ -1104,6 +1112,9 @@ internal fun UpdateDialog(
    ========================================================= */
 
 private const val REMOTE_PREFS_FILE = "vrca_remote"
+
+/** vrca_remote pref: the app version that last got past boot (the boot screen shows once per update). */
+private const val LAST_BOOT_VERSION_KEY = "last_boot_version_code"
 
 /** Floor for a NEW / logged-out user's boot screen (no VRChat presence to warm),
  *  so it doesn't flash by on the way to onboarding. A logged-in user has no floor

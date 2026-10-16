@@ -253,7 +253,15 @@ fun BootScreen(
     /** The VRChat display name for the checklist's "Welcome back" title; null before sign-in. */
     userName: String? = null,
     /** Called once the intro has finished and every row is on screen (right away without an intro). */
-    onShown: () -> Unit = {}
+    onShown: () -> Unit = {},
+    /**
+     * Set true to play the way out: the panels fold back into their lines, the wall fades, and the
+     * logo either glides + shrinks into the app's top-bar logo spot ([exitToTopBar], when the main
+     * app is what opens next) or fades out in place. [onExited] runs when it's finished.
+     */
+    exit: Boolean = false,
+    exitToTopBar: Boolean = true,
+    onExited: () -> Unit = {}
 ) {
     val working = checks.any { it.state == BootState.Working }
     // Intro, in three beats: the logo fades/grows in at the centre, holds, then settles up into
@@ -297,6 +305,17 @@ fun BootScreen(
         delay(130)
         partsR.animateTo(1f, tween(700))
     }
+    val exitP = remember { Animatable(0f) }
+    val exitedCallback by rememberUpdatedState(onExited)
+    LaunchedEffect(exit) {
+        if (!exit) return@LaunchedEffect
+        // Reverse of the opening: right panel first, then the left, folding back to their lines.
+        launch { panelR.animateTo(0f, tween(EXIT_FOLD_MS, easing = FastOutSlowInEasing)) }
+        launch { delay(90); panelL.animateTo(0f, tween(EXIT_FOLD_MS, easing = FastOutSlowInEasing)) }
+        delay(260)
+        exitP.animateTo(1f, tween(EXIT_LOGO_MS, easing = FastOutSlowInEasing))
+        exitedCallback()
+    }
     val shownCallback by rememberUpdatedState(onShown)
     LaunchedEffect(Unit) {
         snapshotFlow { partsL.value >= 1f && partsR.value >= 1f }.first { it }
@@ -304,14 +323,14 @@ fun BootScreen(
     }
     val rise = with(LocalDensity.current) { 22.dp.toPx() }
     val contentLayer = Modifier.graphicsLayer {
-        alpha = contentIn.value
+        alpha = contentIn.value * (1f - exitP.value)
         translationY = rise * (1f - contentIn.value)
     }
     Surface(color = GremlinColors.Backdrop) {
         BoxWithConstraints(
             Modifier.fillMaxSize().background(GremlinColors.Backdrop).onGloballyPositioned { rootCoords = it }
         ) {
-            BootBackdropLayer(backdrop, alpha = { contentIn.value }, modifier = Modifier.matchParentSize())
+            BootBackdropLayer(backdrop, alpha = { contentIn.value * (1f - exitP.value) }, modifier = Modifier.matchParentSize())
             val wide = maxWidth >= 720.dp
             val boxW = constraints.maxWidth.toFloat()
             val boxH = constraints.maxHeight.toFloat()
@@ -323,8 +342,11 @@ fun BootScreen(
                 BootLogo(
                     height = height,
                     maxScale = startScale,
-                    introScale = { (startScale + (1f - startScale) * settle.value) * (0.9f + 0.1f * logoIn.value) },
-                    fadeIn = logoIn.value,
+                    introScale = {
+                        val toBar = if (exitToTopBar) 1f + (TOP_BAR_LOGO_HEIGHT / height - 1f) * exitP.value else 1f
+                        (startScale + (1f - startScale) * settle.value) * (0.9f + 0.1f * logoIn.value) * toBar
+                    },
+                    fadeIn = logoIn.value * (if (exitToTopBar) 1f else 1f - exitP.value),
                     modifier = Modifier
                         .onGloballyPositioned { logoCoords = it }
                         .graphicsLayer {
@@ -332,6 +354,11 @@ fun BootScreen(
                             if (c != null) {
                                 translationX = (boxW / 2f - c.x) * (1f - settle.value)
                                 translationY = (boxH / 2f - c.y) * (1f - settle.value)
+                                if (exitToTopBar && exitP.value > 0f) {
+                                    // To the top bar's logo: centred, half the 64dp bar down.
+                                    translationX += (boxW / 2f - c.x) * exitP.value
+                                    translationY += (TOP_BAR_CENTER_Y.toPx() - c.y) * exitP.value
+                                }
                             }
                         }
                 )
@@ -425,6 +452,12 @@ fun BootScreen(
         }
     }
 }
+
+/** The app's top-bar logo (VrcaScreen, headset): 56dp tall, centred in the 64dp bar. */
+private val TOP_BAR_LOGO_HEIGHT = 56.dp
+private val TOP_BAR_CENTER_Y = 32.dp
+private const val EXIT_FOLD_MS = 420
+private const val EXIT_LOGO_MS = 700
 
 /** How big the logo starts in the intro, relative to its final size. */
 private const val INTRO_SCALE = 2.1f
