@@ -37,6 +37,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material.icons.filled.Public
@@ -105,15 +106,13 @@ data class BootCheck(
     val icon: ImageVector? = null
 )
 
-/** Right-hand panel: VRChat's platform status, the release notes after an update, a stat. */
+/** Status panel: VRChat's platform status and our own servers'. Null while still checking. */
 data class BootStatus(
-    /** Null while still checking. */
     val vrchatOk: Boolean? = null,
     val vrchatDetail: String = "",
-    /** Version just updated to, with its notes; null when this open isn't right after an update. */
-    val updatedTo: String? = null,
-    val updateNotes: List<String> = emptyList(),
-    val lifetimeSends: Long = 0
+    /** The app's own backend (sync, avatar search). */
+    val serversOk: Boolean? = null,
+    val serversDetail: String = ""
 )
 
 private val Settled = setOf(BootState.Done, BootState.Warn, BootState.Skipped, BootState.Background)
@@ -281,7 +280,7 @@ fun BootScreen(
                         logo(WIDE_LOGO_HEIGHT)
                         Spacer(Modifier.height(28.dp))
                         Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
-                            StatusPanel(status, Modifier.fillMaxWidth(), partsR.value, fit = true)
+                            StatusPanel(status, Modifier.fillMaxWidth(), partsR.value, rowHeight = WIDE_ROW_HEIGHT)
                         }
                     }
                     Unfold({ panelL.value }, Modifier.weight(1.15f)) {
@@ -305,8 +304,8 @@ fun BootScreen(
                         Unfold({ panelL.value }, Modifier.fillMaxWidth().height(330.dp)) {
                             LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxSize(), partsL.value)
                         }
-                        Unfold({ panelR.value }, Modifier.fillMaxWidth().height(250.dp)) {
-                            StatusPanel(status, Modifier.fillMaxSize(), partsR.value)
+                        Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
+                            StatusPanel(status, Modifier.fillMaxWidth(), partsR.value)
                         }
                     }
                 }
@@ -360,7 +359,9 @@ private fun BootLogo(height: Dp, maxScale: Float, introScale: () -> Float, fadeI
 
 private val LOGO_HEIGHT = 104.dp
 /** Headset: the logo has the whole left column, so it's bigger. */
-private val WIDE_LOGO_HEIGHT = 150.dp
+private val WIDE_LOGO_HEIGHT = 210.dp
+/** Headset row height, shared by check rows and status rows so both panels match. */
+private val WIDE_ROW_HEIGHT = 38.dp
 
 /** One-glance summary under the name: Starting up / Ready / Needs attention. */
 @Composable
@@ -489,9 +490,9 @@ private fun LoadingPanel(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Column(if (roomy) Modifier else Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (roomy) 10.dp else 4.dp)) {
+            Column(if (roomy) Modifier else Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (roomy) 8.dp else 4.dp)) {
                 checks.forEachIndexed { i, c ->
-                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, 2 + i, pieces)), height = if (roomy) 48.dp else 31.dp)
+                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, 2 + i, pieces)), height = if (roomy) WIDE_ROW_HEIGHT else 31.dp)
                 }
             }
             if (error != null) {
@@ -598,103 +599,55 @@ private fun BootStateMark(state: BootState) {
     }
 }
 
-/** A small layer-2 card inside a panel. */
+/** One service in the Status panel: icon, name, state text and a coloured dot. Built like a check row. */
 @Composable
-private fun InfoCard(modifier: Modifier = Modifier, edge: Color = Color.Transparent, content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        modifier.clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
-            .border(1.dp, edge, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 11.dp),
-        content = content
-    )
+private fun ServiceRow(icon: ImageVector, name: String, ok: Boolean?, detail: String, modifier: Modifier, height: Dp) {
+    val tone = when (ok) {
+        true -> GremlinColors.Positive
+        false -> GremlinColors.Caution
+        null -> GremlinColors.Inactive
+    }
+    val edge by animateColorAsState(if (ok == false) tone.copy(alpha = 0.6f) else Color.Transparent, label = "serviceEdge")
+    Row(
+        modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
+            .background(GremlinColors.Card)
+            .border(1.dp, edge, RoundedCornerShape(10.dp))
+            .padding(start = 10.dp, end = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, null, tint = tone, modifier = Modifier.size(17.dp))
+        Spacer(Modifier.width(10.dp))
+        Text(name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.Text, maxLines = 1)
+        Spacer(Modifier.weight(1f).width(10.dp))
+        Text(
+            when (ok) {
+                true -> "Online"
+                false -> detail.ifBlank { "Having issues" }
+                null -> "Checking..."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = if (ok == false) GremlinColors.Caution else GremlinColors.TextMuted,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 170.dp)
+        )
+        Spacer(Modifier.width(10.dp))
+        Box(Modifier.size(9.dp).background(tone, CircleShape))
+    }
 }
 
+/** Is VRChat up, and are our own servers up. Wraps its rows (no fixed height). */
 @Composable
-private fun StatusPanel(
-    status: BootStatus,
-    modifier: Modifier,
-    reveal: Float = 1f,
-    /** Wrap the cards (headset) instead of filling a fixed-height panel. */
-    fit: Boolean = false
-) {
-    val accent = MaterialTheme.colorScheme.primary
+private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 1f, rowHeight: Dp = 31.dp) {
     Layer(modifier) {
-        Column(Modifier.then(if (fit) Modifier.fillMaxWidth() else Modifier.fillMaxSize()).padding(horizontal = 18.dp, vertical = 16.dp)) {
-            Box(Modifier.widenIn(stagger(reveal, 0, 4))) { PanelHeader(Icons.Filled.Insights, "Status") }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+            Box(Modifier.widenIn(stagger(reveal, 0, 3))) { PanelHeader(Icons.Filled.Insights, "Status") }
             Spacer(Modifier.height(12.dp))
-            val vrcTone = when (status.vrchatOk) {
-                true -> GremlinColors.Positive
-                false -> GremlinColors.Caution
-                null -> GremlinColors.Inactive
-            }
-            InfoCard(Modifier.fillMaxWidth().widenIn(stagger(reveal, 1, 4)), edge = if (status.vrchatOk == false) vrcTone.copy(alpha = 0.6f) else Color.Transparent) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.Public, null, tint = vrcTone, modifier = Modifier.size(20.dp))
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("VRChat", style = MaterialTheme.typography.titleSmall, color = GremlinColors.Text)
-                        Text(
-                            when (status.vrchatOk) {
-                                true -> "All systems operational"
-                                false -> status.vrchatDetail.ifBlank { "Having issues" }
-                                null -> "Checking..."
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (status.vrchatOk == false) GremlinColors.Caution else GremlinColors.TextMuted,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Box(Modifier.size(9.dp).background(vrcTone, CircleShape))
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-            if (status.updatedTo != null) {
-                InfoCard(Modifier.fillMaxWidth().then(if (fit) Modifier else Modifier.weight(1f)).widenIn(stagger(reveal, 2, 4)), edge = accent.copy(alpha = 0.45f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.AutoAwesome, null, tint = accent, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "Updated to v${status.updatedTo.removePrefix("v")}",
-                            style = MaterialTheme.typography.titleSmall, color = GremlinColors.Text,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            "NEW", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold,
-                            color = GremlinColors.Backdrop,
-                            modifier = Modifier.background(accent, RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    status.updateNotes.take(4).forEach { note ->
-                        Row(Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(5.dp).background(accent, CircleShape))
-                            Spacer(Modifier.width(9.dp))
-                            Text(
-                                note, style = MaterialTheme.typography.bodyMedium, color = GremlinColors.Text,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(10.dp))
-            } else if (!fit) {
-                Spacer(Modifier.weight(1f))
-            }
-            // Hidden until it's a number worth showing, so a fresh install never sees "0".
-            if (status.lifetimeSends >= 100) {
-                InfoCard(Modifier.fillMaxWidth().widenIn(stagger(reveal, 3, 4))) {
-                    Row(verticalAlignment = Alignment.Bottom) {
-                        Text(
-                            String.format(java.util.Locale.US, "%,d", status.lifetimeSends),
-                            style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = accent
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "chatbox updates sent", style = MaterialTheme.typography.bodySmall,
-                            color = GremlinColors.TextMuted, modifier = Modifier.padding(bottom = 4.dp)
-                        )
-                    }
-                }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ServiceRow(Icons.Filled.Public, "VRChat", status.vrchatOk, status.vrchatDetail, Modifier.widenIn(stagger(reveal, 1, 3)), rowHeight)
+                // Never names the backend (public UI rule): just "VRC-A servers".
+                ServiceRow(Icons.Filled.Dns, "VRC-A servers", status.serversOk, status.serversDetail, Modifier.widenIn(stagger(reveal, 2, 3)), rowHeight)
             }
         }
     }
 }
+

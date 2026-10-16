@@ -375,9 +375,8 @@ object UiLabScenes {
         val status = com.vrca.app.BootStatus(
             vrchatOk = if (v == "incident") false else if (v == "mid") null else true,
             vrchatDetail = if (v == "incident") "Investigating login issues on Quest" else "",
-            updatedTo = if (v == "updated") "1.2.80" else null,
-            updateNotes = if (v == "updated") listOf("New boot screen", "Logo in the top bar", "Faster start-up") else emptyList(),
-            lifetimeSends = 12840
+            serversOk = if (v == "mid") null else if (v == "error") false else true,
+            serversDetail = if (v == "error") "Can't reach them" else ""
         )
         com.vrca.app.BootScreen(
             checks, status,
