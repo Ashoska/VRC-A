@@ -350,8 +350,11 @@ fun BootScreen(
                     ) {
                         // Just the logo up here (user: no "VRChat Assistant" title or status pill;
                         // the checklist already shows how boot is going).
-                        logo(WIDE_LOGO_HEIGHT)
-                        Spacer(Modifier.height(28.dp))
+                        // The logo art has empty room under it, so it's nudged down to sit close above
+                        // the Status card (user: the gap looked big). Offset, not layout: the slot keeps
+                        // its size and the intro still lands on it (its position includes the offset).
+                        Box(Modifier.offset(y = 26.dp)) { logo(WIDE_LOGO_HEIGHT) }
+                        Spacer(Modifier.height(14.dp))
                         Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
                             StatusPanel(status, Modifier.fillMaxWidth(), partsR.value, rowHeight = WIDE_ROW_HEIGHT)
                         }
@@ -449,7 +452,7 @@ private fun BootLogo(height: Dp, maxScale: Float, introScale: () -> Float, fadeI
 
 private val LOGO_HEIGHT = 104.dp
 /** Headset: the logo has the whole left column, so it's bigger. */
-private val WIDE_LOGO_HEIGHT = 210.dp
+private val WIDE_LOGO_HEIGHT = 236.dp
 /** Headset row height, shared by check rows and status rows so both panels match. */
 private val WIDE_ROW_HEIGHT = 38.dp
 /** Headset gap between the left column and the checklist; the error buttons meet across it. */
@@ -525,6 +528,59 @@ private fun Modifier.widenIn(a: Float) = graphicsLayer {
     alpha = a
 }
 
+/**
+ * The checklist's header: a badge + title that say where boot is as a whole (Starting up → Ready,
+ * or Needs attention), a count chip, and one bar segment per check in row order. Segments take
+ * their row's colour; a running one breathes, so the bar shows what's still going at a glance.
+ */
+@Composable
+private fun BootHeader(checks: List<BootCheck>) {
+    val accent = MaterialTheme.colorScheme.primary
+    val failed = checks.any { it.state == BootState.Failed }
+    val done = checks.all { it.state in Settled }
+    val finished = checks.count { it.state in Settled }
+    val (title, icon, target) = when {
+        failed -> Triple("Needs attention", Icons.Filled.PriorityHigh, GremlinColors.Negative)
+        done -> Triple("Ready", Icons.Filled.Check, GremlinColors.Positive)
+        else -> Triple("Starting up", Icons.Filled.RocketLaunch, accent)
+    }
+    val tone by animateColorAsState(target, label = "headerTone")
+    val pulse by rememberInfiniteTransition(label = "segPulse").animateFloat(
+        0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "segPulseA"
+    )
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(30.dp).background(tone.copy(alpha = 0.16f), RoundedCornerShape(9.dp)), contentAlignment = Alignment.Center) {
+                Crossfade(icon, label = "headerIcon") { Icon(it, null, tint = tone, modifier = Modifier.size(18.dp)) }
+            }
+            Spacer(Modifier.width(10.dp))
+            Crossfade(title, Modifier.weight(1f), label = "headerTitle") {
+                Text(it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text, maxLines = 1)
+            }
+            Text(
+                "$finished/${checks.size}",
+                style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
+                modifier = Modifier.background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(Modifier.fillMaxWidth().height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            checks.forEach { c ->
+                val seg by animateColorAsState(
+                    when (c.state) {
+                        BootState.Waiting -> GremlinColors.Raised
+                        BootState.Skipped -> GremlinColors.Inactive
+                        else -> c.state.tone(accent)
+                    },
+                    label = "seg"
+                )
+                val a = if (c.state == BootState.Working) pulse else 1f
+                Box(Modifier.weight(1f).fillMaxHeight().background(seg.copy(alpha = seg.alpha * a), CircleShape))
+            }
+        }
+    }
+}
+
 @Composable
 private fun PanelHeader(icon: ImageVector, title: String, trailing: @Composable () -> Unit = {}) {
     val accent = MaterialTheme.colorScheme.primary
@@ -554,13 +610,14 @@ private fun LoadingPanel(
     /** Headset right column: bigger rows, more space between, and the panel wraps its rows. */
     roomy: Boolean = false
 ) {
-    val pieces = checks.size + 1 // each check, then the buttons
+    val pieces = checks.size + 2 // the header, each check, then the buttons
     Layer(modifier) {
-        // Just the rows (user): no "Starting up" title, count or progress bar; the marks show progress.
         Column(Modifier.then(if (roomy) Modifier.fillMaxWidth() else Modifier.fillMaxSize()).padding(horizontal = 18.dp, vertical = 16.dp)) {
+            Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { BootHeader(checks) }
+            Spacer(Modifier.height(14.dp))
             Column(if (roomy) Modifier else Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (roomy) 8.dp else 4.dp)) {
                 checks.forEachIndexed { i, c ->
-                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, i, pieces)), height = if (roomy) WIDE_ROW_HEIGHT else 31.dp)
+                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, 1 + i, pieces)), height = if (roomy) WIDE_ROW_HEIGHT else 31.dp)
                 }
             }
             // Headset: the buttons sit under both panels instead (see BootScreen).
