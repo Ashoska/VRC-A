@@ -1967,7 +1967,7 @@ private fun CycleLineRow(
 private fun CharBudgetMeter(length: Int) {
     val color = when {
         length > VRC_CHAR_BUDGET -> MaterialTheme.colorScheme.error
-        length > VRC_CHAR_BUDGET - 30 -> com.vrca.ui.theme.SlimeWarning
+        length > VRC_CHAR_BUDGET - 30 -> com.vrca.ui.theme.GremlinColors.Warning
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     Text("$length/$VRC_CHAR_BUDGET", style = MaterialTheme.typography.labelSmall, color = color)

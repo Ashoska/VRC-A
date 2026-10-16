@@ -58,9 +58,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.Image
-import com.vrca.ui.theme.SlimeError
-import com.vrca.ui.theme.SlimeSuccess
-import com.vrca.ui.theme.SlimeWarning
+import com.vrca.ui.theme.GremlinColors
 
 /* =========================================================================
    PublicUiKit — shared building blocks for the public-build UI revamp.
@@ -80,9 +78,9 @@ enum class KitTone { Neutral, Success, Warning, Error }
 @Composable
 fun KitTone.color(): Color = when (this) {
     KitTone.Neutral -> MaterialTheme.colorScheme.outline
-    KitTone.Success -> SlimeSuccess
-    KitTone.Warning -> SlimeWarning
-    KitTone.Error   -> SlimeError
+    KitTone.Success -> GremlinColors.Success
+    KitTone.Warning -> GremlinColors.Warning
+    KitTone.Error   -> GremlinColors.Error
 }
 
 /**

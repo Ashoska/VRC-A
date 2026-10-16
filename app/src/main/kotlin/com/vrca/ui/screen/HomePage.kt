@@ -1,5 +1,6 @@
 package com.vrca.ui.screen
 
+import com.vrca.ui.theme.GremlinColors
 import android.content.Context
 import android.os.PowerManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -1259,7 +1260,7 @@ private fun PreviewAndTogglesCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = when {
                     used > budget -> MaterialTheme.colorScheme.error
-                    used > budget - 30 -> androidx.compose.ui.graphics.Color(0xFFFFB300)
+                    used > budget - 30 -> GremlinColors.Caution
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }
             )

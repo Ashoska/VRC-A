@@ -43,7 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.vrca.R
 import com.vrca.data.SettingsStates
 import com.vrca.ui.common.HapticConstants
-import com.vrca.ui.theme.VrcaTheme
+import com.vrca.ui.theme.GremlinTheme
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -248,7 +248,7 @@ fun ConversationListPreview() {
         Message(content = "🥥🍹🍡"),
         Message(content = "Line1\nLine2")
     )
-    VrcaTheme {
+    GremlinTheme {
         ConversationList(
             ConversationUiState(
                 initialMessages = messageList.reversed()

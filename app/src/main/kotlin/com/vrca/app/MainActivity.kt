@@ -14,7 +14,7 @@ import com.vrca.BuildConfig
 import com.vrca.keepalive.KeepAliveService
 import com.vrca.keepalive.PipelineWatchdogWorker
 import com.vrca.overlay.OverlayDaemon
-import com.vrca.ui.theme.VrcaTheme
+import com.vrca.ui.theme.GremlinTheme
 import java.security.MessageDigest
 import java.security.SecureRandom
 
@@ -78,7 +78,7 @@ class MainActivity : ComponentActivity() {
         PipelineWatchdogWorker.ensureScheduled(applicationContext)
 
         setContent {
-            VrcaTheme(themeMode = com.vrca.ui.theme.ThemeMode.Dark) {
+            GremlinTheme(themeMode = com.vrca.ui.theme.ThemeMode.Dark) {
                 // App routing (ToS gate + Admin-only UI) lives in VrcaApp.kt
                 VrcaApp()
 

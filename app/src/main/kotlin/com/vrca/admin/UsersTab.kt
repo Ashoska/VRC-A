@@ -1,5 +1,6 @@
 package com.vrca.admin
 
+import com.vrca.ui.theme.GremlinColors
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -1405,8 +1406,8 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                                 name,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = when {
-                                    self -> androidx.compose.ui.graphics.Color(0xFFB388FF)
-                                    friend -> androidx.compose.ui.graphics.Color(0xFFFFD54F)
+                                    self -> GremlinColors.Highlight.Self
+                                    friend -> GremlinColors.Highlight.Friend
                                     else -> MaterialTheme.colorScheme.onSurface
                                 },
                                 modifier = Modifier.weight(1f),

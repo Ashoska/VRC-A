@@ -1,5 +1,6 @@
 package com.vrca.ui.screen
 
+import com.vrca.ui.theme.GremlinColors
 import android.content.Context
 import android.content.Context.MODE_PRIVATE
 import android.content.Intent
@@ -283,7 +284,7 @@ private fun ConnectionButton(vm: com.vrca.ui.viewmodel.VrcaViewModel) {
     var menuOpen by remember { mutableStateOf(false) }
     var editOpen by remember { mutableStateOf(false) }
     val tint = when {
-        isHeadset || reachable == true -> Color(0xFF4CAF50)
+        isHeadset || reachable == true -> GremlinColors.Positive
         reachable == false -> MaterialTheme.colorScheme.error
         else -> LocalContentColor.current
     }
@@ -297,7 +298,7 @@ private fun ConnectionButton(vm: com.vrca.ui.viewmodel.VrcaViewModel) {
                 DropdownMenuItem(
                     text = { Text("This headset · 127.0.0.1") },
                     onClick = { menuOpen = false },
-                    leadingIcon = { Icon(Icons.Filled.Wifi, null, tint = Color(0xFF4CAF50)) }
+                    leadingIcon = { Icon(Icons.Filled.Wifi, null, tint = GremlinColors.Positive) }
                 )
             } else {
                 val activeSlot by repo.activeIpSlot.collectAsState(initial = 1)

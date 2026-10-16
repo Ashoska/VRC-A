@@ -1,5 +1,6 @@
 package com.vrca.ui.screen
 
+import com.vrca.ui.theme.GremlinColors
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -785,7 +786,7 @@ private fun SettingsRow(
                         Modifier
                             .size(8.dp)
                             .background(
-                                color = if (granted) androidx.compose.ui.graphics.Color(0xFF2BCF5C)
+                                color = if (granted) GremlinColors.Positive
                                         else MaterialTheme.colorScheme.error,
                                 shape = androidx.compose.foundation.shape.CircleShape
                             )
@@ -794,7 +795,7 @@ private fun SettingsRow(
                     Text(
                         if (granted) "Granted" else "Not granted",
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (granted) androidx.compose.ui.graphics.Color(0xFF2BCF5C)
+                        color = if (granted) GremlinColors.Positive
                                 else MaterialTheme.colorScheme.error
                     )
                 }

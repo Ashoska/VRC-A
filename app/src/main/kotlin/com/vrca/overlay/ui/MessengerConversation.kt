@@ -41,7 +41,7 @@ import com.vrca.data.SettingsStates
 import com.vrca.ui.common.HapticConstants
 import com.vrca.ui.conversation.ConversationUiState
 import com.vrca.ui.conversation.Message
-import com.vrca.ui.theme.VrcaTheme
+import com.vrca.ui.theme.GremlinTheme
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -227,7 +227,7 @@ fun MessengerConversationPreview() {
         Message(content = "🥥🍹🍡"),
         Message(content = "Line1\nLine2")
     )
-    VrcaTheme {
+    GremlinTheme {
         MessengerConversation(
             ConversationUiState(
                 initialMessages = messageList.reversed()
