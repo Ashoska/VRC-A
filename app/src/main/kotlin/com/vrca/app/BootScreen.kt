@@ -234,7 +234,6 @@ fun BootScreen(
                 verticalArrangement = Arrangement.Center
             ) {
                 BootLogo(
-                    breathing = working && settle.value >= 1f,
                     // From INTRO_SCALE at the screen's centre down to 1x in its slot.
                     introScale = { (INTRO_SCALE + (1f - INTRO_SCALE) * settle.value) * (0.9f + 0.1f * logoIn.value) },
                     fadeIn = logoIn.value,
@@ -298,18 +297,11 @@ private const val INTRO_SCALE = 2.1f
 
 /**
  * The logo on its own (no tile: a speech bubble inside a box read oddly), with a flat
- * silhouette copy offset below it as its drop layer. Breathes softly while checks run.
+ * silhouette copy offset below it as its drop layer. Steady: a "breathing" fade while checks ran
+ * was removed (it read as the logo blipping brighter and dimmer; the status pill shows progress).
  */
 @Composable
-private fun BootLogo(breathing: Boolean, introScale: () -> Float, fadeIn: Float, modifier: Modifier = Modifier) {
-    val pulse = rememberInfiniteTransition(label = "bootPulse")
-    val breath by pulse.animateFloat(
-        initialValue = 1f, targetValue = 0.72f,
-        animationSpec = infiniteRepeatable(tween(1300), RepeatMode.Reverse), label = "bootBreath"
-    )
-    // Ease the breath in/out instead of switching it on: switching jumped the alpha to wherever
-    // the pulse happened to be, a visible flash the moment the intro logo landed.
-    val breathWeight by animateFloatAsState(if (breathing) 1f else 0f, tween(700), label = "breathWeight")
+private fun BootLogo(introScale: () -> Float, fadeIn: Float, modifier: Modifier = Modifier) {
     // vrca_logo_bar: the logo cropped to its drawing (the full asset is ~35% empty margin).
     val logo = ImageBitmap.imageResource(com.vrca.R.drawable.vrca_logo_bar)
     // The slot is LOGO_HEIGHT tall, but the logo is laid out at its biggest (intro) size and only
@@ -331,7 +323,7 @@ private fun BootLogo(breathing: Boolean, introScale: () -> Float, fadeIn: Float,
                 // The fade sits on the images themselves, not on the oversized box around them:
                 // a see-through layer whose content spills past its bounds drew nothing in the
                 // UI Lab's software renderer (the intro's fade-in recorded as blank).
-                modifier = Modifier.fillMaxHeight().alpha(fadeIn * (1f - (1f - breath) * breathWeight))
+                modifier = Modifier.fillMaxHeight().alpha(fadeIn)
             )
         }
     }

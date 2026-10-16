@@ -22,6 +22,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import com.vrca.ui.theme.GremlinColors
 import kotlin.math.PI
@@ -262,7 +263,15 @@ private val SYMBOL_SIZE = 58.dp
  * margins, and a see-through layer would clip that).
  */
 @Composable
-fun BootBackdropLayer(style: BootBackdrop, alpha: () -> Float = { 1f }, modifier: Modifier = Modifier.fillMaxSize()) {
+fun BootBackdropLayer(
+    style: BootBackdrop,
+    alpha: () -> Float = { 1f },
+    modifier: Modifier = Modifier.fillMaxSize(),
+    /** A clear area at the top centre (logo, name, status pill): symbols fade out as they drift
+     *  behind it. The logo is an outline with a see-through middle, so symbols passing behind
+     *  showed through it and read as the logo flickering. */
+    calmZone: DpSize = DpSize(320.dp, 225.dp)
+) {
     if (style == BootBackdrop.None) return
     val seed = remember { Random.nextInt() }
     val wall = remember { Wall(seed) }
@@ -289,16 +298,26 @@ fun BootBackdropLayer(style: BootBackdrop, alpha: () -> Float = { 1f }, modifier
             val width = 1.6.dp.toPx()
             val bob = 3.dp.toPx()
             val t = frame / 1e9f
+            val calmHalfW = calmZone.width.toPx() / 2
+            val calmBottom = calmZone.height.toPx()
+            val calmFade = 36.dp.toPx()
             for (p in wall.sprites) {
                 val s = p.size
                 if (p.x < -s || p.x > size.width + s) continue
+                // Distance from the calm zone (0 inside it) -> 0..1, eased: fades out near the logo.
+                val ox = (kotlin.math.abs(p.x - size.width / 2) - calmHalfW).coerceAtLeast(0f)
+                val oy = (p.y - calmBottom).coerceAtLeast(0f)
+                var f = ((kotlin.math.hypot(ox, oy) - s * 0.3f) / calmFade).coerceIn(0f, 1f)
+                f = f * f * (3 - 2 * f)
+                if (f <= 0f) continue
+                val symInk = if (f < 1f) ink.copy(alpha = ink.alpha * f) else ink
                 // Each symbol's own slow sway and bob on top of the physics.
                 val sway = 8f * sin(0.9f * t + p.phase)
                 val lift = bob * sin(0.7f * t + p.phase * 1.7f)
                 translate(p.x - s / 2, p.y - s / 2 + lift) {
                     rotate(p.deg + sway, pivot = Offset(s / 2, s / 2)) {
                         scale(if (p.mirror) -1f else 1f, 1f, pivot = Offset(s / 2, s / 2)) {
-                            SymbolPen(this, s, ink, width).apply(p.symbol.draw)
+                            SymbolPen(this, s, symInk, width).apply(p.symbol.draw)
                         }
                     }
                 }
