@@ -110,28 +110,62 @@ enum class BootState {
     Background // still running, but boot doesn't wait for it (keeps going in the app)
 }
 
+/**
+ * The ONLY words a check row can show on its right. A fixed short list instead of free text (user):
+ * free text could run long and get cut off; these always fit one line, so rows never change size.
+ * Add a new word here rather than passing a sentence.
+ */
+enum class BootNote(val text: String) {
+    SignedIn("Signed in"),
+    SignInNeeded("Sign in needed"),
+    Good("Good"),
+    Restricted("Restricted"),
+    Online("Online"),
+    Connecting("Connecting"),
+    Found("Found"),
+    NotOpen("VRChat not open"),
+    UpToDate("Up to date"),
+    UpdateReady("Update ready"),
+    CantConnect("Can't connect"),
+    TimedOut("Timed out")
+}
+
 /** One row of the boot checklist. [blocking] rows must be Done before boot hands off. */
 data class BootCheck(
     val label: String,
     val state: BootState,
-    val detail: String = "",
+    val note: BootNote? = null,
     val blocking: Boolean = false,
     val icon: ImageVector? = null
 )
 
-/**
- * Status panel: the headset's internet, VRChat's platform status and our own servers'. Null while
- * still checking. Every detail is shown on ONE line (cut with "..."), so rows never grow.
- */
+/** What a Status row says about a service: a fixed word each (same reason as [BootNote]). */
+enum class ServiceState(val text: String) {
+    Checking("Checking..."),
+    Online("Online"),
+    /** VRChat's status page: a minor incident, or one part of VRChat not working. */
+    Issues("Having issues"),
+    Maintenance("Maintenance"),
+    Down("Down")
+}
+
+/** The headset's connection type, for the Internet row. */
+enum class InternetLink(val text: String) {
+    Checking("Checking..."),
+    WiFi("Wi-Fi"),
+    Ethernet("Ethernet"),
+    Mobile("Mobile data"),
+    None("Not connected")
+}
+
+/** Status panel: the headset's internet, VRChat's platform status and our own servers'. */
 data class BootStatus(
-    val internetOk: Boolean? = null,
-    /** When connected: the link and its speed, e.g. "Wi-Fi · 120 Mbps" (see [internetStatus]). */
-    val internetDetail: String = "",
-    val vrchatOk: Boolean? = null,
-    val vrchatDetail: String = "",
+    val internet: InternetLink = InternetLink.Checking,
+    /** Android's estimate of the download speed; 0 = unknown (then only the link type shows). */
+    val internetMbps: Int = 0,
+    val vrchat: ServiceState = ServiceState.Checking,
     /** The app's own backend (sync, avatar search). */
-    val serversOk: Boolean? = null,
-    val serversDetail: String = ""
+    val servers: ServiceState = ServiceState.Checking
 )
 
 private val Settled = setOf(BootState.Done, BootState.Warn, BootState.Skipped, BootState.Background)
@@ -581,9 +615,9 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
             modifier = Modifier.weight(1f)
         )
         Spacer(Modifier.width(10.dp))
-        if (check.detail.isNotBlank()) {
+        if (check.note != null) {
             Text(
-                check.detail,
+                check.note.text,
                 style = MaterialTheme.typography.bodySmall,
                 color = when (check.state) {
                     BootState.Failed -> GremlinColors.Negative
@@ -636,15 +670,10 @@ private fun BootStateMark(state: BootState) {
     }
 }
 
-/** One service in the Status panel: icon, name, state text and a coloured dot. Built like a check row. */
+/** One service in the Status panel: icon, name, its fixed state word and a coloured dot. Built like a check row. */
 @Composable
-private fun ServiceRow(icon: ImageVector, name: String, ok: Boolean?, detail: String, modifier: Modifier, height: Dp) {
-    val tone = when (ok) {
-        true -> GremlinColors.Positive
-        false -> GremlinColors.Caution
-        null -> GremlinColors.Inactive
-    }
-    val edge by animateColorAsState(if (ok == false) tone.copy(alpha = 0.6f) else Color.Transparent, label = "serviceEdge")
+private fun ServiceRow(icon: ImageVector, name: String, text: String, tone: Color, warn: Boolean, modifier: Modifier, height: Dp) {
+    val edge by animateColorAsState(if (warn) tone.copy(alpha = 0.6f) else Color.Transparent, label = "serviceEdge")
     Row(
         modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
             .background(GremlinColors.Card)
@@ -656,23 +685,23 @@ private fun ServiceRow(icon: ImageVector, name: String, ok: Boolean?, detail: St
         Spacer(Modifier.width(10.dp))
         Text(
             name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.Text,
-            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+            maxLines = 1, modifier = Modifier.weight(1f)
         )
         Spacer(Modifier.width(10.dp))
         Text(
-            when (ok) {
-                true -> detail.ifBlank { "Online" }
-                false -> detail.ifBlank { "Having issues" }
-                null -> "Checking..."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = if (ok == false) GremlinColors.Caution else GremlinColors.TextMuted,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = 170.dp)
+            text, style = MaterialTheme.typography.bodySmall,
+            color = if (warn) tone else GremlinColors.TextMuted, maxLines = 1
         )
         Spacer(Modifier.width(10.dp))
         Box(Modifier.size(9.dp).background(tone, CircleShape))
     }
+}
+
+private fun ServiceState.tone(): Color = when (this) {
+    ServiceState.Checking -> GremlinColors.Inactive
+    ServiceState.Online -> GremlinColors.Positive
+    ServiceState.Issues, ServiceState.Maintenance -> GremlinColors.Caution
+    ServiceState.Down -> GremlinColors.Negative
 }
 
 /** Is VRChat up, and are our own servers up. Wraps its rows (no fixed height). */
@@ -682,10 +711,30 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
             // No header (user): the rows speak for themselves.
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                ServiceRow(Icons.Filled.Wifi, "Internet", status.internetOk, status.internetDetail, Modifier.widenIn(stagger(reveal, 0, 3)), rowHeight)
-                ServiceRow(Icons.Filled.Public, "VRChat", status.vrchatOk, status.vrchatDetail, Modifier.widenIn(stagger(reveal, 1, 3)), rowHeight)
-                // Never names the backend (public UI rule): just "VRC-A servers".
-                ServiceRow(Icons.Filled.Dns, "VRC-A servers", status.serversOk, status.serversDetail, Modifier.widenIn(stagger(reveal, 2, 3)), rowHeight)
+                val net = status.internet
+                ServiceRow(
+                    Icons.Filled.Wifi, "Internet",
+                    if (status.internetMbps > 0 && net != InternetLink.None && net != InternetLink.Checking)
+                        "${net.text} · ${status.internetMbps.coerceAtMost(9999)} Mbps" else net.text,
+                    when (net) {
+                        InternetLink.Checking -> GremlinColors.Inactive
+                        InternetLink.None -> GremlinColors.Negative
+                        else -> GremlinColors.Positive
+                    },
+                    warn = net == InternetLink.None, Modifier.widenIn(stagger(reveal, 0, 3)), rowHeight
+                )
+                for ((i, row) in listOf(
+                    Triple(Icons.Filled.Public, "VRChat", status.vrchat),
+                    // Never names the backend (public UI rule): just "VRC-A servers".
+                    Triple(Icons.Filled.Dns, "VRC-A servers", status.servers)
+                ).withIndex()) {
+                    val (icon, name, state) = row
+                    ServiceRow(
+                        icon, name, state.text, state.tone(),
+                        warn = state != ServiceState.Online && state != ServiceState.Checking,
+                        Modifier.widenIn(stagger(reveal, 1 + i, 3)), rowHeight
+                    )
+                }
             }
         }
     }
@@ -741,20 +790,15 @@ private fun Modifier.reportSeam() = layout { measurable, constraints ->
     layout(p.width, p.height, mapOf(PillSeam to p.width)) { p.place(0, 0) }
 }
 
-/**
- * The internet row's state: false + "Not connected" with no validated network, else true + the
- * link type and Android's estimate of its download speed (Wi-Fi link rate when that's all we have).
- */
-fun internetStatus(context: android.content.Context): Pair<Boolean, String> {
-    val cm = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return false to "Not connected"
+/** The Internet row: the active connection's type and Android's download-speed estimate (Mbps, 0 = unknown). */
+fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
+    val cm = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return InternetLink.None to 0
     val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-    if (caps == null || !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return false to "Not connected"
-    val kind = when {
-        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
-        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
-        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "Mobile data"
-        else -> "Connected"
+    if (caps == null || !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return InternetLink.None to 0
+    val link = when {
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> InternetLink.Ethernet
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> InternetLink.Mobile
+        else -> InternetLink.WiFi
     }
-    val mbps = caps.linkDownstreamBandwidthKbps / 1000
-    return true to if (mbps > 0) "$kind · $mbps Mbps" else kind
+    return link to (caps.linkDownstreamBandwidthKbps / 1000).coerceAtLeast(0)
 }

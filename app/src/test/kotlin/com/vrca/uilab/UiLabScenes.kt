@@ -356,30 +356,28 @@ object UiLabScenes {
             "Server session" to I.Cloud, "VRChat sign-in" to I.Person, "Account standing" to I.Shield,
             "VRChat connection" to I.Link, "VRChat on this headset" to I.Headset, "Updates" to I.SystemUpdate
         )
-        fun c(l: String, st: com.vrca.app.BootState, d: String = "", b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b, icons[l])
+        fun c(l: String, st: com.vrca.app.BootState, d: com.vrca.app.BootNote? = null, b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b, icons[l])
         val v = rest.substringBefore(' ').ifBlank { "mid" }
         val backdrop = if (rest.substringAfter(' ', "") == "none") com.vrca.app.BootBackdrop.None else com.vrca.app.BootBackdrop.Lanes
         val checks = when (v) {
             "error" -> listOf(
-                c("Server session", S.Failed, "Couldn't reach the server", true), c("VRChat sign-in", S.Done),
-                c("Account standing", S.Waiting, b = true), c("VRChat connection", S.Background, "Connecting"),
-                c("VRChat on this headset", S.Skipped, "VRChat not open"), c("Updates", S.Done, "Up to date"))
+                c("Server session", S.Failed, com.vrca.app.BootNote.CantConnect, true), c("VRChat sign-in", S.Done),
+                c("Account standing", S.Waiting, b = true), c("VRChat connection", S.Background, com.vrca.app.BootNote.Connecting),
+                c("VRChat on this headset", S.Skipped, com.vrca.app.BootNote.NotOpen), c("Updates", S.Done, com.vrca.app.BootNote.UpToDate))
             "done", "incident", "updated", "offline" -> listOf(
-                c("Server session", S.Done, b = true), c("VRChat sign-in", S.Done, "Signed in"),
-                c("Account standing", S.Done, "Good", true), c("VRChat connection", S.Done, "Online"),
-                c("VRChat on this headset", S.Done, "Found"), c("Updates", S.Done, "Up to date"))
+                c("Server session", S.Done, b = true), c("VRChat sign-in", S.Done, com.vrca.app.BootNote.SignedIn),
+                c("Account standing", S.Done, com.vrca.app.BootNote.Good, true), c("VRChat connection", S.Done, com.vrca.app.BootNote.Online),
+                c("VRChat on this headset", S.Done, com.vrca.app.BootNote.Found), c("Updates", S.Done, com.vrca.app.BootNote.UpToDate))
             else -> listOf(
-                c("Server session", S.Done, b = true), c("VRChat sign-in", S.Done, "Signed in"),
-                c("Account standing", S.Working, b = true), c("VRChat connection", S.Working, "Connecting"),
-                c("VRChat on this headset", S.Skipped, "VRChat not open"), c("Updates", S.Waiting))
+                c("Server session", S.Done, b = true), c("VRChat sign-in", S.Done, com.vrca.app.BootNote.SignedIn),
+                c("Account standing", S.Working, b = true), c("VRChat connection", S.Working, com.vrca.app.BootNote.Connecting),
+                c("VRChat on this headset", S.Skipped, com.vrca.app.BootNote.NotOpen), c("Updates", S.Waiting))
         }
         val status = com.vrca.app.BootStatus(
-            vrchatOk = if (v == "incident") false else if (v == "mid") null else true,
-            vrchatDetail = if (v == "incident") "Investigating login issues on Quest" else "",
-            internetOk = if (v == "offline") false else true,
-            internetDetail = if (v == "offline") "Not connected" else "Wi-Fi · 240 Mbps",
-            serversOk = if (v == "mid") null else if (v == "error") false else true,
-            serversDetail = if (v == "error") "Can't reach them" else ""
+            internet = if (v == "offline") com.vrca.app.InternetLink.None else com.vrca.app.InternetLink.WiFi,
+            internetMbps = if (v == "offline") 0 else 240,
+            vrchat = when (v) { "incident" -> com.vrca.app.ServiceState.Issues; "mid" -> com.vrca.app.ServiceState.Checking; else -> com.vrca.app.ServiceState.Online },
+            servers = when (v) { "mid" -> com.vrca.app.ServiceState.Checking; "error" -> com.vrca.app.ServiceState.Down; else -> com.vrca.app.ServiceState.Online }
         )
         com.vrca.app.BootScreen(
             checks, status,
