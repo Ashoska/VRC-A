@@ -1,5 +1,9 @@
 package com.vrca.uilab
 
+import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.ui.res.vectorResource
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -351,43 +355,48 @@ object UiLabScenes {
     )).toJson()
 
     /**
-     * `show boot live`: a scripted run through every state a row can hit (checks finishing one by
-     * one, then VRChat having issues → maintenance, our servers going down, Wi-Fi dropping, and all
-     * coming back), for recording the state animations.
+     * `show boot live`: a scripted boot with the checks running AT THE SAME TIME (each finishes at
+     * its own pace; VRChat sign-in is slowest), then every Status state: VRChat issues → maintenance,
+     * our servers down, Wi-Fi lost, and all coming back. For recording the state animations.
      */
     @Composable
     private fun bootLive(c: (String, com.vrca.app.BootState, com.vrca.app.BootNote?, Boolean) -> com.vrca.app.BootCheck) {
-        val W = com.vrca.app.BootState.Waiting; val R = com.vrca.app.BootState.Working; val D = com.vrca.app.BootState.Done
-        val K = com.vrca.app.BootState.Skipped
+        val B = com.vrca.app.BootState::class.java.enumConstants!!.associateBy { it.name }
         val N = com.vrca.app.BootNote::class.java.enumConstants!!.associateBy { it.name }
         val V = com.vrca.app.ServiceState::class.java.enumConstants!!.associateBy { it.name }
         val L = com.vrca.app.InternetLink::class.java.enumConstants!!.associateBy { it.name }
-        val labels = listOf("Server session", "VRChat sign-in", "Account standing", "VRChat connection", "VRChat on this headset", "Updates")
-        // Each step: check states, check notes, internet, Mbps, vrchat, servers; then how long it holds.
-        data class Step(val st: List<com.vrca.app.BootState>, val notes: List<String?>, val net: String, val mbps: Int, val vrc: String, val srv: String, val ms: Long)
-        val none = listOf<String?>(null, null, null, null, null, null)
-        val steps = listOf(
-            Step(listOf(W, W, W, W, W, W), none, "Checking", 0, "Checking", "Checking", 500),
-            Step(listOf(R, W, W, W, W, W), none, "WiFi", 240, "Checking", "Checking", 500),
-            Step(listOf(D, R, W, W, W, W), none, "WiFi", 240, "Checking", "Online", 500),
-            Step(listOf(D, D, R, W, W, W), listOf(null, "SignedIn", null, null, null, null), "WiFi", 240, "Online", "Online", 500),
-            Step(listOf(D, D, D, R, W, W), listOf(null, "SignedIn", "Good", "Connecting", null, null), "WiFi", 240, "Online", "Online", 500),
-            Step(listOf(D, D, D, D, K, R), listOf(null, "SignedIn", "Good", "Online", "NotOpen", null), "WiFi", 240, "Online", "Online", 500),
-            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "WiFi", 240, "Online", "Online", 900),
-            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "WiFi", 240, "Issues", "Online", 900),
-            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "WiFi", 240, "Maintenance", "Online", 900),
-            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "WiFi", 240, "Maintenance", "Down", 900),
-            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "None", 0, "Maintenance", "Down", 1000),
-            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "WiFi", 240, "Online", "Online", 1500)
+        // label, starts at, finishes at, final state, final note, blocking
+        data class Row(val label: String, val start: Long, val end: Long, val state: String, val note: String?, val blocking: Boolean)
+        val rows = listOf(
+            Row("VRChat sign-in", 0, 2600, "Done", "SignedIn", false),
+            Row("Device session", 0, 700, "Done", "Connected", true),
+            Row("Terms of Service", 700, 1100, "Done", "Accepted", true),   // needs the device session
+            Row("Account standing", 700, 1500, "Done", "Good", true),       // needs the device session
+            Row("Discord", 0, 2000, "Done", "Connected", false),
+            Row("VRChat on this headset", 0, 250, "Skipped", "NotOpen", false),
+            Row("Updates", 0, 900, "Done", "UpToDate", false)
         )
-        var i by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
-        androidx.compose.runtime.LaunchedEffect(Unit) {
-            for (k in steps.indices) { i = k; kotlinx.coroutines.delay(steps[k].ms) }
+        // Status: at this time → internet, vrchat, servers.
+        val status = listOf(
+            0L to Triple("Checking", "Checking", "Checking"), 300L to Triple("WiFi", "Checking", "Checking"),
+            700L to Triple("WiFi", "Checking", "Online"), 1200L to Triple("WiFi", "Online", "Online"),
+            3600L to Triple("WiFi", "Issues", "Online"), 4500L to Triple("WiFi", "Maintenance", "Online"),
+            5400L to Triple("WiFi", "Maintenance", "Down"), 6300L to Triple("None", "Maintenance", "Down"),
+            7300L to Triple("WiFi", "Online", "Online")
+        )
+        var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(0L) }
+        androidx.compose.runtime.LaunchedEffect(Unit) { while (now < 9000) { kotlinx.coroutines.delay(50); now += 50 } }
+        val checks = rows.map { r ->
+            when {
+                now < r.start -> c(r.label, B["Waiting"]!!, null, r.blocking)
+                now < r.end -> c(r.label, B["Working"]!!, null, r.blocking)
+                else -> c(r.label, B[r.state]!!, r.note?.let { N[it] }, r.blocking)
+            }
         }
-        val s = steps[i]
+        val (net, vrc, srv) = status.last { it.first <= now }.second
         com.vrca.app.BootScreen(
-            labels.mapIndexed { n, l -> c(l, s.st[n], s.notes[n]?.let { N[it] }, n == 0 || n == 2) },
-            com.vrca.app.BootStatus(L[s.net]!!, s.mbps, V[s.vrc]!!, V[s.srv]!!),
+            checks,
+            com.vrca.app.BootStatus(L[net]!!, if (net == "WiFi") 240 else 0, V[vrc]!!, V[srv]!!),
             error = null, retryInSec = null, onContinue = null, playIntro = false,
             backdrop = com.vrca.app.BootBackdrop.Lanes
         )
@@ -398,25 +407,24 @@ object UiLabScenes {
     private fun bootSample(rest: String) {
         val I = androidx.compose.material.icons.Icons.Filled
         val icons = mapOf(
-            "Server session" to I.Cloud, "VRChat sign-in" to I.Person, "Account standing" to I.Shield,
-            "VRChat connection" to I.Link, "VRChat on this headset" to I.Headset, "Updates" to I.SystemUpdate
+            "VRChat sign-in" to I.Person, "Device session" to I.Devices, "Terms of Service" to I.Description,
+            "Account standing" to I.Shield, "Discord" to androidx.compose.ui.graphics.vector.ImageVector.vectorResource(com.vrca.R.drawable.ic_discord),
+            "VRChat on this headset" to I.Headset, "Updates" to I.SystemUpdate
         )
         fun c(l: String, st: com.vrca.app.BootState, d: com.vrca.app.BootNote? = null, b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b, icons[l])
         val v = rest.substringBefore(' ').ifBlank { "mid" }
         val backdrop = if (rest.substringAfter(' ', "") == "none") com.vrca.app.BootBackdrop.None else com.vrca.app.BootBackdrop.Lanes
+        val Nt = com.vrca.app.BootNote::class.java.enumConstants!!.associateBy { it.name }
+        // [VRChat sign-in, Device session, Terms, Account standing, Discord, headset, Updates] as State:Note
+        fun rows(vararg s: String) = listOf("VRChat sign-in", "Device session", "Terms of Service", "Account standing", "Discord", "VRChat on this headset", "Updates")
+            .mapIndexed { n, l ->
+                val (st, note) = (s[n] + ":").split(":")
+                c(l, com.vrca.app.BootState.valueOf(st), Nt[note], n in 1..3)
+            }
         val checks = when (v) {
-            "error" -> listOf(
-                c("Server session", S.Failed, com.vrca.app.BootNote.CantConnect, true), c("VRChat sign-in", S.Done),
-                c("Account standing", S.Waiting, b = true), c("VRChat connection", S.Background, com.vrca.app.BootNote.Connecting),
-                c("VRChat on this headset", S.Skipped, com.vrca.app.BootNote.NotOpen), c("Updates", S.Done, com.vrca.app.BootNote.UpToDate))
-            "done", "incident", "updated", "offline" -> listOf(
-                c("Server session", S.Done, b = true), c("VRChat sign-in", S.Done, com.vrca.app.BootNote.SignedIn),
-                c("Account standing", S.Done, com.vrca.app.BootNote.Good, true), c("VRChat connection", S.Done, com.vrca.app.BootNote.Online),
-                c("VRChat on this headset", S.Done, com.vrca.app.BootNote.Found), c("Updates", S.Done, com.vrca.app.BootNote.UpToDate))
-            else -> listOf(
-                c("Server session", S.Done, b = true), c("VRChat sign-in", S.Done, com.vrca.app.BootNote.SignedIn),
-                c("Account standing", S.Working, b = true), c("VRChat connection", S.Working, com.vrca.app.BootNote.Connecting),
-                c("VRChat on this headset", S.Skipped, com.vrca.app.BootNote.NotOpen), c("Updates", S.Waiting))
+            "error" -> rows("Working", "Failed:CantConnect", "Waiting", "Waiting", "Done:Connected", "Skipped:NotOpen", "Done:UpToDate")
+            "done", "incident", "updated", "offline" -> rows("Done:SignedIn", "Done:Connected", "Done:Accepted", "Done:Good", "Done:Connected", "Done:Found", "Done:UpToDate")
+            else -> rows("Working", "Done:Connected", "Done:Accepted", "Working", "Working", "Skipped:NotOpen", "Done:UpToDate")
         }
         if (v == "live") { bootLive(::c); return }
         val status = com.vrca.app.BootStatus(

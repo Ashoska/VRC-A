@@ -132,6 +132,10 @@ enum class BootNote(val text: String) {
     NotOpen("VRChat not open"),
     UpToDate("Up to date"),
     UpdateReady("Update ready"),
+    Connected("Connected"),
+    Off("Off"),
+    Accepted("Accepted"),
+    NewTerms("New terms"),
     CantConnect("Can't connect"),
     TimedOut("Timed out")
 }
@@ -542,37 +546,13 @@ private fun LoadingPanel(
     /** Headset right column: bigger rows, more space between, and the panel wraps its rows. */
     roomy: Boolean = false
 ) {
-    val accent = MaterialTheme.colorScheme.primary
-    val finished = checks.count { it.state in Settled }
-    val pieces = checks.size + 3 // header, segment bar, each check, the buttons
+    val pieces = checks.size + 1 // each check, then the buttons
     Layer(modifier) {
+        // Just the rows (user): no "Starting up" title, count or progress bar; the marks show progress.
         Column(Modifier.then(if (roomy) Modifier.fillMaxWidth() else Modifier.fillMaxSize()).padding(horizontal = 18.dp, vertical = 16.dp)) {
-            Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { PanelHeader(Icons.Filled.RocketLaunch, "Starting up") {
-                Text(
-                    "$finished/${checks.size}",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = GremlinColors.TextMuted,
-                    modifier = Modifier.background(GremlinColors.Card, CircleShape)
-                        .padding(horizontal = 10.dp, vertical = 3.dp)
-                )
-            } }
-            Spacer(Modifier.height(12.dp))
-            // One segment per check, coloured by its state: the whole boot readable at a glance.
-            Row(
-                Modifier.fillMaxWidth().height(5.dp).widenIn(stagger(reveal, 1, pieces)),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                checks.forEach { c ->
-                    val seg by animateColorAsState(
-                        if (c.state == BootState.Waiting) GremlinColors.Raised else c.state.tone(accent), label = "seg"
-                    )
-                    Box(Modifier.weight(1f).fillMaxHeight().background(seg, CircleShape))
-                }
-            }
-            Spacer(Modifier.height(12.dp))
             Column(if (roomy) Modifier else Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (roomy) 8.dp else 4.dp)) {
                 checks.forEachIndexed { i, c ->
-                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, 2 + i, pieces)), height = if (roomy) WIDE_ROW_HEIGHT else 31.dp)
+                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, i, pieces)), height = if (roomy) WIDE_ROW_HEIGHT else 31.dp)
                 }
             }
             // Headset: the buttons sit under both panels instead (see BootScreen).
