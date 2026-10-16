@@ -1,5 +1,32 @@
 package com.vrca.uilab
 
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Badge
+import androidx.compose.material.icons.filled.Login
+import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.Policy
+import androidx.compose.material.icons.filled.Handshake
+import androidx.compose.material.icons.filled.AssignmentTurnedIn
+import androidx.compose.material.icons.filled.ViewInAr
+import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material.icons.filled.Vrpano
+import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Update
+import androidx.compose.material.icons.filled.Upgrade
+import androidx.compose.material.icons.filled.NewReleases
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.ui.res.vectorResource
@@ -333,7 +360,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "iconpick", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -402,6 +429,43 @@ object UiLabScenes {
         )
     }
 
+    /** TEMP `show iconpick`: candidate left icons for four Starting up rows, each shown in a real row. */
+    @Composable
+    private fun iconPick() {
+        val I = androidx.compose.material.icons.Icons.Filled
+        val sets = listOf(
+            "Device session" to listOf("Devices (now)" to I.Devices, "Key" to I.Key, "Fingerprint" to I.Fingerprint, "Verified user" to I.VerifiedUser, "Badge" to I.Badge, "Login" to I.Login),
+            "Terms of Service" to listOf("Document (now)" to I.Description, "Gavel" to I.Gavel, "Article" to I.Article, "Policy" to I.Policy, "Handshake" to I.Handshake, "Checklist" to I.AssignmentTurnedIn),
+            "VRChat on this headset" to listOf("Headphones (now)" to I.Headset, "3D / AR box" to I.ViewInAr, "Controller" to I.SportsEsports, "Panorama" to I.Vrpano, "Compass" to I.Explore, "Eye" to I.Visibility),
+            "Updates" to listOf("Phone + arrow (now)" to I.SystemUpdate, "Download" to I.Download, "Cloud download" to I.CloudDownload, "Refresh clock" to I.Update, "Upgrade" to I.Upgrade, "New badge" to I.NewReleases)
+        )
+        val G = com.vrca.ui.theme.GremlinColors
+        androidx.compose.foundation.layout.Column(
+            androidx.compose.ui.Modifier.fillMaxSize().background(G.Backdrop).padding(horizontal = 28.dp, vertical = 22.dp),
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(16.dp)
+        ) {
+            sets.forEach { (row, options) ->
+                androidx.compose.foundation.layout.Column {
+                    androidx.compose.material3.Text(row, color = G.Text, style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
+                    androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(6.dp))
+                    androidx.compose.foundation.layout.Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
+                        options.forEach { (name, icon) ->
+                            androidx.compose.foundation.layout.Row(
+                                androidx.compose.ui.Modifier.weight(1f).height(38.dp)
+                                    .background(G.Card, androidx.compose.foundation.shape.RoundedCornerShape(12.dp)).padding(horizontal = 10.dp),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                androidx.compose.material3.Icon(icon, null, tint = G.TextMuted, modifier = androidx.compose.ui.Modifier.size(17.dp))
+                                androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.width(9.dp))
+                                androidx.compose.material3.Text(name, color = G.Text, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /** `show boot [mid|error|done|incident|updated|intro] [none]`: a sample state + backdrop. */
     @Composable
     private fun bootSample(rest: String) {
@@ -462,6 +526,7 @@ object UiLabScenes {
         val rest = arg.substringAfter(' ', "")
         when (name) {
             "boot" -> bootSample(rest)
+            "iconpick" -> iconPick()
             "crash" -> CrashScreen(
                 crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",
                 onClear = {}, onContinue = {}
