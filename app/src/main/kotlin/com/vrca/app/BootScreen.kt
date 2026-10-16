@@ -853,52 +853,52 @@ object BootIcons {
     val Updates: ImageVector get() = Icons.Filled.Download
 
     /**
-     * A VR headset (Material has none): goggles with two lens cut-outs and a nose notch, and the
-     * head strap arcing over the top. Drawn on Material's 24-unit grid, filled, so it sits with the stock icons.
+     * A VR headset (Material has none), in the bold goggle style (user's reference): one wide visor
+     * with an outlined rim and a nose notch, side straps, and the head strap arcing over the top.
+     * Our own drawing on Material's 24-unit grid, filled, so it sits with the stock icons.
      */
     val VrHeadset: ImageVector by lazy {
         ImageVector.Builder("VrHeadset", 24.dp, 24.dp, 24f, 24f).apply {
-            // Head strap over the top.
-            path(
-                stroke = SolidColor(Color.Black), strokeLineWidth = 1.8f,
-                strokeLineCap = androidx.compose.ui.graphics.StrokeCap.Round
-            ) {
-                moveTo(5.5f, 7f)
-                curveTo(7f, 3.2f, 17f, 3.2f, 18.5f, 7f)
+            val ink = SolidColor(Color.Black)
+            // Head strap over the top, and a short centre strap.
+            path(stroke = ink, strokeLineWidth = 2.2f, strokeLineCap = androidx.compose.ui.graphics.StrokeCap.Round) {
+                moveTo(4.6f, 8.6f)
+                curveTo(5.6f, 3.6f, 18.4f, 3.6f, 19.4f, 8.6f)
             }
-            path(fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd) {
-                // Body, its bottom edge dipping up round the nose.
-                moveTo(5f, 7f)
-                horizontalLineTo(19f)
-                arcTo(3f, 3f, 0f, false, true, 22f, 10f)
-                verticalLineTo(16f)
-                arcTo(3f, 3f, 0f, false, true, 19f, 19f)
-                horizontalLineTo(15.2f)
-                curveTo(14.3f, 19f, 13.7f, 16.2f, 12f, 16.2f)
-                curveTo(10.3f, 16.2f, 9.7f, 19f, 8.8f, 19f)
-                horizontalLineTo(5f)
-                arcTo(3f, 3f, 0f, false, true, 2f, 16f)
-                verticalLineTo(10f)
-                arcTo(3f, 3f, 0f, false, true, 5f, 7f)
-                close()
-                // Lenses (holes).
-                lens(4.4f)
-                lens(13.4f)
+            path(fill = ink) {
+                moveTo(11f, 3.6f); horizontalLineTo(13f); verticalLineTo(7.4f); horizontalLineTo(11f); close()
+                // Side straps.
+                moveTo(0.8f, 11f); horizontalLineTo(2.6f); verticalLineTo(15.6f); horizontalLineTo(0.8f); close()
+                moveTo(21.4f, 11f); horizontalLineTo(23.2f); verticalLineTo(15.6f); horizontalLineTo(21.4f); close()
             }
+            // Visor rim: the outline minus a slightly smaller copy leaves a ring...
+            path(fill = ink, pathFillType = PathFillType.EvenOdd) {
+                visor(0f)
+                visor(1.3f)
+            }
+            // ...and the lens fills the middle, a thin gap inside the rim.
+            path(fill = ink) { visor(2.5f) }
         }.build()
     }
 
-    private fun androidx.compose.ui.graphics.vector.PathBuilder.lens(left: Float) {
-        val top = 9.4f; val w = 6.2f; val h = 4.6f; val r = 1.6f
-        moveTo(left + r, top)
-        horizontalLineTo(left + w - r)
-        arcTo(r, r, 0f, false, true, left + w, top + r)
-        verticalLineTo(top + h - r)
-        arcTo(r, r, 0f, false, true, left + w - r, top + h)
-        horizontalLineTo(left + r)
-        arcTo(r, r, 0f, false, true, left, top + h - r)
-        verticalLineTo(top + r)
-        arcTo(r, r, 0f, false, true, left + r, top)
+    /** The visor outline, shrunk by [d] on every side (nose notch included). */
+    private fun androidx.compose.ui.graphics.vector.PathBuilder.visor(d: Float) {
+        val l = 2.6f + d; val t = 7.6f + d; val r = 21.4f - d; val b = 19.6f - d
+        val rad = (4.2f - d).coerceAtLeast(0.6f)
+        val nose = 2.3f - d * 0.15f   // half-width of the notch at the bottom edge
+        val apex = 15.6f - d * 0.8f    // how high the notch reaches
+        moveTo(l + rad, t)
+        horizontalLineTo(r - rad)
+        arcTo(rad, rad, 0f, false, true, r, t + rad)
+        verticalLineTo(b - rad)
+        arcTo(rad, rad, 0f, false, true, r - rad, b)
+        horizontalLineTo(12f + nose + 0.8f)
+        curveTo(12f + nose * 0.4f, b, 12f + nose * 0.5f, apex, 12f, apex)
+        curveTo(12f - nose * 0.5f, apex, 12f - nose * 0.4f, b, 12f - nose - 0.8f, b)
+        horizontalLineTo(l + rad)
+        arcTo(rad, rad, 0f, false, true, l, b - rad)
+        verticalLineTo(t + rad)
+        arcTo(rad, rad, 0f, false, true, l + rad, t)
         close()
     }
 }
