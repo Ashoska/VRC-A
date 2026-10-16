@@ -193,13 +193,14 @@ fun BootScreen(
     // guaranteed), which could leave the intro waiting on a blank screen until something moved.
     var rootCoords by remember { mutableStateOf<LayoutCoordinates?>(null, neverEqualPolicy()) }
     var logoCoords by remember { mutableStateOf<LayoutCoordinates?>(null, neverEqualPolicy()) }
-    val logoCenterY = run {
+    val logoCenter: Offset? = run {
         val r = rootCoords; val l = logoCoords
-        if (r != null && l != null && r.isAttached && l.isAttached) r.localPositionOf(l, Offset.Zero).y + l.size.height / 2f
-        else Float.NaN
+        if (r != null && l != null && r.isAttached && l.isAttached)
+            r.localPositionOf(l, Offset.Zero) + Offset(l.size.width / 2f, l.size.height / 2f)
+        else null
     }
     // Start once the logo's final slot is known, so the first frame already has it at the centre.
-    val placed = !logoCenterY.isNaN()
+    val placed = logoCenter != null
     LaunchedEffect(placed) {
         if (!playIntro || !placed || logoIn.value > 0f) return@LaunchedEffect
         logoIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
@@ -227,48 +228,74 @@ fun BootScreen(
         ) {
             BootBackdropLayer(backdrop, alpha = { contentIn.value }, modifier = Modifier.matchParentSize())
             val wide = maxWidth >= 720.dp
-            val boxHeightPx = constraints.maxHeight.toFloat()
-            Column(
-                Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 18.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
+            val boxW = constraints.maxWidth.toFloat()
+            val boxH = constraints.maxHeight.toFloat()
+            // The logo: from the screen's centre to its slot. Phone: starts INTRO_SCALE big and shrinks
+            // as it rises. Headset: one size, it just slides left (user: shrinking isn't needed there,
+            // a straight slide reads cleaner).
+            val startScale = if (wide) 1f else INTRO_SCALE
+            val logo: @Composable (Dp) -> Unit = { height ->
                 BootLogo(
-                    // From INTRO_SCALE at the screen's centre down to 1x in its slot.
-                    introScale = { (INTRO_SCALE + (1f - INTRO_SCALE) * settle.value) * (0.9f + 0.1f * logoIn.value) },
+                    height = height,
+                    maxScale = startScale,
+                    introScale = { (startScale + (1f - startScale) * settle.value) * (0.9f + 0.1f * logoIn.value) },
                     fadeIn = logoIn.value,
                     modifier = Modifier
                         .onGloballyPositioned { logoCoords = it }
                         .graphicsLayer {
-                            val startDy = if (logoCenterY.isNaN()) 0f else boxHeightPx / 2f - logoCenterY
-                            translationY = startDy * (1f - settle.value)
+                            val c = logoCenter
+                            if (c != null) {
+                                translationX = (boxW / 2f - c.x) * (1f - settle.value)
+                                translationY = (boxH / 2f - c.y) * (1f - settle.value)
+                            }
                         }
                 )
-                Spacer(Modifier.height(14.dp))
+            }
+            val nameAndPill: @Composable () -> Unit = {
                 Column(contentLayer, horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
                         "VRChat Assistant",
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold,
                         color = GremlinColors.Text
                     )
                     Spacer(Modifier.height(8.dp))
                     StatusPill(checks, error)
                 }
-                Spacer(Modifier.height(16.dp))
-                if (wide) {
-                    Row(
-                        Modifier.widthIn(max = 900.dp).fillMaxWidth().height(358.dp),
-                        horizontalArrangement = Arrangement.spacedBy(18.dp)
+            }
+            if (wide) {
+                // Headset: logo, name, pill and the Status card on the left; the checklist on the right.
+                Row(
+                    Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 22.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(28.dp)
+                ) {
+                    Column(
+                        Modifier.weight(0.85f),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Unfold({ panelL.value }, Modifier.weight(1.2f).fillMaxHeight()) {
-                            LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxSize(), partsL.value)
-                        }
-                        Unfold({ panelR.value }, Modifier.weight(1f).fillMaxHeight()) {
+                        logo(WIDE_LOGO_HEIGHT)
+                        Spacer(Modifier.height(16.dp))
+                        nameAndPill()
+                        Spacer(Modifier.height(24.dp))
+                        Unfold({ panelR.value }, Modifier.fillMaxWidth().height(250.dp)) {
                             StatusPanel(status, Modifier.fillMaxSize(), partsR.value)
                         }
                     }
-                } else {
+                    Unfold({ panelL.value }, Modifier.weight(1.15f).height(540.dp)) {
+                        LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxSize(), partsL.value, roomy = true)
+                    }
+                }
+            } else {
+                Column(
+                    Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    logo(LOGO_HEIGHT)
+                    Spacer(Modifier.height(14.dp))
+                    nameAndPill()
+                    Spacer(Modifier.height(16.dp))
                     Column(
                         Modifier.widthIn(max = 460.dp).fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -301,22 +328,22 @@ private const val INTRO_SCALE = 2.1f
  * was removed (it read as the logo blipping brighter and dimmer; the status pill shows progress).
  */
 @Composable
-private fun BootLogo(introScale: () -> Float, fadeIn: Float, modifier: Modifier = Modifier) {
+private fun BootLogo(height: Dp, maxScale: Float, introScale: () -> Float, fadeIn: Float, modifier: Modifier = Modifier) {
     // vrca_logo_bar: the logo cropped to its drawing (the full asset is ~35% empty margin).
     val logo = ImageBitmap.imageResource(com.vrca.R.drawable.vrca_logo_bar)
     // The slot is LOGO_HEIGHT tall, but the logo is laid out at its biggest (intro) size and only
     // ever scaled DOWN: scaling a small one up showed a blurry logo that snapped sharp on landing.
-    Box(modifier.height(LOGO_HEIGHT), contentAlignment = Alignment.Center) {
+    Box(modifier.height(height), contentAlignment = Alignment.Center) {
         Box(
-            Modifier.requiredHeight(LOGO_HEIGHT * INTRO_SCALE).graphicsLayer {
-                val s = introScale() / INTRO_SCALE
+            Modifier.requiredHeight(height * maxScale).graphicsLayer {
+                val s = introScale() / maxScale
                 scaleX = s; scaleY = s
             }
         ) {
             Image(
                 bitmap = logo, contentDescription = null, filterQuality = FilterQuality.High,
                 colorFilter = ColorFilter.tint(DropLayer.copy(alpha = 0.55f)),
-                modifier = Modifier.fillMaxHeight().offset(y = 5.dp * INTRO_SCALE).alpha(fadeIn)
+                modifier = Modifier.fillMaxHeight().offset(y = 5.dp * maxScale).alpha(fadeIn)
             )
             Image(
                 bitmap = logo, contentDescription = "VRC-A", filterQuality = FilterQuality.High,
@@ -330,6 +357,8 @@ private fun BootLogo(introScale: () -> Float, fadeIn: Float, modifier: Modifier 
 }
 
 private val LOGO_HEIGHT = 104.dp
+/** Headset: the logo has the whole left column, so it's bigger. */
+private val WIDE_LOGO_HEIGHT = 150.dp
 
 /** One-glance summary under the name: Starting up / Ready / Needs attention. */
 @Composable
@@ -426,7 +455,9 @@ private fun LoadingPanel(
     onRetry: () -> Unit,
     onContinue: (() -> Unit)?,
     modifier: Modifier,
-    reveal: Float = 1f
+    reveal: Float = 1f,
+    /** Taller panel (headset right column): bigger rows, more space between. */
+    roomy: Boolean = false
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val finished = checks.count { it.state in Settled }
@@ -456,8 +487,10 @@ private fun LoadingPanel(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                checks.forEachIndexed { i, c -> BootCheckTile(c, Modifier.widenIn(stagger(reveal, 2 + i, pieces))) }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (roomy) 10.dp else 4.dp)) {
+                checks.forEachIndexed { i, c ->
+                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, 2 + i, pieces)), height = if (roomy) 48.dp else 31.dp)
+                }
             }
             if (error != null) {
                 Spacer(Modifier.height(8.dp))
@@ -480,14 +513,14 @@ private fun LoadingPanel(
 
 /** A check as a layer-2 tile: category icon, label, reason, and its state mark on the right. */
 @Composable
-private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier) {
+private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, height: Dp = 31.dp) {
     val accent = MaterialTheme.colorScheme.primary
     val tone = check.state.tone(accent)
     val dim = check.state == BootState.Waiting
     val active = check.state == BootState.Working || check.state == BootState.Failed
     val edge by animateColorAsState(if (active) tone.copy(alpha = 0.7f) else Color.Transparent, label = "tileEdge")
     Row(
-        modifier.fillMaxWidth().height(31.dp).clip(RoundedCornerShape(10.dp))
+        modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
             .background(if (dim) GremlinColors.Card.copy(alpha = 0.5f) else GremlinColors.Card)
             .border(1.dp, edge, RoundedCornerShape(10.dp))
             .padding(start = 10.dp, end = 8.dp),
