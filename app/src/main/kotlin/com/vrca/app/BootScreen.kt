@@ -682,7 +682,7 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
         modifier.graphicsLayer { translationX = shake.value * density }
             .fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
             .background(if (dim) GremlinColors.Card.copy(alpha = 0.5f) else GremlinColors.Card)
-            .border(1.dp, edge, RoundedCornerShape(10.dp))
+            .border(1.dp, edge, RoundedCornerShape(12.dp))
             .padding(start = 10.dp, end = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -823,7 +823,7 @@ private fun ServiceRow(icon: ImageVector, name: String, text: String, mark: Mark
     Row(
         modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
             .background(GremlinColors.Card)
-            .border(1.dp, edge, RoundedCornerShape(10.dp))
+            .border(1.dp, edge, RoundedCornerShape(12.dp))
             .padding(start = 10.dp, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
