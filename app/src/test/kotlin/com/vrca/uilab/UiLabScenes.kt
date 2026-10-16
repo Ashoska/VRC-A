@@ -467,6 +467,8 @@ object UiLabScenes {
             }
         val checks = when (v) {
             "error" -> rows("Failed:CantConnect", "Waiting", "Waiting", "Working", "Done:Connected", "Skipped:NotOpen", "Done:UpToDate")
+            "signin" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Failed:SignInNeeded", "Skipped:Off", "Done:Found", "Done:UpToDate")
+            "vrcdown" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Warn:VrchatIssues", "Skipped:Off", "Done:Found", "Done:UpToDate")
             "done", "incident", "updated", "offline" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Done:SignedIn", "Done:Connected", "Done:Found", "Done:UpToDate")
             else -> rows("Done:Connected", "Done:Accepted", "Working", "Working", "Working", "Skipped:NotOpen", "Done:UpToDate")
         }
@@ -474,7 +476,7 @@ object UiLabScenes {
         val status = com.vrca.app.BootStatus(
             internet = if (v == "offline") com.vrca.app.InternetLink.None else com.vrca.app.InternetLink.WiFi,
             internetMbps = if (v == "offline") 0 else 240,
-            vrchat = when (v) { "incident" -> com.vrca.app.ServiceState.Issues; "mid" -> com.vrca.app.ServiceState.Checking; else -> com.vrca.app.ServiceState.Online },
+            vrchat = when (v) { "incident", "vrcdown" -> com.vrca.app.ServiceState.Issues; "mid" -> com.vrca.app.ServiceState.Checking; else -> com.vrca.app.ServiceState.Online },
             servers = when (v) { "mid" -> com.vrca.app.ServiceState.Checking; "error" -> com.vrca.app.ServiceState.Down; else -> com.vrca.app.ServiceState.Online }
         )
         com.vrca.app.BootScreen(
@@ -483,7 +485,8 @@ object UiLabScenes {
             retryInSec = if (v == "error") 5 else null,
             onContinue = if (v == "error") ({}) else null,
             playIntro = v == "intro",
-            backdrop = backdrop, userName = "Ashoska"
+            backdrop = backdrop, userName = "Ashoska",
+            onSignIn = if (v == "signin") ({}) else null
         )
     }
 

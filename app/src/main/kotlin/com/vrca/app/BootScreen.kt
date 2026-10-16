@@ -148,6 +148,7 @@ enum class BootNote(val text: String) {
     Connected("Connected"),
     Off("Off"),
     NoAccess("No log access"),
+    VrchatIssues("VRChat issues"),
     Accepted("Accepted"),
     NewTerms("New terms"),
     CantConnect("Can't connect"),
@@ -261,7 +262,9 @@ fun BootScreen(
      */
     exit: Boolean = false,
     exitToTopBar: Boolean = true,
-    onExited: () -> Unit = {}
+    onExited: () -> Unit = {},
+    /** Non-null while VRChat needs signing in: shows a "Sign in to VRChat" pill under the panels. */
+    onSignIn: (() -> Unit)? = null
 ) {
     val working = checks.any { it.state == BootState.Working }
     // Intro, in three beats: the logo fades/grows in at the centre, holds, then settles up into
@@ -403,11 +406,17 @@ fun BootScreen(
                         LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxWidth(), partsL.value, roomy = true, userName = userName)
                     }
                 }
-                AnimatedVisibility(error != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                // Kept while it animates away (onSignIn is already null by then).
+                var lastSignIn by remember { mutableStateOf<(() -> Unit)?>(null) }
+                if (onSignIn != null) lastSignIn = onSignIn
+                AnimatedVisibility(error != null || onSignIn != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                     // The pill's seam (where Retry meets Continue anyway) sits on the centre of the gap
                     // between the two panels: Retry under the left one, Continue under the right.
                     Layout(
-                        content = { ActionPill(retryInSec, onRetry, onContinue) },
+                        content = {
+                            val signIn = lastSignIn
+                            if (error == null && signIn != null) SignInPill(signIn) else ActionPill(retryInSec, onRetry, onContinue)
+                        },
                         modifier = Modifier.fillMaxWidth().padding(top = 20.dp)
                     ) { measurables, constraints ->
                         val pill = measurables.first().measure(constraints.copy(minWidth = 0))
@@ -1044,5 +1053,23 @@ object BootIcons {
         verticalLineTo(t + rad)
         arcTo(rad, rad, 0f, false, true, l + rad, t)
         close()
+    }
+}
+
+/** "Sign in to VRChat": shown under the panels while the VRChat session needs signing in. */
+@Composable
+private fun SignInPill(onClick: () -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    Layer(
+        Modifier.height(50.dp).clip(CircleShape).clickable(onClick = onClick),
+        shape = CircleShape, color = accent, edge = Color.Transparent, drop = 4.dp
+    ) {
+        Row(Modifier.fillMaxHeight().padding(start = 20.dp, end = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Person, null, tint = GremlinColors.Backdrop, modifier = Modifier.size(19.dp))
+            Spacer(Modifier.width(10.dp))
+            Text("Sign in to VRChat", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Backdrop)
+            Spacer(Modifier.width(10.dp))
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = GremlinColors.Backdrop, modifier = Modifier.size(18.dp))
+        }
     }
 }

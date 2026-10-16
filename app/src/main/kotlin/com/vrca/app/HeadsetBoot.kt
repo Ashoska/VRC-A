@@ -9,6 +9,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.vectorResource
@@ -50,7 +52,7 @@ private enum class Row(val label: String, val blocking: Boolean) {
     Device("Device session", true),
     Terms("Terms of Service", true),
     Account("Account standing", true),
-    VrchatSignIn("VRChat sign-in", false),
+    VrchatSignIn("VRChat sign-in", true),
     Discord("Discord", false),
     VrchatHere("VRChat on this headset", false),
     Updates("Updates", true)
@@ -77,7 +79,16 @@ internal fun HeadsetBoot(onDone: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var retryIn by remember { mutableStateOf<Int?>(null) }
     var shown by remember { mutableStateOf(false) }
-    var blockingDone by remember { mutableStateOf(false) }
+    var tutorialDone by remember { mutableStateOf(false) }
+    var signInAttempt by remember { mutableIntStateOf(0) }
+    var showLogin by remember { mutableStateOf(false) }
+    // Boot may go on once every blocking row has settled without failing (a failed device session
+    // waits on Retry, a failed VRChat sign-in waits on signing in).
+    val blockingDone = tutorialDone && Row.entries.filter { it.blocking }.all { rows[it.ordinal].state in SETTLED }
+    val signInNeeded = rows[Row.VrchatSignIn.ordinal].let { it.state == BootState.Failed && it.note == BootNote.SignInNeeded }
+    // VRChat's status-page answer, once it's in (the sign-in row needs it to judge a failure).
+    suspend fun vrchatStatus(): ServiceState =
+        withTimeoutOrNull(8_000L) { snapshotFlow { status.vrchat }.first { it != ServiceState.Checking } } ?: ServiceState.Issues
     val everSignedIn = remember {
         ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE).getString("auth_uid", "").orEmpty().isNotBlank()
     }
@@ -106,11 +117,11 @@ internal fun HeadsetBoot(onDone: () -> Unit) {
     LaunchedEffect(attempt) {
         error = null
         retryIn = null
-        blockingDone = false
+        tutorialDone = false
         Row.entries.forEach { set(it, BootState.Waiting) }
         coroutineScope {
             // Rows that don't need the device session start straight away.
-            launch { vrchatSignIn(ctx) { s, n -> set(Row.VrchatSignIn, s, n) } }
+            launch { vrchatSignIn(ctx, { vrchatStatus() }) { s, n -> set(Row.VrchatSignIn, s, n) } }
             launch { discord(ctx) { s, n -> set(Row.Discord, s, n) } }
             launch { vrchatHere { s, n -> set(Row.VrchatHere, s, n) } }
             val worker = async(Dispatchers.IO) { AvatarGlobalDb.fetchHealth() != null }
@@ -170,8 +181,14 @@ internal fun HeadsetBoot(onDone: () -> Unit) {
                 }
             }
             terms.join(); account.join(); updates.join(); tutorial.join()
-            blockingDone = true
+            tutorialDone = true
         }
+    }
+
+    // After signing in from the boot screen, check the VRChat session again.
+    LaunchedEffect(signInAttempt) {
+        if (signInAttempt == 0) return@LaunchedEffect
+        vrchatSignIn(ctx, { vrchatStatus() }) { s, n -> set(Row.VrchatSignIn, s, n) }
     }
 
     // A failed device session retries itself after a short countdown.
@@ -197,6 +214,7 @@ internal fun HeadsetBoot(onDone: () -> Unit) {
         rows[Row.Account.ordinal].note != BootNote.Restricted &&
         VrchatAuthManager.isLoggedIn(ctx) && com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
 
+    androidx.compose.foundation.layout.Box {
     BootScreen(
         checks = Row.entries.map { r ->
             val s = rows[r.ordinal]
@@ -211,8 +229,22 @@ internal fun HeadsetBoot(onDone: () -> Unit) {
         onShown = { shown = true },
         exit = exiting,
         exitToTopBar = toMainApp,
-        onExited = onDone
+        onExited = onDone,
+        onSignIn = if (signInNeeded && error == null) ({ showLogin = true }) else null
     )
+    // Sign in right here, over the boot screen (which stays underneath, so it doesn't replay).
+    if (showLogin) {
+        androidx.compose.material3.Surface(androidx.compose.ui.Modifier.fillMaxSize(), color = com.vrca.ui.theme.GremlinColors.Backdrop) {
+            com.vrca.vrchat.VrchatLoginScreen(
+                pendingBanId = HeadsetBootResults.banId,
+                onCancel = { showLogin = false }
+            ) { _, _ ->
+                showLogin = false
+                signInAttempt++
+            }
+        }
+    }
+    }
 }
 
 /**
@@ -232,15 +264,53 @@ private suspend fun <T> orNull(block: suspend () -> T): T? = try {
 /** How long Ready stays up before the app opens (covers the Ready sweep). */
 private const val READY_HOLD_MS = 900L
 
-/** VRChat sign-in: not signed in is skipped (the login screen follows); otherwise start the live
- *  link and wait for it. It doesn't hold boot up: if it's slow it keeps going in the app. */
-private suspend fun vrchatSignIn(ctx: Context, set: (BootState, BootNote?) -> Unit) {
-    if (!VrchatAuthManager.isLoggedIn(ctx)) { set(BootState.Skipped, BootNote.SignInNeeded); return }
+/**
+ * VRChat sign-in. Boot needs a working VRChat session (user rule), with one exception: when
+ * VRChat itself is having problems AND this headset has a saved session, boot goes on (amber
+ * "VRChat issues") since signing in again wouldn't help. Any other failure means the session is
+ * gone (expired, signed out) and the row asks to sign in, which holds boot until they do.
+ *  - First run (tutorial not done): skipped; the tutorial's own sign-in step handles it.
+ *  - The saved session is re-read for a few seconds first: on a cold start the Keystore can make
+ *    it read as missing for a moment (see VrcaApp's vrcLoginDone re-check).
+ *  - 401: a silent re-login with the saved password is tried before asking.
+ *  - The live VRChat link is started once the session is good; boot doesn't wait for it.
+ */
+private suspend fun vrchatSignIn(ctx: Context, vrchatStatus: suspend () -> ServiceState, set: (BootState, BootNote?) -> Unit) {
+    if (!com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)) { set(BootState.Skipped, BootNote.SignInNeeded); return }
     set(BootState.Working, null)
-    startPipelineWarmup(ctx)
-    val up = withTimeoutOrNull(12_000L) { VrchatPipelineState.isConnectedFlow.first { it } }
-    if (up != null) set(BootState.Done, BootNote.SignedIn) else set(BootState.Background, BootNote.Connecting)
+    val saved = withTimeoutOrNull(4_000L) {
+        while (!VrchatAuthManager.isLoggedIn(ctx)) delay(400)
+        true
+    } == true
+    if (!saved) { set(BootState.Failed, BootNote.SignInNeeded); return }
+    var v = orNull { VrchatAuthManager.validateSessionDetailed(ctx) } ?: VrchatAuthManager.SessionValidity.UNKNOWN
+    repeat(2) {
+        if (v == VrchatAuthManager.SessionValidity.UNKNOWN) {
+            delay(1_500L)
+            v = orNull { VrchatAuthManager.validateSessionDetailed(ctx) } ?: VrchatAuthManager.SessionValidity.UNKNOWN
+        }
+    }
+    when (v) {
+        VrchatAuthManager.SessionValidity.VALID -> {
+            set(BootState.Done, BootNote.SignedIn); startPipelineWarmup(ctx)
+        }
+        VrchatAuthManager.SessionValidity.UNAUTHORIZED ->
+            if (orNull { VrchatAuthManager.autoRelogin(ctx) } == true) {
+                set(BootState.Done, BootNote.SignedIn); startPipelineWarmup(ctx)
+            } else {
+                set(BootState.Failed, BootNote.SignInNeeded)
+            }
+        VrchatAuthManager.SessionValidity.UNKNOWN ->
+            if (vrchatStatus() != ServiceState.Online) {
+                set(BootState.Warn, BootNote.VrchatIssues); startPipelineWarmup(ctx)
+            } else {
+                set(BootState.Failed, BootNote.SignInNeeded)
+            }
+    }
 }
+
+/** States that let boot go on. */
+private val SETTLED = setOf(BootState.Done, BootState.Warn, BootState.Skipped, BootState.Background)
 
 /** Discord: skipped ("Off") when the Discord status link isn't turned on; otherwise follows it. */
 private suspend fun discord(ctx: Context, set: (BootState, BootNote?) -> Unit) {
