@@ -38,6 +38,14 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.foundation.clickable
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material.icons.filled.Public
@@ -265,11 +273,13 @@ fun BootScreen(
             if (wide) {
                 // Headset: logo and the Status card on the left; the checklist on the right. Both
                 // panels wrap their content (no empty strips) and sit bottom-aligned so their lower
-                // edges line up; the pair is centred on the screen.
+                // edges line up; the pair is centred on the screen. On an error, Retry / Continue
+                // anyway open up underneath, meeting at the gap between the two panels.
+                Column(Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 32.dp, vertical = 22.dp)) {
                 Row(
-                    Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 32.dp, vertical = 22.dp),
+                    Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.Bottom,
-                    horizontalArrangement = Arrangement.spacedBy(28.dp)
+                    horizontalArrangement = Arrangement.spacedBy(WIDE_GAP)
                 ) {
                     Column(
                         Modifier.weight(0.85f),
@@ -286,6 +296,15 @@ fun BootScreen(
                     Unfold({ panelL.value }, Modifier.weight(1.15f)) {
                         LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxWidth(), partsL.value, roomy = true)
                     }
+                }
+                AnimatedVisibility(error != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                    Row(Modifier.fillMaxWidth().padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(WIDE_GAP)) {
+                        Box(Modifier.weight(0.85f), contentAlignment = Alignment.CenterEnd) { RetryButton(retryInSec, onRetry) }
+                        Box(Modifier.weight(1.15f), contentAlignment = Alignment.CenterStart) {
+                            if (onContinue != null) ContinueButton(onContinue)
+                        }
+                    }
+                }
                 }
             } else {
                 Column(
@@ -362,6 +381,8 @@ private val LOGO_HEIGHT = 104.dp
 private val WIDE_LOGO_HEIGHT = 210.dp
 /** Headset row height, shared by check rows and status rows so both panels match. */
 private val WIDE_ROW_HEIGHT = 38.dp
+/** Headset gap between the left column and the checklist; the error buttons meet across it. */
+private val WIDE_GAP = 28.dp
 
 /** One-glance summary under the name: Starting up / Ready / Needs attention. */
 @Composable
@@ -495,21 +516,58 @@ private fun LoadingPanel(
                     BootCheckTile(c, Modifier.widenIn(stagger(reveal, 2 + i, pieces)), height = if (roomy) WIDE_ROW_HEIGHT else 31.dp)
                 }
             }
-            if (error != null) {
+            // Headset: the buttons sit under both panels instead (see BootScreen).
+            if (error != null && !roomy) {
                 Spacer(Modifier.height(8.dp))
                 Row(
                     Modifier.widenIn(stagger(reveal, pieces - 1, pieces)),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Button(onClick = onRetry) {
-                        Text(if (retryInSec != null) "Retry in ${retryInSec}s" else "Retry")
-                    }
-                    if (onContinue != null) {
-                        OutlinedButton(onClick = onContinue) { Text("Continue anyway") }
-                    }
+                    RetryButton(retryInSec, onRetry)
+                    if (onContinue != null) ContinueButton(onContinue)
                 }
             }
+        }
+    }
+}
+
+/** Retry: the accent action, with the auto-retry countdown in a chip. */
+@Composable
+private fun RetryButton(retryInSec: Int?, onClick: () -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    Layer(
+        Modifier.height(46.dp).clip(RoundedCornerShape(14.dp)).clickable(onClick = onClick),
+        shape = RoundedCornerShape(14.dp), color = accent, edge = Color.Transparent, drop = 4.dp
+    ) {
+        Row(Modifier.fillMaxHeight().padding(start = 16.dp, end = if (retryInSec != null) 8.dp else 20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Refresh, null, tint = GremlinColors.Backdrop, modifier = Modifier.size(19.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Retry", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Backdrop)
+            if (retryInSec != null) {
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "${retryInSec}s", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
+                    color = GremlinColors.Backdrop,
+                    modifier = Modifier.background(GremlinColors.Backdrop.copy(alpha = 0.16f), RoundedCornerShape(9.dp))
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                )
+            }
+        }
+    }
+}
+
+/** Continue anyway: a quieter raised card button. */
+@Composable
+private fun ContinueButton(onClick: () -> Unit) {
+    Layer(
+        Modifier.height(46.dp).clip(RoundedCornerShape(14.dp)).clickable(onClick = onClick),
+        shape = RoundedCornerShape(14.dp), color = GremlinColors.Raised, drop = 4.dp
+    ) {
+        Row(Modifier.fillMaxHeight().padding(start = 20.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Continue anyway", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text)
+            Spacer(Modifier.width(8.dp))
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = GremlinColors.TextMuted, modifier = Modifier.size(18.dp))
         }
     }
 }
