@@ -203,7 +203,8 @@ private class Wall(private val seed: Int) {
                 out += Sprite(
                     symbol = pick, x = -margin + at * stretch, y = laneY + (rnd.nextFloat() - 0.5f) * rowH * 0.5f,
                     laneY = laneY, laneSpeed = speed, size = size,
-                    deg = (rnd.nextFloat() - 0.5f) * 140f, mirror = rnd.nextBoolean(), phase = rnd.nextFloat() * 6.283f
+                    // Any angle, upside down included (user: they never were, it read too tidy).
+                    deg = rnd.nextFloat() * 360f, mirror = rnd.nextBoolean(), phase = rnd.nextFloat() * 6.283f
                 )
             }
             y += rowH
