@@ -26,6 +26,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.imageResource
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
@@ -695,7 +697,20 @@ fun VrcaScreen(
                     modifier = Modifier.pointerInput(Unit) {
                         detectTapGestures(onTap = { topBarFocus.clearFocus() })
                     },
-                    title = { Text(if (BuildConfig.IS_ADMIN_BUILD) "VRC-A (ADMIN)" else "VRC-A") },
+                    title = {
+                        // Headset: the VRC-A logo instead of the words (UI revamp, user ask).
+                        if (BuildConfig.IS_HEADSET_BUILD) {
+                            Image(
+                                bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(R.drawable.vrca_logo),
+                                contentDescription = "VRC-A",
+                                // High: the 512px logo's thin strokes broke up when shrunk with the default filter.
+                                filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
+                                modifier = Modifier.size(52.dp)
+                            )
+                        } else {
+                            Text(if (BuildConfig.IS_ADMIN_BUILD) "VRC-A (ADMIN)" else "VRC-A")
+                        }
+                    },
                     navigationIcon = {
                         if (BuildConfig.IS_ADMIN_BUILD) {
                             IconButton(onClick = { page = AppPage.Admin }) {
