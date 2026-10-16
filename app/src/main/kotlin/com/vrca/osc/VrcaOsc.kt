@@ -168,11 +168,6 @@ class VrcaOsc(
 
     private fun sendOscMessage(address: String, arguments: List<Any?>, delay: Long = 0) {
         if (blocked) return
-        // Lifetime "chatbox updates sent" counter (boot screen stat). Counts
-        // every non-blank content send; typing signals and blank clears don't.
-        if (address == "/chatbox/input" && (arguments.firstOrNull() as? String)?.isNotBlank() == true) {
-            com.vrca.app.ChatboxStats.increment()
-        }
         dispatchSend(OSCMessage(address, arguments), delay)
     }
 

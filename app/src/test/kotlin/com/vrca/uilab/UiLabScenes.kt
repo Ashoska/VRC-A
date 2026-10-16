@@ -1,10 +1,50 @@
 package com.vrca.uilab
 
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Badge
+import androidx.compose.material.icons.filled.Login
+import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.Policy
+import androidx.compose.material.icons.filled.Handshake
+import androidx.compose.material.icons.filled.AssignmentTurnedIn
+import androidx.compose.material.icons.filled.ViewInAr
+import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material.icons.filled.Vrpano
+import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Update
+import androidx.compose.material.icons.filled.Upgrade
+import androidx.compose.material.icons.filled.NewReleases
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.ui.res.vectorResource
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import com.vrca.app.BannedScreen
-import com.vrca.app.BootstrapScreen
+import com.vrca.app.BootState as S
+import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Headset
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Cloud
 import com.vrca.app.CrashScreen
 import com.vrca.app.TosGate
 import com.vrca.app.UpdateDialog
@@ -319,7 +359,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -329,7 +369,7 @@ object UiLabScenes {
             val step = arg.substringAfter(' ', "0").trim().toIntOrNull() ?: 0
             OnboardingPrefs.saveStep(d.app, step)
         }
-        if (name in FULL) { d.overlay.value = null; d.base.value = "show:$arg" } else d.overlay.value = arg
+        if (name in FULL) { d.overlay.value = null; d.base.value = "show:$arg"; d.startRecordingFresh() } else d.overlay.value = arg
         return "show $arg"
     }
 
@@ -339,6 +379,116 @@ object UiLabScenes {
         RichBlock.Callout("warn", "Re-open the app once after updating."),
         RichBlock.Text("Thanks for testing! *More soon.*")
     )).toJson()
+
+    /**
+     * `show boot live`: a scripted boot with the checks running AT THE SAME TIME (each finishes at
+     * its own pace; VRChat sign-in is slowest; rows in dependency order), then every Status state: VRChat issues → maintenance,
+     * our servers down, Wi-Fi lost, and all coming back. For recording the state animations.
+     */
+    @Composable
+    private fun bootLive(c: (String, com.vrca.app.BootState, com.vrca.app.BootNote?, Boolean) -> com.vrca.app.BootCheck, fail: Boolean = false, demo: Boolean = false, toApp: () -> Unit = {}) {
+        val B = com.vrca.app.BootState::class.java.enumConstants!!.associateBy { it.name }
+        val N = com.vrca.app.BootNote::class.java.enumConstants!!.associateBy { it.name }
+        val V = com.vrca.app.ServiceState::class.java.enumConstants!!.associateBy { it.name }
+        val L = com.vrca.app.InternetLink::class.java.enumConstants!!.associateBy { it.name }
+        // label, starts at, finishes at, final state, final note, blocking
+        data class Row(val label: String, val start: Long, val end: Long, val state: String, val note: String?, val blocking: Boolean)
+        // `demo`: a slowed-down, all-good boot WITH the intro, for showing testers (rows tick one
+        // by one after the screen opens, then Ready).
+        val rows = if (demo) listOf(
+            Row("Device session", 2600, 3800, "Done", "Connected", true),
+            Row("Terms of Service", 3800, 4700, "Done", "Accepted", true),
+            Row("Account standing", 3800, 5400, "Done", "Good", true),
+            Row("VRChat sign-in", 2600, 7200, "Done", "SignedIn", false),
+            Row("Discord", 2600, 6300, "Done", "Connected", false),
+            Row("VRChat on this headset", 2600, 3200, "Done", "Found", false),
+            Row("Updates", 3800, 5900, "Done", "UpToDate", true)
+        ) else listOf(
+            if (fail) Row("Device session", 0, 900, "Failed", "CantConnect", true) else Row("Device session", 0, 700, "Done", "Connected", true),
+            Row("Terms of Service", if (fail) 99999 else 700, 1100, "Done", "Accepted", true),   // needs the device session
+            Row("Account standing", if (fail) 99999 else 700, 1500, "Done", "Good", true),       // needs the device session
+            Row("VRChat sign-in", 0, 2600, "Done", "SignedIn", false),
+            Row("Discord", 0, 2000, "Done", "Connected", false),
+            Row("VRChat on this headset", 0, 250, "Skipped", "NotOpen", false),
+            Row("Updates", 0, 900, "Done", "UpToDate", false)
+        )
+        // Status: at this time → internet, vrchat, servers.
+        val status = if (demo) listOf(
+            0L to Triple("Checking", "Checking", "Checking"), 2900L to Triple("WiFi", "Checking", "Checking"),
+            3900L to Triple("WiFi", "Checking", "Online"), 4600L to Triple("WiFi", "Online", "Online")
+        ) else listOf(
+            0L to Triple("Checking", "Checking", "Checking"), 300L to Triple("WiFi", "Checking", "Checking"),
+            700L to Triple("WiFi", "Checking", "Online"), 1200L to Triple("WiFi", "Online", "Online"),
+            3600L to Triple("WiFi", "Issues", "Online"), 4500L to Triple("WiFi", "Maintenance", "Online"),
+            5400L to Triple("WiFi", "Maintenance", "Down"), 6300L to Triple("None", "Maintenance", "Down"),
+            7300L to Triple("WiFi", "Online", "Online")
+        )
+        var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(0L) }
+        androidx.compose.runtime.LaunchedEffect(Unit) { while (now < 12000) { kotlinx.coroutines.delay(50); now += 50 } }
+        val shownRows = rows.filter { com.vrca.BuildConfig.IS_HEADSET_BUILD || it.label != "VRChat on this headset" }
+        val checks = shownRows.map { r ->
+            when {
+                now < r.start -> c(r.label, B["Waiting"]!!, null, r.blocking)
+                now < r.end -> c(r.label, B["Working"]!!, null, r.blocking)
+                else -> c(r.label, B[r.state]!!, r.note?.let { N[it] }, r.blocking)
+            }
+        }
+        val (net, vrc, srv) = status.last { it.first <= now }.second
+        com.vrca.app.BootScreen(
+            checks,
+            com.vrca.app.BootStatus(L[net]!!, if (net == "WiFi") 240 else 0, V[vrc]!!, V[srv]!!),
+            error = if (fail && now >= 900) "Can't connect" else null, retryInSec = if (fail && now >= 900) 5 else null,
+            onContinue = if (fail && now >= 900) ({}) else null, playIntro = demo,
+            // demo: after Ready, the way out (logo into the top bar), then the app itself.
+            exit = demo && now >= 8100, exitToTopBar = com.vrca.BuildConfig.IS_HEADSET_BUILD, onExited = toApp,
+            backdrop = com.vrca.app.BootBackdrop.Lanes, userName = "Ashoska"
+        )
+    }
+
+    /** `show boot [mid|error|done|incident|updated|intro] [none]`: a sample state + backdrop. */
+    @Composable
+    private fun bootSample(rest: String, toApp: () -> Unit = {}) {
+        val I = androidx.compose.material.icons.Icons.Filled
+        val icons = mapOf(
+            "Device session" to com.vrca.app.BootIcons.DeviceSession, "Terms of Service" to com.vrca.app.BootIcons.Terms,
+            "Account standing" to com.vrca.app.BootIcons.Account, "VRChat sign-in" to com.vrca.app.BootIcons.VrchatSignIn,
+            "Discord" to androidx.compose.ui.graphics.vector.ImageVector.vectorResource(com.vrca.R.drawable.ic_discord),
+            "VRChat on this headset" to com.vrca.app.BootIcons.VrchatHere, "Updates" to com.vrca.app.BootIcons.Updates
+        )
+        fun c(l: String, st: com.vrca.app.BootState, d: com.vrca.app.BootNote? = null, b: Boolean = false) = com.vrca.app.BootCheck(l, st, d, b, icons[l])
+        val v = rest.substringBefore(' ').ifBlank { "mid" }
+        val backdrop = if (rest.substringAfter(' ', "") == "none") com.vrca.app.BootBackdrop.None else com.vrca.app.BootBackdrop.Lanes
+        val Nt = com.vrca.app.BootNote::class.java.enumConstants!!.associateBy { it.name }
+        // [Device session, Terms, Account standing, VRChat sign-in, Discord, headset, Updates] as State:Note
+        fun rows(vararg s: String) = listOf("Device session", "Terms of Service", "Account standing", "VRChat sign-in", "Discord", "VRChat on this headset", "Updates")
+            .mapIndexed { n, l ->
+                val (st, note) = (s[n] + ":").split(":")
+                c(l, com.vrca.app.BootState.valueOf(st), Nt[note], n in 0..2)
+            }.filter { com.vrca.BuildConfig.IS_HEADSET_BUILD || it.label != "VRChat on this headset" }
+        val checks = when (v) {
+            "error" -> rows("Failed:CantConnect", "Waiting", "Waiting", "Working", "Done:Connected", "Skipped:NotOpen", "Done:UpToDate")
+            "signin" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Failed:SignInNeeded", "Skipped:Off", "Done:Found", "Done:UpToDate")
+            "vrcdown" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Warn:VrchatIssues", "Skipped:Off", "Done:Found", "Done:UpToDate")
+            "done", "incident", "updated", "offline" -> rows("Done:Connected", "Done:Accepted", "Done:Good", "Done:SignedIn", "Done:Connected", "Done:Found", "Done:UpToDate")
+            else -> rows("Done:Connected", "Done:Accepted", "Working", "Working", "Working", "Skipped:NotOpen", "Done:UpToDate")
+        }
+        if (v == "live" || v == "livefail" || v == "demo") { bootLive(::c, fail = v == "livefail", demo = v == "demo", toApp = toApp); return }
+        val status = com.vrca.app.BootStatus(
+            internet = if (v == "offline") com.vrca.app.InternetLink.None else com.vrca.app.InternetLink.WiFi,
+            internetMbps = if (v == "offline") 0 else 240,
+            vrchat = when (v) { "incident", "vrcdown" -> com.vrca.app.ServiceState.Issues; "mid" -> com.vrca.app.ServiceState.Checking; else -> com.vrca.app.ServiceState.Online },
+            servers = when (v) { "mid" -> com.vrca.app.ServiceState.Checking; "error" -> com.vrca.app.ServiceState.Down; else -> com.vrca.app.ServiceState.Online }
+        )
+        com.vrca.app.BootScreen(
+            checks, status,
+            error = if (v == "error") "Couldn't reach the server" else null,
+            retryInSec = if (v == "error") 5 else null,
+            onContinue = if (v == "error") ({}) else null,
+            playIntro = v == "intro",
+            backdrop = backdrop, userName = "Ashoska",
+            onSignIn = if (v == "signin") ({}) else null
+        )
+    }
 
     @Composable
     fun Root(d: UiLabDriver) {
@@ -350,6 +500,7 @@ object UiLabScenes {
                 else -> VrcaScreen(chatboxViewModel = d.vm, discordInvite = "https://discord.gg/example")
             }
             d.overlay.value?.let { Overlay(d, it) }
+            com.vrca.app.BootRevealOverlay()
         }
     }
 
@@ -358,10 +509,15 @@ object UiLabScenes {
         val name = arg.substringBefore(' ')
         val rest = arg.substringAfter(' ', "")
         when (name) {
-            "boot" -> BootstrapScreen(
-                working = rest != "error", error = if (rest == "error") "Couldn't reach the server. Check your connection." else null,
-                onRetry = {}, phase = if (rest == "2") 2 else 1, accountChecked = rest == "done"
-            )
+            "boot" -> bootSample(rest) { com.vrca.app.BootReveal.start(withLogo = com.vrca.BuildConfig.IS_HEADSET_BUILD); d.base.value = "screen" }
+            // The REAL headset boot runner (its checks run against the lab, so it shows what fails offline).
+            "headsetboot" -> {
+                // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
+                // sign-in row really checks the session instead of leaving it to the tutorial.
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                if (rest == "onboarded") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
+                com.vrca.app.AppBoot(onDone = { _ -> })
+            }
             "crash" -> CrashScreen(
                 crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",
                 onClear = {}, onContinue = {}

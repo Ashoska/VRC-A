@@ -83,9 +83,6 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
         // previous (possibly paused) track immediately instead of blanking.
         com.vrca.nowplaying.NowPlayingState.attach(applicationContext)
 
-        // Lifetime chatbox-send counter (boot screen stat).
-        ChatboxStats.attach(applicationContext)
-
         // "In VRChat" uptime timer (Home uptime label) — restore across a kill
         // within the grace window, like the Discord RPC counter.
         com.vrca.vrchat.VrchatUptime.attach(applicationContext)
