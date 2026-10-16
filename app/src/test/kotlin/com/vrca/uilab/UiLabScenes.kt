@@ -425,7 +425,7 @@ object UiLabScenes {
             checks,
             com.vrca.app.BootStatus(L[net]!!, if (net == "WiFi") 240 else 0, V[vrc]!!, V[srv]!!),
             error = null, retryInSec = null, onContinue = null, playIntro = false,
-            backdrop = com.vrca.app.BootBackdrop.Lanes
+            backdrop = com.vrca.app.BootBackdrop.Lanes, userName = "Ashoska"
         )
     }
 
@@ -467,7 +467,7 @@ object UiLabScenes {
             retryInSec = if (v == "error") 5 else null,
             onContinue = if (v == "error") ({}) else null,
             playIntro = v == "intro",
-            backdrop = backdrop
+            backdrop = backdrop, userName = "Ashoska"
         )
     }
 

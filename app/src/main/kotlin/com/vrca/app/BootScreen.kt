@@ -244,7 +244,9 @@ fun BootScreen(
     /** Open on the logo alone, big and centred, then glide it into place as the panels arrive. */
     playIntro: Boolean = true,
     /** The back wall's decoration (BootBackdrop.kt); faded in with the intro. */
-    backdrop: BootBackdrop = BootBackdrop.Lanes
+    backdrop: BootBackdrop = BootBackdrop.Lanes,
+    /** The VRChat display name for the checklist's "Welcome back" title; null before sign-in. */
+    userName: String? = null
 ) {
     val working = checks.any { it.state == BootState.Working }
     // Intro, in three beats: the logo fades/grows in at the centre, holds, then settles up into
@@ -359,7 +361,7 @@ fun BootScreen(
                         }
                     }
                     Unfold({ panelL.value }, Modifier.weight(1.15f)) {
-                        LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxWidth(), partsL.value, roomy = true)
+                        LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxWidth(), partsL.value, roomy = true, userName = userName)
                     }
                 }
                 AnimatedVisibility(error != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
@@ -394,7 +396,7 @@ fun BootScreen(
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
                         Unfold({ panelL.value }, Modifier.fillMaxWidth().height(330.dp)) {
-                            LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxSize(), partsL.value)
+                            LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxSize(), partsL.value, userName = userName)
                         }
                         Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
                             StatusPanel(status, Modifier.fillMaxWidth(), partsR.value)
@@ -508,7 +510,9 @@ private fun Unfold(progress: () -> Float, modifier: Modifier, content: @Composab
                 val line = (p / LINE_SHARE).coerceIn(0f, 1f)
                 val open = ((p - LINE_SHARE) / (1f - LINE_SHARE)).coerceIn(0f, 1f)
                 scaleX = line
-                alpha = line * (1f - open)
+                // Gone within the first fifth of the opening: fading over the whole opening left a
+                // purple line lingering across the middle of the half-open panel.
+                alpha = line * (1f - open * 5f).coerceAtLeast(0f)
             },
             contentAlignment = Alignment.Center
         ) {
@@ -531,34 +535,32 @@ private fun Modifier.widenIn(a: Float) = graphicsLayer {
 }
 
 /**
- * The checklist's header: a badge + title that say where boot is as a whole (Starting up → Ready,
- * or Needs attention), a count chip, and one bar segment per check in row order. Segments take
- * their row's colour; a running one breathes, so the bar shows what's still going at a glance.
+ * The checklist's header: "Welcome back, <VRChat name>" (just "Welcome back" before sign-in), a
+ * count chip coloured by how boot is going (accent while running, green when ready, red on a
+ * failure), and one bar segment per check in row order. Segments take their row's colour; a
+ * running one breathes, so the bar shows what's still going at a glance. VRChat names are at most
+ * 15 characters, so the title always fits one line.
  */
 @Composable
-private fun BootHeader(checks: List<BootCheck>) {
+private fun BootHeader(checks: List<BootCheck>, userName: String?) {
     val accent = MaterialTheme.colorScheme.primary
-    val failed = checks.any { it.state == BootState.Failed }
-    val done = checks.all { it.state in Settled }
     val finished = checks.count { it.state in Settled }
-    val (title, icon, target) = when {
-        failed -> Triple("Needs attention", Icons.Filled.PriorityHigh, GremlinColors.Negative)
-        done -> Triple("Ready", Icons.Filled.Check, GremlinColors.Positive)
-        else -> Triple("Starting up", Icons.Filled.RocketLaunch, accent)
+    val target = when {
+        checks.any { it.state == BootState.Failed } -> GremlinColors.Negative
+        checks.all { it.state in Settled } -> GremlinColors.Positive
+        else -> accent
     }
     val tone by animateColorAsState(target, label = "headerTone")
     val pulse by rememberInfiniteTransition(label = "segPulse").animateFloat(
         0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "segPulseA"
     )
     Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(30.dp).background(tone.copy(alpha = 0.16f), RoundedCornerShape(9.dp)), contentAlignment = Alignment.Center) {
-                Crossfade(icon, label = "headerIcon") { Icon(it, null, tint = tone, modifier = Modifier.size(18.dp)) }
-            }
-            Spacer(Modifier.width(10.dp))
-            Crossfade(title, Modifier.weight(1f), label = "headerTitle") {
-                Text(it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text, maxLines = 1)
-            }
+        Row(Modifier.height(30.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (userName.isNullOrBlank()) "Welcome back" else "Welcome back, $userName",
+                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+            )
             Text(
                 "$finished/${checks.size}",
                 style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
@@ -610,12 +612,13 @@ private fun LoadingPanel(
     modifier: Modifier,
     reveal: Float = 1f,
     /** Headset right column: bigger rows, more space between, and the panel wraps its rows. */
-    roomy: Boolean = false
+    roomy: Boolean = false,
+    userName: String? = null
 ) {
     val pieces = checks.size + 2 // the header, each check, then the buttons
     Layer(modifier) {
         Column(Modifier.then(if (roomy) Modifier.fillMaxWidth() else Modifier.fillMaxSize()).padding(horizontal = 18.dp, vertical = 16.dp)) {
-            Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { BootHeader(checks) }
+            Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { BootHeader(checks, userName) }
             Spacer(Modifier.height(14.dp))
             Column(if (roomy) Modifier else Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (roomy) 8.dp else 4.dp)) {
                 checks.forEachIndexed { i, c ->
