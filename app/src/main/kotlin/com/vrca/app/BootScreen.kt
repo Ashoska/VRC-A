@@ -87,7 +87,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.AlignmentLine
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.VerticalAlignmentLine
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -300,7 +303,8 @@ fun BootScreen(
                     }
                 }
                 AnimatedVisibility(error != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                    // The pill's centre sits on the centre of the gap between the two panels.
+                    // The pill's seam (where Retry meets Continue anyway) sits on the centre of the gap
+                    // between the two panels: Retry under the left one, Continue under the right.
                     Layout(
                         content = { ActionPill(retryInSec, onRetry, onContinue) },
                         modifier = Modifier.fillMaxWidth().padding(top = 20.dp)
@@ -309,7 +313,8 @@ fun BootScreen(
                         val gap = WIDE_GAP.roundToPx()
                         val gapCentre = ((constraints.maxWidth - gap) * 0.85f / 2f + gap / 2f).toInt()
                         layout(constraints.maxWidth, pill.height) {
-                            pill.place((gapCentre - pill.width / 2).coerceIn(0, constraints.maxWidth - pill.width), 0)
+                            val seam = pill[PillSeam].takeIf { it != AlignmentLine.Unspecified } ?: (pill.width / 2)
+                            pill.place((gapCentre - seam).coerceIn(0, constraints.maxWidth - pill.width), 0)
                         }
                     }
                 }
@@ -690,7 +695,7 @@ private fun ActionPill(retryInSec: Int?, onRetry: () -> Unit, onContinue: (() ->
     Layer(Modifier.height(50.dp), shape = CircleShape, color = GremlinColors.Raised, drop = 4.dp) {
         Row(Modifier.fillMaxHeight().padding(5.dp), verticalAlignment = Alignment.CenterVertically) {
             Row(
-                Modifier.fillMaxHeight().clip(CircleShape).background(accent).clickable(onClick = onRetry).padding(start = 8.dp, end = 20.dp),
+                Modifier.reportSeam().fillMaxHeight().clip(CircleShape).background(accent).clickable(onClick = onRetry).padding(start = 8.dp, end = 20.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
@@ -716,4 +721,12 @@ private fun ActionPill(retryInSec: Int?, onRetry: () -> Unit, onContinue: (() ->
             }
         }
     }
+}
+
+/** The x where the pill's Retry half ends, so the pill can be lined up by its seam. */
+private val PillSeam = VerticalAlignmentLine(::minOf)
+
+private fun Modifier.reportSeam() = layout { measurable, constraints ->
+    val p = measurable.measure(constraints)
+    layout(p.width, p.height, mapOf(PillSeam to p.width)) { p.place(0, 0) }
 }
