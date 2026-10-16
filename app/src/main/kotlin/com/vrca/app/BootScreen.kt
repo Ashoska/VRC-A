@@ -43,6 +43,13 @@ import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
@@ -590,8 +597,7 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
     val accent = MaterialTheme.colorScheme.primary
     val tone = check.state.tone(accent)
     val dim = check.state == BootState.Waiting
-    val active = check.state == BootState.Working || check.state == BootState.Failed
-    val edge by animateColorAsState(if (active) tone.copy(alpha = 0.7f) else Color.Transparent, label = "tileEdge")
+    val edge = rowEdge(check.state.mark(), tone)
     Row(
         modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
             .background(if (dim) GremlinColors.Card.copy(alpha = 0.5f) else GremlinColors.Card)
@@ -630,50 +636,109 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
             )
             Spacer(Modifier.width(10.dp))
         }
-        BootStateMark(check.state)
+        StateMark(check.state.mark())
     }
 }
 
+/** The state symbols, shared by check rows and Status rows so both panels speak one language. */
+private enum class Mark { Waiting, Working, Done, Warn, Maintenance, Failed, Skipped }
+
+private fun BootState.mark(): Mark = when (this) {
+    BootState.Waiting -> Mark.Waiting
+    BootState.Working, BootState.Background -> Mark.Working
+    BootState.Done -> Mark.Done
+    BootState.Warn -> Mark.Warn
+    BootState.Failed -> Mark.Failed
+    BootState.Skipped -> Mark.Skipped
+}
+
+private fun ServiceState.mark(): Mark = when (this) {
+    ServiceState.Checking -> Mark.Working
+    ServiceState.Online -> Mark.Done
+    ServiceState.Issues -> Mark.Warn
+    ServiceState.Maintenance -> Mark.Maintenance
+    ServiceState.Down -> Mark.Failed
+}
+
+/**
+ * A state symbol. Changing state swaps it: the old one shrinks and fades out while the new one
+ * springs in with a small overshoot, so every change is seen without anything moving the row.
+ */
 @Composable
-private fun BootStateMark(state: BootState) {
+private fun StateMark(mark: Mark) {
     val accent = MaterialTheme.colorScheme.primary
-    // Settled marks pop in with a small overshoot.
-    val pop by animateFloatAsState(
-        if (state in Settled || state == BootState.Failed) 1f else 0.6f,
-        spring(dampingRatio = Spring.DampingRatioMediumBouncy), label = "pop"
-    )
-    Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-        when (state) {
-            BootState.Working, BootState.Background -> CircularProgressIndicator(
-                modifier = Modifier.size(15.dp), strokeWidth = 2.dp, color = state.tone(accent)
-            )
-            BootState.Waiting -> Box(Modifier.size(7.dp).background(GremlinColors.Raised, CircleShape))
-            else -> {
-                val icon = when (state) {
-                    BootState.Done -> Icons.Filled.Check
-                    BootState.Warn -> Icons.Filled.PriorityHigh
-                    BootState.Failed -> Icons.Filled.Close
-                    else -> Icons.Filled.Remove
-                }
-                val fill = if (state == BootState.Skipped) GremlinColors.Raised else state.tone(accent)
-                Box(
-                    Modifier.size(19.dp).scale(pop).background(fill, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        icon, null, modifier = Modifier.size(13.dp),
-                        tint = if (state == BootState.Skipped) GremlinColors.TextMuted else GremlinColors.Backdrop
-                    )
+    AnimatedContent(
+        mark,
+        transitionSpec = {
+            (scaleIn(spring(dampingRatio = 0.45f, stiffness = Spring.StiffnessMediumLow), initialScale = 0.3f) + fadeIn(tween(120))) togetherWith
+                (scaleOut(tween(140), targetScale = 0.3f) + fadeOut(tween(140)))
+        },
+        contentAlignment = Alignment.Center,
+        label = "stateMark"
+    ) { m ->
+        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
+            when (m) {
+                Mark.Waiting -> Box(Modifier.size(7.dp).background(GremlinColors.Raised, CircleShape))
+                Mark.Working -> CircularProgressIndicator(modifier = Modifier.size(15.dp), strokeWidth = 2.dp, color = accent)
+                else -> {
+                    val (icon, fill) = when (m) {
+                        Mark.Done -> Icons.Filled.Check to GremlinColors.Positive
+                        Mark.Warn -> Icons.Filled.PriorityHigh to GremlinColors.Caution
+                        Mark.Maintenance -> Icons.Filled.Build to GremlinColors.Caution
+                        Mark.Failed -> Icons.Filled.Close to GremlinColors.Negative
+                        else -> Icons.Filled.Remove to GremlinColors.Raised
+                    }
+                    Box(Modifier.size(19.dp).background(fill, CircleShape), contentAlignment = Alignment.Center) {
+                        Icon(
+                            icon, null, modifier = Modifier.size(if (m == Mark.Maintenance) 11.dp else 13.dp),
+                            tint = if (m == Mark.Skipped) GremlinColors.TextMuted else GremlinColors.Backdrop
+                        )
+                    }
                 }
             }
         }
     }
 }
 
+/**
+ * A row's outline: a steady [tone] edge while it needs attention, and a one-off flash in [tone]
+ * that fades out when it lands on a good result (so "it worked" is felt, then gets out of the way).
+ */
+@Composable
+private fun rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean = true): Color {
+    val flash = remember { Animatable(0f) }
+    var last by remember { mutableStateOf(mark) }
+    LaunchedEffect(mark) {
+        if (mark == Mark.Done && last != Mark.Done) {
+            flash.snapTo(0.8f)
+            flash.animateTo(0f, tween(700, easing = FastOutSlowInEasing))
+        }
+        last = mark
+    }
+    val steady by animateColorAsState(
+        when (mark) {
+            Mark.Working -> if (edgeWhileWorking) tone.copy(alpha = 0.7f) else Color.Transparent
+            Mark.Warn, Mark.Maintenance, Mark.Failed -> tone.copy(alpha = 0.6f)
+            else -> Color.Transparent
+        },
+        label = "rowEdge"
+    )
+    return if (flash.value > 0f) GremlinColors.Positive.copy(alpha = flash.value) else steady
+}
+
 /** One service in the Status panel: icon, name, its fixed state word and a coloured dot. Built like a check row. */
 @Composable
-private fun ServiceRow(icon: ImageVector, name: String, text: String, tone: Color, warn: Boolean, modifier: Modifier, height: Dp) {
-    val edge by animateColorAsState(if (warn) tone.copy(alpha = 0.6f) else Color.Transparent, label = "serviceEdge")
+private fun ServiceRow(icon: ImageVector, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp) {
+    val target = when (mark) {
+        Mark.Done -> GremlinColors.Positive
+        Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
+        Mark.Failed -> GremlinColors.Negative
+        else -> GremlinColors.Inactive
+    }
+    val tone by animateColorAsState(target, label = "serviceTone")
+    val warn = mark == Mark.Warn || mark == Mark.Maintenance || mark == Mark.Failed
+    // No outline while just checking: three outlined rows at once on every open read as alarm.
+    val edge = rowEdge(mark, tone, edgeWhileWorking = false)
     Row(
         modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
             .background(GremlinColors.Card)
@@ -681,27 +746,18 @@ private fun ServiceRow(icon: ImageVector, name: String, text: String, tone: Colo
             .padding(start = 10.dp, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(icon, null, tint = tone, modifier = Modifier.size(17.dp))
+        Crossfade(icon, label = "serviceIcon") { Icon(it, null, tint = tone, modifier = Modifier.size(17.dp)) }
         Spacer(Modifier.width(10.dp))
         Text(
             name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.Text,
             maxLines = 1, modifier = Modifier.weight(1f)
         )
         Spacer(Modifier.width(10.dp))
-        Text(
-            text, style = MaterialTheme.typography.bodySmall,
-            color = if (warn) tone else GremlinColors.TextMuted, maxLines = 1
-        )
+        val textColor by animateColorAsState(if (warn) target else GremlinColors.TextMuted, label = "serviceText")
+        Crossfade(text, label = "serviceText") { Text(it, style = MaterialTheme.typography.bodySmall, color = textColor, maxLines = 1) }
         Spacer(Modifier.width(10.dp))
-        Box(Modifier.size(9.dp).background(tone, CircleShape))
+        StateMark(mark)
     }
-}
-
-private fun ServiceState.tone(): Color = when (this) {
-    ServiceState.Checking -> GremlinColors.Inactive
-    ServiceState.Online -> GremlinColors.Positive
-    ServiceState.Issues, ServiceState.Maintenance -> GremlinColors.Caution
-    ServiceState.Down -> GremlinColors.Negative
 }
 
 /** Is VRChat up, and are our own servers up. Wraps its rows (no fixed height). */
@@ -713,15 +769,15 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 val net = status.internet
                 ServiceRow(
-                    Icons.Filled.Wifi, "Internet",
+                    if (net == InternetLink.None) Icons.Filled.WifiOff else Icons.Filled.Wifi, "Internet",
                     if (status.internetMbps > 0 && net != InternetLink.None && net != InternetLink.Checking)
                         "${net.text} · ${status.internetMbps.coerceAtMost(9999)} Mbps" else net.text,
                     when (net) {
-                        InternetLink.Checking -> GremlinColors.Inactive
-                        InternetLink.None -> GremlinColors.Negative
-                        else -> GremlinColors.Positive
+                        InternetLink.Checking -> Mark.Working
+                        InternetLink.None -> Mark.Failed
+                        else -> Mark.Done
                     },
-                    warn = net == InternetLink.None, Modifier.widenIn(stagger(reveal, 0, 3)), rowHeight
+                    Modifier.widenIn(stagger(reveal, 0, 3)), rowHeight
                 )
                 for ((i, row) in listOf(
                     Triple(Icons.Filled.Public, "VRChat", status.vrchat),
@@ -729,11 +785,7 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
                     Triple(Icons.Filled.Dns, "VRC-A servers", status.servers)
                 ).withIndex()) {
                     val (icon, name, state) = row
-                    ServiceRow(
-                        icon, name, state.text, state.tone(),
-                        warn = state != ServiceState.Online && state != ServiceState.Checking,
-                        Modifier.widenIn(stagger(reveal, 1 + i, 3)), rowHeight
-                    )
+                    ServiceRow(icon, name, state.text, state.mark(), Modifier.widenIn(stagger(reveal, 1 + i, 3)), rowHeight)
                 }
             }
         }

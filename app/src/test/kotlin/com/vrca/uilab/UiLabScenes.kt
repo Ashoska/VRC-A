@@ -9,6 +9,8 @@ import com.vrca.app.BootState as S
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Headset
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Person
@@ -348,6 +350,49 @@ object UiLabScenes {
         RichBlock.Text("Thanks for testing! *More soon.*")
     )).toJson()
 
+    /**
+     * `show boot live`: a scripted run through every state a row can hit (checks finishing one by
+     * one, then VRChat having issues → maintenance, our servers going down, Wi-Fi dropping, and all
+     * coming back), for recording the state animations.
+     */
+    @Composable
+    private fun bootLive(c: (String, com.vrca.app.BootState, com.vrca.app.BootNote?, Boolean) -> com.vrca.app.BootCheck) {
+        val W = com.vrca.app.BootState.Waiting; val R = com.vrca.app.BootState.Working; val D = com.vrca.app.BootState.Done
+        val K = com.vrca.app.BootState.Skipped
+        val N = com.vrca.app.BootNote::class.java.enumConstants!!.associateBy { it.name }
+        val V = com.vrca.app.ServiceState::class.java.enumConstants!!.associateBy { it.name }
+        val L = com.vrca.app.InternetLink::class.java.enumConstants!!.associateBy { it.name }
+        val labels = listOf("Server session", "VRChat sign-in", "Account standing", "VRChat connection", "VRChat on this headset", "Updates")
+        // Each step: check states, check notes, internet, Mbps, vrchat, servers; then how long it holds.
+        data class Step(val st: List<com.vrca.app.BootState>, val notes: List<String?>, val net: String, val mbps: Int, val vrc: String, val srv: String, val ms: Long)
+        val none = listOf<String?>(null, null, null, null, null, null)
+        val steps = listOf(
+            Step(listOf(W, W, W, W, W, W), none, "Checking", 0, "Checking", "Checking", 500),
+            Step(listOf(R, W, W, W, W, W), none, "WiFi", 240, "Checking", "Checking", 500),
+            Step(listOf(D, R, W, W, W, W), none, "WiFi", 240, "Checking", "Online", 500),
+            Step(listOf(D, D, R, W, W, W), listOf(null, "SignedIn", null, null, null, null), "WiFi", 240, "Online", "Online", 500),
+            Step(listOf(D, D, D, R, W, W), listOf(null, "SignedIn", "Good", "Connecting", null, null), "WiFi", 240, "Online", "Online", 500),
+            Step(listOf(D, D, D, D, K, R), listOf(null, "SignedIn", "Good", "Online", "NotOpen", null), "WiFi", 240, "Online", "Online", 500),
+            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "WiFi", 240, "Online", "Online", 900),
+            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "WiFi", 240, "Issues", "Online", 900),
+            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "WiFi", 240, "Maintenance", "Online", 900),
+            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "WiFi", 240, "Maintenance", "Down", 900),
+            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "None", 0, "Maintenance", "Down", 1000),
+            Step(listOf(D, D, D, D, K, D), listOf(null, "SignedIn", "Good", "Online", "NotOpen", "UpToDate"), "WiFi", 240, "Online", "Online", 1500)
+        )
+        var i by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            for (k in steps.indices) { i = k; kotlinx.coroutines.delay(steps[k].ms) }
+        }
+        val s = steps[i]
+        com.vrca.app.BootScreen(
+            labels.mapIndexed { n, l -> c(l, s.st[n], s.notes[n]?.let { N[it] }, n == 0 || n == 2) },
+            com.vrca.app.BootStatus(L[s.net]!!, s.mbps, V[s.vrc]!!, V[s.srv]!!),
+            error = null, retryInSec = null, onContinue = null, playIntro = false,
+            backdrop = com.vrca.app.BootBackdrop.Lanes
+        )
+    }
+
     /** `show boot [mid|error|done|incident|updated|intro] [none]`: a sample state + backdrop. */
     @Composable
     private fun bootSample(rest: String) {
@@ -373,6 +418,7 @@ object UiLabScenes {
                 c("Account standing", S.Working, b = true), c("VRChat connection", S.Working, com.vrca.app.BootNote.Connecting),
                 c("VRChat on this headset", S.Skipped, com.vrca.app.BootNote.NotOpen), c("Updates", S.Waiting))
         }
+        if (v == "live") { bootLive(::c); return }
         val status = com.vrca.app.BootStatus(
             internet = if (v == "offline") com.vrca.app.InternetLink.None else com.vrca.app.InternetLink.WiFi,
             internetMbps = if (v == "offline") 0 else 240,
