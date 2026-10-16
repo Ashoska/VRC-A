@@ -511,7 +511,13 @@ object UiLabScenes {
         when (name) {
             "boot" -> bootSample(rest) { com.vrca.app.BootReveal.start(withLogo = true); d.base.value = "screen" }
             // The REAL headset boot runner (its checks run against the lab, so it shows what fails offline).
-            "headsetboot" -> com.vrca.app.HeadsetBoot(onDone = { _ -> })
+            "headsetboot" -> {
+                // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
+                // sign-in row really checks the session instead of leaving it to the tutorial.
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                if (rest == "onboarded") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
+                com.vrca.app.HeadsetBoot(onDone = { _ -> })
+            }
             "crash" -> CrashScreen(
                 crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",
                 onClear = {}, onContinue = {}
