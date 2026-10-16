@@ -701,11 +701,13 @@ fun VrcaScreen(
                         // Headset: the VRC-A logo instead of the words (UI revamp, user ask).
                         if (BuildConfig.IS_HEADSET_BUILD) {
                             Image(
-                                bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(R.drawable.vrca_logo),
+                                bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(R.drawable.vrca_logo_bar),
                                 contentDescription = "VRC-A",
                                 // High: the 512px logo's thin strokes broke up when shrunk with the default filter.
                                 filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
-                                modifier = Modifier.size(52.dp)
+                                // vrca_logo_bar = vrca_logo cropped to the drawing (the original is ~35% empty margin),
+                                // so 56dp of the 64dp bar is all logo.
+                                modifier = Modifier.height(56.dp)
                             )
                         } else {
                             Text(if (BuildConfig.IS_ADMIN_BUILD) "VRC-A (ADMIN)" else "VRC-A")
