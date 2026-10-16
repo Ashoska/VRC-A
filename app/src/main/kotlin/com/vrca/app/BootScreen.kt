@@ -274,10 +274,10 @@ fun BootScreen(
                         Modifier.weight(0.85f),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
+                        // Just the logo up here (user: no "VRChat Assistant" title or status pill;
+                        // the checklist already shows how boot is going).
                         logo(WIDE_LOGO_HEIGHT)
-                        Spacer(Modifier.height(16.dp))
-                        nameAndPill()
-                        Spacer(Modifier.height(24.dp))
+                        Spacer(Modifier.height(28.dp))
                         Unfold({ panelR.value }, Modifier.fillMaxWidth().height(250.dp)) {
                             StatusPanel(status, Modifier.fillMaxSize(), partsR.value)
                         }
