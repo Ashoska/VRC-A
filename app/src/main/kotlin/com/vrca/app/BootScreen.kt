@@ -66,6 +66,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.vrca.BuildConfig
 import com.vrca.ui.theme.GremlinColors
 
@@ -153,32 +167,78 @@ fun BootScreen(
     error: String? = null,
     retryInSec: Int? = null,
     onRetry: () -> Unit = {},
-    onContinue: (() -> Unit)? = null
+    onContinue: (() -> Unit)? = null,
+    /** Open on the logo alone, big and centred, then glide it into place as the panels arrive. */
+    playIntro: Boolean = true
 ) {
     val working = checks.any { it.state == BootState.Working }
+    // Intro, in three beats: the logo fades/grows in at the centre, holds, then settles up into
+    // the layout while everything else rises in underneath it. Skipped = all at their end values.
+    val logoIn = remember { Animatable(if (playIntro) 0f else 1f) }
+    val settle = remember { Animatable(if (playIntro) 0f else 1f) }
+    val contentIn = remember { Animatable(if (playIntro) 0f else 1f) }
+    var rootCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var logoCenterY by remember { mutableStateOf(Float.NaN) }
+    // Start once the logo's final slot is known, so the first frame already has it at the centre.
+    val placed = !logoCenterY.isNaN()
+    LaunchedEffect(placed) {
+        if (!playIntro || !placed || logoIn.value > 0f) return@LaunchedEffect
+        logoIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
+        delay(420)
+        launch { settle.animateTo(1f, tween(760, easing = FastOutSlowInEasing)) }
+        delay(300)
+        contentIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
+    }
+    val rise = with(LocalDensity.current) { 22.dp.toPx() }
+    val contentLayer = Modifier.graphicsLayer {
+        alpha = contentIn.value
+        translationY = rise * (1f - contentIn.value)
+    }
     Surface(color = GremlinColors.Backdrop) {
-        BoxWithConstraints(Modifier.fillMaxSize().background(GremlinColors.Backdrop)) {
-            BackdropLayers()
+        BoxWithConstraints(
+            Modifier.fillMaxSize().background(GremlinColors.Backdrop).onGloballyPositioned { rootCoords = it }
+        ) {
+            Box(Modifier.matchParentSize().graphicsLayer { alpha = contentIn.value }) { BackdropLayers() }
             val wide = maxWidth >= 720.dp
+            val boxHeightPx = constraints.maxHeight.toFloat()
             Column(
                 Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 18.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                LogoPlate(working)
-                Spacer(Modifier.height(14.dp))
-                Text(
-                    "VRChat Assistant",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = GremlinColors.Text
+                BootLogo(
+                    breathing = working && settle.value >= 1f,
+                    modifier = Modifier
+                        .onGloballyPositioned { c ->
+                            rootCoords?.let { r ->
+                                logoCenterY = r.localPositionOf(c, Offset.Zero).y + c.size.height / 2f
+                            }
+                        }
+                        .graphicsLayer {
+                            // From the screen's centre at INTRO_SCALE down to its slot at 1x.
+                            val t = settle.value
+                            val startDy = if (logoCenterY.isNaN()) 0f else boxHeightPx / 2f - logoCenterY
+                            translationY = startDy * (1f - t)
+                            val s = (INTRO_SCALE + (1f - INTRO_SCALE) * t) * (0.9f + 0.1f * logoIn.value)
+                            scaleX = s; scaleY = s
+                            alpha = logoIn.value
+                        }
                 )
-                Spacer(Modifier.height(8.dp))
-                StatusPill(checks, error)
+                Spacer(Modifier.height(14.dp))
+                Column(contentLayer, horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "VRChat Assistant",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = GremlinColors.Text
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    StatusPill(checks, error)
+                }
                 Spacer(Modifier.height(16.dp))
                 if (wide) {
                     Row(
-                        Modifier.widthIn(max = 900.dp).fillMaxWidth().height(358.dp),
+                        contentLayer.widthIn(max = 900.dp).fillMaxWidth().height(358.dp),
                         horizontalArrangement = Arrangement.spacedBy(18.dp)
                     ) {
                         LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.weight(1.2f).fillMaxHeight())
@@ -186,7 +246,7 @@ fun BootScreen(
                     }
                 } else {
                     Column(
-                        Modifier.widthIn(max = 460.dp).fillMaxWidth(),
+                        contentLayer.widthIn(max = 460.dp).fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
                         LoadingPanel(checks, error, retryInSec, onRetry, onContinue, Modifier.fillMaxWidth().height(330.dp))
@@ -198,7 +258,7 @@ fun BootScreen(
                 "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
                 style = MaterialTheme.typography.labelSmall,
                 color = GremlinColors.TextMuted.copy(alpha = 0.55f),
-                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 10.dp)
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 10.dp).then(contentLayer)
             )
         }
     }
@@ -222,29 +282,32 @@ private fun BoxScope.BackdropLayers() {
     Slab(Alignment.BottomStart, (-170).dp, 150.dp, 300.dp, 220.dp, 10f)
 }
 
+/** How big the logo starts in the intro, relative to its final size. */
+private const val INTRO_SCALE = 2.1f
+
+/**
+ * The logo on its own (no tile: a speech bubble inside a box read oddly), with a flat
+ * silhouette copy offset below it as its drop layer. Breathes softly while checks run.
+ */
 @Composable
-private fun LogoPlate(working: Boolean) {
+private fun BootLogo(breathing: Boolean, modifier: Modifier = Modifier) {
     val pulse = rememberInfiniteTransition(label = "bootPulse")
     val breath by pulse.animateFloat(
-        initialValue = 1f, targetValue = 0.7f,
+        initialValue = 1f, targetValue = 0.72f,
         animationSpec = infiniteRepeatable(tween(1300), RepeatMode.Reverse), label = "bootBreath"
     )
-    val accent = MaterialTheme.colorScheme.primary
-    Layer(
-        shape = RoundedCornerShape(26.dp),
-        color = GremlinColors.Card,
-        edge = accent.copy(alpha = 0.55f),
-        drop = 7.dp
-    ) {
-        Box(Modifier.size(width = 108.dp, height = 92.dp), contentAlignment = Alignment.Center) {
-            Image(
-                // vrca_logo_bar: the logo cropped to its drawing (the full asset is ~35% empty margin).
-                bitmap = ImageBitmap.imageResource(com.vrca.R.drawable.vrca_logo_bar),
-                contentDescription = "VRC-A",
-                filterQuality = FilterQuality.High,
-                modifier = Modifier.height(60.dp).alpha(if (working) breath else 1f)
-            )
-        }
+    // vrca_logo_bar: the logo cropped to its drawing (the full asset is ~35% empty margin).
+    val logo = ImageBitmap.imageResource(com.vrca.R.drawable.vrca_logo_bar)
+    Box(modifier) {
+        Image(
+            bitmap = logo, contentDescription = null, filterQuality = FilterQuality.High,
+            colorFilter = ColorFilter.tint(DropLayer.copy(alpha = 0.55f)),
+            modifier = Modifier.height(104.dp).offset(y = 5.dp)
+        )
+        Image(
+            bitmap = logo, contentDescription = "VRC-A", filterQuality = FilterQuality.High,
+            modifier = Modifier.height(104.dp).alpha(if (breathing) breath else 1f)
+        )
     }
 }
 

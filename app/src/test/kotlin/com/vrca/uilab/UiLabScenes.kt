@@ -382,7 +382,8 @@ object UiLabScenes {
             checks, status,
             error = if (v == "error") "Couldn't reach the server" else null,
             retryInSec = if (v == "error") 5 else null,
-            onContinue = if (v == "error") ({}) else null
+            onContinue = if (v == "error") ({}) else null,
+            playIntro = v == "intro"
         )
     }
 
