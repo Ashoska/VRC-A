@@ -438,7 +438,7 @@ object UiLabScenes {
             checks,
             com.vrca.app.BootStatus(L[net]!!, if (net == "WiFi") 240 else 0, V[vrc]!!, V[srv]!!),
             error = if (fail && now >= 900) "Can't connect" else null, retryInSec = if (fail && now >= 900) 5 else null,
-            onContinue = if (fail && now >= 900) ({}) else null, playIntro = demo,
+            playIntro = demo,
             // demo: after Ready, the way out (logo into the top bar), then the app itself.
             exit = demo && now >= 8100, exitToTopBar = com.vrca.BuildConfig.IS_HEADSET_BUILD, onExited = toApp,
             backdrop = com.vrca.app.BootBackdrop.Lanes, userName = "Ashoska"
@@ -483,7 +483,6 @@ object UiLabScenes {
             checks, status,
             error = if (v == "error") "Couldn't reach the server" else null,
             retryInSec = if (v == "error") 5 else null,
-            onContinue = if (v == "error") ({}) else null,
             playIntro = v == "intro",
             backdrop = backdrop, userName = "Ashoska",
             onSignIn = if (v == "signin") ({}) else null
