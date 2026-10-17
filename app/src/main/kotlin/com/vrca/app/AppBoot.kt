@@ -310,6 +310,9 @@ internal fun AppBoot(
             celebrate = true
             delay(READY_HOLD_MS)
             toMainApp = BuildConfig.IS_HEADSET_BUILD && mainNext
+            // The app shows through during the logo's glide (BootScreen): keep its own top-bar logo
+            // hidden until the flying one lands on that spot, so there are never two.
+            if (toMainApp) BootReveal.hideTopBarLogo.value = true
             exiting = true
         }
     }
@@ -538,6 +541,8 @@ private suspend fun fetchVrchatPlatform(): ServiceState = withContext(Dispatcher
  */
 internal object BootReveal {
     val active = mutableStateOf(false)
+    /** True while the boot screen's logo flies into the top bar over the already-visible app. */
+    val hideTopBarLogo = mutableStateOf(false)
     private val logo = mutableStateOf(false)
     val withLogo: Boolean get() = logo.value
     fun start(withLogo: Boolean) { logo.value = withLogo; active.value = true }

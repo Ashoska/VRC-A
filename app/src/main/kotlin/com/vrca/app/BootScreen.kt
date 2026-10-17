@@ -354,7 +354,16 @@ fun BootScreen(
     // screen. Retry and Sign in stay accessible.
     Box(Modifier.fillMaxSize().pointerInput(Unit) {}) {
         BoxWithConstraints(
-            Modifier.fillMaxSize().background(GremlinColors.Backdrop).onGloballyPositioned { coords[0] = it; notePlaced() }
+            Modifier.fillMaxSize()
+                // When the main app is next (already built and drawn underneath), the backdrop
+                // fades out during the second part of the logo's glide, so the logo lands on an app
+                // that's already appearing instead of on an empty panel (user's recordings showed a
+                // ~0.3 s plain dark beat between the landing and the old reveal fade).
+                .drawBehind {
+                    val a = if (exitToTopBar) 1f - ((exitP.value - REVEAL_FROM) / (1f - REVEAL_FROM)).coerceIn(0f, 1f) else 1f
+                    if (a > 0f) drawRect(GremlinColors.Backdrop.copy(alpha = a))
+                }
+                .onGloballyPositioned { coords[0] = it; notePlaced() }
         ) {
             BootBackdropLayer(backdrop, alpha = { contentIn.value * (1f - exitP.value) }, modifier = Modifier.matchParentSize())
             // Wide = the headset panel (or a tablet); a phone gets the stacked column.
@@ -514,6 +523,8 @@ private val TOP_BAR_LOGO_HEIGHT = 56.dp
 private val TOP_BAR_CENTER_Y = 32.dp
 private const val EXIT_FOLD_MS = 420
 private const val EXIT_LOGO_MS = 700
+/** Point of the logo's glide (0-1) where the backdrop starts fading to show the app. */
+private const val REVEAL_FROM = 0.35f
 
 /**
  * The logo on its own (no tile: a speech bubble inside a box read oddly), with a flat

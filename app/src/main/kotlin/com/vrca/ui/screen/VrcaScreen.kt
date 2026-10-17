@@ -95,6 +95,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -705,8 +706,11 @@ fun VrcaScreen(
                                 // same drawing the boot screen flies up into this spot.
                                 painter = com.vrca.ui.common.appLogoPainter(),
                                 contentDescription = "VRC-A",
-                                // 56dp of the 64dp bar is all logo.
-                                modifier = Modifier.height(56.dp)
+                                // 56dp of the 64dp bar is all logo. Hidden while the boot screen's
+                                // logo flies into this spot (read while drawing: no rebuild).
+                                modifier = Modifier.height(56.dp).graphicsLayer {
+                                    alpha = if (com.vrca.app.BootReveal.hideTopBarLogo.value) 0f else 1f
+                                }
                             )
                         } else {
                             Text(if (BuildConfig.IS_ADMIN_BUILD) "VRC-A (ADMIN)" else "VRC-A")
