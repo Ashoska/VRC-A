@@ -121,6 +121,17 @@ internal fun AppBoot(
     // VRChat's status-page answer, once it's in (the sign-in row needs it to judge a failure).
     suspend fun vrchatStatus(): ServiceState =
         withTimeoutOrNull(8_000L) { snapshotFlow { status.vrchat }.first { it != ServiceState.Checking } } ?: ServiceState.Issues
+    // One-time main-thread setup, done BEFORE the first frame (in this first composition, while the
+    // system's launch splash is still up) instead of when the checks start. In the user's Quest
+    // video the checklist froze ~1.3 s right as the checks began, with VRChat holding ~93% CPU.
+    // The costly first-in-process pieces on the main thread there: Firebase's first instances, and
+    // Chromium loading for the first WebView (the Discord row starts its WebView). A throwaway
+    // WebView loads Chromium now; the RPC's own WebView is then cheap to create.
+    remember {
+        runCatching { com.google.firebase.auth.FirebaseAuth.getInstance(); FirebaseFirestore.getInstance() }
+        if (discordWillStart(ctx)) runCatching { android.webkit.WebView(ctx.applicationContext).destroy() }
+        true
+    }
     val everSignedIn = remember {
         ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE).getString("auth_uid", "").orEmpty().isNotBlank()
     }
@@ -138,8 +149,9 @@ internal fun AppBoot(
     // Internet: re-read every second so plugging in / dropping Wi-Fi shows straight away.
     LaunchedEffect(Unit) {
         while (true) {
-            val (link, mbps) = internetStatus(ctx)
-            status = status.copy(internet = link, internetMbps = mbps)
+            // Off the main thread, and only written when it changed (a write rebuilds the Status card).
+            val (link, mbps) = withContext(Dispatchers.IO) { internetStatus(ctx) }
+            if (link != status.internet || mbps != status.internetMbps) status = status.copy(internet = link, internetMbps = mbps)
             delay(1000)
         }
     }
@@ -264,6 +276,8 @@ internal fun AppBoot(
             if (mainAppNext) {
                 prepareApp()
                 withTimeoutOrNull(APP_BUILD_CAP_MS) { snapshotFlow { appReadyNow }.first { it } }
+                // ...and DRAWN: its first draw (text, icons, images) is the other first-time cost.
+                repeat(2) { androidx.compose.runtime.withFrameNanos { } }
             }
             celebrate = true
             delay(READY_HOLD_MS)
@@ -374,6 +388,15 @@ private suspend fun vrchatSignIn(ctx: Context, vrchatStatus: suspend () -> Servi
 
 /** States that let boot go on. */
 private val SETTLED = setOf(BootState.Done, BootState.Warn, BootState.Skipped, BootState.Background)
+
+/** Whether the Discord row will start the RPC service (and so its WebView) this boot. */
+private fun discordWillStart(ctx: Context): Boolean {
+    if (com.vrca.discord.DiscordRpcService.isRunning) return false
+    val repo = (ctx.applicationContext as VrcaApplication).userPreferencesRepository
+    return kotlinx.coroutines.runBlocking {
+        withTimeoutOrNull(500L) { repo.discordRpcEnabled.first() && repo.discordSessionSeeded.first() }
+    } == true
+}
 
 /** Discord: skipped ("Off") when the Discord status link isn't turned on; otherwise follows it. */
 private suspend fun discord(ctx: Context, set: (BootState, BootNote?) -> Unit) {
