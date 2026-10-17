@@ -375,6 +375,9 @@ internal fun HomePage(
         )
     }
 
+    // Built over 3 frames (StagedBuild): a tab switch back to Home built every card in one frame.
+    val build = com.vrca.ui.common.rememberStagedBuild(2)
+
     if (BuildConfig.IS_HEADSET_BUILD) {
         // Headset: FILL the panel (bottom nav stays pinned) and never scroll the whole
         // page. Wide → two columns (Preview + alerts LEFT, Quick Toggles + Manual Send
@@ -401,21 +404,23 @@ internal fun HomePage(
                             Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            QuickTogglesSection(
-                                vm = vm,
-                                isBanned = isBanned,
-                                cardReorderMode = cardReorderMode,
-                                onToggleReorderMode = { cardReorderMode = it },
-                                onResetOrder = { vm.resetCardOrder() },
-                                onNavigate = onNavigate
-                            )
-                            ManualSendCard(vm = vm, isBanned = isBanned)
+                            build.Step(1) {
+                                QuickTogglesSection(
+                                    vm = vm,
+                                    isBanned = isBanned,
+                                    cardReorderMode = cardReorderMode,
+                                    onToggleReorderMode = { cardReorderMode = it },
+                                    onResetOrder = { vm.resetCardOrder() },
+                                    onNavigate = onNavigate
+                                )
+                                ManualSendCard(vm = vm, isBanned = isBanned)
+                            }
                         }
                         Column(
                             Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            InstanceRosterPanel()
+                            build.Step(2) { InstanceRosterPanel() }
                         }
                     }
                 }
@@ -467,7 +472,7 @@ internal fun HomePage(
         PageContainer {
             alertCards()
             preview(true)
-            ManualSendCard(vm = vm, isBanned = isBanned)
+            build.Step(1) { ManualSendCard(vm = vm, isBanned = isBanned) }
         }
     }
 }
