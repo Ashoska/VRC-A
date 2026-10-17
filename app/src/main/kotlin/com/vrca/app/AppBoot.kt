@@ -99,6 +99,9 @@ internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var retryIn by remember { mutableStateOf<Int?>(null) }
     var shown by remember { mutableStateOf(false) }
+    // The checks wait for the panels to start opening: the intro animates on its own (no network or
+    // device-session work fighting its first frames) and every row is seen going from Working to done.
+    var opening by remember { mutableStateOf(false) }
     var tutorialDone by remember { mutableStateOf(false) }
     var signInAttempt by remember { mutableIntStateOf(0) }
     var showLogin by remember { mutableStateOf(false) }
@@ -132,9 +135,10 @@ internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
         }
     }
     // VRChat's own status page.
-    LaunchedEffect(Unit) { status = status.copy(vrchat = fetchVrchatPlatform()) }
+    LaunchedEffect(opening) { if (opening) status = status.copy(vrchat = fetchVrchatPlatform()) }
 
-    LaunchedEffect(attempt) {
+    LaunchedEffect(attempt, opening) {
+        if (!opening) return@LaunchedEffect
         error = null
         retryIn = null
         tutorialDone = false
@@ -247,6 +251,7 @@ internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
         onRetry = { attempt++ },
         onContinue = if (everSignedIn) ({ exiting = true }) else null,
         userName = userName,
+        onOpening = { opening = true },
         onShown = { shown = true },
         exit = exiting,
         exitToTopBar = toMainApp,
