@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.imageResource
@@ -91,17 +92,25 @@ private data class RowState(val state: BootState = BootState.Waiting, val note: 
  * (sign-in, ban check, release check) plus one `config/app` read for the terms row.
  */
 @Composable
-internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
+internal fun AppBoot(
+    /** Build the app behind the boot screen now (it stays hidden until [onDone]). */
+    prepareApp: () -> Unit = {},
+    /** True once that app has been built and laid out. */
+    appReady: Boolean = false,
+    onDone: (logoInTopBar: Boolean) -> Unit
+) {
     val ctx = LocalContext.current
     val rows = remember { mutableStateListOf(*Array(Row.entries.size) { RowState() }) }
     var status by remember { mutableStateOf(BootStatus()) }
     var attempt by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     var retryIn by remember { mutableStateOf<Int?>(null) }
+    // The checks wait until the intro has finished and every row is on screen (`onShown`). Starting
+    // them as the panels began to unfold put the device-session setup and the Discord WebView on
+    // the unfold itself: on the Quest (VRChat holding ~93% CPU) the panels froze for ~1 s and the
+    // rows appeared already ticked (user video). Now the intro has the device to itself and every
+    // row is seen going from Waiting to Working to its answer.
     var shown by remember { mutableStateOf(false) }
-    // The checks wait for the panels to start opening: the intro animates on its own (no network or
-    // device-session work fighting its first frames) and every row is seen going from Working to done.
-    var opening by remember { mutableStateOf(false) }
     var tutorialDone by remember { mutableStateOf(false) }
     var signInAttempt by remember { mutableIntStateOf(0) }
     var showLogin by remember { mutableStateOf(false) }
@@ -138,14 +147,14 @@ internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
     // Fetch FIRST, then copy: `status.copy(vrchat = fetch())` reads `status` before the fetch
     // suspends and writes that stale copy back after it, wiping a servers/internet result that
     // landed meanwhile (the VRC-A servers row stuck on "Checking..." on the headset).
-    LaunchedEffect(opening) {
-        if (!opening) return@LaunchedEffect
+    LaunchedEffect(shown) {
+        if (!shown) return@LaunchedEffect
         val vrchat = fetchVrchatPlatform()
         status = status.copy(vrchat = vrchat)
     }
 
-    LaunchedEffect(attempt, opening) {
-        if (!opening) return@LaunchedEffect
+    LaunchedEffect(attempt, shown) {
+        if (!shown) return@LaunchedEffect
         error = null
         retryIn = null
         tutorialDone = false
@@ -235,20 +244,35 @@ internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
     // waits for their answer; each has its own timeout, Discord's being the longest at 25 s since
     // its hidden WebView has to load discord.com first). The hold runs from that moment, so the
     // header's Ready sweep always plays in full before the fold.
+    //
+    // Before the Ready sweep, when the main app is what opens next, the app is BUILT behind the
+    // boot screen ([prepareApp], hidden, pop-ups held) and the sweep waits for it ([appReady]).
+    // Its first build is the costly part of the hand-off (~2.4 s in the lab, the frozen panel
+    // before Home in the user's video: the app's code isn't precompiled on a sideloaded install).
+    // Done here, every row is settled and nothing on the panel is moving, so the hand-off after
+    // it is just the fold and the fade over an app that's already there.
     var exiting by remember { mutableStateOf(false) }
+    var celebrate by remember { mutableStateOf(false) }
+    val appReadyNow by rememberUpdatedState(appReady)
+    // The main app (not a terms, sign-in, first-run or ban screen) is what opens next.
+    val mainAppNext = rows[Row.Terms.ordinal].state == BootState.Done &&
+        rows[Row.Account.ordinal].note != BootNote.Restricted &&
+        VrchatAuthManager.isLoggedIn(ctx) && com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
     LaunchedEffect(blockingDone, shown) {
         if (blockingDone && shown) {
             snapshotFlow { ROWS.all { rows[it.ordinal].state in SETTLED } }.first { it }
+            if (mainAppNext) {
+                prepareApp()
+                withTimeoutOrNull(APP_BUILD_CAP_MS) { snapshotFlow { appReadyNow }.first { it } }
+            }
+            celebrate = true
             delay(READY_HOLD_MS)
             exiting = true
         }
     }
-    // The logo only flies into the top bar when the main app is what opens next; a terms, sign-in,
-    // first-run or ban screen comes first otherwise, so it just fades out there.
-    // (Headset only: the phone/admin top bar shows the name in words, not the logo.)
-    val toMainApp = exiting && BuildConfig.IS_HEADSET_BUILD && rows[Row.Terms.ordinal].state == BootState.Done &&
-        rows[Row.Account.ordinal].note != BootNote.Restricted &&
-        VrchatAuthManager.isLoggedIn(ctx) && com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
+    // The logo only flies into the top bar when the main app is what opens next; it just fades
+    // out otherwise. (Headset only: the phone/admin top bar shows the name in words, not the logo.)
+    val toMainApp = exiting && BuildConfig.IS_HEADSET_BUILD && mainAppNext
 
     androidx.compose.foundation.layout.Box {
     BootScreen(
@@ -262,8 +286,8 @@ internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
         onRetry = { attempt++ },
         onContinue = if (everSignedIn) ({ exiting = true }) else null,
         userName = userName,
-        onOpening = { opening = true },
         onShown = { shown = true },
+        celebrate = celebrate,
         exit = exiting,
         exitToTopBar = toMainApp,
         onExited = { onDone(toMainApp) },
@@ -300,6 +324,8 @@ private suspend fun <T> orNull(block: suspend () -> T): T? = try {
 
 /** How long Ready stays up before the app opens (covers the Ready sweep). */
 private const val READY_HOLD_MS = 900L
+/** Longest the Ready sweep waits for the app to be built behind the boot screen. */
+private const val APP_BUILD_CAP_MS = 6_000L
 
 /**
  * VRChat sign-in. Boot needs a working VRChat session (user rule), with one exception: when

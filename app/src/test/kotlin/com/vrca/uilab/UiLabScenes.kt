@@ -514,9 +514,19 @@ object UiLabScenes {
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.
+                // `show headsetboot full`: the whole real start as a returning user (tutorial done,
+                // terms accepted, swipe-reopened): VrcaApp's boot gate, the app built behind the boot
+                // screen before the Ready sweep, then the fold + reveal into the real app.
                 val ctx = androidx.compose.ui.platform.LocalContext.current
-                if (rest == "onboarded") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
-                com.vrca.app.AppBoot(onDone = { _ -> })
+                if (rest == "onboarded" || rest == "full") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
+                if (rest == "full") {
+                    androidx.compose.runtime.remember {
+                        com.vrca.app.TosPrefs.accept(ctx, 1_000)
+                        com.vrca.app.VrcaApplication.openedFromSwipe = true
+                        true
+                    }
+                    VrcaApp()
+                } else com.vrca.app.AppBoot(onDone = { _ -> })
             }
             "crash" -> CrashScreen(
                 crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",

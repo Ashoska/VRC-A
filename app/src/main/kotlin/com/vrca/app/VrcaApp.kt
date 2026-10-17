@@ -53,6 +53,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -199,14 +200,42 @@ private fun VrcaAppContent() {
     }
     // The boot screen (BootScreen.kt, run by AppBoot.kt) does every boot check itself, side by
     // side: the device session, terms, the ban check, the VRChat session, updates and the rest.
-    if (!bootOk) {
-        AppBoot(onDone = { toTopBar ->
-            // The app appears underneath and the boot screen's backdrop fades off it (no hard cut).
-            BootReveal.start(withLogo = toTopBar)
-            bootOk = true
-        })
-        return
+    // Once they're all in and the main app opens next, AppBoot has the app BUILT behind it
+    // ([prepared]: hidden, untouchable, dialogs held) before its Ready sweep, so the costly first
+    // build happens while nothing on the boot screen moves, not during the hand-off (the frozen
+    // panel before Home in the user's video). Same call site before and after boot, so the built
+    // app is kept, not rebuilt (its listeners attach once).
+    var prepared by remember { mutableStateOf(false) }
+    var appReady by remember { mutableStateOf(false) }
+    androidx.compose.foundation.layout.Box {
+        if (bootOk || prepared) {
+            androidx.compose.foundation.layout.Box(
+                Modifier.fillMaxSize()
+                    .graphicsLayer { alpha = if (bootOk) 1f else 0f }
+                    .onPlaced { appReady = true }
+            ) {
+                VrcaAfterBoot(warmResume = warmResume, bootOk = bootOk)
+            }
+        }
+        if (!bootOk) {
+            AppBoot(
+                prepareApp = { com.vrca.ui.common.PanelDialogHold.held.value = true; prepared = true },
+                appReady = appReady,
+                onDone = { toTopBar ->
+                    com.vrca.ui.common.PanelDialogHold.held.value = false
+                    // The app shows underneath and the boot screen's backdrop fades off it (no hard cut).
+                    BootReveal.start(withLogo = toTopBar)
+                    bootOk = true
+                }
+            )
+        }
     }
+}
+
+/** Everything after the boot gate: ban, terms, onboarding and update gates, then the app itself. */
+@Composable
+private fun VrcaAfterBoot(warmResume: Boolean, bootOk: Boolean) {
+    val ctx = LocalContext.current
 
     /* -------------------------
        Phase 1 ban check (device hash + auth UID)

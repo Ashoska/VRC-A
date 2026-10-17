@@ -74,5 +74,13 @@ fun PanelDialog(
     properties: DialogProperties = DialogProperties(),
     content: @Composable () -> Unit,
 ) {
+    // Held while the app is being built behind the boot screen: a dialog is its own window, so it
+    // would show OVER the boot screen. It appears as soon as the hold lifts (it reads the state).
+    if (PanelDialogHold.held.value) return
     Dialog(onDismissRequest = onDismissRequest, properties = properties) { PanelScaled(content) }
+}
+
+/** While [held] is true every [PanelDialog] waits (AppBoot builds the app behind its screen). */
+object PanelDialogHold {
+    val held = androidx.compose.runtime.mutableStateOf(false)
 }
