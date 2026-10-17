@@ -539,7 +539,9 @@ internal fun BootRevealOverlay() {
     if (!BootReveal.active.value) return
     val fade = remember { androidx.compose.animation.core.Animatable(1f) }
     LaunchedEffect(Unit) {
-        fade.animateTo(0f, androidx.compose.animation.core.tween(REVEAL_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        // Moves from its first frame (LinearOutSlowIn): FastOutSlowIn's slow start, after the boot
+        // screen's own exit, read as ~0.5 s of plain dark panel before Home (user's recordings).
+        fade.animateTo(0f, androidx.compose.animation.core.tween(REVEAL_MS, easing = androidx.compose.animation.core.LinearOutSlowInEasing))
         BootReveal.end()
     }
     androidx.compose.foundation.layout.Box(
@@ -551,7 +553,7 @@ internal fun BootRevealOverlay() {
     ) {
         if (BootReveal.withLogo) {
             androidx.compose.foundation.Image(
-                androidx.compose.ui.res.painterResource(com.vrca.R.drawable.vrca_logo_vector), null,
+                com.vrca.ui.common.appLogoPainter(), null,
                 modifier = androidx.compose.ui.Modifier.align(androidx.compose.ui.Alignment.TopCenter)
                     .padding(top = 4.dp).height(56.dp)
             )
@@ -559,4 +561,4 @@ internal fun BootRevealOverlay() {
     }
 }
 
-private const val REVEAL_MS = 650
+private const val REVEAL_MS = 450

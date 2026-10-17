@@ -1,5 +1,6 @@
 package com.vrca.app
 
+import kotlinx.coroutines.flow.first
 import android.app.Application
 import android.content.Context
 import android.os.Build
@@ -78,12 +79,30 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
         // Records main-thread freezes in the first 2 minutes (Settings → Debug).
         MainThreadWatch.start(applicationContext)
 
+        // Parse the logo's big vector off the main thread (~0.6 s on the Quest when the boot
+        // screen parsed it in its first frame; MainThreadWatch).
+        com.vrca.ui.common.AppLogo.preload(applicationContext)
+
         // Open the encrypted VRChat store in the background now, so it's ready by the time
         // anything asks (slow right after the headset turns on; VrchatAuthManager.getPrefs).
         com.vrca.vrchat.VrchatAuthManager.warmUp(applicationContext)
 
         // Your repo expects Context
         userPreferencesRepository = UserPreferencesRepository(applicationContext)
+
+        // Load Chromium's WebView provider off the main thread when Discord will need a WebView
+        // (~1 s on the Quest, previously all inside the boot screen's pre-first-frame warm-up).
+        // getDefaultUserAgent may be called from any thread and loads the provider.
+        Thread({
+            runCatching {
+                val wanted = kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.withTimeoutOrNull(2_000L) {
+                        userPreferencesRepository.discordRpcEnabled.first() && userPreferencesRepository.discordSessionSeeded.first()
+                    }
+                } == true
+                if (wanted) android.webkit.WebSettings.getDefaultUserAgent(applicationContext)
+            }
+        }, "vrca-webview-warm").apply { isDaemon = true }.start()
 
         // Seed the last-known NowPlaying track (as paused) BEFORE any ViewModel
         // collects NowPlayingState, so a headless revival / cold start shows the
