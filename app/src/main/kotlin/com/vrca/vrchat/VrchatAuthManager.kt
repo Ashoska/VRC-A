@@ -114,12 +114,52 @@ object VrchatAuthManager {
     // is a SharedPreferences, so one instance is safe to share across threads.
     @Volatile private var openedPrefs: android.content.SharedPreferences? = null
 
+    //
+    // The MAIN thread never waits on the Keystore for long: right after the headset turns on the
+    // Keystore can take seconds to answer (or fail), and every main-thread caller (boot launch,
+    // view-model start, login re-checks) used to retry the open itself, so the first window
+    // couldn't draw and Horizon showed "VRC-A isn't responding" until Wait (user reports, only
+    // on the auto-open at power-on). Now one background thread opens it ([warmUp] starts it at
+    // process start); the main thread waits at most [MAIN_THREAD_WAIT_MS] and otherwise gets
+    // null, the same "not ready yet" answer as a transient Keystore failure, which every caller
+    // already re-checks for.
+    private const val MAIN_THREAD_WAIT_MS = 400L
+    private val openThread = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "vrca-auth-store").apply { isDaemon = true }
+    }
+    private val pendingLock = Any()
+    @Volatile private var pendingOpen: java.util.concurrent.Future<android.content.SharedPreferences?>? = null
+
     private fun getPrefs(context: Context): android.content.SharedPreferences? {
+        openedPrefs?.let { return it }
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) return openNow(context)
+        return try {
+            startOpen(context).get(MAIN_THREAD_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun openNow(context: Context): android.content.SharedPreferences? {
         openedPrefs?.let { return it }
         synchronized(this) {
             openedPrefs?.let { return it }
             return openPrefs(context)?.also { openedPrefs = it }
         }
+    }
+
+    /** One open in flight at a time, on the background thread. */
+    private fun startOpen(context: Context): java.util.concurrent.Future<android.content.SharedPreferences?> {
+        val app = context.applicationContext
+        synchronized(pendingLock) {
+            pendingOpen?.takeIf { !it.isDone }?.let { return it }
+            return openThread.submit<android.content.SharedPreferences?> { openNow(app) }.also { pendingOpen = it }
+        }
+    }
+
+    /** Starts opening the store in the background (process start), so it's ready when asked. */
+    fun warmUp(context: Context) {
+        if (openedPrefs == null) runCatching { startOpen(context) }
     }
 
     private fun openPrefs(context: Context): android.content.SharedPreferences? {

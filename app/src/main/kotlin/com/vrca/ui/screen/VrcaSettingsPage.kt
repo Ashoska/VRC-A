@@ -407,6 +407,20 @@ internal fun SettingsPage(
                         Modifier.padding(top = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        // Freezes recorded at startup (MainThreadWatch). Read into state off the main thread.
+                        var stalls by remember { mutableStateOf("") }
+                        var stallsTick by remember { mutableStateOf(0) }
+                        androidx.compose.runtime.LaunchedEffect(stallsTick) {
+                            stalls = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.vrca.app.MainThreadWatch.read(ctx) }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Main-thread stalls (startup)", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                            androidx.compose.material3.TextButton(onClick = { com.vrca.app.MainThreadWatch.clear(ctx); stallsTick++ }) { Text("Clear") }
+                        }
+                        SelectionContainer {
+                            Text(stalls.ifBlank { "(none)" }.let { com.vrca.app.sanitizeBackendRefs(it) }, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        }
+
                         Text("Sync (last issue)", style = MaterialTheme.typography.labelMedium)
                         Text(
                             text = lastFirebaseIssue?.let { com.vrca.app.sanitizeBackendRefs(it) }
