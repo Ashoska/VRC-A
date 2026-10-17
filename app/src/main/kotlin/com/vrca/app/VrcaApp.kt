@@ -1285,7 +1285,7 @@ private fun signingCertSha256Hex(ctx: Context): String {
     val certBytes: ByteArray = try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
-            info.signingInfo.apkContentsSigners.firstOrNull()?.toByteArray() ?: byteArrayOf()
+            info.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray() ?: byteArrayOf()
         } else {
             @Suppress("DEPRECATION")
             val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES)

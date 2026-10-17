@@ -2,6 +2,7 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
     id 'com.mikepenz.aboutlibraries.plugin'
 
     // Firebase / Google Services
@@ -67,7 +68,7 @@ def computedVersionName = "v${baseMajor}.${baseMinor + minorBump}.${patch}"
 
 android {
     namespace 'com.vrca'
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         // default = PUBLIC id; admin flavor overrides
@@ -169,19 +170,12 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = '17'
-        freeCompilerArgs += ['-opt-in=androidx.compose.material3.ExperimentalMaterial3Api']
-    }
 
     buildFeatures {
         compose true
         buildConfig true
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion '1.5.9'
-    }
 
     packagingOptions {
         resources {
@@ -242,6 +236,19 @@ android {
             }
         }
     }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        freeCompilerArgs.add('-opt-in=androidx.compose.material3.ExperimentalMaterial3Api')
+    }
+}
+
+// Strong skipping is the Kotlin 2 default; kept OFF until the two stale-prone spots in
+// docs/systems/ui-kit.md ("Known stale-prone spots") are redesigned.
+composeCompiler {
+    featureFlags = [org.jetbrains.kotlin.compose.compiler.gradle.ComposeFeatureFlag.StrongSkipping.disabled()]
 }
 
 aboutLibraries {
