@@ -106,7 +106,23 @@ object VrchatAuthManager {
      * destructive delete+recreate only runs after several consecutive failed
      * launches (genuine MasterKey corruption). A success resets the counter.
      */
+    // The opened store, kept once it opens. Opening it is a Keystore round trip plus Tink keyset
+    // setup (tens of ms or more on the Quest, on whatever thread asked), and every isLoggedIn /
+    // getStored* / REST helper call used to open it afresh: the boot screen alone did that on
+    // every redraw. Only a SUCCESSFUL open is kept; a failed one (Keystore not ready after a
+    // reboot) returns null as before and the next call tries again. EncryptedSharedPreferences
+    // is a SharedPreferences, so one instance is safe to share across threads.
+    @Volatile private var openedPrefs: android.content.SharedPreferences? = null
+
     private fun getPrefs(context: Context): android.content.SharedPreferences? {
+        openedPrefs?.let { return it }
+        synchronized(this) {
+            openedPrefs?.let { return it }
+            return openPrefs(context)?.also { openedPrefs = it }
+        }
+    }
+
+    private fun openPrefs(context: Context): android.content.SharedPreferences? {
         try {
             val p = createEncryptedPrefs(context)
             // Success → clear the persisted failure count.

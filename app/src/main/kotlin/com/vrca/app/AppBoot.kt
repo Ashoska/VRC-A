@@ -82,13 +82,14 @@ private val ROWS = Row.entries.filter { it.inThisBuild }
 private data class RowState(val state: BootState = BootState.Waiting, val note: BootNote? = null)
 
 /**
- * The app's boot (every build): every check starts at once (Terms of Service and Account standing wait for
- * the device session, which they need), each row shows where its check is, and boot hands off when
- * the blocking rows (device session, terms, account, updates) have finished, the screen has fully
- * opened and the Ready sweep has played. The other rows can still be finishing when it opens.
+ * The app's boot (every build): once the intro has finished every check starts (Terms of Service,
+ * Account standing and Updates wait for the device session, which they need), each row shows where
+ * its check is, and boot hands off when every row has its answer and the blocking rows (device
+ * session, terms, account, VRChat sign-in, updates) passed, after the Ready sweep.
  *
- * A failed device session shows Retry (counting down to an automatic retry) and, when this device
- * has signed in before, Continue anyway. Nothing here writes; reads are the ones boot already did
+ * A blocking check that couldn't reach the server holds boot on Retry (counting down to an
+ * automatic retry); there is no "Continue anyway" (user rule: they're needed for moderation and to
+ * know the device is really connected). Nothing here writes; reads are the ones boot already did
  * (sign-in, ban check, release check) plus one `config/app` read for the terms row.
  */
 @Composable
@@ -134,9 +135,6 @@ internal fun AppBoot(
         // animators, ~0.2 s on the Quest the first time a row starts working (third user video).
         runCatching { ctx.getDrawable(com.vrca.R.drawable.boot_spinner) }
         true
-    }
-    val everSignedIn = remember {
-        ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE).getString("auth_uid", "").orEmpty().isNotBlank()
     }
     val userName = remember { VrchatAuthManager.getStoredDisplayName(ctx) }
     val discordIcon = ImageVector.vectorResource(com.vrca.R.drawable.ic_discord)
@@ -209,7 +207,7 @@ internal fun AppBoot(
                 set(Row.Account, BootState.Working)
                 val result = orNull { VrchatBanChecker.checkPhase1(deviceHash, authUid) }
                 if (result == null) {
-                    set(Row.Account, BootState.Warn, BootNote.CantConnect)
+                    set(Row.Account, BootState.Failed, BootNote.CantConnect)
                 } else {
                     BootResults.banId = result.banId
                     BootResults.banChecked = true
@@ -225,8 +223,8 @@ internal fun AppBoot(
                 when (r) {
                     ReleaseCheckResult.UpToDate -> set(Row.Updates, BootState.Done, BootNote.UpToDate)
                     is ReleaseCheckResult.UpdateAvailable -> set(Row.Updates, BootState.Warn, BootNote.UpdateReady)
-                    null -> set(Row.Updates, BootState.Warn, BootNote.TimedOut)
-                    else -> set(Row.Updates, BootState.Warn, BootNote.CantConnect)
+                    null -> set(Row.Updates, BootState.Failed, BootNote.TimedOut)
+                    else -> set(Row.Updates, BootState.Failed, BootNote.CantConnect)
                 }
             }
             // A new user's first open: fetch the tutorial's pictures while the screen is up.
@@ -237,6 +235,12 @@ internal fun AppBoot(
             }
             terms.join(); account.join(); updates?.join(); tutorial.join()
             tutorialDone = true
+            // User rule: a blocking check that couldn't get an answer holds boot (no "Continue
+            // anyway"): the device session, terms, account standing (moderation) and updates have
+            // to actually reach the server. Same Retry pill + 5 s auto-retry as a failed device session.
+            if (listOf(Row.Terms, Row.Account, Row.Updates).any { it.inThisBuild && rows[it.ordinal].state == BootState.Failed }) {
+                error = "Can't connect"
+            }
         }
     }
 
@@ -269,14 +273,19 @@ internal fun AppBoot(
     var exiting by remember { mutableStateOf(false) }
     var celebrate by remember { mutableStateOf(false) }
     val appReadyNow by rememberUpdatedState(appReady)
-    // The main app (not a terms, sign-in, first-run or ban screen) is what opens next.
-    val mainAppNext = rows[Row.Terms.ordinal].state == BootState.Done &&
+    // The main app (not a terms, sign-in, first-run or ban screen) is what opens next. A function,
+    // asked only when it's needed: as a value it re-read the saved VRChat login (encrypted store)
+    // and onboarding prefs on EVERY AppBoot recomposition, i.e. on every row change.
+    fun mainAppNext() = rows[Row.Terms.ordinal].state == BootState.Done &&
         rows[Row.Account.ordinal].note != BootNote.Restricted &&
         VrchatAuthManager.isLoggedIn(ctx) && com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
+    // Decided once, when the hand-off is about to start.
+    var toMainApp by remember { mutableStateOf(false) }
     LaunchedEffect(blockingDone, shown) {
         if (blockingDone && shown) {
             snapshotFlow { ROWS.all { rows[it.ordinal].state in SETTLED } }.first { it }
-            if (mainAppNext) {
+            val mainNext = mainAppNext()
+            if (mainNext) {
                 prepareApp()
                 withTimeoutOrNull(APP_BUILD_CAP_MS) { snapshotFlow { appReadyNow }.first { it } }
                 // ...and DRAWN: its first draw (text, icons, images) is the other first-time cost.
@@ -284,12 +293,12 @@ internal fun AppBoot(
             }
             celebrate = true
             delay(READY_HOLD_MS)
+            toMainApp = BuildConfig.IS_HEADSET_BUILD && mainNext
             exiting = true
         }
     }
     // The logo only flies into the top bar when the main app is what opens next; it just fades
     // out otherwise. (Headset only: the phone/admin top bar shows the name in words, not the logo.)
-    val toMainApp = exiting && BuildConfig.IS_HEADSET_BUILD && mainAppNext
 
     androidx.compose.foundation.layout.Box {
     BootScreen(
@@ -301,7 +310,6 @@ internal fun AppBoot(
         error = error,
         retryInSec = retryIn,
         onRetry = { attempt++ },
-        onContinue = if (everSignedIn) ({ exiting = true }) else null,
         userName = userName,
         onShown = { shown = true },
         celebrate = celebrate,
@@ -453,7 +461,7 @@ private suspend fun terms(ctx: Context, set: (BootState, BootNote?) -> Unit) {
     val snap = withTimeoutOrNull(8_000L) {
         orNull { FirebaseFirestore.getInstance().collection("config").document("app").get().await() }
     }
-    if (snap == null) { set(BootState.Warn, BootNote.CantConnect); return }
+    if (snap == null) { set(BootState.Failed, BootNote.CantConnect); return }
     val version = (snap.getLong("tosVersion") ?: 1L).toInt().coerceAtLeast(1)
     val updatedAt = snap.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
     val accepted = TosPrefs.acceptedVersion(ctx) >= version && TosPrefs.acceptedAtMs(ctx) >= updatedAt

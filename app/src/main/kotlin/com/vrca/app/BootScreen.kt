@@ -251,7 +251,6 @@ fun BootScreen(
     error: String? = null,
     retryInSec: Int? = null,
     onRetry: () -> Unit = {},
-    onContinue: (() -> Unit)? = null,
     /** Open on the logo alone, big and centred, then glide it into place as the panels arrive. */
     playIntro: Boolean = true,
     /** The back wall's decoration (BootBackdrop.kt); faded in with the intro. */
@@ -384,8 +383,8 @@ fun BootScreen(
             }
             val pills: @Composable () -> Unit = {
                 BootPills(
-                    error, retryInSec, onRetry, onContinue, onSignIn,
-                    seamAt = if (wide) { width, gap -> ((width - gap) * 0.85f / 2f + gap / 2f).toInt() } else null
+                    error, retryInSec, onRetry, onSignIn,
+                    centreAt = if (wide) { width, gap -> ((width - gap) * 0.85f / 2f + gap / 2f).toInt() } else null
                 )
             }
             if (wide) {
@@ -460,14 +459,14 @@ fun BootScreen(
 }
 
 /**
- * Retry / Continue anyway (a failed device session) or Sign in to VRChat, opening under the panels.
- * [seamAt] places the pill: on the headset its seam (where Retry meets Continue anyway) sits on the
- * gap between the two panels; on a phone it's centred.
+ * Retry (a blocking check couldn't reach the server; boot waits, user rule: no "Continue anyway")
+ * or Sign in to VRChat, opening under the panels. [centreAt] places the pill's centre: on the
+ * headset on the gap between the two panels; on a phone (null) it's centred.
  */
 @Composable
 private fun BootPills(
-    error: String?, retryInSec: Int?, onRetry: () -> Unit, onContinue: (() -> Unit)?,
-    onSignIn: (() -> Unit)?, seamAt: ((width: Int, gap: Int) -> Int)?
+    error: String?, retryInSec: Int?, onRetry: () -> Unit,
+    onSignIn: (() -> Unit)?, centreAt: ((width: Int, gap: Int) -> Int)?
 ) {
     // Kept while it animates away (onSignIn is already null by then).
     var lastSignIn by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -476,15 +475,13 @@ private fun BootPills(
         Layout(
             content = {
                 val signIn = lastSignIn
-                if (error == null && signIn != null) SignInPill(signIn) else ActionPill(retryInSec, onRetry, onContinue)
+                if (error == null && signIn != null) SignInPill(signIn) else RetryPill(retryInSec, onRetry)
             },
             modifier = Modifier.fillMaxWidth().padding(top = 20.dp)
         ) { measurables, constraints ->
             val pill = measurables.first().measure(constraints.copy(minWidth = 0))
-            val x = if (seamAt == null) (constraints.maxWidth - pill.width) / 2 else {
-                val seam = pill[PillSeam].takeIf { it != AlignmentLine.Unspecified } ?: (pill.width / 2)
-                seamAt(constraints.maxWidth, WIDE_GAP.roundToPx()) - seam
-            }
+            val x = if (centreAt == null) (constraints.maxWidth - pill.width) / 2
+                else centreAt(constraints.maxWidth, WIDE_GAP.roundToPx()) - pill.width / 2
             layout(constraints.maxWidth, pill.height) {
                 pill.place(x.coerceIn(0, (constraints.maxWidth - pill.width).coerceAtLeast(0)), 0)
             }
@@ -960,11 +957,11 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
 
 
 /**
- * Retry and Continue anyway joined into one pill. Retry's countdown drains as a ring round the
- * seconds left (the ring's full length is the longest countdown seen, since the wait can vary).
+ * The Retry pill. Its countdown to the automatic retry drains as a ring round the seconds left
+ * (the ring's full length is the longest countdown seen, since the wait can vary).
  */
 @Composable
-private fun ActionPill(retryInSec: Int?, onRetry: () -> Unit, onContinue: (() -> Unit)?) {
+private fun RetryPill(retryInSec: Int?, onRetry: () -> Unit) {
     val accent = MaterialTheme.colorScheme.primary
     var longest by remember { mutableIntStateOf(1) }
     if ((retryInSec ?: 0) > longest) longest = retryInSec ?: 0
@@ -972,7 +969,7 @@ private fun ActionPill(retryInSec: Int?, onRetry: () -> Unit, onContinue: (() ->
     Layer(Modifier.height(50.dp), shape = CircleShape, color = GremlinColors.Raised, drop = 4.dp) {
         Row(Modifier.fillMaxHeight().padding(5.dp), verticalAlignment = Alignment.CenterVertically) {
             Row(
-                Modifier.reportSeam().fillMaxHeight().clip(CircleShape).background(accent).clickable(onClick = onRetry).padding(start = 8.dp, end = 20.dp),
+                Modifier.fillMaxHeight().clip(CircleShape).background(accent).clickable(onClick = onRetry).padding(start = 8.dp, end = 20.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
@@ -986,27 +983,10 @@ private fun ActionPill(retryInSec: Int?, onRetry: () -> Unit, onContinue: (() ->
                 Spacer(Modifier.width(10.dp))
                 Text("Retry", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Backdrop)
             }
-            if (onContinue != null) {
-                Row(
-                    Modifier.fillMaxHeight().clip(CircleShape).clickable(onClick = onContinue).padding(start = 18.dp, end = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Continue anyway", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text)
-                    Spacer(Modifier.width(8.dp))
-                    Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = GremlinColors.TextMuted, modifier = Modifier.size(18.dp))
-                }
-            }
         }
     }
 }
 
-/** The x where the pill's Retry half ends, so the pill can be lined up by its seam. */
-private val PillSeam = VerticalAlignmentLine(::minOf)
-
-private fun Modifier.reportSeam() = layout { measurable, constraints ->
-    val p = measurable.measure(constraints)
-    layout(p.width, p.height, mapOf(PillSeam to p.width)) { p.place(0, 0) }
-}
 
 /** The Internet row: the active connection's type and Android's download-speed estimate (Mbps, 0 = unknown). */
 fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
