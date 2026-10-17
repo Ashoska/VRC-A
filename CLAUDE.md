@@ -84,7 +84,7 @@ tools/cardinal-lab/lab.sh run tools/cardinal-lab/scripts/hangout.txt
 - Never hardcode secrets, API keys or credentials.
 - Never show backend names ("Firebase"/"Firestore") in public-build UI text.
 - No em dashes in onboarding/login UI copy.
-- Follow the **Performance rules** in `ui-kit.md` (animations read only while drawing; nothing slow while composing; narrow inputs) and run the UI Lab `perf` lag check on screens a UI change touches.
+- Follow the **Performance rules** in `ui-kit.md` (animations read only while drawing; nothing slow while composing; narrow inputs; **everything shown is watched state**, never a plain field, prefs or clock read, so nothing can show stale info) and run the UI Lab `perf` lag check on screens a UI change touches.
 - Dialogs use `PanelDialog` (not `Dialog`): on the headset the UI is one fixed 1024x640dp panel scaled to the window, and a plain Dialog window would not scale with it.
 
 ## Git & PR Conventions (land every task in VRC-A-Official)
