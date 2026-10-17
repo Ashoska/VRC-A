@@ -253,15 +253,28 @@ object SpotifyAuthManager {
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
-    private fun readPrefs(context: Context) = try {
-        val masterKey = MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
-        EncryptedSharedPreferences.create(
-            context, PREFS_FILE, masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-    } catch (e: Exception) {
-        Log.e(TAG, "prefs init failed", e); null
+    // The opened store, kept once it opens: opening is a Keystore round trip plus Tink keyset
+    // setup, and every call here used to open it afresh (0.38 s on the Quest's main thread when
+    // Settings opened; MainThreadWatch, user's 2026-10-18 recording). Only a successful open is
+    // kept, so a Keystore that isn't ready yet is retried next call (same as VrchatAuthManager).
+    @Volatile private var openedPrefs: android.content.SharedPreferences? = null
+
+    private fun readPrefs(context: Context): android.content.SharedPreferences? {
+        openedPrefs?.let { return it }
+        synchronized(this) {
+            openedPrefs?.let { return it }
+            return try {
+                val app = context.applicationContext
+                val masterKey = MasterKey.Builder(app).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+                EncryptedSharedPreferences.create(
+                    app, PREFS_FILE, masterKey,
+                    EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                    EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+                ).also { openedPrefs = it }
+            } catch (e: Exception) {
+                Log.e(TAG, "prefs init failed", e); null
+            }
+        }
     }
 
     private inline fun writePrefs(context: Context, block: android.content.SharedPreferences.Editor.() -> Unit) {

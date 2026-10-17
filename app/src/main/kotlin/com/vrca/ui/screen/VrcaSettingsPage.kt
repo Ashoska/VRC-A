@@ -963,7 +963,10 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
         // listener). Connect once via OAuth; we then poll currently-playing.
         val spotifyConnected by com.vrca.spotify.SpotifyAuthManager.connectedFlow.collectAsState()
         androidx.compose.runtime.LaunchedEffect(Unit) {
-            com.vrca.spotify.SpotifyAuthManager.refreshConnectedState(ctx)
+            // Off the main thread: it opens an encrypted store (Keystore) the first time.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.vrca.spotify.SpotifyAuthManager.refreshConnectedState(ctx)
+            }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
