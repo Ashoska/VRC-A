@@ -707,6 +707,9 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
     val accent = MaterialTheme.colorScheme.primary
     val tone = check.state.tone(accent)
     val dim = check.state == BootState.Waiting
+    // Waiting rows are dimmed; when a row comes alive it fades up over ~0.35 s instead of snapping
+    // to full (user: rows' text "quickly popping to white"). Read only in draw/layer lambdas.
+    val lit = animateFloatAsState(if (dim) 0f else 1f, tween(350, easing = FastOutSlowInEasing), label = "rowLit")
     // A row that fails gives one short sideways shake, so the eye goes straight to it.
     val shake = remember { Animatable(0f) }
     LaunchedEffect(check.state) {
@@ -717,15 +720,17 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
     Row(
         modifier.graphicsLayer { translationX = shake.value * density }
             .fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
-            .background(if (dim) GremlinColors.Card.copy(alpha = 0.5f) else GremlinColors.Card)
+            .drawBehind { drawRect(GremlinColors.Card.copy(alpha = 0.5f + 0.5f * lit.value)) }
             .rowEdge(check.state.mark(), tone)
+            // The row's content (not its outline) at the dim level.
+            .graphicsLayer { alpha = 0.4f + 0.6f * lit.value }
             .padding(start = 10.dp, end = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (check.icon != null) {
             Icon(
                 check.icon, null, modifier = Modifier.size(17.dp),
-                tint = if (dim) GremlinColors.TextMuted.copy(alpha = 0.4f) else GremlinColors.TextMuted
+                tint = GremlinColors.TextMuted
             )
             Spacer(Modifier.width(10.dp))
         }
@@ -733,7 +738,7 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
             check.label,
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium,
-            color = if (dim) GremlinColors.TextMuted.copy(alpha = 0.5f) else GremlinColors.Text,
+            color = GremlinColors.Text,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
@@ -855,7 +860,8 @@ private fun Modifier.rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean 
     var last by remember { mutableStateOf(mark) }
     LaunchedEffect(mark) {
         if (mark == Mark.Done && last != Mark.Done) {
-            flash.snapTo(0.8f)
+            // Rise, then fade (it used to jump straight to full: a quick flash on the headset).
+            flash.animateTo(0.7f, tween(160, easing = FastOutSlowInEasing))
             flash.animateTo(0f, tween(700, easing = FastOutSlowInEasing))
         }
         last = mark
@@ -866,6 +872,7 @@ private fun Modifier.rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean 
             Mark.Warn, Mark.Maintenance, Mark.Failed -> tone.copy(alpha = 0.6f)
             else -> Color.Transparent
         },
+        tween(400, easing = FastOutSlowInEasing),
         label = "rowEdge"
     )
     return drawWithContent {
