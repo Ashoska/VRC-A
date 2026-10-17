@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -795,7 +796,7 @@ private fun StateMark(mark: Mark) {
         Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
             when (m) {
                 Mark.Waiting -> Box(Modifier.size(7.dp).background(GremlinColors.Raised, CircleShape))
-                Mark.Working -> CircularProgressIndicator(modifier = Modifier.size(15.dp), strokeWidth = 2.dp, color = accent)
+                Mark.Working -> BootSpinner(accent, Modifier.size(15.dp))
                 else -> {
                     val (icon, fill) = when (m) {
                         Mark.Done -> Icons.Filled.Check to GremlinColors.Positive
@@ -814,6 +815,32 @@ private fun StateMark(mark: Mark) {
             }
         }
     }
+}
+
+/**
+ * The "working" spinner (res/drawable/boot_spinner.xml, an AnimatedVectorDrawable). Android runs
+ * those on the RenderThread, so it keeps turning while the app's main thread is busy with boot
+ * work; Compose's CircularProgressIndicator is driven from the main thread and froze with it.
+ */
+@Composable
+private fun BootSpinner(color: Color, modifier: Modifier) {
+    androidx.compose.ui.viewinterop.AndroidView(
+        factory = { c ->
+            android.widget.ImageView(c).apply {
+                val d = c.getDrawable(com.vrca.R.drawable.boot_spinner)!!.mutate()
+                setImageDrawable(d)
+                (d as? android.graphics.drawable.Animatable)?.start()
+                // (Re)start whenever it's attached, so it can never sit as a still arc.
+                addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(v: android.view.View) { (d as? android.graphics.drawable.Animatable)?.start() }
+                    override fun onViewDetachedFromWindow(v: android.view.View) {}
+                })
+            }
+        },
+        update = { it.imageTintList = android.content.res.ColorStateList.valueOf(color.toArgb()) },
+        onRelease = { (it.drawable as? android.graphics.drawable.Animatable)?.stop() },
+        modifier = modifier
+    )
 }
 
 /**
