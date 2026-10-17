@@ -141,7 +141,7 @@ internal fun AppBoot(
         }
         // The rows' spinner (an AnimatedVectorDrawable): its first load parses the XML and its
         // animators, ~0.2 s on the Quest the first time a row starts working (third user video).
-        runCatching { ctx.getDrawable(com.vrca.R.drawable.boot_spinner) }
+        com.vrca.ui.common.preloadRenderThreadSpinner(ctx)
         true
     }
     val userName = remember { VrchatAuthManager.getStoredDisplayName(ctx) }
