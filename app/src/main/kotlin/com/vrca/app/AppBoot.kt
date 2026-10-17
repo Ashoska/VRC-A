@@ -458,6 +458,16 @@ private suspend fun discord(ctx: Context, set: (BootState, BootNote?) -> Unit) {
             it == DiscordRpcStatus.CONNECTED || it == DiscordRpcStatus.SESSION_EXPIRED || it == DiscordRpcStatus.FAILED
         }
     }
+    if (end == DiscordRpcStatus.CONNECTED) {
+        // Hold the tick until the hidden page has drawn its first picture (~0.4 s main-thread
+        // freeze on the Quest), so that freeze happens here, while this row's RenderThread
+        // spinner turns, and not during the hand-off to Home (user's recording: Home popped in).
+        // Capped: a page that isn't on screen may never report it.
+        val t0 = android.os.SystemClock.uptimeMillis()
+        val drawn = withTimeoutOrNull(DISCORD_PICTURE_CAP_MS) { DiscordRpcState.pageDrawnFlow.first { it } } != null
+        MainThreadWatch.note(ctx, "discord first picture: " +
+            if (drawn) "${android.os.SystemClock.uptimeMillis() - t0} ms after connected" else "not reported within ${DISCORD_PICTURE_CAP_MS} ms")
+    }
     when (end) {
         DiscordRpcStatus.CONNECTED -> set(BootState.Done, BootNote.Connected)
         DiscordRpcStatus.SESSION_EXPIRED -> set(BootState.Warn, BootNote.SignInNeeded)
@@ -561,4 +571,5 @@ internal fun BootRevealOverlay() {
     }
 }
 
+private const val DISCORD_PICTURE_CAP_MS = 1_500L
 private const val REVEAL_MS = 450

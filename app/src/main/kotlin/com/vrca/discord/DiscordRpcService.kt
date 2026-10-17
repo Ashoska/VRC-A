@@ -21,6 +21,7 @@ import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import java.io.File
@@ -62,6 +63,16 @@ object DiscordRpcState {
         get() = _failureMessage.value
         set(value) { _failureMessage.value = value }
 
+    // True once the hidden page has drawn its first picture (WebView.postVisualStateCallback).
+    // That first draw costs ~0.4 s on VRC-A's main thread on the Quest (MainThreadWatch); the
+    // boot screen's Discord row waits for it (capped) so it happens there, not during the
+    // hand-off to Home. Reset for every new page.
+    private val _pageDrawn = MutableStateFlow(false)
+    val pageDrawnFlow: StateFlow<Boolean> = _pageDrawn.asStateFlow()
+    var pageDrawn: Boolean
+        get() = _pageDrawn.value
+        set(value) { _pageDrawn.value = value }
+
     fun reset() {
         status = DiscordRpcStatus.IDLE
         failureMessage = null
@@ -73,6 +84,8 @@ class DiscordRpcService : Service() {
     companion object {
         private const val TAG = "DiscordRPC"
         private const val VRCHAT_APP_ID = "438274841678872576"
+        /** Fonts and media the hidden page never needs (see shouldInterceptRequest). */
+        private val STRIPPED_MEDIA = listOf(".woff2", ".woff", ".ttf", ".otf", ".mp3", ".ogg", ".wav", ".mp4", ".webm")
         private const val NOTIF_CHANNEL = "vrca_pipeline"
         private const val NOTIF_ID = 1001
 
@@ -404,6 +417,7 @@ class DiscordRpcService : Service() {
             shimReady = false
             shimRetryCount = 0
             consecutivePushFailures = 0
+            DiscordRpcState.pageDrawn = false
 
             val wv = object : WebView(applicationContext) {
                 // Chromium background-throttles (and eventually freezes) JS timers when
@@ -444,9 +458,31 @@ class DiscordRpcService : Service() {
                         if (u.contains("discord.com/channels") || u.contains("discord.com/app")) {
                             view?.evaluateJavascript(WS_HOOK_JS, null)
                             injectShimDelayed()
+                            runCatching {
+                                view?.postVisualStateCallback(1L, object : WebView.VisualStateCallback() {
+                                    override fun onComplete(requestId: Long) { DiscordRpcState.pageDrawn = true }
+                                })
+                            }
                         } else if (u.contains("discord.com/login")) {
                             Log.w(TAG, "Discord session expired — landed on login page")
                             onSessionExpired()
+                        }
+                    }
+
+                    // Nobody sees this page, so it gets EMPTY stylesheets and no fonts or media: far
+                    // less style/layout/paint work and ~3 MB less per start. Measured on discord.com
+                    // in Chromium, 4x CPU throttle: style work 219 -> 39 ms, requests 1047 -> 693.
+                    // Stylesheets must be answered (empty), not refused: refused, Discord's app
+                    // never finished starting (its code loader waits for them). Runs off the main
+                    // thread. The login WebView (shown to the user) is separate and untouched.
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                        val path = request?.url?.path?.lowercase() ?: return null
+                        return when {
+                            path.endsWith(".css") ->
+                                WebResourceResponse("text/css", "utf-8", java.io.ByteArrayInputStream(ByteArray(0)))
+                            STRIPPED_MEDIA.any { path.endsWith(it) } ->
+                                WebResourceResponse("application/octet-stream", null, 404, "Not Found", emptyMap(), java.io.ByteArrayInputStream(ByteArray(0)))
+                            else -> null
                         }
                     }
 
