@@ -1,5 +1,6 @@
 package com.vrca.app
 
+import androidx.compose.ui.draw.drawBehind
 import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -144,7 +145,8 @@ internal fun AppBoot(
         com.vrca.ui.common.preloadRenderThreadSpinner(ctx)
         true
     }
-    val userName = remember { VrchatAuthManager.getStoredDisplayName(ctx) }
+    // State, refreshed after a boot-screen sign-in (rule: everything shown is watched state, ui-kit.md).
+    var userName by remember { mutableStateOf(VrchatAuthManager.getStoredDisplayName(ctx)) }
     val discordIcon = ImageVector.vectorResource(com.vrca.R.drawable.ic_discord)
     val icons = remember(discordIcon) {
         mapOf(
@@ -334,6 +336,7 @@ internal fun AppBoot(
                 onCancel = { showLogin = false }
             ) { _, _ ->
                 showLogin = false
+                userName = VrchatAuthManager.getStoredDisplayName(ctx)
                 signInAttempt++
             }
         }
@@ -519,9 +522,9 @@ private suspend fun fetchVrchatPlatform(): ServiceState = withContext(Dispatcher
  */
 internal object BootReveal {
     val active = mutableStateOf(false)
-    var withLogo = false
-        private set
-    fun start(withLogo: Boolean) { this.withLogo = withLogo; active.value = true }
+    private val logo = mutableStateOf(false)
+    val withLogo: Boolean get() = logo.value
+    fun start(withLogo: Boolean) { logo.value = withLogo; active.value = true }
     fun end() { active.value = false }
 }
 
@@ -535,7 +538,8 @@ internal fun BootRevealOverlay() {
     }
     androidx.compose.foundation.layout.Box(
         androidx.compose.ui.Modifier.fillMaxSize()
-            .background(com.vrca.ui.theme.GremlinColors.Backdrop.copy(alpha = fade.value))
+            // Fade read while drawing: repaints, doesn't rebuild (ui-kit.md performance rules).
+            .drawBehind { drawRect(com.vrca.ui.theme.GremlinColors.Backdrop.copy(alpha = fade.value)) }
             // Swallow taps while it's up (it's only ~half a second).
             .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } }
     ) {
