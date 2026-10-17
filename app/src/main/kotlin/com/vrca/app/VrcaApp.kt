@@ -190,8 +190,8 @@ private fun VrcaAppContent() {
     // stored below; a missing value on a prior-used install counts as "just updated" once.
     val bootPrefs = remember { ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE) }
     val justUpdated = remember { bootPrefs.getInt(LAST_BOOT_VERSION_KEY, 0) != BuildConfig.VERSION_CODE }
-    // A boot-launch is a genuine cold start → show the boot screen too (not just
-    // swipe-reopen / first install).
+    // The first open since a device restart is a genuine cold start → show the boot
+    // screen too (not just swipe-reopen / first install).
     val warmResume = remember { !(openedFromSwipe || openedFromBoot || !everBootstrapped || justUpdated) }
 
     val bootOkState = remember { mutableStateOf(warmResume) }

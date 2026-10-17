@@ -52,10 +52,12 @@ class MainActivity : ComponentActivity() {
         VrcaApplication.openedFromSwipe =
             runCatching { AppShutdown.isSwipedAway(applicationContext) }.getOrDefault(false)
 
-        // A launch from the BootReceiver (device turned on) is a genuine cold start —
-        // show the boot screen (and let the feature-session restore run visibly).
-        VrcaApplication.openedFromBoot =
-            runCatching { intent?.getBooleanExtra("vrca_from_boot", false) == true }.getOrDefault(false)
+        // The first open since the device restarted (BootReceiver left a note) is a genuine
+        // cold start: show the boot screen and its checks (and let the feature-session restore
+        // run visibly). Read once per process, then cleared.
+        if (!VrcaApplication.openedFromBoot) {
+            VrcaApplication.openedFromBoot = runCatching { takeRebooted(applicationContext) }.getOrDefault(false)
+        }
 
         //Ensure device hash exists early (before any screen reads it).
         runCatching { ensureDeviceHash(applicationContext) }
@@ -85,6 +87,24 @@ class MainActivity : ComponentActivity() {
                 //Overlay MUST stay inside Compose because OverlayDaemon is @Composable
                 OverlayDaemon(this@MainActivity)
             }
+        }
+    }
+
+    companion object {
+        private const val PREFS = "vrca_remote"
+        private const val KEY_REBOOTED = "rebooted_since_open"
+
+        /** BootReceiver: the device restarted; the next open is a cold start. */
+        fun markRebooted(ctx: Context) {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_REBOOTED, true).apply()
+        }
+
+        /** True (once) if the device restarted since the app was last opened. */
+        fun takeRebooted(ctx: Context): Boolean {
+            val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (!prefs.getBoolean(KEY_REBOOTED, false)) return false
+            prefs.edit().remove(KEY_REBOOTED).apply()
+            return true
         }
     }
 }
