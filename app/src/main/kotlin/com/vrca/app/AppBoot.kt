@@ -354,6 +354,15 @@ private suspend fun discord(ctx: Context, set: (BootState, BootNote?) -> Unit) {
     val repo = (ctx.applicationContext as VrcaApplication).userPreferencesRepository
     if (!repo.discordRpcEnabled.first()) { set(BootState.Skipped, BootNote.Off); return }
     set(BootState.Working, BootNote.Connecting)
+    // Start it now instead of waiting for the VRChat pipeline's socket to open (its onOpen
+    // auto-start would otherwise be the first start, seconds later on a cold boot). Same guard
+    // as that auto-start; a duplicate START is a no-op in the service anyway.
+    if (repo.discordSessionSeeded.first() && !com.vrca.discord.DiscordRpcService.isRunning) {
+        runCatching {
+            androidx.core.content.ContextCompat.startForegroundService(ctx, android.content.Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
+                .setAction(com.vrca.discord.DiscordRpcService.ACTION_START))
+        }
+    }
     val end = withTimeoutOrNull(25_000L) {
         DiscordRpcState.statusFlow.first {
             it == DiscordRpcStatus.CONNECTED || it == DiscordRpcStatus.SESSION_EXPIRED || it == DiscordRpcStatus.FAILED

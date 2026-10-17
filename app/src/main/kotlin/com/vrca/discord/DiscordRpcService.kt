@@ -421,6 +421,11 @@ class DiscordRpcService : Service() {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.databaseEnabled = true
+                // Nobody ever sees this page: don't download the avatars/images/emoji the
+                // Discord client renders (the bulk of its load on a cold start, plus data and
+                // the WebView cache). The gateway and our OP 3 don't need them; the RPC's art
+                // lookup is a fetch() to external-assets, which this setting doesn't touch.
+                settings.blockNetworkImage = true
                 settings.userAgentString =
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
                 CookieManager.getInstance().setAcceptCookie(true)
