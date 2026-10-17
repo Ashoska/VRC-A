@@ -130,6 +130,9 @@ internal fun AppBoot(
     remember {
         runCatching { com.google.firebase.auth.FirebaseAuth.getInstance(); FirebaseFirestore.getInstance() }
         if (discordWillStart(ctx)) runCatching { android.webkit.WebView(ctx.applicationContext).destroy() }
+        // The rows' spinner (an AnimatedVectorDrawable): its first load parses the XML and its
+        // animators, ~0.2 s on the Quest the first time a row starts working (third user video).
+        runCatching { ctx.getDrawable(com.vrca.R.drawable.boot_spinner) }
         true
     }
     val everSignedIn = remember {
