@@ -82,6 +82,7 @@ import com.vrca.vrchat.VrchatPipelineService
 import com.vrca.vrchat.VrchatPipelineState
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.first
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.withTimeoutOrNull
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
@@ -193,7 +194,8 @@ private fun VrcaAppContent() {
     // swipe-reopen / first install).
     val warmResume = remember { !(openedFromSwipe || openedFromBoot || !everBootstrapped || justUpdated) }
 
-    var bootOk by remember { mutableStateOf(warmResume) }
+    val bootOkState = remember { mutableStateOf(warmResume) }
+    var bootOk by bootOkState
     LaunchedEffect(bootOk) {
         if (bootOk) bootPrefs.edit().putInt(LAST_BOOT_VERSION_KEY, BuildConfig.VERSION_CODE).apply()
     }
@@ -212,7 +214,11 @@ private fun VrcaAppContent() {
             // that cost onto the reveal: ~0.8 s of empty panel in the user's video). The boot
             // screen above is opaque, so it stays unseen until the boot screen goes.
             androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().onPlaced { appReady = true }) {
-                VrcaAfterBoot(warmResume = warmResume, bootOk = bootOk)
+                // The flag goes in as State, not a value: passed as a value, boot finishing changed
+                // a parameter of the already-built app and recomposed all of it (its ViewModel isn't a
+                // stable type, so nothing could be skipped). That was the ~0.8 s freeze right after the
+                // logo reached the top bar in the user's third video.
+                VrcaAfterBoot(warmResume = warmResume, bootOk = bootOkState)
             }
         }
         if (!bootOk) {
@@ -232,7 +238,7 @@ private fun VrcaAppContent() {
 
 /** Everything after the boot gate: ban, terms, onboarding and update gates, then the app itself. */
 @Composable
-private fun VrcaAfterBoot(warmResume: Boolean, bootOk: Boolean) {
+private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.State<Boolean>) {
     val ctx = LocalContext.current
 
     /* -------------------------
@@ -246,8 +252,10 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: Boolean) {
     var phase1BanId by remember { mutableStateOf(if (booted) BootResults.banId else null) }
     var phase1Checked by remember { mutableStateOf(booted && BootResults.banChecked) }
 
-    LaunchedEffect(bootOk) {
-        if (!bootOk || phase1Checked) return@LaunchedEffect
+    LaunchedEffect(Unit) {
+        // Read only here, so boot finishing doesn't recompose this whole tree.
+        snapshotFlow { bootOk.value }.first { it }
+        if (phase1Checked) return@LaunchedEffect
         val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
         val deviceHash = prefs.getString("device_id_hash", "") ?: ""
         val authUid    = prefs.getString("auth_uid", "") ?: ""
