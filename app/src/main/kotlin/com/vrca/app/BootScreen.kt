@@ -24,6 +24,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
+import com.vrca.ui.common.animatedOutline
+import com.vrca.ui.common.widenIn
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.background
@@ -599,12 +601,6 @@ private fun stagger(reveal: Float, i: Int, n: Int): Float {
 }
 
 /** A piece widening out from its middle as it appears. */
-private fun Modifier.widenIn(a: () -> Float) = graphicsLayer {
-    val v = a()
-    scaleX = 0.2f + 0.8f * v
-    alpha = v
-}
-
 /**
  * How many of a panel's [pieces] have fully appeared. Changes only when one finishes, so a panel
  * recomposes [pieces] times during its reveal instead of on every frame (the reveal itself is
@@ -818,7 +814,7 @@ private fun StateMark(mark: Mark) {
         Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
             when (m) {
                 Mark.Waiting -> Box(Modifier.size(7.dp).background(GremlinColors.Raised, CircleShape))
-                Mark.Working -> BootSpinner(accent, Modifier.size(15.dp))
+                Mark.Working -> com.vrca.ui.common.RenderThreadSpinner(accent, Modifier.size(15.dp))
                 else -> {
                     val (icon, fill) = when (m) {
                         Mark.Done -> Icons.Filled.Check to GremlinColors.Positive
@@ -837,32 +833,6 @@ private fun StateMark(mark: Mark) {
             }
         }
     }
-}
-
-/**
- * The "working" spinner (res/drawable/boot_spinner.xml, an AnimatedVectorDrawable). Android runs
- * those on the RenderThread, so it keeps turning while the app's main thread is busy with boot
- * work; Compose's CircularProgressIndicator is driven from the main thread and froze with it.
- */
-@Composable
-private fun BootSpinner(color: Color, modifier: Modifier) {
-    androidx.compose.ui.viewinterop.AndroidView(
-        factory = { c ->
-            android.widget.ImageView(c).apply {
-                val d = c.getDrawable(com.vrca.R.drawable.boot_spinner)!!.mutate()
-                setImageDrawable(d)
-                (d as? android.graphics.drawable.Animatable)?.start()
-                // (Re)start whenever it's attached, so it can never sit as a still arc.
-                addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
-                    override fun onViewAttachedToWindow(v: android.view.View) { (d as? android.graphics.drawable.Animatable)?.start() }
-                    override fun onViewDetachedFromWindow(v: android.view.View) {}
-                })
-            }
-        },
-        update = { it.imageTintList = android.content.res.ColorStateList.valueOf(color.toArgb()) },
-        onRelease = { (it.drawable as? android.graphics.drawable.Animatable)?.stop() },
-        modifier = modifier
-    )
 }
 
 /**
@@ -892,20 +862,10 @@ private fun Modifier.rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean 
         tween(400, easing = FastOutSlowInEasing),
         label = "rowEdge"
     )
-    return drawWithContent {
-        drawContent()
+    return animatedOutline({
         val f = flash.value
-        val c = if (f > 0f) GremlinColors.Positive.copy(alpha = f) else steady.value
-        if (c.alpha <= 0f) return@drawWithContent
-        val w = 1.dp.toPx()
-        val r = 12.dp.toPx() - w / 2
-        drawRoundRect(
-            c, topLeft = androidx.compose.ui.geometry.Offset(w / 2, w / 2),
-            size = androidx.compose.ui.geometry.Size(size.width - w, size.height - w),
-            cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r),
-            style = androidx.compose.ui.graphics.drawscope.Stroke(w)
-        )
-    }
+        if (f > 0f) GremlinColors.Positive.copy(alpha = f) else steady.value
+    })
 }
 
 /** One service in the Status panel: icon, name, its fixed state word and a coloured dot. Built like a check row. */
