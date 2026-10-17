@@ -256,6 +256,8 @@ fun BootScreen(
     backdrop: BootBackdrop = BootBackdrop.Lanes,
     /** The VRChat display name for the checklist's "Welcome back" title; null before sign-in. */
     userName: String? = null,
+    /** Called as the panels start to unfold (right away without an intro): the moment to start the work. */
+    onOpening: () -> Unit = {},
     /** Called once the intro has finished and every row is on screen (right away without an intro). */
     onShown: () -> Unit = {},
     /**
@@ -320,6 +322,11 @@ fun BootScreen(
         delay(260)
         exitP.animateTo(1f, tween(EXIT_LOGO_MS, easing = FastOutSlowInEasing))
         exitedCallback()
+    }
+    val openingCallback by rememberUpdatedState(onOpening)
+    LaunchedEffect(Unit) {
+        snapshotFlow { panelL.value > 0f }.first { it }
+        openingCallback()
     }
     val shownCallback by rememberUpdatedState(onShown)
     LaunchedEffect(Unit) {
