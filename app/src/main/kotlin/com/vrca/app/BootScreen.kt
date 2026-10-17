@@ -256,8 +256,11 @@ fun BootScreen(
     backdrop: BootBackdrop = BootBackdrop.Lanes,
     /** The VRChat display name for the checklist's "Welcome back" title; null before sign-in. */
     userName: String? = null,
-    /** Called as the panels start to unfold (right away without an intro): the moment to start the work. */
-    onOpening: () -> Unit = {},
+    /**
+     * False holds the checklist header's Ready moment (sweep + chip pop) even once every row has
+     * settled; it plays when this turns true (AppBoot builds the app behind the screen first).
+     */
+    celebrate: Boolean = true,
     /** Called once the intro has finished and every row is on screen (right away without an intro). */
     onShown: () -> Unit = {},
     /**
@@ -322,11 +325,6 @@ fun BootScreen(
         delay(260)
         exitP.animateTo(1f, tween(EXIT_LOGO_MS, easing = FastOutSlowInEasing))
         exitedCallback()
-    }
-    val openingCallback by rememberUpdatedState(onOpening)
-    LaunchedEffect(Unit) {
-        snapshotFlow { panelL.value > 0f }.first { it }
-        openingCallback()
     }
     val shownCallback by rememberUpdatedState(onShown)
     LaunchedEffect(Unit) {
@@ -413,7 +411,7 @@ fun BootScreen(
                         }
                     }
                     Unfold({ panelL.value }, Modifier.weight(1.15f)) {
-                        LoadingPanel(checks, Modifier.fillMaxWidth(), partsL.value, userName = userName)
+                        LoadingPanel(checks, Modifier.fillMaxWidth(), partsL.value, userName = userName, celebrate = celebrate)
                     }
                 }
                 pills()
@@ -445,7 +443,7 @@ fun BootScreen(
                         }
                         Spacer(Modifier.height(PHONE_GAP))
                         Unfold({ panelL.value }, Modifier.fillMaxWidth()) {
-                            LoadingPanel(checks, Modifier.fillMaxWidth(), partsL.value, userName = userName, rowHeight = rowH, rowGap = rowGap)
+                            LoadingPanel(checks, Modifier.fillMaxWidth(), partsL.value, userName = userName, rowHeight = rowH, rowGap = rowGap, celebrate = celebrate)
                         }
                         pills()
                     }
@@ -609,7 +607,7 @@ private fun Modifier.widenIn(a: Float) = graphicsLayer {
  * 15 characters, so the title always fits one line.
  */
 @Composable
-private fun BootHeader(checks: List<BootCheck>, userName: String?) {
+private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Boolean = true) {
     val accent = MaterialTheme.colorScheme.primary
     val finished = checks.count { it.state in Settled }
     val target = when {
@@ -623,7 +621,7 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?) {
     )
     // The Ready moment: when the last check settles, a light sweeps along the bar left to right
     // and the count chip pops, so even a very fast boot visibly "lands".
-    val done = checks.isNotEmpty() && checks.all { it.state in Settled } && checks.none { it.state == BootState.Failed }
+    val done = celebrate && checks.isNotEmpty() && checks.all { it.state in Settled } && checks.none { it.state == BootState.Failed }
     val sweep = remember { Animatable(-2f) }
     val chipPop = remember { Animatable(1f) }
     LaunchedEffect(done) {
@@ -673,7 +671,7 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?) {
 @Composable
 private fun LoadingPanel(
     checks: List<BootCheck>, modifier: Modifier, reveal: Float = 1f, userName: String? = null,
-    rowHeight: Dp = WIDE_ROW_HEIGHT, rowGap: Dp = 8.dp
+    rowHeight: Dp = WIDE_ROW_HEIGHT, rowGap: Dp = 8.dp, celebrate: Boolean = true
 ) {
     val pieces = checks.size + 1 // the header, then each check
     // A row shows "waiting" until it has fully appeared, so a check that finished during the intro
@@ -683,7 +681,7 @@ private fun LoadingPanel(
     }
     Layer(modifier) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
-            Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { BootHeader(checks, userName) }
+            Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { BootHeader(checks, userName, celebrate) }
             Spacer(Modifier.height(14.dp))
             Column(verticalArrangement = Arrangement.spacedBy(rowGap)) {
                 checks.forEachIndexed { i, c ->
