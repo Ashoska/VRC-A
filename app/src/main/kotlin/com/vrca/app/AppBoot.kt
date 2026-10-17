@@ -130,7 +130,15 @@ internal fun AppBoot(
     // WebView loads Chromium now; the RPC's own WebView is then cheap to create.
     remember {
         runCatching { com.google.firebase.auth.FirebaseAuth.getInstance(); FirebaseFirestore.getInstance() }
-        if (discordWillStart(ctx)) runCatching { android.webkit.WebView(ctx.applicationContext).destroy() }
+        BootDiscordStart.sent = false   // once per boot run, not per process
+        if (discordWillStart(ctx)) {
+            runCatching { android.webkit.WebView(ctx.applicationContext).destroy() }
+            // Discord starts HERE, at the very start of boot, not with the other checks: its hidden
+            // WebView has to load the whole discord.com app (seconds) while every other check is one
+            // quick request, so started with them it finished long after (user: "looks silly").
+            // Started now, its load overlaps the launch splash + intro (~3 s head start).
+            startDiscordRpc(ctx)
+        }
         // The rows' spinner (an AnimatedVectorDrawable): its first load parses the XML and its
         // animators, ~0.2 s on the Quest the first time a row starts working (third user video).
         runCatching { ctx.getDrawable(com.vrca.R.drawable.boot_spinner) }
@@ -400,6 +408,24 @@ private suspend fun vrchatSignIn(ctx: Context, vrchatStatus: suspend () -> Servi
 /** States that let boot go on. */
 private val SETTLED = setOf(BootState.Done, BootState.Warn, BootState.Skipped, BootState.Background)
 
+/**
+ * Starts the Discord RPC service once per boot run. The service only sets `isRunning` after its
+ * WebView exists, and a second START before that re-runs its fresh start, rebuilding the WebView and
+ * throwing away the page load in progress, so the boot screen never sends it twice.
+ */
+private object BootDiscordStart { @Volatile var sent = false }
+
+private fun startDiscordRpc(ctx: Context) {
+    if (BootDiscordStart.sent) return
+    BootDiscordStart.sent = true
+    runCatching {
+        androidx.core.content.ContextCompat.startForegroundService(
+            ctx, android.content.Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
+                .setAction(com.vrca.discord.DiscordRpcService.ACTION_START)
+        )
+    }.onFailure { BootDiscordStart.sent = false }
+}
+
 /** Whether the Discord row will start the RPC service (and so its WebView) this boot. */
 private fun discordWillStart(ctx: Context): Boolean {
     if (com.vrca.discord.DiscordRpcService.isRunning) return false
@@ -414,15 +440,10 @@ private suspend fun discord(ctx: Context, set: (BootState, BootNote?) -> Unit) {
     val repo = (ctx.applicationContext as VrcaApplication).userPreferencesRepository
     if (!repo.discordRpcEnabled.first()) { set(BootState.Skipped, BootNote.Off); return }
     set(BootState.Working, BootNote.Connecting)
-    // Start it now instead of waiting for the VRChat pipeline's socket to open (its onOpen
-    // auto-start would otherwise be the first start, seconds later on a cold boot). Same guard
-    // as that auto-start; a duplicate START is a no-op in the service anyway.
-    if (repo.discordSessionSeeded.first() && !com.vrca.discord.DiscordRpcService.isRunning) {
-        runCatching {
-            androidx.core.content.ContextCompat.startForegroundService(ctx, android.content.Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
-                .setAction(com.vrca.discord.DiscordRpcService.ACTION_START))
-        }
-    }
+    // Normally already started at the very start of boot (see AppBoot's first composition); this
+    // covers a retry, or prefs that weren't readable then. Not via the VRChat pipeline's onOpen
+    // auto-start, which would be seconds later on a cold boot.
+    if (repo.discordSessionSeeded.first() && !com.vrca.discord.DiscordRpcService.isRunning) startDiscordRpc(ctx)
     val end = withTimeoutOrNull(25_000L) {
         DiscordRpcState.statusFlow.first {
             it == DiscordRpcStatus.CONNECTED || it == DiscordRpcStatus.SESSION_EXPIRED || it == DiscordRpcStatus.FAILED
