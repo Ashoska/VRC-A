@@ -18,6 +18,10 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.scale
@@ -255,6 +259,38 @@ private class Wall(private val seed: Int) {
 private val LANE_HEIGHT = 86.dp
 private val SYMBOL_SIZE = 58.dp
 
+/** Below this the wall isn't drawn, so its drift isn't stepped either. */
+private const val INVISIBLE = 0.001f
+/** The drift runs at about 30 fps: symbols move 6-20 dp/s, so that's under 1 dp a step. */
+private const val STEP_NS = 33_000_000L
+
+/**
+ * Each symbol drawn ONCE into a small image per size step, instead of re-stroking every symbol
+ * (and rebuilding its paths) on every frame: ~130 symbols on the headset panel made the wall the
+ * boot screen's biggest per-frame cost, on the main thread of a Quest whose CPU VRChat mostly owns.
+ */
+private class SymbolImages(private val ink: Color, private val width: Float, private val density: Float) {
+    private val images = HashMap<String, ImageBitmap>()
+    /** Sizes are snapped to steps of this many px, so a handful of images serve every sprite. */
+    private val step = 12f * density
+
+    /** The image for [p] and the symbol size it was drawn at (the image is padded around it). */
+    fun of(p: Sprite): Pair<ImageBitmap, Float> {
+        val base = (kotlin.math.round(p.size / step) * step).coerceAtLeast(step)
+        val img = images.getOrPut(p.symbol.name + "#" + base.toInt()) {
+            val side = kotlin.math.ceil(base * 1.3f).toInt()
+            val pad = (side - base) / 2f
+            ImageBitmap(side, side).also { bmp ->
+                CanvasDrawScope().draw(
+                    Density(density), LayoutDirection.Ltr, androidx.compose.ui.graphics.Canvas(bmp),
+                    Size(side.toFloat(), side.toFloat())
+                ) { translate(pad, pad) { SymbolPen(this, base, ink, width).apply(p.symbol.draw) } }
+            }
+        }
+        return img to base
+    }
+}
+
 /**
  * The back wall: lanes of symbols drifting sideways like traffic, neighbouring lanes at their own
  * speeds and directions; symbols that meet bounce off each other, then settle back into their lane.
@@ -268,12 +304,19 @@ fun BootBackdropLayer(style: BootBackdrop, alpha: () -> Float = { 1f }, modifier
     val seed = remember { Random.nextInt() }
     val wall = remember { Wall(seed) }
     var frame by remember { mutableLongStateOf(0L) }
+    // Built on first draw (it needs the density); a plain holder, not state (drawing writes it).
+    val images = remember { arrayOfNulls<SymbolImages>(1) }
+    val alphaNow by androidx.compose.runtime.rememberUpdatedState(alpha)
     LaunchedEffect(wall) {
         var last = 0L
         while (true) {
             withFrameNanos { now ->
+                // Nothing to do while the wall is invisible (before the intro brings it in, after
+                // the fold): no stepping, no redraws.
+                if (alphaNow() <= INVISIBLE) { last = 0L; return@withFrameNanos }
+                if (last != 0L && now - last < STEP_NS) return@withFrameNanos
                 // Capped step: a hitch (or the app pausing) can't fling everything across the wall.
-                val dt = if (last == 0L) 0f else ((now - last) / 1e9f).coerceAtMost(0.05f)
+                val dt = if (last == 0L) 0f else ((now - last) / 1e9f).coerceAtMost(0.1f)
                 last = now
                 wall.step(dt)
                 frame = now
@@ -282,24 +325,25 @@ fun BootBackdropLayer(style: BootBackdrop, alpha: () -> Float = { 1f }, modifier
     }
     Box(
         modifier.drawBehind {
-            frame // redraw every frame
+            frame // redraw on each drift step
             val a = alpha()
-            if (a <= 0f) return@drawBehind
+            if (a <= INVISIBLE) return@drawBehind
             wall.ensure(size.width, size.height, density)
-            val ink = GremlinColors.Edge.copy(alpha = 0.6f * a)
-            val width = 1.6.dp.toPx()
+            val cache = images[0] ?: SymbolImages(GremlinColors.Edge.copy(alpha = 0.6f), 1.6.dp.toPx(), density).also { images[0] = it }
             val bob = 3.dp.toPx()
             val t = frame / 1e9f
             for (p in wall.sprites) {
                 val s = p.size
                 if (p.x < -s || p.x > size.width + s) continue
+                val (img, base) = cache.of(p)
+                val k = s / base
                 // Each symbol's own slow sway and bob on top of the physics.
                 val sway = 8f * sin(0.9f * t + p.phase)
                 val lift = bob * sin(0.7f * t + p.phase * 1.7f)
-                translate(p.x - s / 2, p.y - s / 2 + lift) {
-                    rotate(p.deg + sway, pivot = Offset(s / 2, s / 2)) {
-                        scale(if (p.mirror) -1f else 1f, 1f, pivot = Offset(s / 2, s / 2)) {
-                            SymbolPen(this, s, ink, width).apply(p.symbol.draw)
+                translate(p.x, p.y + lift) {
+                    rotate(p.deg + sway, pivot = Offset.Zero) {
+                        scale(if (p.mirror) -k else k, k, pivot = Offset.Zero) {
+                            drawImage(img, topLeft = Offset(-img.width / 2f, -img.height / 2f), alpha = a)
                         }
                     }
                 }
