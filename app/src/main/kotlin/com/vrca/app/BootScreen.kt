@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -616,7 +617,10 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
         else -> accent
     }
     val tone by animateColorAsState(target, label = "headerTone")
-    val pulse by rememberInfiniteTransition(label = "segPulse").animateFloat(
+    // The breathing pulse, the Ready sweep and the chip pop are read only in draw/layer lambdas
+    // below, never here: read in composition they rebuilt the whole header every frame, which is
+    // what stutters on a Quest whose CPU VRChat mostly owns. Now they only repaint.
+    val pulse = rememberInfiniteTransition(label = "segPulse").animateFloat(
         0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "segPulseA"
     )
     // The Ready moment: when the last check settles, a light sweeps along the bar left to right
@@ -640,13 +644,13 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
             Text(
                 "$finished/${checks.size}",
                 style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
-                modifier = Modifier.scale(chipPop.value).background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
+                modifier = Modifier.graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }.background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
             )
         }
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth().height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             checks.forEachIndexed { i, c ->
-                val seg by animateColorAsState(
+                val seg = animateColorAsState(
                     when (c.state) {
                         BootState.Waiting -> GremlinColors.Raised
                         BootState.Skipped -> GremlinColors.Inactive
@@ -654,13 +658,17 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
                     },
                     label = "seg"
                 )
-                val a = if (c.state == BootState.Working) pulse else 1f
+                val working = c.state == BootState.Working
                 // How much of the Ready sweep is on this segment right now (0..1).
-                val glow = (1f - kotlin.math.abs(sweep.value - i - 0.5f)).coerceIn(0f, 1f)
-                val color = androidx.compose.ui.graphics.lerp(seg.copy(alpha = seg.alpha * a), GremlinColors.Text, glow * 0.75f)
+                fun glow() = (1f - kotlin.math.abs(sweep.value - i - 0.5f)).coerceIn(0f, 1f)
                 Box(
-                    Modifier.weight(1f).fillMaxHeight().graphicsLayer { scaleY = 1f + glow * 0.6f }
-                        .background(color, CircleShape)
+                    Modifier.weight(1f).fillMaxHeight().graphicsLayer { scaleY = 1f + glow() * 0.6f }
+                        .drawBehind {
+                            val base = seg.value
+                            val a = if (working) pulse.value else 1f
+                            val color = androidx.compose.ui.graphics.lerp(base.copy(alpha = base.alpha * a), GremlinColors.Text, glow() * 0.75f)
+                            drawRoundRect(color, cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2, size.height / 2))
+                        }
                 )
             }
         }
@@ -698,7 +706,6 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
     val accent = MaterialTheme.colorScheme.primary
     val tone = check.state.tone(accent)
     val dim = check.state == BootState.Waiting
-    val edge = rowEdge(check.state.mark(), tone)
     // A row that fails gives one short sideways shake, so the eye goes straight to it.
     val shake = remember { Animatable(0f) }
     LaunchedEffect(check.state) {
@@ -710,7 +717,7 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
         modifier.graphicsLayer { translationX = shake.value * density }
             .fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
             .background(if (dim) GremlinColors.Card.copy(alpha = 0.5f) else GremlinColors.Card)
-            .border(1.dp, edge, RoundedCornerShape(12.dp))
+            .rowEdge(check.state.mark(), tone)
             .padding(start = 10.dp, end = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -812,9 +819,11 @@ private fun StateMark(mark: Mark) {
 /**
  * A row's outline: a steady [tone] edge while it needs attention, and a one-off flash in [tone]
  * that fades out when it lands on a good result (so "it worked" is felt, then gets out of the way).
+ * Drawn here (1dp, 12dp corners like the row's clip) with the animations read at DRAW time, so a
+ * flash or a colour change only repaints the row instead of rebuilding it every frame.
  */
 @Composable
-private fun rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean = true): Color {
+private fun Modifier.rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean = true): Modifier {
     val flash = remember { Animatable(0f) }
     var last by remember { mutableStateOf(mark) }
     LaunchedEffect(mark) {
@@ -824,7 +833,7 @@ private fun rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean = true): 
         }
         last = mark
     }
-    val steady by animateColorAsState(
+    val steady = animateColorAsState(
         when (mark) {
             Mark.Working -> if (edgeWhileWorking) tone.copy(alpha = 0.7f) else Color.Transparent
             Mark.Warn, Mark.Maintenance, Mark.Failed -> tone.copy(alpha = 0.6f)
@@ -832,7 +841,20 @@ private fun rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean = true): 
         },
         label = "rowEdge"
     )
-    return if (flash.value > 0f) GremlinColors.Positive.copy(alpha = flash.value) else steady
+    return drawWithContent {
+        drawContent()
+        val f = flash.value
+        val c = if (f > 0f) GremlinColors.Positive.copy(alpha = f) else steady.value
+        if (c.alpha <= 0f) return@drawWithContent
+        val w = 1.dp.toPx()
+        val r = 12.dp.toPx() - w / 2
+        drawRoundRect(
+            c, topLeft = androidx.compose.ui.geometry.Offset(w / 2, w / 2),
+            size = androidx.compose.ui.geometry.Size(size.width - w, size.height - w),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(w)
+        )
+    }
 }
 
 /** One service in the Status panel: icon, name, its fixed state word and a coloured dot. Built like a check row. */
@@ -847,11 +869,10 @@ private fun ServiceRow(icon: ImageVector, name: String, text: String, mark: Mark
     val tone by animateColorAsState(target, label = "serviceTone")
     val warn = mark == Mark.Warn || mark == Mark.Maintenance || mark == Mark.Failed
     // No outline while just checking: three outlined rows at once on every open read as alarm.
-    val edge = rowEdge(mark, tone, edgeWhileWorking = false)
     Row(
         modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
             .background(GremlinColors.Card)
-            .border(1.dp, edge, RoundedCornerShape(12.dp))
+            .rowEdge(mark, tone, edgeWhileWorking = false)
             .padding(start = 10.dp, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

@@ -52,7 +52,6 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
@@ -201,7 +200,7 @@ private fun VrcaAppContent() {
     // The boot screen (BootScreen.kt, run by AppBoot.kt) does every boot check itself, side by
     // side: the device session, terms, the ban check, the VRChat session, updates and the rest.
     // Once they're all in and the main app opens next, AppBoot has the app BUILT behind it
-    // ([prepared]: hidden, untouchable, dialogs held) before its Ready sweep, so the costly first
+    // ([prepared]: covered by the opaque boot screen, untouchable, dialogs held) before its Ready sweep, so the costly first
     // build happens while nothing on the boot screen moves, not during the hand-off (the frozen
     // panel before Home in the user's video). Same call site before and after boot, so the built
     // app is kept, not rebuilt (its listeners attach once).
@@ -209,11 +208,10 @@ private fun VrcaAppContent() {
     var appReady by remember { mutableStateOf(false) }
     androidx.compose.foundation.layout.Box {
         if (bootOk || prepared) {
-            androidx.compose.foundation.layout.Box(
-                Modifier.fillMaxSize()
-                    .graphicsLayer { alpha = if (bootOk) 1f else 0f }
-                    .onPlaced { appReady = true }
-            ) {
+            // Drawn for real while prepared (NOT alpha 0, which skipped its first draw and moved
+            // that cost onto the reveal: ~0.8 s of empty panel in the user's video). The boot
+            // screen above is opaque, so it stays unseen until the boot screen goes.
+            androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().onPlaced { appReady = true }) {
                 VrcaAfterBoot(warmResume = warmResume, bootOk = bootOk)
             }
         }
