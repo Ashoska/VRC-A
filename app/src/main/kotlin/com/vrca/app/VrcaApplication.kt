@@ -54,9 +54,9 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
         @Volatile
         var openedFromSwipe: Boolean = false
 
-        // True when this launch came from the BootReceiver (device turned on) — the
-        // headset opens the app on boot, and a reboot is a genuine cold start the
-        // user should see the boot screen for (same treatment as a swipe-reopen).
+        // True when this is the first open since the device restarted (BootReceiver
+        // leaves a note; the app is no longer opened on boot). A reboot is a genuine cold
+        // start the user should see the boot screen for (same treatment as a swipe-reopen).
         @Volatile
         var openedFromBoot: Boolean = false
     }

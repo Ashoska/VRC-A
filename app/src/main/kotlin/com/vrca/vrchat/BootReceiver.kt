@@ -19,25 +19,13 @@ class BootReceiver : BroadcastReceiver() {
         // lingering swipe-dismissal flag so the app/services below are allowed to run.
         runCatching { com.vrca.app.AppShutdown.clearSwipedAway(context) }
 
-        // Headset (Meta Quest): OPEN the app when the headset turns on — a VR
-        // companion should come up with the headset, not sit invisible in the
-        // background (the phone shows a persistent notification; the Quest doesn't).
-        // VRC-A holds SYSTEM_ALERT_WINDOW, which grants the background-activity-launch
-        // exemption needed to start an Activity from a boot receiver on Android 10+.
-        // Launching MainActivity also starts KeepAliveService (onCreate), so the
-        // runtime comes up regardless of VRChat login. Best-effort — harmless if the
-        // OS blocks the background launch. Phone/admin keep the services-only path.
-        if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
-            runCatching {
-                context.startActivity(
-                    Intent(context, com.vrca.app.MainActivity::class.java)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        // Marks this as a boot launch so the app shows its boot screen
-                        // (a reboot is a genuine cold start, not a warm resume).
-                        .putExtra("vrca_from_boot", true)
-                )
-            }
-        }
+        // The app is NOT opened here (it used to be, on the headset). Boot broadcasts arrive late
+        // on the Quest, often while the user is already launching VRChat: VRC-A's window taking
+        // the front mid-launch (plus its boot screen's work: Chromium, the Discord page, Firebase)
+        // left VRChat without input focus, so Horizon showed "VRChat isn't responding" until the
+        // user pressed Wait (user reports). Instead the next open is marked as the first since a
+        // restart, so it shows the boot screen and runs its checks (MainActivity reads this).
+        runCatching { com.vrca.app.MainActivity.markRebooted(context) }
 
         if (!VrchatAuthManager.isLoggedIn(context)) return
 
