@@ -75,6 +75,13 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
 
         instance = this
 
+        // Records main-thread freezes in the first 2 minutes (Settings → Debug).
+        MainThreadWatch.start(applicationContext)
+
+        // Open the encrypted VRChat store in the background now, so it's ready by the time
+        // anything asks (slow right after the headset turns on; VrchatAuthManager.getPrefs).
+        com.vrca.vrchat.VrchatAuthManager.warmUp(applicationContext)
+
         // Your repo expects Context
         userPreferencesRepository = UserPreferencesRepository(applicationContext)
 

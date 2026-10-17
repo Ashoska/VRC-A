@@ -146,7 +146,10 @@ internal fun AppBoot(
         true
     }
     // State, refreshed after a boot-screen sign-in (rule: everything shown is watched state, ui-kit.md).
-    var userName by remember { mutableStateOf(VrchatAuthManager.getStoredDisplayName(ctx)) }
+    // Loaded off the main thread: the encrypted store can be slow right after the headset turns on.
+    var userName by remember { mutableStateOf<String?>(null) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    LaunchedEffect(Unit) { userName = withContext(Dispatchers.IO) { VrchatAuthManager.getStoredDisplayName(ctx) } }
     val discordIcon = ImageVector.vectorResource(com.vrca.R.drawable.ic_discord)
     val icons = remember(discordIcon) {
         mapOf(
@@ -239,7 +242,10 @@ internal fun AppBoot(
             }
             // A new user's first open: fetch the tutorial's pictures while the screen is up.
             val tutorial = launch {
-                if (!VrchatAuthManager.isLoggedIn(ctx) && !com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)) {
+                val newUser = withContext(Dispatchers.IO) {
+                    !VrchatAuthManager.isLoggedIn(ctx) && !com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
+                }
+                if (newUser) {
                     withTimeoutOrNull(TUTORIAL_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx) }
                 }
             }
@@ -294,7 +300,7 @@ internal fun AppBoot(
     LaunchedEffect(blockingDone, shown) {
         if (blockingDone && shown) {
             snapshotFlow { ROWS.all { rows[it.ordinal].state in SETTLED } }.first { it }
-            val mainNext = mainAppNext()
+            val mainNext = withContext(Dispatchers.IO) { mainAppNext() }
             if (mainNext) {
                 prepareApp()
                 withTimeoutOrNull(APP_BUILD_CAP_MS) { snapshotFlow { appReadyNow }.first { it } }
@@ -336,8 +342,8 @@ internal fun AppBoot(
                 onCancel = { showLogin = false }
             ) { _, _ ->
                 showLogin = false
-                userName = VrchatAuthManager.getStoredDisplayName(ctx)
                 signInAttempt++
+                scope.launch { userName = withContext(Dispatchers.IO) { VrchatAuthManager.getStoredDisplayName(ctx) } }
             }
         }
     }
@@ -378,7 +384,7 @@ private suspend fun vrchatSignIn(ctx: Context, vrchatStatus: suspend () -> Servi
     if (!com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)) { set(BootState.Skipped, BootNote.SignInNeeded); return }
     set(BootState.Working, null)
     val saved = withTimeoutOrNull(4_000L) {
-        while (!VrchatAuthManager.isLoggedIn(ctx)) delay(400)
+        while (!withContext(Dispatchers.IO) { VrchatAuthManager.isLoggedIn(ctx) }) delay(400)
         true
     } == true
     if (!saved) { set(BootState.Failed, BootNote.SignInNeeded); return }

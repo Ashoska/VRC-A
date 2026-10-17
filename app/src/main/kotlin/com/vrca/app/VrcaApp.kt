@@ -105,6 +105,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -802,7 +804,7 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
         while (!vrcLoginDone && attempts < 20) {
             kotlinx.coroutines.delay(750)
             attempts++
-            if (VrchatAuthManager.isLoggedIn(ctx)) vrcLoginDone = true
+            if (withContext(Dispatchers.IO) { VrchatAuthManager.isLoggedIn(ctx) }) vrcLoginDone = true
         }
     }
 

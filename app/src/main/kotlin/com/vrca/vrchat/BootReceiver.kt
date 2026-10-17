@@ -19,14 +19,37 @@ class BootReceiver : BroadcastReceiver() {
         // lingering swipe-dismissal flag so the app/services below are allowed to run.
         runCatching { com.vrca.app.AppShutdown.clearSwipedAway(context) }
 
-        // The app is NOT opened here (it used to be, on the headset). Boot broadcasts arrive late
-        // on the Quest, often while the user is already launching VRChat: VRC-A's window taking
-        // the front mid-launch (plus its boot screen's work: Chromium, the Discord page, Firebase)
-        // left VRChat without input focus, so Horizon showed "VRChat isn't responding" until the
-        // user pressed Wait (user reports). Instead the next open is marked as the first since a
-        // restart, so it shows the boot screen and runs its checks (MainActivity reads this).
+        // The next open is the first since a restart: it shows the boot screen and runs its checks
+        // (MainActivity reads this note).
         runCatching { com.vrca.app.MainActivity.markRebooted(context) }
 
+        // Headset (Meta Quest): OPEN the app when the headset turns on — a VR companion should
+        // come up with the headset, not sit invisible in the background. VRC-A holds
+        // SYSTEM_ALERT_WINDOW, which grants the background-activity-launch exemption needed to
+        // start an Activity from a boot receiver on Android 10+. Best-effort.
+        if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+            runCatching {
+                context.startActivity(
+                    Intent(context, com.vrca.app.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            }
+        }
+
+        // Everything else runs OFF the main thread. It reads the encrypted VRChat store, and right
+        // after power-on the Keystore can take seconds: done here on the main thread it held up
+        // the app window just launched above, so Horizon showed "VRC-A isn't responding" until
+        // the user pressed Wait (user reports, only on the auto-open at power-on).
+        val pending = goAsync()
+        Thread({
+            try {
+                runCatching { startServices(context.applicationContext) }
+            } finally {
+                pending.finish()
+            }
+        }, "vrca-boot-receiver").start()
+    }
+
+    private fun startServices(context: Context) {
         if (!VrchatAuthManager.isLoggedIn(context)) return
 
         // Always-on keep-alive (holds the wakelock) — previously NOT restarted on boot.
