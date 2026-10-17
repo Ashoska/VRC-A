@@ -39,6 +39,7 @@ including recompiling edited code; in live mode a command is ~0.4 s (code edits 
 | `root screen\|app` | draw the main screen (default) or the full app with its boot/ToS/onboarding/update gates |
 | `hide` | remove what `show` put up |
 | `record start <name> [ms]` … `record stop` | record an animation: a frame every `ms` of app time (default 32) through every `wait` and the settle after each action in between, then `<name>-frames.png` (a timestamped filmstrip, up to 24 frames in a grid: the motion readable as one image) and `<name>.gif` (real speed, loops; built from `<name>-frames/` by `gif.py`, which `ui.sh`/`uictl.sh` run afterwards). E.g. `record start expand; tap Manual Send; wait 300; record stop`. Dialogs fade and scale in/out like on a device (Robolectric skips window animations, so the lab emulates Android's 200 ms dialog animation); everything Compose animates is captured |
+| `perf start <name> [heavy=N]` … `perf stop` | **lag check**: counts every composable call per frame (Compose's tracing hook) and times each frame's main-thread work. Reports frames with >= N calls (default 1000, a likely Quest stall, with the composables that ran, VRC-A's own first), the longest run of frames each re-running >= 20 VRC-A composables (an animation read in composition instead of while drawing, with what re-ran), and lab frame times. Writes `ui-shots/<name>-perf.txt` (every frame). Start it BEFORE `show` to include the first frame. |
 
 `<where>` = `<text> [#n] [@fx,fy]` (a point inside that element's box as fractions, default its centre:
 `touch slider @0.8,0.5` sets a slider to ~80%) | `slider [#n]` (sliders have no text) | `x,y` (dp on screen).
@@ -62,7 +63,7 @@ The engine itself can't run on the JVM. Expand Manual Send to see the row:
 `ui.sh run headset "preset voice-loading; tap Manual Send; shot v"`.
 
 **Shows:** update, update-optional, whatsnew, confirm, confirm-destructive, timezone (dialogs);
-boot [mid|error|done|incident|offline|signin|vrcdown|live|livefail|demo] [none] (samples), headsetboot [onboarded|full] (the real boot run; `full` = the whole real start as a returning user: VrcaApp, app built behind the boot screen, fold + reveal into the app), crash, banned [reason], tos, onboarding <step 0-7>, login [nocancel] (full screens).
+boot [mid|error|done|incident|offline|signin|vrcdown|live|livefail|demo] [none] (samples), headsetboot [onboarded|full] [discord[=ms]|discordfail[=ms]] (the real boot run; `discord=ms` turns Discord RPC on and simulates it (Connecting from the start, Connected/Failed after ms of app time, default 6000: the real hidden discord.com WebView can't run here); `full` = the whole real start as a returning user: VrcaApp, app built behind the boot screen, fold + reveal into the app), crash, banned [reason], tos, onboarding <step 0-7>, login [nocancel] (full screens).
 
 Everything else is reached the way a user gets there: tap through the tabs, sub-tabs, cards,
 chips and buttons (`tree` lists what's tappable).

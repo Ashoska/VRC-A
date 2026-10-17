@@ -516,9 +516,32 @@ object UiLabScenes {
                 // `show headsetboot full`: the whole real start as a returning user (tutorial done,
                 // terms accepted, swipe-reopened): VrcaApp's boot gate, the app built behind the boot
                 // screen before the Ready sweep, then the fold + reveal into the real app.
+                // `... discord[=ms]` / `... discordfail[=ms]`: Discord RPC on for this run, simulated. The
+                // real RPC is a hidden discord.com WebView the lab can't run, but the boot only watches
+                // DiscordRpcState, so this plays that: Connecting from the start (the real boot starts
+                // Discord before the first frame), then Connected (or Failed) after ms of app time
+                // (default 6000, about a Quest load).
                 val ctx = androidx.compose.ui.platform.LocalContext.current
-                if (rest == "onboarded" || rest == "full") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
-                if (rest == "full") {
+                val words = rest.split(' ').filter { it.isNotBlank() }
+                val mode = words.firstOrNull { !it.startsWith("discord") }.orEmpty()
+                val discordArg = words.firstOrNull { it.startsWith("discord") }
+                if (discordArg != null) {
+                    val ms = discordArg.substringAfter('=', "6000").toLongOrNull() ?: 6000L
+                    val fail = discordArg.startsWith("discordfail")
+                    androidx.compose.runtime.remember {
+                        val repo = (ctx.applicationContext as com.vrca.app.VrcaApplication).userPreferencesRepository
+                        kotlinx.coroutines.runBlocking { repo.saveDiscordRpcEnabled(true); repo.saveDiscordSessionSeeded(true) }
+                        com.vrca.discord.DiscordRpcState.status = com.vrca.discord.DiscordRpcStatus.CONNECTING
+                        true
+                    }
+                    androidx.compose.runtime.LaunchedEffect(Unit) {
+                        kotlinx.coroutines.delay(ms)
+                        com.vrca.discord.DiscordRpcState.status =
+                            if (fail) com.vrca.discord.DiscordRpcStatus.FAILED else com.vrca.discord.DiscordRpcStatus.CONNECTED
+                    }
+                }
+                if (mode == "onboarded" || mode == "full") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
+                if (mode == "full") {
                     androidx.compose.runtime.remember {
                         com.vrca.app.TosPrefs.accept(ctx, 1_000)
                         com.vrca.app.VrcaApplication.openedFromSwipe = true

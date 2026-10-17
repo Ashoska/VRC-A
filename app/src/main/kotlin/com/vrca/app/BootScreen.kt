@@ -120,6 +120,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.derivedStateOf
 import com.vrca.BuildConfig
 import com.vrca.ui.theme.GremlinColors
 
@@ -287,19 +288,22 @@ fun BootScreen(
     val panelR = remember { Animatable(start) }
     val partsL = remember { Animatable(start) }
     val partsR = remember { Animatable(start) }
-    // Both coordinates are kept and the logo's centre is derived from them here. Computing it in
-    // the logo's own callback needed the box's callback to have run first (their order isn't
+    // Both coordinates are kept and the logo's centre is derived from them. Computing it in the
+    // logo's own callback needed the box's callback to have run first (their order isn't
     // guaranteed), which could leave the intro waiting on a blank screen until something moved.
-    var rootCoords by remember { mutableStateOf<LayoutCoordinates?>(null, neverEqualPolicy()) }
-    var logoCoords by remember { mutableStateOf<LayoutCoordinates?>(null, neverEqualPolicy()) }
-    val logoCenter: Offset? = run {
-        val r = rootCoords; val l = logoCoords
-        if (r != null && l != null && r.isAttached && l.isAttached)
+    // PLAIN holders, read only where the logo is drawn: they're written on every layout pass, and
+    // as state (never-equal) every pass rebuilt the whole screen, including frames where only a
+    // row's text changed (UI Lab `perf`: 48 frames in a row). Only [placed] is state, set once.
+    val coords = remember { arrayOfNulls<LayoutCoordinates>(2) } // [0] the screen, [1] the logo
+    fun logoCenter(): Offset? {
+        val r = coords[0]; val l = coords[1]
+        return if (r != null && l != null && r.isAttached && l.isAttached)
             r.localPositionOf(l, Offset.Zero) + Offset(l.size.width / 2f, l.size.height / 2f)
         else null
     }
     // Start once the logo's final slot is known, so the first frame already has it at the centre.
-    val placed = logoCenter != null
+    var placed by remember { mutableStateOf(false) }
+    fun notePlaced() { if (!placed && logoCenter() != null) placed = true }
     LaunchedEffect(placed) {
         if (!playIntro || !placed || logoIn.value > 0f) return@LaunchedEffect
         logoIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
@@ -339,7 +343,7 @@ fun BootScreen(
     }
     Surface(color = GremlinColors.Backdrop) {
         BoxWithConstraints(
-            Modifier.fillMaxSize().background(GremlinColors.Backdrop).onGloballyPositioned { rootCoords = it }
+            Modifier.fillMaxSize().background(GremlinColors.Backdrop).onGloballyPositioned { coords[0] = it; notePlaced() }
         ) {
             BootBackdropLayer(backdrop, alpha = { contentIn.value * (1f - exitP.value) }, modifier = Modifier.matchParentSize())
             // Wide = the headset panel (or a tablet); a phone gets the stacked column.
@@ -356,11 +360,13 @@ fun BootScreen(
                         val toBar = if (exitToTopBar) 1f + (TOP_BAR_LOGO_HEIGHT / height - 1f) * exitP.value else 1f
                         (0.9f + 0.1f * logoIn.value) * toBar
                     },
-                    fadeIn = logoIn.value * (if (exitToTopBar) 1f else 1f - exitP.value),
+                    // A lambda, read while drawing: as a value it rebuilt the whole screen on every
+                    // frame of the logo intro and the fold (UI Lab `perf`).
+                    fadeIn = { logoIn.value * (if (exitToTopBar) 1f else 1f - exitP.value) },
                     modifier = Modifier
-                        .onGloballyPositioned { logoCoords = it }
+                        .onGloballyPositioned { coords[1] = it; notePlaced() }
                         .graphicsLayer {
-                            val c = logoCenter
+                            val c = logoCenter()
                             if (c != null) {
                                 translationX = (boxW / 2f - c.x) * (1f - settle.value)
                                 translationY = (boxH / 2f - c.y) * (1f - settle.value)
@@ -408,11 +414,11 @@ fun BootScreen(
                         logo(WIDE_LOGO_HEIGHT)
                         Spacer(Modifier.height(WIDE_LOGO_GAP))
                         Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
-                            StatusPanel(status, Modifier.fillMaxWidth(), partsR.value, rowHeight = WIDE_ROW_HEIGHT)
+                            StatusPanel(status, Modifier.fillMaxWidth(), { partsR.value }, rowHeight = WIDE_ROW_HEIGHT)
                         }
                     }
                     Unfold({ panelL.value }, Modifier.weight(1.15f)) {
-                        LoadingPanel(checks, Modifier.fillMaxWidth(), partsL.value, userName = userName, celebrate = celebrate)
+                        LoadingPanel(checks, Modifier.fillMaxWidth(), { partsL.value }, userName = userName, celebrate = celebrate)
                     }
                 }
                 pills()
@@ -440,11 +446,11 @@ fun BootScreen(
                     Spacer(Modifier.height(PHONE_GAP + 4.dp))
                     Column(Modifier.widthIn(max = PHONE_MAX_WIDTH).fillMaxWidth()) {
                         Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
-                            StatusPanel(status, Modifier.fillMaxWidth(), partsR.value, rowHeight = rowH, rowGap = rowGap)
+                            StatusPanel(status, Modifier.fillMaxWidth(), { partsR.value }, rowHeight = rowH, rowGap = rowGap)
                         }
                         Spacer(Modifier.height(PHONE_GAP))
                         Unfold({ panelL.value }, Modifier.fillMaxWidth()) {
-                            LoadingPanel(checks, Modifier.fillMaxWidth(), partsL.value, userName = userName, rowHeight = rowH, rowGap = rowGap, celebrate = celebrate)
+                            LoadingPanel(checks, Modifier.fillMaxWidth(), { partsL.value }, userName = userName, rowHeight = rowH, rowGap = rowGap, celebrate = celebrate)
                         }
                         pills()
                     }
@@ -501,7 +507,7 @@ private const val EXIT_LOGO_MS = 700
  * was removed (it read as the logo blipping brighter and dimmer).
  */
 @Composable
-private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: Float, modifier: Modifier = Modifier) {
+private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: () -> Float, modifier: Modifier = Modifier) {
     // The logo as a vector (vrca_logo_vector, traced by tools/symbol-lab/logo_trace.py): sharp at any size, which
     // matters on the headset where the whole panel zooms when its window is resized.
     val logo = painterResource(com.vrca.R.drawable.vrca_logo_vector)
@@ -516,14 +522,14 @@ private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: Float, modifie
             Image(
                 painter = logo, contentDescription = null,
                 colorFilter = ColorFilter.tint(DropLayer.copy(alpha = 0.55f)),
-                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).offset(y = 5.dp).alpha(fadeIn)
+                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).offset(y = 5.dp).graphicsLayer { alpha = fadeIn() }
             )
             Image(
                 painter = logo, contentDescription = "VRC-A",
                 // The fade sits on the images themselves, not on the oversized box around them:
                 // a see-through layer whose content spills past its bounds drew nothing in the
                 // UI Lab's software renderer (the intro's fade-in recorded as blank).
-                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).alpha(fadeIn)
+                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).graphicsLayer { alpha = fadeIn() }
             )
         }
     }
@@ -593,9 +599,22 @@ private fun stagger(reveal: Float, i: Int, n: Int): Float {
 }
 
 /** A piece widening out from its middle as it appears. */
-private fun Modifier.widenIn(a: Float) = graphicsLayer {
-    scaleX = 0.2f + 0.8f * a
-    alpha = a
+private fun Modifier.widenIn(a: () -> Float) = graphicsLayer {
+    val v = a()
+    scaleX = 0.2f + 0.8f * v
+    alpha = v
+}
+
+/**
+ * How many of a panel's [pieces] have fully appeared. Changes only when one finishes, so a panel
+ * recomposes [pieces] times during its reveal instead of on every frame (the reveal itself is
+ * read in [widenIn], at draw time).
+ */
+@Composable
+private fun revealedCount(reveal: () -> Float, pieces: Int): Int {
+    val r by rememberUpdatedState(reveal)
+    val count by remember(pieces) { derivedStateOf { (0 until pieces).count { stagger(r(), it, pieces) >= 1f } } }
+    return count
 }
 
 /**
@@ -676,22 +695,23 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
 /** The checklist: the header, then one row per check. Wraps its rows (no fixed height). */
 @Composable
 private fun LoadingPanel(
-    checks: List<BootCheck>, modifier: Modifier, reveal: Float = 1f, userName: String? = null,
+    checks: List<BootCheck>, modifier: Modifier, reveal: () -> Float = { 1f }, userName: String? = null,
     rowHeight: Dp = WIDE_ROW_HEIGHT, rowGap: Dp = 8.dp, celebrate: Boolean = true
 ) {
     val pieces = checks.size + 1 // the header, then each check
     // A row shows "waiting" until it has fully appeared, so a check that finished during the intro
     // still lands its tick on screen instead of arriving already ticked.
+    val shown = revealedCount(reveal, pieces)
     val checks = checks.mapIndexed { i, c ->
-        if (stagger(reveal, 1 + i, pieces) < 1f) c.copy(state = BootState.Waiting, note = null) else c
+        if (1 + i >= shown) c.copy(state = BootState.Waiting, note = null) else c
     }
     Layer(modifier) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
-            Box(Modifier.widenIn(stagger(reveal, 0, pieces))) { BootHeader(checks, userName, celebrate) }
+            Box(Modifier.widenIn { stagger(reveal(), 0, pieces) }) { BootHeader(checks, userName, celebrate) }
             Spacer(Modifier.height(14.dp))
             Column(verticalArrangement = Arrangement.spacedBy(rowGap)) {
                 checks.forEachIndexed { i, c ->
-                    BootCheckTile(c, Modifier.widenIn(stagger(reveal, 1 + i, pieces)), height = rowHeight)
+                    BootCheckTile(c, Modifier.widenIn { stagger(reveal(), 1 + i, pieces) }, height = rowHeight)
                 }
             }
         }
@@ -923,13 +943,14 @@ private fun ServiceRow(icon: ImageVector, name: String, text: String, mark: Mark
 
 /** Is VRChat up, and are our own servers up. Wraps its rows (no fixed height). */
 @Composable
-private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 1f, rowHeight: Dp = WIDE_ROW_HEIGHT, rowGap: Dp = 8.dp) {
+private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: () -> Float = { 1f }, rowHeight: Dp = WIDE_ROW_HEIGHT, rowGap: Dp = 8.dp) {
+    val shown = revealedCount(reveal, 3)
     Layer(modifier) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
             // No header (user): the rows speak for themselves.
             Column(verticalArrangement = Arrangement.spacedBy(rowGap)) {
                 // Same as the checklist: a row says "Checking..." until it has fully appeared.
-                val net = if (stagger(reveal, 0, 3) < 1f) InternetLink.Checking else status.internet
+                val net = if (0 >= shown) InternetLink.Checking else status.internet
                 ServiceRow(
                     if (net == InternetLink.None) Icons.Filled.WifiOff else Icons.Filled.Wifi, "Internet",
                     if (status.internetMbps > 0 && net != InternetLink.None && net != InternetLink.Checking)
@@ -939,16 +960,16 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: Float = 
                         InternetLink.None -> Mark.Failed
                         else -> Mark.Done
                     },
-                    Modifier.widenIn(stagger(reveal, 0, 3)), rowHeight
+                    Modifier.widenIn { stagger(reveal(), 0, 3) }, rowHeight
                 )
                 for ((i, row) in listOf(
                     // Both service rows share the server icon (user): they're both "is that server up".
-                    Triple(Icons.Filled.Dns, "VRChat", if (stagger(reveal, 1, 3) < 1f) ServiceState.Checking else status.vrchat),
+                    Triple(Icons.Filled.Dns, "VRChat", if (1 >= shown) ServiceState.Checking else status.vrchat),
                     // Never names the backend (public UI rule): just "VRC-A servers".
-                    Triple(Icons.Filled.Dns, "VRC-A servers", if (stagger(reveal, 2, 3) < 1f) ServiceState.Checking else status.servers)
+                    Triple(Icons.Filled.Dns, "VRC-A servers", if (2 >= shown) ServiceState.Checking else status.servers)
                 ).withIndex()) {
                     val (icon, name, state) = row
-                    ServiceRow(icon, name, state.text, state.mark(), Modifier.widenIn(stagger(reveal, 1 + i, 3)), rowHeight)
+                    ServiceRow(icon, name, state.text, state.mark(), Modifier.widenIn { stagger(reveal(), 1 + i, 3) }, rowHeight)
                 }
             }
         }
