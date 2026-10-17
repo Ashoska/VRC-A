@@ -104,6 +104,8 @@ class DiscordRpcService : Service() {
         private const val MAX_SHIM_RETRIES = 5
         private const val MAX_SESSION_RECOVERIES = 3
         private const val SHIM_RETRY_BASE_DELAY_MS = 3000L
+        private const val SHIM_POLL_MS = 750L
+        private const val SHIM_POLL_WINDOW_MS = 20_000L
         private const val PUSH_MIN_INTERVAL_MS = 1500L
         private const val PUSH_TIMER_INTERVAL_MS = 10_000L
         // If VRChat presence drops (crash, world-hop hiccup) or the whole app process
@@ -627,10 +629,36 @@ class DiscordRpcService : Service() {
         }
     }
 
+    // Was a fixed 5 s wait after the page loaded before the first shim attempt, which made every cold
+    // start take page load + 5 s (the boot screen's Discord row timed out on the headset). Now the
+    // module finder is polled every SHIM_POLL_MS from page-finished: until Discord's own JS has opened
+    // the gateway it only answers no_gateway / gateway_not_open (no side effects), so the first "ok"
+    // lands as soon as Discord is ready. Those early "not yet" answers don't use up shim retries;
+    // anything else, or still not ready after SHIM_POLL_WINDOW_MS, goes to the normal injectShim()
+    // retry path (which re-runs the finder and handles ok/failure as before). [shimPollGen] drops a
+    // stale poll chain when the page reloads.
+    private var shimPollGen = 0
+
     private fun injectShimDelayed() {
-        mainHandler.postDelayed({
-            injectShim()
-        }, 5000)
+        val gen = ++shimPollGen
+        val deadline = System.currentTimeMillis() + SHIM_POLL_WINDOW_MS
+        mainHandler.postDelayed({ pollShimEarly(gen, deadline) }, SHIM_POLL_MS)
+    }
+
+    private fun pollShimEarly(gen: Int, deadline: Long) {
+        if (gen != shimPollGen) return
+        val wv = webView ?: return
+        wv.evaluateJavascript(MODULE_FINDER_JS) { result ->
+            if (gen != shimPollGen) return@evaluateJavascript
+            lastJsResponseMs = System.currentTimeMillis()
+            val cleaned = result?.trim()?.replace("\"", "") ?: "null"
+            val notYet = cleaned.startsWith("no_gateway") || cleaned.startsWith("gateway_not_open")
+            if (notYet && System.currentTimeMillis() < deadline) {
+                mainHandler.postDelayed({ pollShimEarly(gen, deadline) }, SHIM_POLL_MS)
+            } else {
+                injectShim()
+            }
+        }
     }
 
     private fun injectShim() {
