@@ -831,7 +831,16 @@ fun VrcaScreen(
                     Modifier.fillMaxSize()
                 }
                 Box(contentModifier) {
+                // Pages build over a few frames (StagedBuild) only on a TAB SWITCH, where the
+                // crossfade starts them at alpha 0 and hides the steps. The page shown when the
+                // screen first appears (cold start, tabbing back into a recreated app) builds at
+                // once: staged there, Home's blocks visibly popped in one at a time (user report).
+                val initialPage = remember { page }
+                val everSwitched = remember { mutableStateOf(false) }
+                val staging = page != initialPage || everSwitched.value
+                androidx.compose.runtime.SideEffect { if (page != initialPage) everSwitched.value = true }
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
+                  androidx.compose.runtime.CompositionLocalProvider(com.vrca.ui.common.LocalStagedBuild provides staging) {
                     when (p) {
                         AppPage.Home -> {
                             if (isBannedEffective) {
@@ -890,6 +899,7 @@ fun VrcaScreen(
                             }
                         }
                     }
+                  }
                 }
                 } // Box(contentModifier)
               } // BoxWithConstraints

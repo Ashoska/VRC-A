@@ -5,6 +5,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.withFrameNanos
 
 /*
@@ -26,10 +27,18 @@ class StagedBuild internal constructor(private val stage: State<Int>, private va
     }
 }
 
-/** Steps 1..[steps] each arrive one frame after the last. */
+/**
+ * True where staging is hidden by a fade (VrcaScreen sets it for pages entering through a tab
+ * switch). Elsewhere a page builds all at once: on a plain appear (cold start, tabbing back into
+ * the app) the steps showed as blocks popping in one at a time.
+ */
+val LocalStagedBuild = compositionLocalOf { false }
+
+/** Steps 1..[steps] each arrive one frame after the last (only where [LocalStagedBuild] is true). */
 @Composable
 fun rememberStagedBuild(steps: Int): StagedBuild {
-    val stage = remember { mutableIntStateOf(0) }
+    val staged = LocalStagedBuild.current
+    val stage = remember { mutableIntStateOf(if (staged) 0 else steps) }
     LaunchedEffect(Unit) {
         while (stage.intValue < steps) {
             withFrameNanos { }
