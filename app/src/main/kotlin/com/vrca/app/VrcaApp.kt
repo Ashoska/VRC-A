@@ -229,8 +229,14 @@ private fun VrcaAppContent() {
                 appReady = appReady,
                 onDone = { toTopBar ->
                     com.vrca.ui.common.PanelDialogHold.held.value = false
-                    // The app shows underneath and the boot screen's backdrop fades off it (no hard cut).
-                    BootReveal.start(withLogo = toTopBar)
+                    if (toTopBar) {
+                        // The app already showed through during the logo's glide; the logo has
+                        // landed on the top bar's own logo, which can show again.
+                        BootReveal.hideTopBarLogo.value = false
+                    } else {
+                        // Otherwise the app shows underneath and a backdrop fades off it (no hard cut).
+                        BootReveal.start(withLogo = false)
+                    }
                     bootOk = true
                 }
             )

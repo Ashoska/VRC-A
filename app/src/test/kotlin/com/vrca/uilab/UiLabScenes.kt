@@ -508,7 +508,21 @@ object UiLabScenes {
         val name = arg.substringBefore(' ')
         val rest = arg.substringAfter(' ', "")
         when (name) {
-            "boot" -> bootSample(rest) { com.vrca.app.BootReveal.start(withLogo = com.vrca.BuildConfig.IS_HEADSET_BUILD); d.base.value = "screen" }
+            "boot" -> Box {
+                // demo on the headset plays the real hand-off: the app is already built and drawn
+                // under the boot screen, shows through during the logo's glide, and its own top-bar
+                // logo stays hidden until the flying one lands (VrcaApp / AppBoot / BootScreen).
+                val overApp = rest.startsWith("demo") && com.vrca.BuildConfig.IS_HEADSET_BUILD
+                if (overApp) {
+                    androidx.compose.runtime.remember { com.vrca.app.BootReveal.hideTopBarLogo.value = true; true }
+                    VrcaScreen(chatboxViewModel = d.vm, discordInvite = "https://discord.gg/example")
+                }
+                bootSample(rest) {
+                    if (overApp) com.vrca.app.BootReveal.hideTopBarLogo.value = false
+                    else com.vrca.app.BootReveal.start(withLogo = false)
+                    d.base.value = "screen"
+                }
+            }
             // The REAL headset boot runner (its checks run against the lab, so it shows what fails offline).
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
