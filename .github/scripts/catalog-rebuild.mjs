@@ -188,7 +188,9 @@ async function main() {
     if (a.authorId) tokens.add(a.authorId.toLowerCase());
     for (const t of tokens) {
       const ib = indexBucket(t);
-      const bucket = (idxBuckets[ib] ||= {});
+      // No prototype: on a plain {} the token "constructor" is Object's inherited function
+      // ("bucket[t].add is not a function"), which crashed every run.
+      const bucket = (idxBuckets[ib] ||= Object.create(null));
       (bucket[t] ||= new Set()).add(id);
     }
   }

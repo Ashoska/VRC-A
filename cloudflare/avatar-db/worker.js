@@ -374,8 +374,10 @@ async function applyIndexOps(env, ops) {
     if (o.frag) fw.set[id] = o.frag;
     if (o.avtr === "a") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).add.add(id);
     else if (o.avtr === "r") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).rem.add(id);
-    for (const t of (o.add || [])) ((idxWork[indexBucketFor(t)] ||= {})[t] ||= { add: new Set(), rem: new Set() }).add.add(id);
-    for (const t of (o.rem || [])) ((idxWork[indexBucketFor(t)] ||= {})[t] ||= { add: new Set(), rem: new Set() }).rem.add(id);
+    // Token maps have NO prototype: a plain {} hands the token "constructor" Object's inherited
+    // function, so `.add.add` threw, the whole drain failed and requeued, every flush (poison op).
+    for (const t of (o.add || [])) ((idxWork[indexBucketFor(t)] ||= Object.create(null))[t] ||= { add: new Set(), rem: new Set() }).add.add(id);
+    for (const t of (o.rem || [])) ((idxWork[indexBucketFor(t)] ||= Object.create(null))[t] ||= { add: new Set(), rem: new Set() }).rem.add(id);
   }
   const changed = [];
   const base = env.CATALOG_BASE ? env.CATALOG_BASE.replace(/\/$/, "") : null;
@@ -746,7 +748,7 @@ export default {
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
           lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
-          version: 38,   // v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 39,   // v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
