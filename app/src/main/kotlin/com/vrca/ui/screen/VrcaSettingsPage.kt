@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import com.vrca.BuildConfig
 import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -76,8 +77,11 @@ internal fun SettingsPage(
     // permission control with its live status, not in Android's raw settings list.
     val settingsScroll = rememberScrollState()
     val permsBring = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    // Built over 6 frames during the tab crossfade (StagedBuild; all at once was a ~4,100-call frame).
+    val build = com.vrca.ui.common.rememberStagedBuild(5)
     androidx.compose.runtime.LaunchedEffect(SettingsFocus.scrollToPermissions.value) {
         if (SettingsFocus.scrollToPermissions.value) {
+            androidx.compose.runtime.snapshotFlow { build.done }.first { it }
             kotlinx.coroutines.delay(300)   // let the page lay out after the tab switch
             runCatching { permsBring.bringIntoView() }
             SettingsFocus.scrollToPermissions.value = false
@@ -167,6 +171,7 @@ internal fun SettingsPage(
             ) { vm.setTime24hFlag(it) }
         }
 
+        build.Step(1) {
         // -- App --
         SectionCard(title = "App") {
             Text(
@@ -193,12 +198,18 @@ internal fun SettingsPage(
             if (showWhatsNew) WhatsNewDialog(onDismiss = { showWhatsNew = false })
         }
 
+        } // Step(1)
+
+        build.Step(2) {
         // -- Notifications (moved here from the VRChat tab — configuration,
         //    not daily use; docs/ui-revamp.md Settings) --
         SectionCard(title = "Notifications") {
             com.vrca.ui.settings.NotificationToggleSection(vm = vm)
         }
 
+        } // Step(2)
+
+        build.Step(3) {
         // -- Permissions (every permission the app uses lives here, each with
         //    its live granted status) --
         Box(Modifier.fillMaxWidth().bringIntoViewRequester(permsBring)) {
@@ -324,7 +335,9 @@ internal fun SettingsPage(
             }
         }
         } // Box(bringIntoViewRequester = permsBring)
+        } // Step(3)
 
+        build.Step(4) {
         // -- About --
         SectionCard(title = "About") {
             Text(
@@ -372,6 +385,9 @@ internal fun SettingsPage(
             )
         }
 
+        } // Step(4)
+
+        build.Step(5) {
         // -- Debug (collapsible) --
         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(12.dp)) {
@@ -624,6 +640,7 @@ internal fun SettingsPage(
                 }
             }
         }
+        } // Step(5)
     }
 }
 
