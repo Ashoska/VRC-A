@@ -512,7 +512,7 @@ private const val EXIT_LOGO_MS = 700
 private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: () -> Float, modifier: Modifier = Modifier) {
     // The logo as a vector (vrca_logo_vector, traced by tools/symbol-lab/logo_trace.py): sharp at any size, which
     // matters on the headset where the whole panel zooms when its window is resized.
-    val logo = painterResource(com.vrca.R.drawable.vrca_logo_vector)
+    val logo = com.vrca.ui.common.appLogoPainter()
     val aspect = logo.intrinsicSize.width / logo.intrinsicSize.height
     Box(modifier.height(height), contentAlignment = Alignment.Center) {
         Box(

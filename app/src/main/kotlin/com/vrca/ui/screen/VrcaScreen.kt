@@ -703,7 +703,7 @@ fun VrcaScreen(
                             Image(
                                 // The vector logo (vrca_logo_vector): sharp at any panel zoom, and the
                                 // same drawing the boot screen flies up into this spot.
-                                painter = androidx.compose.ui.res.painterResource(R.drawable.vrca_logo_vector),
+                                painter = com.vrca.ui.common.appLogoPainter(),
                                 contentDescription = "VRC-A",
                                 // 56dp of the 64dp bar is all logo.
                                 modifier = Modifier.height(56.dp)

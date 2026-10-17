@@ -10,15 +10,16 @@ import java.io.File
  * Records main-thread freezes during the first [WATCH_MS] of each process, so a freeze on the
  * headset can be traced without adb (Settings → Debug → "Main-thread stalls"). A background
  * thread pings the main thread every [PING_MS]; when a ping goes unanswered for [STALL_MS] it
- * saves what the main thread is running (its stack), again at 2 s and 5 s if it's still stuck,
- * and the total once it answers. Written to disk straight away, so a stall that ends in
- * "isn't responding" → Close is still there on the next open. Added for the power-on
+ * saves what the main thread is running (its top 24 frames), again at 2 s and 5 s if it's still
+ * stuck, and the total once it answers (250 ms: the first version's 400 ms missed shorter hitches).
+ * Written to disk straight away, so a stall that ends in "isn't responding" → Close is still
+ * there on the next open. Added for the power-on
  * "VRC-A isn't responding" reports and the pause before Home after boot.
  */
 object MainThreadWatch {
     private const val WATCH_MS = 120_000L
     private const val PING_MS = 100L
-    private const val STALL_MS = 400L
+    private const val STALL_MS = 250L
     private const val MAX_FILE_BYTES = 48 * 1024L
     private const val FILE = "main_stalls.txt"
 
@@ -63,11 +64,11 @@ object MainThreadWatch {
     fun clear(ctx: Context) { runCatching { File(ctx.filesDir, FILE).delete() } }
 
     private fun mainStack(): String {
-        val frames = Looper.getMainLooper().thread.stackTrace
-        // The app's own frames say what it was doing; the top frames say where it was blocked.
-        val top = frames.take(6)
-        val own = frames.drop(6).filter { it.className.startsWith("com.vrca") }.take(12)
-        return (top + own).joinToString("\n") { "    ${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" }
+        // Full class names: release builds are shrunk (R8), so names like "hb.p1" only translate
+        // back with the package (mapping.txt, kept per CI build as the headset-mapping artifact).
+        // The top frames say where it was blocked; deeper ones what it was doing.
+        return Looper.getMainLooper().thread.stackTrace.take(24)
+            .joinToString("\n") { "    ${it.className}.${it.methodName}:${it.lineNumber}" }
     }
 
     private fun write(ctx: Context, text: String) {
