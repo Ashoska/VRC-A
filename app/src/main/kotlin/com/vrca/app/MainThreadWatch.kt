@@ -58,6 +58,9 @@ object MainThreadWatch {
         }, "vrca-main-watch").apply { isDaemon = true; priority = Thread.MAX_PRIORITY }.start()
     }
 
+    /** Adds a line to the log (e.g. a boot timing worth comparing between builds). */
+    fun note(ctx: Context, text: String) = write(ctx.applicationContext, "note: $text")
+
     /** The saved stalls, newest last (empty if none). */
     fun read(ctx: Context): String = runCatching { File(ctx.filesDir, FILE).readText() }.getOrDefault("")
 
