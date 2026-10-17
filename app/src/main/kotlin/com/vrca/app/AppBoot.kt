@@ -135,7 +135,14 @@ internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
         }
     }
     // VRChat's own status page.
-    LaunchedEffect(opening) { if (opening) status = status.copy(vrchat = fetchVrchatPlatform()) }
+    // Fetch FIRST, then copy: `status.copy(vrchat = fetch())` reads `status` before the fetch
+    // suspends and writes that stale copy back after it, wiping a servers/internet result that
+    // landed meanwhile (the VRC-A servers row stuck on "Checking..." on the headset).
+    LaunchedEffect(opening) {
+        if (!opening) return@LaunchedEffect
+        val vrchat = fetchVrchatPlatform()
+        status = status.copy(vrchat = vrchat)
+    }
 
     LaunchedEffect(attempt, opening) {
         if (!opening) return@LaunchedEffect
@@ -225,8 +232,9 @@ internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
 
     // Hand off once the blocking rows are done AND the screen has fully opened AND every other row
     // has succeeded or failed too (user rule: non-blocking rows can't stop boot, but boot still
-    // waits for their answer; each has its own timeout, Discord's being the longest at 12 s). The
-    // hold runs from that moment, so the header's Ready sweep always plays in full before the fold.
+    // waits for their answer; each has its own timeout, Discord's being the longest at 25 s since
+    // its hidden WebView has to load discord.com first). The hold runs from that moment, so the
+    // header's Ready sweep always plays in full before the fold.
     var exiting by remember { mutableStateOf(false) }
     LaunchedEffect(blockingDone, shown) {
         if (blockingDone && shown) {
@@ -346,7 +354,7 @@ private suspend fun discord(ctx: Context, set: (BootState, BootNote?) -> Unit) {
     val repo = (ctx.applicationContext as VrcaApplication).userPreferencesRepository
     if (!repo.discordRpcEnabled.first()) { set(BootState.Skipped, BootNote.Off); return }
     set(BootState.Working, BootNote.Connecting)
-    val end = withTimeoutOrNull(12_000L) {
+    val end = withTimeoutOrNull(25_000L) {
         DiscordRpcState.statusFlow.first {
             it == DiscordRpcStatus.CONNECTED || it == DiscordRpcStatus.SESSION_EXPIRED || it == DiscordRpcStatus.FAILED
         }
