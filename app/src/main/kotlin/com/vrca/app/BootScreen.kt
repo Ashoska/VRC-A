@@ -1,5 +1,7 @@
 package com.vrca.app
 
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Person
@@ -80,7 +82,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -343,7 +344,15 @@ fun BootScreen(
         alpha = contentIn.value * (1f - exitP.value)
         translationY = rise * (1f - contentIn.value)
     }
-    Surface(color = GremlinColors.Backdrop) {
+    // Accessibility: on the Quest an accessibility service is on, so Compose keeps a description of
+    // everything on screen, and any element marked important hides what's under it. The boot screen
+    // used to (its text and the Surface's traversal group), so the app built underneath during
+    // the hand-off ([prepareApp]) only got described when the boot screen went: a 0.4 s main-thread
+    // walk right at the hand-off (MainThreadWatch, user's 2026-10-18 recording). Now the decorative
+    // parts are left out ([NoA11y]) and a plain Box replaces Surface (its empty pointerInput still
+    // keeps taps off the app underneath), so the app is described while it's built, behind a still
+    // screen. Retry and Sign in stay accessible.
+    Box(Modifier.fillMaxSize().pointerInput(Unit) {}) {
         BoxWithConstraints(
             Modifier.fillMaxSize().background(GremlinColors.Backdrop).onGloballyPositioned { coords[0] = it; notePlaced() }
         ) {
@@ -365,7 +374,7 @@ fun BootScreen(
                     // A lambda, read while drawing: as a value it rebuilt the whole screen on every
                     // frame of the logo intro and the fold (UI Lab `perf`).
                     fadeIn = { logoIn.value * (if (exitToTopBar) 1f else 1f - exitP.value) },
-                    modifier = Modifier
+                    modifier = NoA11y
                         .onGloballyPositioned { coords[1] = it; notePlaced() }
                         .graphicsLayer {
                             val c = logoCenter()
@@ -386,7 +395,7 @@ fun BootScreen(
                     "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
                     style = MaterialTheme.typography.labelMedium,
                     color = GremlinColors.TextMuted.copy(alpha = 0.85f),
-                    modifier = m.then(contentLayer)
+                    modifier = m.then(contentLayer).then(NoA11y)
                 )
             }
             val pills: @Composable () -> Unit = {
@@ -415,11 +424,11 @@ fun BootScreen(
                         // Sized so its top lines up with the checklist's top (user), just above Status.
                         logo(WIDE_LOGO_HEIGHT)
                         Spacer(Modifier.height(WIDE_LOGO_GAP))
-                        Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
+                        Unfold({ panelR.value }, Modifier.fillMaxWidth().then(NoA11y)) {
                             StatusPanel(status, Modifier.fillMaxWidth(), { partsR.value }, rowHeight = WIDE_ROW_HEIGHT)
                         }
                     }
-                    Unfold({ panelL.value }, Modifier.weight(1.15f)) {
+                    Unfold({ panelL.value }, Modifier.weight(1.15f).then(NoA11y)) {
                         LoadingPanel(checks, Modifier.fillMaxWidth(), { partsL.value }, userName = userName, celebrate = celebrate)
                     }
                 }
@@ -447,11 +456,11 @@ fun BootScreen(
                     logo(if (compact) PHONE_LOGO_HEIGHT_COMPACT else PHONE_LOGO_HEIGHT)
                     Spacer(Modifier.height(PHONE_GAP + 4.dp))
                     Column(Modifier.widthIn(max = PHONE_MAX_WIDTH).fillMaxWidth()) {
-                        Unfold({ panelR.value }, Modifier.fillMaxWidth()) {
+                        Unfold({ panelR.value }, Modifier.fillMaxWidth().then(NoA11y)) {
                             StatusPanel(status, Modifier.fillMaxWidth(), { partsR.value }, rowHeight = rowH, rowGap = rowGap)
                         }
                         Spacer(Modifier.height(PHONE_GAP))
-                        Unfold({ panelL.value }, Modifier.fillMaxWidth()) {
+                        Unfold({ panelL.value }, Modifier.fillMaxWidth().then(NoA11y)) {
                             LoadingPanel(checks, Modifier.fillMaxWidth(), { partsL.value }, userName = userName, rowHeight = rowH, rowGap = rowGap, celebrate = celebrate)
                         }
                         pills()
@@ -465,6 +474,9 @@ fun BootScreen(
         }
     }
 }
+
+/** Left out of accessibility (see BootScreen): decorative, and it would hide the app built underneath. */
+private val NoA11y = Modifier.clearAndSetSemantics {}
 
 /**
  * Retry (a blocking check couldn't reach the server; boot waits, user rule: no "Continue anyway")
