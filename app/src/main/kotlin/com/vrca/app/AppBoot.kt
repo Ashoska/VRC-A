@@ -223,19 +223,14 @@ internal fun AppBoot(onDone: (logoInTopBar: Boolean) -> Unit) {
         attempt++
     }
 
-    // Hand off once the blocking rows are done AND the screen has fully opened. The header's Ready
-    // sweep only plays when EVERY row has settled, so the other rows get a short grace first; one
-    // still going after it (Discord connecting, the log not found yet) carries on in the background,
-    // which counts as settled. The hold then runs from that moment, so the sweep always plays in full
-    // instead of being skipped or cut off by the fold.
+    // Hand off once the blocking rows are done AND the screen has fully opened AND every other row
+    // has succeeded or failed too (user rule: non-blocking rows can't stop boot, but boot still
+    // waits for their answer; each has its own timeout, Discord's being the longest at 12 s). The
+    // hold runs from that moment, so the header's Ready sweep always plays in full before the fold.
     var exiting by remember { mutableStateOf(false) }
     LaunchedEffect(blockingDone, shown) {
         if (blockingDone && shown) {
-            val allSettled = withTimeoutOrNull(NON_BLOCKING_GRACE_MS) {
-                snapshotFlow { ROWS.all { rows[it.ordinal].state in SETTLED } }.first { it }
-            } != null
-            if (!allSettled) ROWS.filter { rows[it.ordinal].state !in SETTLED }
-                .forEach { set(it, BootState.Background, rows[it.ordinal].note) }
+            snapshotFlow { ROWS.all { rows[it.ordinal].state in SETTLED } }.first { it }
             delay(READY_HOLD_MS)
             exiting = true
         }
@@ -297,7 +292,6 @@ private suspend fun <T> orNull(block: suspend () -> T): T? = try {
 
 /** How long Ready stays up before the app opens (covers the Ready sweep). */
 private const val READY_HOLD_MS = 900L
-private const val NON_BLOCKING_GRACE_MS = 2_500L
 
 /**
  * VRChat sign-in. Boot needs a working VRChat session (user rule), with one exception: when
@@ -361,7 +355,7 @@ private suspend fun discord(ctx: Context, set: (BootState, BootNote?) -> Unit) {
         DiscordRpcStatus.CONNECTED -> set(BootState.Done, BootNote.Connected)
         DiscordRpcStatus.SESSION_EXPIRED -> set(BootState.Warn, BootNote.SignInNeeded)
         DiscordRpcStatus.FAILED -> set(BootState.Warn, BootNote.CantConnect)
-        else -> set(BootState.Background, BootNote.Connecting)
+        else -> set(BootState.Warn, BootNote.TimedOut)
     }
 }
 
