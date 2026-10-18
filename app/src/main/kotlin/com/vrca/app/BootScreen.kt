@@ -304,9 +304,19 @@ fun BootScreen(
             r.localPositionOf(l, Offset.Zero) + Offset(l.size.width / 2f, l.size.height / 2f)
         else null
     }
+    // The logo's centre as state, written only when it actually moves (Offset compares by value,
+    // so an unchanged layout pass invalidates nothing; the never-equal coordinates were the
+    // per-pass rebuild above). The logo's layer block reads it, so it re-runs whenever the slot
+    // moves: under strong skipping nothing else re-applies that block (the logo started in its
+    // slot instead of centred, user's 2026-10-19 recording).
+    var slotCenter by remember { mutableStateOf<Offset?>(null) }
     // Start once the logo's final slot is known, so the first frame already has it at the centre.
     var placed by remember { mutableStateOf(false) }
-    fun notePlaced() { if (!placed && logoCenter() != null) placed = true }
+    fun notePlaced() {
+        val c = logoCenter() ?: return
+        if (c != slotCenter) slotCenter = c
+        if (!placed) placed = true
+    }
     LaunchedEffect(placed) {
         if (!playIntro || !placed || logoIn.value > 0f) return@LaunchedEffect
         logoIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
@@ -386,7 +396,7 @@ fun BootScreen(
                     modifier = NoA11y
                         .onGloballyPositioned { coords[1] = it; notePlaced() }
                         .graphicsLayer {
-                            val c = logoCenter()
+                            val c = slotCenter
                             if (c != null) {
                                 translationX = (boxW / 2f - c.x) * (1f - settle.value)
                                 translationY = (boxH / 2f - c.y) * (1f - settle.value)

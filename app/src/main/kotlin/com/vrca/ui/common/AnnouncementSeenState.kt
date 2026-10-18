@@ -23,12 +23,21 @@ object AnnouncementSeenState {
     var seen by mutableStateOf<Set<String>>(emptySet())
         private set
 
-    fun ensureLoaded(ctx: Context) {
+    /** Reads the stored ids off the main thread: the first read waits for the prefs file to load
+     *  from disk (a 0.5 s main-thread stall on the Quest, MainThreadWatch 2026-10-19). */
+    suspend fun ensureLoaded(ctx: Context) {
         if (loaded) return
         loaded = true
-        runCatching {
-            seen = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-                .getStringSet(KEY, emptySet())?.toSet() ?: emptySet()
+        val stored = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getStringSet(KEY, emptySet())?.toSet()
+            }.getOrNull()
+        } ?: emptySet()
+        // Merge: a card opened while the file was loading is already in [seen].
+        val merged = seen + stored
+        if (merged != seen) seen = merged
+        if (merged != stored) {
+            runCatching { ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putStringSet(KEY, merged).apply() }
         }
     }
 

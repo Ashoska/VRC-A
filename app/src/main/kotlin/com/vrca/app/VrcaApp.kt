@@ -881,7 +881,8 @@ internal fun UpdateDialog(
         ElevatedCard(
             shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
             colors = androidx.compose.material3.CardDefaults.elevatedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
+                // The 1 dp elevation tint Material 3 1.1 put on a `surface` card (1.4 doesn't).
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow
             ),
             modifier = Modifier
                 .fillMaxSize()
