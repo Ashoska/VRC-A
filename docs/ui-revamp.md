@@ -272,6 +272,7 @@ Mechanics:
 
 ## Cross-cutting rules
 
+- Every screen built here also follows the build checklist in `docs/systems/ui-kit.md` ("Building UI: the checklist": Gremlin look, components, watched state, no in-place mutation, performance, lab checks).
 - Strip repeated teaching copy ("Toggle it on Home. Stop clears instantly.")
   once onboarding exists — it moves into the replayable tutorial.
 - Kill duplicated affordances (the "is this reachable somewhere more natural?"
