@@ -167,7 +167,9 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
     var filter by rememberSaveable { mutableStateOf("All") }
     var showDismissAllConfirm by remember { mutableStateOf(false) }
     // Drives the relative timestamps ("just now" / "5m ago") so they advance on
-    // their own; only the cheap formatRelativeTime Text nodes recompose.
+    // their own; only the cheap formatRelativeTime Text nodes recompose. Also keeps the alerts
+    // list builder current: it reads plain stores (EventSeriesStore "Going", AlertImageStore) that
+    // only refresh because the builder captures nowMs. Removing this ticker makes those stale.
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {

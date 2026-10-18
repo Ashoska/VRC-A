@@ -68,7 +68,10 @@ fun VrcaCardDialog(
         ElevatedCard(
             shape = MaterialTheme.shapes.large,
             colors = CardDefaults.elevatedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
+                // Material 3 1.1 tinted a `surface` card by its elevation (6 dp = the lighter
+                // blue-indigo these dialogs have); 1.4 dropped that tint, so name the role that
+                // holds that exact tone (Theme.kt withGremlinSurfaceContainers: High = 6 dp).
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
             ),
             elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
             modifier = Modifier
