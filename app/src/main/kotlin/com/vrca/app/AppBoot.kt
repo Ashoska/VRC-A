@@ -4,6 +4,7 @@ import androidx.compose.ui.draw.drawBehind
 import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -145,11 +146,10 @@ internal fun AppBoot(
         com.vrca.ui.common.preloadRenderThreadSpinner(ctx)
         true
     }
-    // State, refreshed after a boot-screen sign-in (rule: everything shown is watched state, ui-kit.md).
-    // Loaded off the main thread: the encrypted store can be slow right after the headset turns on.
-    var userName by remember { mutableStateOf<String?>(null) }
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
-    LaunchedEffect(Unit) { userName = withContext(Dispatchers.IO) { VrchatAuthManager.getStoredDisplayName(ctx) } }
+    // The shared watched name (rule: everything shown is watched state, ui-kit.md): it fills in
+    // when the encrypted store opens in the background and changes on a boot-screen sign-in.
+    val storedSession by VrchatAuthManager.session.collectAsState()
+    val userName = storedSession.displayName.ifBlank { null }
     val discordIcon = ImageVector.vectorResource(com.vrca.R.drawable.ic_discord)
     val icons = remember(discordIcon) {
         mapOf(
@@ -346,7 +346,6 @@ internal fun AppBoot(
             ) { _, _ ->
                 showLogin = false
                 signInAttempt++
-                scope.launch { userName = withContext(Dispatchers.IO) { VrchatAuthManager.getStoredDisplayName(ctx) } }
             }
         }
     }

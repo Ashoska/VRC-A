@@ -71,7 +71,7 @@ tools/ui-lab/ui.sh serve headset & tools/ui-lab/uictl.sh "tap Settings" "shot s"
 tools/cardinal-lab/lab.sh run tools/cardinal-lab/scripts/hangout.txt
 ```
 - **Web sessions:** the container starts without the Android SDK; the committed SessionStart hook (`.claude/hooks/session-start.sh`) installs it to `$HOME/android-sdk` and writes `local.properties`. `.gitignore` tracks only `.claude/settings.json` + `.claude/hooks/`.
-- **Toolchain:** Gradle 8.14, AGP 8.13, Kotlin 2.4 (Compose compiler plugin, strong skipping off), compileSdk 36; the session hook installs `platforms;android-36`. Compose 1.12 would need AGP 9.1 + compileSdk 37 (`ui-kit.md`).
+- **Toolchain:** Gradle 9.7, AGP 9.4 (built-in Kotlin: no `kotlin-android` plugin in `app/`), Kotlin 2.4 + Compose compiler plugin (strong skipping ON), Compose 1.12 (BOM 2026.09.00), compileSdk 37 (target 34); the session hook installs `platforms;android-37.0` + `build-tools;36.0.0`. Details in `ui-kit.md`.
 - **Always compile public, admin and headset before pushing** (`./gradlew compilePublicAppDebugKotlin compileAdminAppDebugKotlin compileHeadsetAppDebugKotlin`). This catches API/signature nits (e.g. `HorizontalDivider` vs `Divider`) that would otherwise only fail in CI.
 - **No permanent unit tests (user preference).** For pure logic, write a throwaway test under `app/src/test`, run `./gradlew testPublicAppDebugUnitTest`, then delete it before committing. UI and the VRChat/Discord/OSC/Firestore integrations can only be verified on the user's device (or visually in the UI Lab). The two labs are deliberate, gated exceptions; don't delete them.
 - Use the UI Lab to check layout/fit after UI changes before asking the user to build.

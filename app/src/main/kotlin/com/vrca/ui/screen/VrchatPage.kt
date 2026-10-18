@@ -149,8 +149,9 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
     // Reactive: vm.vrchatLoggedOut flips on the auth manager's logged-in/out
     // signals, so a Settings sign-out (or a re-login) updates this tab
     // immediately — the old one-shot remember froze the cold-start value.
-    val isLinked = !vm.vrchatLoggedOut && VrchatAuthManager.isLoggedIn(ctx)
-    val displayName = if (isLinked) VrchatAuthManager.getStoredDisplayName(ctx) ?: "" else ""
+    val stored by VrchatAuthManager.session.collectAsState()
+    val isLinked = !vm.vrchatLoggedOut && stored.signedIn
+    val displayName = if (isLinked) stored.displayName else ""
     val presence by VrchatPipelineState.presenceFlow.collectAsState()
     val isConnected by VrchatPipelineState.isConnectedFlow.collectAsState()
 

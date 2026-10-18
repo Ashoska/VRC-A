@@ -853,10 +853,10 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
     val repo = (ctx.applicationContext as com.vrca.app.VrcaApplication).userPreferencesRepository
     val scope = androidx.compose.runtime.rememberCoroutineScope()
 
-    // VRChat state: vm.vrchatLoggedOut flips reactively on the auth signals;
-    // also consult isLoggedIn for cold truth (covers process restarts).
-    val vrcSignedIn = !vm.vrchatLoggedOut &&
-        com.vrca.vrchat.VrchatAuthManager.isLoggedIn(ctx)
+    // VRChat state: vm.vrchatLoggedOut flips reactively on the auth signals; the stored session
+    // (watched) is the cold truth across process restarts.
+    val storedSession by com.vrca.vrchat.VrchatAuthManager.session.collectAsState()
+    val vrcSignedIn = !vm.vrchatLoggedOut && storedSession.signedIn
 
     val discordSeeded by repo.discordSessionSeeded.collectAsStateInitially(false)
     val discordEnabled by repo.discordRpcEnabled.collectAsStateInitially(false)

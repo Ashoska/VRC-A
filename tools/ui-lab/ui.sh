@@ -15,7 +15,7 @@ cd "$ROOT"
 # Cloud sessions started outside the repo folder never run the SessionStart hook, so the first
 # lab run had no Android SDK. Install it here when it's missing (the hook is idempotent).
 SDK=$(sed -n 's/^sdk.dir=//p' local.properties 2>/dev/null || true)
-if [[ "${CLAUDE_CODE_REMOTE:-}" == true && ! -d "${SDK:-${ANDROID_HOME:-$HOME/android-sdk}}/platforms/android-34" ]]; then
+if [[ "${CLAUDE_CODE_REMOTE:-}" == true && ! -d "${SDK:-${ANDROID_HOME:-$HOME/android-sdk}}/platforms/android-37.0" ]]; then
   CLAUDE_PROJECT_DIR="$ROOT" bash "$ROOT/.claude/hooks/session-start.sh" 2>&1 | tail -1
 fi
 [[ -n "${ANDROID_HOME:-}" ]] || export ANDROID_HOME="$HOME/android-sdk"

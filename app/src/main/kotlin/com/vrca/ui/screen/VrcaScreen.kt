@@ -662,9 +662,8 @@ fun VrcaScreen(
     // mid-session sign-out (Settings → Accounts) flips this reactively. Feeds
     // the Home health checklist and the red dot on the Home nav icon — the
     // old every-tab "Setup incomplete" banner is gone (Home-only checklist).
-    val vrcLinked = !chatboxViewModel.vrchatLoggedOut &&
-        VrchatAuthManager.isLoggedIn(ctx) &&
-        VrchatAuthManager.getStoredUserId(ctx)?.isNotBlank() == true
+    val storedSession by VrchatAuthManager.session.collectAsState()
+    val vrcLinked = !chatboxViewModel.vrchatLoggedOut && storedSession.signedIn
     val ipSet = remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
         // Headset forces the OSC target to 127.0.0.1 (loopback to VRChat on the

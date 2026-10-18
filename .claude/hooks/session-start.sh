@@ -31,7 +31,7 @@ echo "sdk.dir=$ANDROID_HOME" > "$PROJECT_DIR/local.properties"
 have_pkg() { [ -d "$ANDROID_HOME/$1" ]; }
 
 # Idempotent fast path: everything already installed (cached container) → done.
-if have_pkg "platforms/android-36" && have_pkg "build-tools/35.0.0" && have_pkg "platform-tools"; then
+if have_pkg "platforms/android-37.0" && have_pkg "build-tools/36.0.0" && have_pkg "platform-tools"; then
   echo "Android SDK already present at $ANDROID_HOME — skipping install."
   exit 0
 fi
@@ -52,9 +52,9 @@ fi
 
 SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-# Accept licenses, then install the components the build needs (compileSdk 36; AGP 8.13 uses build-tools 35).
+# Accept licenses, then install the components the build needs (compileSdk 37; AGP 9.4 uses build-tools 36).
 yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null 2>&1 || true
 "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
-  "platform-tools" "platforms;android-36" "build-tools;35.0.0"
+  "platform-tools" "platforms;android-37.0" "build-tools;36.0.0"
 
 echo "Android SDK ready at $ANDROID_HOME"
