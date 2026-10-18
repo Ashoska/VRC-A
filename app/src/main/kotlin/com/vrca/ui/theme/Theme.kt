@@ -1,5 +1,8 @@
 package com.vrca.ui.theme
 
+import kotlin.math.ln
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.material3.ColorScheme
 import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -42,6 +45,27 @@ private val NoHoverRippleAlpha = RippleAlpha(
     hoveredAlpha = 0f,
     pressedAlpha = 0.12f
 )
+
+/**
+ * Material 3 1.3+ colours cards, switch tracks, menus, the navigation bar and dialogs with the
+ * surfaceContainer* roles. Left unset they fall back to Material's stock grey-purple (cards and
+ * toggles came out grey after the 2026 Compose upgrade). These reproduce what the earlier
+ * Material 3 drew: the surface tinted by the primary at the old tonal elevations (1 dp elevated
+ * cards, 3 dp bars and menus, 6 dp dialogs), and the surface variant for filled cards and tracks.
+ */
+private fun ColorScheme.withGremlinSurfaceContainers(): ColorScheme {
+    fun tinted(elevationDp: Float) =
+        primary.copy(alpha = (4.5f * ln(elevationDp + 1f) + 2f) / 100f).compositeOver(surface)
+    return copy(
+        surfaceContainerLowest = surface,
+        surfaceContainerLow = tinted(1f),
+        surfaceContainer = tinted(3f),
+        surfaceContainerHigh = tinted(6f),
+        surfaceContainerHighest = surfaceVariant,
+        surfaceBright = tinted(6f),
+        surfaceDim = surface
+    )
+}
 
 fun ThemeMode.isDark(systemIsDark: Boolean): Boolean = when (this) {
     ThemeMode.System -> systemIsDark
@@ -109,6 +133,9 @@ private val GremlinLight = lightColorScheme(
     onError = Color.White
 )
 
+private val GremlinDarkWithContainers = GremlinDark.withGremlinSurfaceContainers()
+private val GremlinLightWithContainers = GremlinLight.withGremlinSurfaceContainers()
+
 /** Gremlin, VRC-A's own design system: colours in [GremlinColors], plus shapes and type. */
 @Composable
 fun GremlinTheme(
@@ -124,8 +151,8 @@ fun GremlinTheme(
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> GremlinDark
-        else -> GremlinLight
+        darkTheme -> GremlinDarkWithContainers
+        else -> GremlinLightWithContainers
     }
 
     val view = LocalView.current
@@ -173,8 +200,8 @@ fun GremlinOverlayTheme(
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> GremlinDark
-        else -> GremlinLight
+        darkTheme -> GremlinDarkWithContainers
+        else -> GremlinLightWithContainers
     }
 
     MaterialTheme(

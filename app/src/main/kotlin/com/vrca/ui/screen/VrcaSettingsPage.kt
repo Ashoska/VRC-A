@@ -1270,7 +1270,7 @@ private fun ChatboxWidthCalibrationTool(vm: VrcaViewModel) {
                 )
             }
         }
-        androidx.compose.material3.Slider(
+        com.vrca.ui.common.GremlinSlider(
             value = count.toFloat(),
             onValueChange = { count = it.toInt().coerceIn(1, 80) },
             valueRange = 1f..80f
