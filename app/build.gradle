@@ -245,6 +245,16 @@ kotlin {
     }
 }
 
+// Headset only: store the speech engine's native libs (sherpa-onnx + ONNX Runtime, ~25 MB raw)
+// COMPRESSED in the APK and extract them at install. Non-legacy packaging stores them
+// uncompressed, roughly doubling the download. (Was android:extractNativeLibs="true" in the
+// headset manifest, which AGP 9 rejects.) Public/admin have no native engine: default packaging.
+androidComponents {
+    onVariants(selector().withFlavor(new kotlin.Pair("app", "headsetApp"))) { variant ->
+        variant.packaging.jniLibs.useLegacyPackaging.set(true)
+    }
+}
+
 aboutLibraries {
     configPath = "config"
 }
