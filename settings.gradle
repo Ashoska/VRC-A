@@ -2,9 +2,10 @@ pluginManagement {
     repositories {
         // Google's Maven Central mirror first: Maven Central rate-limits (HTTP 429) the shared
         // cloud-session egress, which failed every fresh lab/compile run. mavenCentral() stays as fallback.
+        // google() before the plugin portal: the portal hands AGP's own dependencies to Maven Central (429s).
+        google()
         maven { url "https://maven-central.storage-download.googleapis.com/maven2/" }
         gradlePluginPortal()
-        google()
         mavenCentral()
     }
 }

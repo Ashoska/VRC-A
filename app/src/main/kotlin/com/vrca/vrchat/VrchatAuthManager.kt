@@ -37,6 +37,29 @@ object VrchatAuthManager {
     private val _loggedInSignal = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val loggedInSignal: kotlinx.coroutines.flow.SharedFlow<Unit> = _loggedInSignal
 
+    /** What the encrypted store holds about the VRChat sign-in, as watched state. */
+    data class StoredSession(val signedIn: Boolean = false, val userId: String = "", val displayName: String = "")
+
+    // The UI shows the signed-in name (and whether there is a session) from THIS, never by reading
+    // the store in a composable body: a store read only looked current because something else
+    // redrew the screen (docs/systems/ui-kit.md "Everything shown is watched state"). Published
+    // when the store opens and after every write of the cookie / user id / name, and on logout.
+    // Empty until the store has opened (warmUp starts that at process start).
+    private val _session = kotlinx.coroutines.flow.MutableStateFlow(StoredSession())
+    val session: kotlinx.coroutines.flow.StateFlow<StoredSession> = _session
+
+    private fun publishSession(prefs: android.content.SharedPreferences?) {
+        prefs ?: return
+        val userId = prefs.getString(KEY_USER_ID, null).orEmpty()
+        _session.value = StoredSession(
+            signedIn = prefs.getString(KEY_AUTH_COOKIE, null)?.isNotBlank() == true && userId.isNotBlank(),
+            userId = userId,
+            displayName = prefs.getString(KEY_DISPLAY_NAME, null).orEmpty()
+        )
+    }
+
+    private fun publishSession(context: Context) = publishSession(openedPrefs ?: getPrefs(context))
+
     private const val TAG = "VrchatAuth"
     private const val BASE = "https://api.vrchat.cloud/api/1"
     private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
@@ -144,7 +167,7 @@ object VrchatAuthManager {
         openedPrefs?.let { return it }
         synchronized(this) {
             openedPrefs?.let { return it }
-            return openPrefs(context)?.also { openedPrefs = it }
+            return openPrefs(context)?.also { openedPrefs = it; publishSession(it) }
         }
     }
 
@@ -636,6 +659,7 @@ object VrchatAuthManager {
 
     fun logout(context: Context) {
         getPrefs(context)?.edit()?.clear()?.apply()
+        publishSession(context)
         // Close out the current instance's "left" time now. A VRChat logout doesn't
         // fire a user-location:offline pipeline event (the socket just disconnects),
         // so without this the last instance stayed marked "Still here" and kept
@@ -737,6 +761,7 @@ object VrchatAuthManager {
                                 getPrefs(context)?.edit()
                                     ?.putString(KEY_AUTH_COOKIE, authCookieValue)
                                     ?.apply()
+                                publishSession(context)
                             }
                             val types = (0 until requires2FA.length())
                                 .map { requires2FA.getString(it) }
@@ -779,6 +804,7 @@ object VrchatAuthManager {
                                     ?.putLong(KEY_2FA_COOKIE_STORED_AT, now)
                             }
                             editor?.apply()
+                            publishSession(context)
                             _loggedInSignal.tryEmit(Unit)
                             AuthResult.Success(userId, displayName)
                         } else {
@@ -2897,6 +2923,7 @@ object VrchatAuthManager {
             editor.putLong(KEY_2FA_COOKIE_STORED_AT, now)
         }
         editor.apply()
+        publishSession(context)
     }
 
     // ------------------------------------------------------------------
@@ -2942,6 +2969,7 @@ object VrchatAuthManager {
             val uid = o.optString("uid", ""); if (uid.isNotBlank()) putString(KEY_USER_ID, uid)
             val dn = o.optString("dn", ""); if (dn.isNotBlank()) putString(KEY_DISPLAY_NAME, dn)
         }.commit()
+        publishSession(prefs)
         when (login(context, username, password)) {
             is AuthResult.Success -> true
             else -> false
