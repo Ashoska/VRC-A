@@ -49,15 +49,12 @@
          the square icon as fallback) and ignore a manifest banner. A proper QGO tile needs
          a custom cover set in QGO / submitted to its database; a store tile needs the Meta
          dashboard cover art. So the banner PNG was dropped to save headset APK space. -->
-    <!-- extractNativeLibs=true (headset ONLY): store the speech engine's native libs
-         (sherpa-onnx + ONNX Runtime, ~25 MB raw) COMPRESSED inside the APK and extract them
-         at install. Non-legacy packaging would store them uncompressed, roughly doubling the
-         APK download. AGP reads this per-variant when useLegacyPackaging is unset in the DSL,
-         so public/admin (no native speech engine) keep the default. -->
+    <!-- The speech engine's native libs are stored COMPRESSED (legacy packaging, set for the
+         headset variant in app/build.gradle androidComponents; AGP 9 refuses the old
+         android:extractNativeLibs="true" here). -->
     <application
         android:resizeableActivity="true"
         android:usesCleartextTraffic="true"
-        android:extractNativeLibs="true"
         tools:node="merge">
         <!-- Fixed panel (user request: the window shouldn't be resizable). Horizon lets users
              resize any Android panel (Meta's docs: "Users can resize panels freely"; no lock
