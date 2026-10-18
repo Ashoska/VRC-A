@@ -44,3 +44,6 @@ lab-runs/
 __pycache__/
 *.pyc
 ui-shots/
+
+# Kotlin 2 compiler caches
+.kotlin/

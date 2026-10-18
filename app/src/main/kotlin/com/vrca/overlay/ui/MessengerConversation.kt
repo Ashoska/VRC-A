@@ -152,7 +152,7 @@ private fun ConversationList(
             MessageCard(
                 message,
                 onCopyPressed,
-                Modifier.animateItemPlacement()
+                Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null)
             )
         }
     }

@@ -2,6 +2,7 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
     id 'com.mikepenz.aboutlibraries.plugin'
 
     // Firebase / Google Services
@@ -67,7 +68,7 @@ def computedVersionName = "v${baseMajor}.${baseMinor + minorBump}.${patch}"
 
 android {
     namespace 'com.vrca'
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         // default = PUBLIC id; admin flavor overrides
@@ -169,19 +170,12 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = '17'
-        freeCompilerArgs += ['-opt-in=androidx.compose.material3.ExperimentalMaterial3Api']
-    }
 
     buildFeatures {
         compose true
         buildConfig true
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion '1.5.9'
-    }
 
     packagingOptions {
         resources {
@@ -244,31 +238,47 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        freeCompilerArgs.add('-opt-in=androidx.compose.material3.ExperimentalMaterial3Api')
+    }
+}
+
+// Strong skipping is the Kotlin 2 default; kept OFF until the two stale-prone spots in
+// docs/systems/ui-kit.md ("Known stale-prone spots") are redesigned.
+composeCompiler {
+    featureFlags = [org.jetbrains.kotlin.compose.compiler.gradle.ComposeFeatureFlag.StrongSkipping.disabled()]
+}
+
 aboutLibraries {
     configPath = "config"
 }
 
 dependencies {
-    implementation 'androidx.core:core-ktx:1.13.1'
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
-    implementation 'androidx.activity:activity-compose:1.8.2'
+    implementation 'androidx.core:core-ktx:1.17.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.10.0'
+    implementation 'androidx.activity:activity-compose:1.12.4'
 
-    // Compose
-    implementation platform('androidx.compose:compose-bom:2024.01.00')
-    implementation 'androidx.compose.foundation:foundation:1.7.0-beta04'
+    // Compose. BOM 2026.06.01 = Compose UI 1.11.4 + Material 3 1.4.0, the newest that builds on the
+    // Android Gradle Plugin 8.x line (Compose 1.12 needs AGP 9.1 + compileSdk 37). The BOM picks
+    // every Compose version; don't pin one here (a pinned foundation 1.7.0-beta04 used to drag
+    // the whole UI onto a pre-release).
+    implementation platform('androidx.compose:compose-bom:2026.06.01')
+    implementation 'androidx.compose.foundation:foundation'
     implementation 'androidx.compose.ui:ui'
     implementation 'androidx.compose.ui:ui-graphics'
     implementation 'androidx.compose.ui:ui-tooling-preview'
     implementation 'androidx.compose.material3:material3'
-    implementation "androidx.compose.material:material-icons-extended:1.6.1"
+    implementation "androidx.compose.material:material-icons-extended"
 
     // Ã¢Å“â€¦ DataStore
     implementation "androidx.datastore:datastore-preferences:1.1.1"
 
     // Lifecycle + Navigation
-    implementation "androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0"
-    implementation 'androidx.navigation:navigation-runtime-ktx:2.7.7'
-    implementation 'androidx.navigation:navigation-compose:2.7.7'
+    implementation "androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0"
+    implementation 'androidx.navigation:navigation-runtime-ktx:2.9.8'
+    implementation 'androidx.navigation:navigation-compose:2.9.8'
 
     // OSC
     implementation 'com.illposed.osc:javaosc-core:0.7'
@@ -330,7 +340,7 @@ dependencies {
     testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
-    androidTestImplementation platform('androidx.compose:compose-bom:2024.01.00')
+    androidTestImplementation platform('androidx.compose:compose-bom:2026.06.01')
     androidTestImplementation 'androidx.compose.ui:ui-test-junit4'
     debugImplementation 'androidx.compose.ui:ui-tooling'
     debugImplementation 'androidx.compose.ui:ui-test-manifest'

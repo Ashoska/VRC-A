@@ -769,6 +769,11 @@ fun VrcaScreen(
             // Bottom navigation bar -- always visible, labelled
             bottomBar = {
                 if (!isBannedEffective) {
+                    // Selected label stays on-surface (white): Material 3 1.3+ turned it the
+                    // secondary colour by default.
+                    val navColors = androidx.compose.material3.NavigationBarItemDefaults.colors(
+                        selectedTextColor = MaterialTheme.colorScheme.onSurface
+                    )
                     NavigationBar {
                         NavigationBarItem(
                             selected = page == AppPage.Home,
@@ -786,25 +791,29 @@ fun VrcaScreen(
                                     Icon(Icons.Filled.Home, contentDescription = null)
                                 }
                             },
-                            label = { Text("Home") }
+                            label = { Text("Home") },
+                            colors = navColors
                         )
                         NavigationBarItem(
                             selected = page == AppPage.Automations,
                             onClick = { page = AppPage.Automations },
                             icon = { Icon(Icons.Filled.Sync, contentDescription = null) },
-                            label = { Text("Chatbox") }
+                            label = { Text("Chatbox") },
+                            colors = navColors
                         )
                         NavigationBarItem(
                             selected = page == AppPage.Music,
                             onClick = { page = AppPage.Music },
                             icon = { Icon(Icons.Filled.MusicNote, contentDescription = null) },
-                            label = { Text("Media") }
+                            label = { Text("Media") },
+                            colors = navColors
                         )
                         NavigationBarItem(
                             selected = page == AppPage.VrchatStatus,
                             onClick = { page = AppPage.VrchatStatus },
                             icon = { Icon(Icons.Filled.AccountCircle, contentDescription = null) },
-                            label = { Text("VRChat") }
+                            label = { Text("VRChat") },
+                            colors = navColors
                         )
                     }
                 }

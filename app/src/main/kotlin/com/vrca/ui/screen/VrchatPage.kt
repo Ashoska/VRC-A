@@ -988,7 +988,7 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                 style = MaterialTheme.typography.bodyMedium
             )
 
-            androidx.compose.material3.Slider(
+            com.vrca.ui.common.GremlinSlider(
                 value = sliderVal.coerceIn(0.1f, 10f),
                 onValueChange = { dragging = true; sliderVal = it },
                 valueRange = 0.1f..10f,

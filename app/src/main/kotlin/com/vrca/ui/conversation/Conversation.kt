@@ -176,7 +176,7 @@ private fun ConversationList(
         }
 
         items(uiState.messages, key = { it.no }) { message ->
-            MessageCard(message, onCopyPressed, Modifier.animateItemPlacement())
+            MessageCard(message, onCopyPressed, Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null))
         }
     }
 }
