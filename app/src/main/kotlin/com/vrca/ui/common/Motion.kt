@@ -1,7 +1,5 @@
 package com.vrca.ui.common
 
-import android.content.Context
-import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
@@ -10,10 +8,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 
 /*
  * Motion building blocks that are cheap by construction: each takes its animated value as a
@@ -46,36 +42,3 @@ fun Modifier.widenIn(progress: () -> Float): Modifier = graphicsLayer {
 
 /** Alpha read in the layer, so a fade only repaints. */
 fun Modifier.layerAlpha(alpha: () -> Float): Modifier = graphicsLayer { this.alpha = alpha() }
-
-/**
- * An indeterminate spinner that keeps turning while the main thread is busy: an
- * AnimatedVectorDrawable (res/drawable/boot_spinner.xml) in an ImageView, which Android animates
- * on the RenderThread. Compose's CircularProgressIndicator is driven from the main thread and
- * freezes with it. Call [preloadRenderThreadSpinner] early (e.g. before a screen's first frame):
- * the drawable's first load parses its XML and animators (~0.2 s on the Quest).
- */
-@Composable
-fun RenderThreadSpinner(color: Color, modifier: Modifier = Modifier) {
-    AndroidView(
-        factory = { c ->
-            android.widget.ImageView(c).apply {
-                val d = c.getDrawable(com.vrca.R.drawable.boot_spinner)!!.mutate()
-                setImageDrawable(d)
-                (d as? android.graphics.drawable.Animatable)?.start()
-                // (Re)start whenever it's attached, so it can never sit as a still arc.
-                addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
-                    override fun onViewAttachedToWindow(v: android.view.View) { (d as? android.graphics.drawable.Animatable)?.start() }
-                    override fun onViewDetachedFromWindow(v: android.view.View) {}
-                })
-            }
-        },
-        update = { it.imageTintList = android.content.res.ColorStateList.valueOf(color.toArgb()) },
-        onRelease = { (it.drawable as? android.graphics.drawable.Animatable)?.stop() },
-        modifier = modifier
-    )
-}
-
-/** Loads the spinner drawable once so the first [RenderThreadSpinner] doesn't stall. */
-fun preloadRenderThreadSpinner(ctx: Context) {
-    runCatching { ctx.getDrawable(com.vrca.R.drawable.boot_spinner) }
-}

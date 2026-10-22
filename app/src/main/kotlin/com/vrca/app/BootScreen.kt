@@ -405,14 +405,6 @@ fun BootScreen(
                         }
                 )
             }
-            val versionText: @Composable (Modifier) -> Unit = { m ->
-                Text(
-                    "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = GremlinColors.TextMuted.copy(alpha = 0.85f),
-                    modifier = m.then(contentLayer).then(NoA11y)
-                )
-            }
             val pills: @Composable () -> Unit = {
                 BootPills(
                     error, retryInSec, onRetry, onSignIn,
@@ -480,12 +472,8 @@ fun BootScreen(
                         }
                         pills()
                     }
-                    // Phone: the version sits under everything (a corner overlay would cover rows).
-                    Spacer(Modifier.height(10.dp))
-                    versionText(Modifier)
                 }
             }
-            if (wide) versionText(Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 10.dp))
         }
     }
 }
@@ -652,7 +640,6 @@ private fun revealedCount(reveal: () -> Float, pieces: Int): Int {
 @Composable
 private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Boolean = true) {
     val accent = MaterialTheme.colorScheme.primary
-    val finished = checks.count { it.state in Settled }
     val target = when {
         checks.any { it.state == BootState.Failed } -> GremlinColors.Negative
         checks.all { it.state in Settled } -> GremlinColors.Positive
@@ -683,8 +670,10 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
                 style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
             )
+            // The app version (user, 2026-10-22: it replaced the "4/7" count; the bar already shows
+            // progress). Still takes the header tone and pops when boot lands.
             Text(
-                "$finished/${checks.size}",
+                "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
                 style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
                 modifier = Modifier.graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }.background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
             )
@@ -734,9 +723,11 @@ private fun LoadingPanel(
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
             Box(Modifier.widenIn { stagger(reveal(), 0, pieces) }) { BootHeader(checks, userName, celebrate) }
             Spacer(Modifier.height(14.dp))
+            // Every check landed well: the cats hop one after another down the list, with the bar's sweep.
+            val allDone = celebrate && checks.isNotEmpty() && checks.all { it.state in Settled } && checks.none { it.state == BootState.Failed }
             Column(verticalArrangement = Arrangement.spacedBy(rowGap)) {
                 checks.forEachIndexed { i, c ->
-                    BootCheckTile(c, Modifier.widenIn { stagger(reveal(), 1 + i, pieces) }, height = rowHeight)
+                    BootCheckTile(c, Modifier.widenIn { stagger(reveal(), 1 + i, pieces) }, height = rowHeight, index = i, celebrate = allDone)
                 }
             }
         }
@@ -745,7 +736,7 @@ private fun LoadingPanel(
 
 /** A check as a layer-2 tile: category icon, label, reason, and its state mark on the right. */
 @Composable
-private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, height: Dp = 31.dp) {
+private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, height: Dp = 31.dp, index: Int = 0, celebrate: Boolean = false) {
     val accent = MaterialTheme.colorScheme.primary
     val tone = check.state.tone(accent)
     val dim = check.state == BootState.Waiting
@@ -800,16 +791,17 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
             )
             Spacer(Modifier.width(10.dp))
         }
-        StateMark(check.state.mark())
+        StateMark(check.state.mark(), variant = index, celebrate = celebrate, hopDelayMs = 250L + index * 130L)
     }
 }
 
 /** The state symbols, shared by check rows and Status rows so both panels speak one language. */
-private enum class Mark { Waiting, Working, Done, Warn, Maintenance, Failed, Skipped }
+internal enum class Mark { Waiting, Working, Background, Done, Warn, Maintenance, Failed, Skipped }
 
 private fun BootState.mark(): Mark = when (this) {
     BootState.Waiting -> Mark.Waiting
-    BootState.Working, BootState.Background -> Mark.Working
+    BootState.Working -> Mark.Working
+    BootState.Background -> Mark.Background
     BootState.Done -> Mark.Done
     BootState.Warn -> Mark.Warn
     BootState.Failed -> Mark.Failed
@@ -825,43 +817,13 @@ private fun ServiceState.mark(): Mark = when (this) {
 }
 
 /**
- * A state symbol. Changing state swaps it: the old one shrinks and fades out while the new one
- * springs in with a small overshoot, so every change is seen without anything moving the row.
+ * A row's state mark: the boot cat ([BootCat]), shared by check rows and Status rows so both panels
+ * speak one language. [variant] desyncs rows that think at the same time; [celebrate] + [hopDelayMs]
+ * make the all-done hop run one row after another.
  */
 @Composable
-private fun StateMark(mark: Mark) {
-    val accent = MaterialTheme.colorScheme.primary
-    AnimatedContent(
-        mark,
-        transitionSpec = {
-            (scaleIn(spring(dampingRatio = 0.45f, stiffness = Spring.StiffnessMediumLow), initialScale = 0.3f) + fadeIn(tween(120))) togetherWith
-                (scaleOut(tween(140), targetScale = 0.3f) + fadeOut(tween(140)))
-        },
-        contentAlignment = Alignment.Center,
-        label = "stateMark"
-    ) { m ->
-        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-            when (m) {
-                Mark.Waiting -> Box(Modifier.size(7.dp).background(GremlinColors.Raised, CircleShape))
-                Mark.Working -> com.vrca.ui.common.RenderThreadSpinner(accent, Modifier.size(15.dp))
-                else -> {
-                    val (icon, fill) = when (m) {
-                        Mark.Done -> Icons.Filled.Check to GremlinColors.Positive
-                        Mark.Warn -> Icons.Filled.PriorityHigh to GremlinColors.Caution
-                        Mark.Maintenance -> Icons.Filled.Build to GremlinColors.Caution
-                        Mark.Failed -> Icons.Filled.Close to GremlinColors.Negative
-                        else -> Icons.Filled.Remove to GremlinColors.Raised
-                    }
-                    Box(Modifier.size(19.dp).background(fill, CircleShape), contentAlignment = Alignment.Center) {
-                        Icon(
-                            icon, null, modifier = Modifier.size(if (m == Mark.Maintenance) 11.dp else 13.dp),
-                            tint = if (m == Mark.Skipped) GremlinColors.TextMuted else GremlinColors.Backdrop
-                        )
-                    }
-                }
-            }
-        }
-    }
+private fun StateMark(mark: Mark, variant: Int, celebrate: Boolean = false, hopDelayMs: Long = 0) {
+    BootCat(mark, variant, Modifier.size(24.dp), celebrate, hopDelayMs)
 }
 
 /**
@@ -884,7 +846,7 @@ private fun Modifier.rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean 
     }
     val steady = animateColorAsState(
         when (mark) {
-            Mark.Working -> if (edgeWhileWorking) tone.copy(alpha = 0.7f) else Color.Transparent
+            Mark.Working, Mark.Background -> if (edgeWhileWorking) tone.copy(alpha = 0.7f) else Color.Transparent
             Mark.Warn, Mark.Maintenance, Mark.Failed -> tone.copy(alpha = 0.6f)
             else -> Color.Transparent
         },
@@ -899,7 +861,7 @@ private fun Modifier.rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean 
 
 /** One service in the Status panel: icon, name, its fixed state word and a coloured dot. Built like a check row. */
 @Composable
-private fun ServiceRow(icon: BootIcon, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp) {
+private fun ServiceRow(icon: BootIcon, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp, variant: Int = 0) {
     val target = when (mark) {
         Mark.Done -> GremlinColors.Positive
         Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
@@ -926,7 +888,7 @@ private fun ServiceRow(icon: BootIcon, name: String, text: String, mark: Mark, m
         val textColor by animateColorAsState(if (warn) target else GremlinColors.TextMuted, label = "serviceText")
         Crossfade(text, label = "serviceText") { Text(it, style = MaterialTheme.typography.bodySmall, color = textColor, maxLines = 1) }
         Spacer(Modifier.width(10.dp))
-        StateMark(mark)
+        StateMark(mark, variant)
     }
 }
 
@@ -958,7 +920,7 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: () -> Fl
                     Triple(BootIcons.VrcaServers, "VRC-A servers", if (2 >= shown) ServiceState.Checking else status.servers)
                 ).withIndex()) {
                     val (icon, name, state) = row
-                    ServiceRow(icon, name, state.text, state.mark(), Modifier.widenIn { stagger(reveal(), 1 + i, 3) }, rowHeight)
+                    ServiceRow(icon, name, state.text, state.mark(), Modifier.widenIn { stagger(reveal(), 1 + i, 3) }, rowHeight, variant = 2 + i)
                 }
             }
         }
