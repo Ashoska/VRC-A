@@ -203,17 +203,18 @@ private class Wall(private val seed: Int) {
                 last = pick
                 picks += Triple(pick, size, x)
                 val next = sym * (0.78f + rnd.nextFloat() * 0.5f)
-                // Centre-to-centre from the pair's mean size: 1.0x clears their collision radii
-                // (0.46 each), so lane-mates still never touch. Tight (user 2026-10-22: the wall had
-                // a lot of blank space at 1.2-2.3x of one size), now and then a slightly wider gap.
-                x += (size + next) / 2 * (1.0f + rnd.nextFloat() * 0.45f) * (if (rnd.nextFloat() < 0.06f) 1.4f else 1f)
+                // Centre-to-centre from the pair's mean size (1.0x would just clear their collision
+                // radii), so a big and a small one get an even gap. 1.25-1.8x: packing them at
+                // 1.0-1.45x read as clumps (user 2026-10-22); the wall is filled by bigger symbols
+                // instead. Now and then a slightly wider gap.
+                x += (size + next) / 2 * (1.25f + rnd.nextFloat() * 0.55f) * (if (rnd.nextFloat() < 0.06f) 1.4f else 1f)
                 size = next
             }
             // Stretch the lane to exactly the world width, so it wraps seamlessly.
             val stretch = world / x
             for ((pick, size, at) in picks) {
                 out += Sprite(
-                    symbol = pick, x = -margin + at * stretch, y = laneY + (rnd.nextFloat() - 0.5f) * rowH * 0.5f,
+                    symbol = pick, x = -margin + at * stretch, y = laneY + (rnd.nextFloat() - 0.5f) * rowH * 0.35f,
                     laneY = laneY, laneSpeed = speed, size = size,
                     // Any angle, upside down included (user: they never were, it read too tidy).
                     deg = rnd.nextFloat() * 360f, mirror = rnd.nextBoolean(), phase = rnd.nextFloat() * 6.283f
@@ -264,8 +265,8 @@ private class Wall(private val seed: Int) {
     }
 }
 
-private val LANE_HEIGHT = 74.dp
-private val SYMBOL_SIZE = 58.dp
+private val LANE_HEIGHT = 92.dp
+private val SYMBOL_SIZE = 74.dp
 
 /** Below this the wall isn't drawn, so its drift isn't stepped either. */
 private const val INVISIBLE = 0.001f
