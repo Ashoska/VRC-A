@@ -141,9 +141,9 @@ internal fun AppBoot(
             // Started now, its load overlaps the launch splash + intro (~3 s head start).
             startDiscordRpc(ctx)
         }
-        // The rows' spinner (an AnimatedVectorDrawable): its first load parses the XML and its
+        // The rows' thinking cats (AnimatedVectorDrawables): their first load parses the XML and the
         // animators, ~0.2 s on the Quest the first time a row starts working (third user video).
-        com.vrca.ui.common.preloadRenderThreadSpinner(ctx)
+        preloadBootCat(ctx)
         true
     }
     // The shared watched name (rule: everything shown is watched state, ui-kit.md): it fills in

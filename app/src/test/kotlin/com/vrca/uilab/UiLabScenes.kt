@@ -400,8 +400,8 @@ object UiLabScenes {
             Row("Terms of Service", 3800, 4700, "Done", "Accepted", true),
             Row("Account standing", 3800, 5400, "Done", "Good", true),
             Row("VRChat sign-in", 2600, 7200, "Done", "SignedIn", false),
-            Row("Discord", 2600, 6300, "Done", "Connected", false),
-            Row("VRChat on this headset", 2600, 3200, "Done", "Found", false),
+            Row("Discord", 2600, 8000, "Done", "Connected", false),   // fails once (4800-6000) and retries
+            Row("VRChat on this headset", 2600, 4300, "Skipped", "NotOpen", false),
             Row("Updates", 3800, 5900, "Done", "UpToDate", true)
         ) else listOf(
             if (fail) Row("Device session", 0, 900, "Failed", "CantConnect", true) else Row("Device session", 0, 700, "Done", "Connected", true),
@@ -429,6 +429,7 @@ object UiLabScenes {
         val checks = shownRows.map { r ->
             when {
                 now < r.start -> c(r.label, B["Waiting"]!!, null, r.blocking)
+                demo && r.label == "Discord" && now in 4800 until 6000 -> c(r.label, B["Failed"]!!, N["CantConnect"], r.blocking)
                 now < r.end -> c(r.label, B["Working"]!!, null, r.blocking)
                 else -> c(r.label, B[r.state]!!, r.note?.let { N[it] }, r.blocking)
             }
@@ -440,7 +441,7 @@ object UiLabScenes {
             error = if (fail && now >= 900) "Can't connect" else null, retryInSec = if (fail && now >= 900) 5 else null,
             playIntro = demo,
             // demo: after Ready, the way out (logo into the top bar), then the app itself.
-            exit = demo && now >= 8100, exitToTopBar = com.vrca.BuildConfig.IS_HEADSET_BUILD, onExited = toApp,
+            exit = demo && now >= 9900, exitToTopBar = com.vrca.BuildConfig.IS_HEADSET_BUILD, onExited = toApp,
             backdrop = com.vrca.app.BootBackdrop.Lanes, userName = "Ashoska"
         )
     }
