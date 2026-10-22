@@ -150,8 +150,9 @@ internal fun AppBoot(
     // when the encrypted store opens in the background and changes on a boot-screen sign-in.
     val storedSession by VrchatAuthManager.session.collectAsState()
     val userName = storedSession.displayName.ifBlank { null }
-    val discordIcon = ImageVector.vectorResource(com.vrca.R.drawable.ic_discord)
-    val icons = remember(discordIcon) {
+    val discordVector = ImageVector.vectorResource(com.vrca.R.drawable.ic_discord)
+    val icons = remember(discordVector) {
+        val discordIcon = BootIcon(discordVector)
         mapOf(
             Row.Device to BootIcons.DeviceSession, Row.Terms to BootIcons.Terms, Row.Account to BootIcons.Account,
             Row.VrchatSignIn to BootIcons.VrchatSignIn, Row.Discord to discordIcon,

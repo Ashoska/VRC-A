@@ -2,13 +2,7 @@ package com.vrca.app
 
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.material.icons.automirrored.filled.Article
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.ViewInAr
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
@@ -56,10 +50,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
@@ -69,7 +60,6 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
@@ -170,7 +160,7 @@ data class BootCheck(
     val state: BootState,
     val note: BootNote? = null,
     val blocking: Boolean = false,
-    val icon: ImageVector? = null
+    val icon: BootIcon? = null
 )
 
 /** What a Status row says about a service: a fixed word each (same reason as [BootNote]). */
@@ -211,6 +201,12 @@ private fun BootState.tone(accent: Color): Color = when (this) {
     BootState.Working -> accent
     BootState.Background -> accent.copy(alpha = 0.5f)
     BootState.Skipped, BootState.Waiting -> GremlinColors.Edge
+}
+
+/** A row icon's detail colour: the state's tone, but muted (not the dark edge colour) while idle. */
+private fun BootState.detailTone(accent: Color): Color = when (this) {
+    BootState.Skipped, BootState.Waiting -> GremlinColors.TextMuted
+    else -> tone(accent)
 }
 
 /** Flat drop layer: a solid darker copy of the shape, offset down. Depth without gradients or blur. */
@@ -774,10 +770,10 @@ private fun BootCheckTile(check: BootCheck, modifier: Modifier = Modifier, heigh
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (check.icon != null) {
-            Icon(
-                check.icon, null, modifier = Modifier.size(17.dp),
-                tint = GremlinColors.TextMuted
-            )
+            // The icon's small detail takes the row's state colour (purple while checking, then
+            // green / amber / red); its lines stay muted like the label's side of the row.
+            val detail by animateColorAsState(check.state.detailTone(accent), tween(300), label = "iconDetail")
+            BootIconView(check.icon, { GremlinColors.TextMuted }, { detail }, Modifier.size(19.dp))
             Spacer(Modifier.width(10.dp))
         }
         Text(
@@ -903,7 +899,7 @@ private fun Modifier.rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean 
 
 /** One service in the Status panel: icon, name, its fixed state word and a coloured dot. Built like a check row. */
 @Composable
-private fun ServiceRow(icon: ImageVector, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp) {
+private fun ServiceRow(icon: BootIcon, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp) {
     val target = when (mark) {
         Mark.Done -> GremlinColors.Positive
         Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
@@ -920,7 +916,7 @@ private fun ServiceRow(icon: ImageVector, name: String, text: String, mark: Mark
             .padding(start = 10.dp, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Crossfade(icon, label = "serviceIcon") { Icon(it, null, tint = tone, modifier = Modifier.size(17.dp)) }
+        Crossfade(icon, label = "serviceIcon") { BootIconView(it, { tone }, { tone }, Modifier.size(19.dp)) }
         Spacer(Modifier.width(10.dp))
         Text(
             name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.Text,
@@ -945,7 +941,7 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: () -> Fl
                 // Same as the checklist: a row says "Checking..." until it has fully appeared.
                 val net = if (0 >= shown) InternetLink.Checking else status.internet
                 ServiceRow(
-                    if (net == InternetLink.None) Icons.Filled.WifiOff else Icons.Filled.Wifi, "Internet",
+                    if (net == InternetLink.None) BootIcons.NoInternet else BootIcons.Internet, "Internet",
                     if (status.internetMbps > 0 && net != InternetLink.None && net != InternetLink.Checking)
                         "${net.text} · ${status.internetMbps.coerceAtMost(9999)} Mbps" else net.text,
                     when (net) {
@@ -956,10 +952,10 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: () -> Fl
                     Modifier.widenIn { stagger(reveal(), 0, 3) }, rowHeight
                 )
                 for ((i, row) in listOf(
-                    // Both service rows share the server icon (user): they're both "is that server up".
-                    Triple(Icons.Filled.Dns, "VRChat", if (1 >= shown) ServiceState.Checking else status.vrchat),
+                    // Each service has its own icon now (user, 2026-10-22; they used to share one).
+                    Triple(BootIcons.Vrchat, "VRChat", if (1 >= shown) ServiceState.Checking else status.vrchat),
                     // Never names the backend (public UI rule): just "VRC-A servers".
-                    Triple(Icons.Filled.Dns, "VRC-A servers", if (2 >= shown) ServiceState.Checking else status.servers)
+                    Triple(BootIcons.VrcaServers, "VRC-A servers", if (2 >= shown) ServiceState.Checking else status.servers)
                 ).withIndex()) {
                     val (icon, name, state) = row
                     ServiceRow(icon, name, state.text, state.mark(), Modifier.widenIn { stagger(reveal(), 1 + i, 3) }, rowHeight)
@@ -1013,67 +1009,6 @@ fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
         else -> InternetLink.WiFi
     }
     return link to (caps.linkDownstreamBandwidthKbps / 1000).coerceAtLeast(0)
-}
-
-/** The Starting up rows' left icons (Discord's comes from R.drawable.ic_discord). */
-object BootIcons {
-    /** The device itself: a VR headset on the headset build, a phone otherwise. */
-    val DeviceSession: ImageVector get() = if (BuildConfig.IS_HEADSET_BUILD) VrHeadset else Icons.Filled.PhoneAndroid
-    val Terms: ImageVector get() = Icons.AutoMirrored.Filled.Article
-    val Account: ImageVector get() = Icons.Filled.Shield
-    val VrchatSignIn: ImageVector get() = Icons.Filled.Person
-    val VrchatHere: ImageVector get() = Icons.Filled.ViewInAr
-    val Updates: ImageVector get() = Icons.Filled.Download
-
-    /**
-     * A VR headset (Material has none), in the bold goggle style (user's reference): one wide visor
-     * with an outlined rim and a nose notch, side straps, and the head strap arcing over the top.
-     * Our own drawing on Material's 24-unit grid, filled, so it sits with the stock icons.
-     */
-    val VrHeadset: ImageVector by lazy {
-        ImageVector.Builder("VrHeadset", 24.dp, 24.dp, 24f, 24f).apply {
-            val ink = SolidColor(Color.Black)
-            // Head strap over the top, and a short centre strap.
-            path(stroke = ink, strokeLineWidth = 2.2f, strokeLineCap = androidx.compose.ui.graphics.StrokeCap.Round) {
-                moveTo(4.6f, 8.6f)
-                curveTo(5.6f, 3.6f, 18.4f, 3.6f, 19.4f, 8.6f)
-            }
-            path(fill = ink) {
-                moveTo(11f, 3.6f); horizontalLineTo(13f); verticalLineTo(7.4f); horizontalLineTo(11f); close()
-                // Side straps.
-                moveTo(0.8f, 11f); horizontalLineTo(2.6f); verticalLineTo(15.6f); horizontalLineTo(0.8f); close()
-                moveTo(21.4f, 11f); horizontalLineTo(23.2f); verticalLineTo(15.6f); horizontalLineTo(21.4f); close()
-            }
-            // Visor rim: the outline minus a slightly smaller copy leaves a ring...
-            path(fill = ink, pathFillType = PathFillType.EvenOdd) {
-                visor(0f)
-                visor(1.3f)
-            }
-            // ...and the lens fills the middle, a thin gap inside the rim.
-            path(fill = ink) { visor(2.5f) }
-        }.build()
-    }
-
-    /** The visor outline, shrunk by [d] on every side (nose notch included). */
-    private fun androidx.compose.ui.graphics.vector.PathBuilder.visor(d: Float) {
-        val l = 2.6f + d; val t = 7.6f + d; val r = 21.4f - d; val b = 19.6f - d
-        val rad = (4.2f - d).coerceAtLeast(0.6f)
-        val nose = 2.3f - d * 0.15f   // half-width of the notch at the bottom edge
-        val apex = 15.6f - d * 0.8f    // how high the notch reaches
-        moveTo(l + rad, t)
-        horizontalLineTo(r - rad)
-        arcTo(rad, rad, 0f, false, true, r, t + rad)
-        verticalLineTo(b - rad)
-        arcTo(rad, rad, 0f, false, true, r - rad, b)
-        horizontalLineTo(12f + nose + 0.8f)
-        curveTo(12f + nose * 0.4f, b, 12f + nose * 0.5f, apex, 12f, apex)
-        curveTo(12f - nose * 0.5f, apex, 12f - nose * 0.4f, b, 12f - nose - 0.8f, b)
-        horizontalLineTo(l + rad)
-        arcTo(rad, rad, 0f, false, true, l, b - rad)
-        verticalLineTo(t + rad)
-        arcTo(rad, rad, 0f, false, true, l + rad, t)
-        close()
-    }
 }
 
 /** "Sign in to VRChat": shown under the panels while the VRChat session needs signing in. */
