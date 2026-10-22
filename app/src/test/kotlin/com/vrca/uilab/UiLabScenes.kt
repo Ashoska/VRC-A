@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.background
 import androidx.compose.ui.unit.dp
@@ -359,7 +360,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -446,6 +447,47 @@ object UiLabScenes {
         )
     }
 
+    /** Each cell replays one of the boot cat's animations every 4 s: [from] for 1.3 s, then [to]. */
+    @Composable
+    private fun CatGallery() {
+        val M = com.vrca.app.Mark.entries.associateBy { it.name }
+        data class Cell(val label: String, val from: String, val to: String, val hop: Boolean = false)
+        val cells = listOf(
+            Cell("Waiting", "Waiting", "Waiting"), Cell("Wakes up", "Waiting", "Working"), Cell("Thinking", "Working", "Working"),
+            Cell("Background", "Working", "Background"), Cell("Done", "Working", "Done"), Cell("Warning", "Working", "Warn"),
+            Cell("Maintenance", "Working", "Maintenance"), Cell("Failed", "Working", "Failed"), Cell("Retry", "Failed", "Working"),
+            Cell("Skipped", "Working", "Skipped"), Cell("All done hop", "Done", "Done", hop = true)
+        )
+        var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(0L) }
+        androidx.compose.runtime.LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(50); now += 50 } }
+        val phase = now % 4000
+        androidx.compose.foundation.layout.Box(
+            androidx.compose.ui.Modifier.fillMaxSize().background(com.vrca.ui.theme.GremlinColors.Backdrop),
+            contentAlignment = androidx.compose.ui.Alignment.Center
+        ) {
+            androidx.compose.foundation.layout.FlowRow(
+                androidx.compose.ui.Modifier.widthIn(max = 900.dp).padding(24.dp),
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(14.dp, androidx.compose.ui.Alignment.CenterHorizontally),
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(14.dp)
+            ) {
+                cells.forEachIndexed { i, c ->
+                    val mark = M[if (phase < 1300) c.from else c.to]!!
+                    androidx.compose.foundation.layout.Column(
+                        androidx.compose.ui.Modifier.width(150.dp).height(170.dp)
+                            .background(com.vrca.ui.theme.GremlinColors.Card, androidx.compose.foundation.shape.RoundedCornerShape(18.dp)),
+                        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+                        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center
+                    ) {
+                        com.vrca.app.BootCat(mark, i, androidx.compose.ui.Modifier.size(84.dp), celebrate = c.hop && phase in 1300..3600)
+                        androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(14.dp))
+                        androidx.compose.material3.Text(c.label, color = com.vrca.ui.theme.GremlinColors.TextMuted,
+                            style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
+                    }
+                }
+            }
+        }
+    }
+
     /** `show boot [mid|error|done|incident|updated|intro] [none]`: a sample state + backdrop. */
     @Composable
     private fun bootSample(rest: String, toApp: () -> Unit = {}) {
@@ -525,6 +567,8 @@ object UiLabScenes {
                 }
             }
             // The REAL headset boot runner (its checks run against the lab, so it shows what fails offline).
+            // `show cats`: every boot cat animation on a loop, labelled (a sheet for testers).
+            "cats" -> CatGallery()
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.
