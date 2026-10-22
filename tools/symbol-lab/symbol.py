@@ -131,15 +131,25 @@ def raw_corners(p: np.ndarray, closed: bool, k: int, max_turn_deg: float):
     n = len(p)
     if n < 2 * k + 1:
         return []
+    def turn_at(i, kk):
+        v1 = p[i] - p[(i - kk) % n]
+        v2 = p[(i + kk) % n] - p[i]
+        l1, l2 = np.hypot(*v1), np.hypot(*v2)
+        if l1 <= 1e-6 or l2 <= 1e-6:
+            return 0.0
+        return math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(v1, v2) / (l1 * l2))))))
     turns = np.zeros(n)
+    kh = max(2, k // 2)
     for i in range(n):
         if not closed and (i < k or i >= n - k):
             continue
-        v1 = p[i] - p[(i - k) % n]
-        v2 = p[(i + k) % n] - p[i]
-        l1, l2 = np.hypot(*v1), np.hypot(*v2)
-        if l1 > 1e-6 and l2 > 1e-6:
-            turns[i] = math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(v1, v2) / (l1 * l2))))))
+        t = turn_at(i, k)
+        # A real corner turns all at once: over half the distance it still turns most of the
+        # way. A tight round curve (a mouth, a small loop) turns gradually, about half as much
+        # over half the distance, so it stays a curve instead of being pinned into a point.
+        if t > max_turn_deg and turn_at(i, kh) < 0.65 * t:
+            t = 0.0
+        turns[i] = t
     out = []
     for i in range(n):
         if turns[i] <= max_turn_deg:
@@ -179,7 +189,8 @@ def shape_stroke(p: np.ndarray, closed: bool, sigma_pts: float, tol: float, k: i
     rounded corner made a little hook at every corner.)"""
     cs = raw_corners(p, closed, k, max_turn)
     if not cs:
-        q = approximate_polygon(smooth(p, closed, sigma_pts), tol)
+        sm = smooth(p, closed, sigma_pts)
+        q = approximate_polygon(sm, tol * 0.5 if length(sm) < 8.0 else tol)
         if closed and len(q) > 2 and np.allclose(q[0], q[-1]):
             q = q[:-1]
         return q, set(), closed
@@ -214,7 +225,9 @@ def shape_stroke(p: np.ndarray, closed: bool, sigma_pts: float, tol: float, k: i
         end = corners_xy[j] if (closed or j < n - 1) else None
         body = np.vstack([v for v in (start[None] if start is not None else None, piece,
                                        end[None] if end is not None else None) if v is not None])
-        q = approximate_polygon(body, tol) if len(body) > 2 else body
+        # Short pieces (small curves) keep more points: the default tolerance flattened them.
+        piece_tol = tol * 0.5 if length(body) < 8.0 else tol
+        q = approximate_polygon(body, piece_tol) if len(body) > 2 else body
         if pts:
             q = q[1:]
             corner_idx.add(len(pts) - 1)
@@ -429,7 +442,11 @@ def finish(strokes, unit, sigma_units, tol, max_turn):
         q, corners, closed = shape_stroke(p, closed, sigma_units / unit, tol, k, max_turn)
         if len(q) < 2:
             continue
-        out.append((q, closed, corners | corners_of(q, closed, max_turn + 25)))
+        # A sharp turn between two LONG simplified segments is a real tip the raw pass missed; between
+        # short ones it's just a small curve drawn with few points (made round things pointy).
+        long_turns = {i for i in corners_of(q, closed, max_turn + 25)
+                      if min(np.hypot(*(q[i] - q[(i - 1) % len(q)])), np.hypot(*(q[(i + 1) % len(q)] - q[i]))) >= 3.0}
+        out.append((q, closed, corners | long_turns))
     return out
 
 
