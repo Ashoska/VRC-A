@@ -190,10 +190,9 @@ def shape_stroke(p: np.ndarray, closed: bool, sigma_pts: float, tol: float, k: i
     cs = raw_corners(p, closed, k, max_turn)
     if not cs:
         sm = smooth(p, closed, sigma_pts)
-        q = approximate_polygon(sm, tol * 0.5 if length(sm) < 8.0 else tol)
-        if closed and len(q) > 2 and np.allclose(q[0], q[-1]):
-            q = q[:-1]
-        return q, set(), closed
+        if closed:
+            return [np.vstack([sm, sm[:1]])], True
+        return [sm], False
     if closed:
         p = np.roll(p, -cs[0], axis=0)
         cs = [(c - cs[0]) % len(p) for c in cs]
@@ -219,24 +218,14 @@ def shape_stroke(p: np.ndarray, closed: bool, sigma_pts: float, tol: float, k: i
         At, x, Bt = _join(A, B, p[cuts[j + 1]])
         pieces[j], pieces[(j + 1) % n] = At, Bt
         corners_xy.append(x)
-    pts, corner_idx = [], set()
+    bodies = []
     for j, piece in enumerate(pieces):
         start = corners_xy[j - 1] if (closed or j > 0) else None
         end = corners_xy[j] if (closed or j < n - 1) else None
-        body = np.vstack([v for v in (start[None] if start is not None else None, piece,
-                                       end[None] if end is not None else None) if v is not None])
-        # Short pieces (small curves) keep more points: the default tolerance flattened them.
-        piece_tol = tol * 0.5 if length(body) < 8.0 else tol
-        q = approximate_polygon(body, piece_tol) if len(body) > 2 else body
-        if pts:
-            q = q[1:]
-            corner_idx.add(len(pts) - 1)
-        pts.extend(q)
-    q = np.asarray(pts)
-    if closed:
-        q = q[:-1]
-        corner_idx.add(0)
-    return q, corner_idx, closed
+        bodies.append(np.vstack([v for v in (start[None] if start is not None else None, piece,
+                                              end[None] if end is not None else None) if v is not None]))
+    # Corners join piece ends exactly; each piece is fitted separately, so the corner stays sharp.
+    return bodies, False
 
 
 def length(p: np.ndarray) -> float:
@@ -286,10 +275,142 @@ def bezier_segments(p: np.ndarray, closed: bool, corners: set):
         yield a, c1, c2, b
 
 
+# ---------------------------------------------------------------- curve fitting
+# Smooth cubic Béziers fitted straight to the traced line (Schneider, "An Algorithm for
+# Automatically Fitting Digitized Curves", Graphics Gems 1990): one curve per stretch, split where
+# it strays more than the tolerance from the trace, with Newton re-parameterisation. Replaced
+# "simplify to a few points, then draw curves through them": small round parts (tight hair curls,
+# the bumps of a mouth) kept too few points and came out pointy or flat (user, Niko drawing).
+
+def _bez(c, t):
+    mt = 1 - t
+    return ((mt ** 3)[:, None] * c[0] + (3 * mt * mt * t)[:, None] * c[1]
+            + (3 * mt * t * t)[:, None] * c[2] + (t ** 3)[:, None] * c[3])
+
+
+def _bez_d1(c, t):
+    mt = 1 - t
+    return ((3 * mt * mt)[:, None] * (c[1] - c[0]) + (6 * mt * t)[:, None] * (c[2] - c[1])
+            + (3 * t * t)[:, None] * (c[3] - c[2]))
+
+
+def _bez_d2(c, t):
+    return ((6 * (1 - t))[:, None] * (c[2] - 2 * c[1] + c[0]) + (6 * t)[:, None] * (c[3] - 2 * c[2] + c[1]))
+
+
+def _unit(v):
+    l = float(np.hypot(*v))
+    return v / l if l > 1e-9 else v
+
+
+def _end_tangent(p, at_start, reach=1.2):
+    """Direction leaving an end, averaged over ~reach box units (pixel steps are noisy)."""
+    q = p if at_start else p[::-1]
+    d = np.cumsum(np.r_[0, np.hypot(*np.diff(q, axis=0).T)])
+    j = min(len(q) - 1, max(1, int(np.searchsorted(d, reach))))
+    return _unit(q[j] - q[0])
+
+
+def _gen(pts, u, t1, t2):
+    p0, p3 = pts[0], pts[-1]
+    b1, b2 = 3 * (1 - u) ** 2 * u, 3 * (1 - u) * u ** 2
+    a1, a2 = t1[None] * b1[:, None], t2[None] * b2[:, None]
+    tmp = pts - _bez(np.array([p0, p0, p3, p3]), u)
+    C = np.array([[np.sum(a1 * a1), np.sum(a1 * a2)], [np.sum(a1 * a2), np.sum(a2 * a2)]])
+    X = np.array([np.sum(a1 * tmp), np.sum(a2 * tmp)])
+    det = C[0, 0] * C[1, 1] - C[0, 1] * C[1, 0]
+    seg = float(np.hypot(*(p3 - p0)))
+    if abs(det) > 1e-12:
+        al1 = (X[0] * C[1, 1] - X[1] * C[0, 1]) / det
+        al2 = (C[0, 0] * X[1] - C[1, 0] * X[0]) / det
+    else:
+        al1 = al2 = 0.0
+    if al1 < 1e-6 * seg or al2 < 1e-6 * seg:
+        al1 = al2 = seg / 3
+    return np.array([p0, p0 + t1 * al1, p3 + t2 * al2, p3])
+
+
+def _reparam(c, pts, u):
+    d = _bez(c, u) - pts
+    d1, d2 = _bez_d1(c, u), _bez_d2(c, u)
+    num = np.sum(d * d1, axis=1)
+    den = np.sum(d1 * d1, axis=1) + np.sum(d * d2, axis=1)
+    return np.clip(np.where(np.abs(den) > 1e-12, u - num / np.where(den == 0, 1, den), u), 0, 1)
+
+
+def _fit(pts, t1, t2, err2, out, depth=0):
+    if len(pts) <= 2:
+        seg = float(np.hypot(*(pts[-1] - pts[0]))) / 3
+        out.append(np.array([pts[0], pts[0] + t1 * seg, pts[-1] + t2 * seg, pts[-1]]))
+        return
+    u = np.r_[0, np.cumsum(np.hypot(*np.diff(pts, axis=0).T))]
+    u = u / u[-1] if u[-1] > 0 else np.linspace(0, 1, len(pts))
+    c = _gen(pts, u, t1, t2)
+    for _ in range(8):
+        e = np.sum((_bez(c, u) - pts) ** 2, axis=1)
+        if e.max() <= err2:
+            out.append(c)
+            return
+        if e.max() > err2 * 16:
+            break
+        u = _reparam(c, pts, u)
+        c = _gen(pts, u, t1, t2)
+    e = np.sum((_bez(c, u) - pts) ** 2, axis=1)
+    if e.max() <= err2 or depth > 12 or len(pts) < 4:
+        out.append(c)
+        return
+    i = int(np.clip(np.argmax(e[1:-1]) + 1, 1, len(pts) - 2))
+    tc = _unit(pts[max(0, i - 2)] - pts[min(len(pts) - 1, i + 2)])
+    _fit(pts[:i + 1], t1, tc, err2, out, depth + 1)
+    _fit(pts[i:], -tc, t2, err2, out, depth + 1)
+
+
+def fit_curves(pts: np.ndarray, err: float, closed_loop: bool = False):
+    """Béziers [p0, c1, c2, p3] fitted to a dense point run (box units)."""
+    if len(pts) < 2:
+        return []
+    if closed_loop:
+        t = _unit(pts[1] - pts[-2])  # same tangent both sides of the seam: no kink there
+        t1, t2 = t, -t
+    else:
+        t1, t2 = _end_tangent(pts, True), _end_tangent(pts, False)
+    out = []
+    _fit(pts, t1, t2, err * err, out)
+    return out
+
+
 def fmt(v: float) -> str:
     s = f"{v:.1f}"
     s = s[:-2] if s.endswith(".0") else s
     return "0" if s == "-0" else s
+
+
+def curves_path(curves, closed: bool) -> str:
+    """One stroke as SVG path data (absolute, 1 decimal); a new M only where pieces don't meet."""
+    out, last = [], None
+    for c in curves:
+        a, c1, c2, b = c
+        if last is None or np.hypot(*(a - last)) > 0.05:
+            out.append(f"M{fmt(a[0])} {fmt(a[1])}")
+        cross = lambda u, v: abs(u[0] * v[1] - u[1] * v[0])
+        straight = cross(b - a, c1 - a) + cross(b - a, c2 - a)
+        if straight / max(np.linalg.norm(b - a), 1e-6) < 0.05:
+            out.append(f"L{fmt(b[0])} {fmt(b[1])}")
+        else:
+            out.append(f"C{fmt(c1[0])} {fmt(c1[1])} {fmt(c2[0])} {fmt(c2[1])} {fmt(b[0])} {fmt(b[1])}")
+        last = b
+    if closed:
+        out.append("Z")
+    return "".join(out)
+
+
+def curves_points(curves, per=16):
+    pts = []
+    t = np.linspace(0, 1, per)
+    for c in curves:
+        q = _bez(np.asarray(c), t)
+        pts.extend(map(tuple, q if not pts else q[1:]))
+    return pts
 
 
 def stroke_path(p: np.ndarray, closed: bool, corners: set) -> str:
@@ -439,14 +560,13 @@ def finish(strokes, unit, sigma_units, tol, max_turn):
     out = []
     k = max(3, round(2.0 / unit))
     for p, closed in strokes:
-        q, corners, closed = shape_stroke(p, closed, sigma_units / unit, tol, k, max_turn)
-        if len(q) < 2:
-            continue
-        # A sharp turn between two LONG simplified segments is a real tip the raw pass missed; between
-        # short ones it's just a small curve drawn with few points (made round things pointy).
-        long_turns = {i for i in corners_of(q, closed, max_turn + 25)
-                      if min(np.hypot(*(q[i] - q[(i - 1) % len(q)])), np.hypot(*(q[(i + 1) % len(q)] - q[i]))) >= 3.0}
-        out.append((q, closed, corners | long_turns))
+        bodies, loop = shape_stroke(p, closed, sigma_units / unit, tol, k, max_turn)
+        curves = []
+        for b in bodies:
+            if len(b) >= 2 and length(b) > 0.2:
+                curves += fit_curves(b, tol, closed_loop=loop)
+        if curves:
+            out.append((curves, loop))
     return out
 
 
@@ -464,10 +584,8 @@ def preview(src: Image.Image, finished, dots, out_path: str):
         d = ImageDraw.Draw(big)
         k = S * SS / BOX
         w = max(1, round(width * SS))
-        for q, closed, corners in finished:
-            pts = [(x * k, y * k) for x, y in sample(q, closed, corners)]
-            if closed:
-                pts.append(pts[0])
+        for curves, closed in finished:
+            pts = [(x * k, y * k) for x, y in curves_points(curves)]
             d.line(pts, fill=ink, width=w, joint="curve")
             for x, y in (pts[0], pts[-1]):  # round caps
                 d.ellipse([x - w / 2, y - w / 2, x + w / 2, y + w / 2], fill=ink)
@@ -483,9 +601,9 @@ def main():
     ap.add_argument("image")
     ap.add_argument("--name", required=True)
     ap.add_argument("--mode", choices=["lines", "outline"], default="lines")
-    ap.add_argument("--smooth", type=float, default=1.0)
+    ap.add_argument("--smooth", type=float, default=0.6)
     ap.add_argument("--corner", type=float, default=50.0)
-    ap.add_argument("--detail", type=float, default=0.35, help="simplification tolerance, box units")
+    ap.add_argument("--detail", type=float, default=0.25, help="curve fit tolerance: max distance from the traced line, box units")
     ap.add_argument("--invert", action="store_true", default=None)
     a = ap.parse_args()
 
@@ -500,7 +618,7 @@ def main():
         strokes, dots = trace_outline(m, unit, off, a.smooth)
     finished = finish(strokes, unit, a.smooth, a.detail, a.corner)
 
-    d = "".join(stroke_path(q, closed, corners) for q, closed, corners in finished)
+    d = "".join(curves_path(curves, closed) for curves, closed in finished)
     d += "".join(dot_path(x, y, r) for x, y, r in dots)
     ident = "".join(w.capitalize() for w in "".join(ch if ch.isalnum() else " " for ch in a.name).split()) or "Symbol"
     print(f'    val {ident} = BootSymbol.fromSvg("{a.name}", "{d}")')
