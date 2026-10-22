@@ -18,8 +18,12 @@ Check the preview, then the boot screen in the UI Lab (`ui.sh run headset "show 
   become small circles; spurs off junctions (scaled to the line thickness) are dropped; line ends
   that meet are joined.
 - `--mode outline`: solid filled shapes; traces their outer edge, smoothed the same way.
-- `--smooth N` (default 1.0, box units), `--corner DEG` (default 50), `--detail N` (default 0.35):
-  how much lines are smoothed, how sharp a turn stays a corner, how closely points follow the line.
+- `--smooth N` (default 0.6, box units), `--corner DEG` (default 50), `--detail N` (default 0.25):
+  how much lines are smoothed before fitting, how sharp a turn stays a corner, and the curve fit
+  tolerance (max distance a fitted curve may stray from the traced line).
+- Curves are fitted directly to each traced line (Schneider's algorithm), so small round parts stay
+  round. Details smaller than the pen line's thickness (a tiny dip) still average out: shape that
+  one stroke by hand in the printed path (Niko's mouth).
 - `--invert`: force light-on-dark (auto-detected; transparent PNGs use their alpha).
 
 Quality notes (why it's built this way): curve handles are sized to their own segment (plain
