@@ -196,14 +196,18 @@ private class Wall(private val seed: Int) {
             val picks = mutableListOf<Triple<BootSymbol, Float, Float>>() // symbol, size, x along lane
             var x = 0f
             var last: BootSymbol? = null
+            var size = sym * (0.78f + rnd.nextFloat() * 0.5f)
             while (x < world - sym) {
                 var pick = pool[rnd.nextInt(pool.size)]
                 if (pick == last && pool.size > 1) pick = pool[rnd.nextInt(pool.size)] // fewer twins
                 last = pick
-                val size = sym * (0.78f + rnd.nextFloat() * 0.5f)
                 picks += Triple(pick, size, x)
-                // Even-ish spacing; now and then a wider gap (rare, so no stretch of wall goes empty).
-                x += size * (1.2f + rnd.nextFloat() * 1.1f) * (if (rnd.nextFloat() < 0.08f) 1.5f else 1f)
+                val next = sym * (0.78f + rnd.nextFloat() * 0.5f)
+                // Centre-to-centre from the pair's mean size: 1.0x clears their collision radii
+                // (0.46 each), so lane-mates still never touch. Tight (user 2026-10-22: the wall had
+                // a lot of blank space at 1.2-2.3x of one size), now and then a slightly wider gap.
+                x += (size + next) / 2 * (1.0f + rnd.nextFloat() * 0.45f) * (if (rnd.nextFloat() < 0.06f) 1.4f else 1f)
+                size = next
             }
             // Stretch the lane to exactly the world width, so it wraps seamlessly.
             val stretch = world / x
@@ -260,7 +264,7 @@ private class Wall(private val seed: Int) {
     }
 }
 
-private val LANE_HEIGHT = 86.dp
+private val LANE_HEIGHT = 74.dp
 private val SYMBOL_SIZE = 58.dp
 
 /** Below this the wall isn't drawn, so its drift isn't stepped either. */
