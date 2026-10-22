@@ -38,7 +38,13 @@ object VrchatAuthManager {
     val loggedInSignal: kotlinx.coroutines.flow.SharedFlow<Unit> = _loggedInSignal
 
     /** What the encrypted store holds about the VRChat sign-in, as watched state. */
-    data class StoredSession(val signedIn: Boolean = false, val userId: String = "", val displayName: String = "")
+    data class StoredSession(
+        val signedIn: Boolean = false,
+        val userId: String = "",
+        val displayName: String = "",
+        /** False until the encrypted store has opened: "not known yet", NOT "signed out". */
+        val loaded: Boolean = false
+    )
 
     // The UI shows the signed-in name (and whether there is a session) from THIS, never by reading
     // the store in a composable body: a store read only looked current because something else
@@ -54,7 +60,8 @@ object VrchatAuthManager {
         _session.value = StoredSession(
             signedIn = prefs.getString(KEY_AUTH_COOKIE, null)?.isNotBlank() == true && userId.isNotBlank(),
             userId = userId,
-            displayName = prefs.getString(KEY_DISPLAY_NAME, null).orEmpty()
+            displayName = prefs.getString(KEY_DISPLAY_NAME, null).orEmpty(),
+            loaded = true
         )
     }
 

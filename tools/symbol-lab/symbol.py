@@ -372,12 +372,27 @@ def snap_ends(strokes, radius, half):
 def trace_lines(m, unit, off, sigma_units, max_turn):
     sk = skeletonize(m)
     dist = distance_transform_edt(m)
+    half_px = float(np.median(dist[sk])) if sk.any() else 1.0
+    dots = []
+    # Solid dots (eyes) found as whole shapes first: a filled blob's centreline is often a tiny
+    # branched cluster, which the chain walk split into short pieces at a junction and dropped
+    # as spurs (a fan drawing lost both eyes). A small, compact, filled component is a dot.
+    from skimage.measure import label, regionprops
+    lab = label(m)
+    for r in regionprops(lab):
+        h, w = r.bbox[2] - r.bbox[0], r.bbox[3] - r.bbox[1]
+        # Round, not just small: a short dash (sound lines) is small too but elongated.
+        if max(h, w) <= 8 * half_px and r.solidity > 0.8 and max(h, w) <= 1.6 * min(h, w):
+            cy, cx = r.centroid
+            rad = max(dist[int(round(cy)), int(round(cx))] * unit * 0.6, 0.6)
+            dots.append((off[0] + cx * unit, off[1] + cy * unit, rad))
+            sk[lab == r.label] = False
     chains, deg = trace_skeleton(sk)
     # Typical half-thickness of the drawing's lines (box units): a thick corner sprouts a spur
     # toward its outer point about this long, so spurs shorter than ~3x it are pruned.
-    half = float(np.median(dist[sk])) * unit if sk.any() else 1.0
+    half = half_px * unit
     spur = max(2.5, 3.0 * half)
-    strokes, dots = [], []
+    strokes = []
     for c, closed in chains:
         p = to_box(c, unit, off)
         ends_deg = [deg.get(tuple(e), 0) for e in (c[0], c[-1])]
