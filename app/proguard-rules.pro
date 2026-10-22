@@ -52,3 +52,9 @@
 # native side fails at runtime (release builds minify).
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 -dontwarn com.k2fsa.sherpa.onnx.**
+
+# javaosc (OSC send/parse): keep its classes in their packages. Its argument-handler Activator calls
+# getPackage().getName() on its own class; AGP 9's R8 moved the renamed classes into the unnamed
+# package, where getPackage() is null, so EVERY OSC send threw a NullPointerException before
+# leaving the device (headset: "udp ok=never, failStreak" in Settings > Debug, 2026-10-22).
+-keep class com.illposed.osc.** { *; }
