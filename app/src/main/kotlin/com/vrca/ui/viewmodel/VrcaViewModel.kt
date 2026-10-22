@@ -2009,8 +2009,16 @@ class VrcaViewModel(
     // removed, a signed-out cold start lands straight in the app — the OSC
     // block must hold from the first frame, not wait for a loggedOutSignal
     // that never fires on cold start.
+    //
+    // Seeded from the WATCHED stored session (VrchatAuthManager.session), and only when the
+    // encrypted store has actually opened. isLoggedIn() here waited at most 400 ms on the main
+    // thread and then answered "no" while the Keystore was still opening (slow on the Quest,
+    // worst at power-on), which seeded this TRUE for a signed-in user: every chatbox send was
+    // dropped at the gate until the VRChat pipeline connected (user report 2026-10-22: OSC not
+    // sending on the headset while OSCQuery and incoming OSC worked). "Store not open yet" is not
+    // "signed out"; startVrchatAuthGateWatcher follows the session as soon as it loads.
     var vrchatLoggedOut by mutableStateOf(
-        !com.vrca.vrchat.VrchatAuthManager.isLoggedIn(app.applicationContext)
+        com.vrca.vrchat.VrchatAuthManager.session.value.let { it.loaded && !it.signedIn }
     )
         private set
 
@@ -2051,6 +2059,21 @@ class VrcaViewModel(
     private fun startVrchatAuthGateWatcher() {
         // Apply the seeded state immediately (cold start while signed out).
         refreshOscBlockGate()
+        // The stored session decides once the encrypted store has opened (and on every later
+        // write): signed in = unblocked, signed out = blocked. Sign-out still also arrives via
+        // loggedOutSignal below, which stops sending first.
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatAuthManager.session.collect { s ->
+                if (!s.loaded) return@collect
+                val out = !s.signedIn
+                if (out != vrchatLoggedOut) {
+                    // Same order as loggedOutSignal: the chatbox-clearing send goes out first.
+                    if (out && oscSending) stopSending()
+                    vrchatLoggedOut = out
+                    refreshOscBlockGate()
+                }
+            }
+        }
         viewModelScope.launch {
             com.vrca.vrchat.VrchatAuthManager.loggedOutSignal.collect {
                 // Order matters: stopSending()'s chatbox-clearing send must go
