@@ -68,6 +68,9 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.fadeOut
 import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material.icons.filled.Remove
@@ -306,6 +309,7 @@ fun BootScreen(
     val partsR = remember { Animatable(start) }
     // First open: Boot Cat's entrance under the logo (WelcomeLayout).
     val catIn = remember { Animatable(start) }
+    val catMove = remember { Animatable(start) }
     // Both coordinates are kept and the logo's centre is derived from them. Computing it in the
     // logo's own callback needed the box's callback to have run first (their order isn't
     // guaranteed), which could leave the intro waiting on a blank screen until something moved.
@@ -343,12 +347,18 @@ fun BootScreen(
         }
         delay(420)
         launch { settle.animateTo(1f, tween(760, easing = FastOutSlowInEasing)) }
+        // First open: Boot Cat jumps across just behind the logo's glide, landing as his panel opens.
+        if (firstOpen) {
+            launch { delay(BOOT_CAT_JUMP_DELAY_MS); catMove.animateTo(1f, tween(BOOT_CAT_JUMP_MS, easing = LinearEasing)) }
+            // His panel opens while he's in the air, so he lands in it rather than waiting on an empty wall.
+            launch { delay(160); panelR.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
+        }
         delay(300)
         launch { contentIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing)) }
         delay(220)
         launch { panelL.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
         delay(130)
-        launch { panelR.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
+        if (!firstOpen) launch { panelR.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
         delay(470)
         launch { partsL.animateTo(1f, tween(700)) }
         delay(130)
@@ -439,7 +449,7 @@ fun BootScreen(
             if (firstOpen) {
                 WelcomeLayout(
                     checks, status, wide, error, logo = logo, pills = pills,
-                    catIn = { catIn.value }, move = { settle.value }, panelIn = { panelR.value }, out = { exitP.value },
+                    catIn = { catIn.value }, move = { catMove.value }, panelIn = { panelR.value }, out = { exitP.value },
                     celebrate = celebrate, onListed = onWelcomeListed
                 )
             } else if (wide) {
@@ -1105,6 +1115,11 @@ private fun WelcomeLayout(
         helloTwo = true
     }
     val moving by remember { derivedStateOf { move() > 0f } }
+    val bubbleBack = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { move() >= 1f }.first { it }
+        bubbleBack.animateTo(1f, spring(dampingRatio = 0.7f, stiffness = 380f))
+    }
     val (mark, line) = when {
         !moving && !helloTwo -> Mark.Done to "Hi, I'm Boot Cat!"
         !moving || panelIn() < 1f && next == 0 -> Mark.Done to "Let's get you set up!"
@@ -1183,20 +1198,29 @@ private fun WelcomeLayout(
         // Boot Cat and his bubble: first under the centred logo, then gliding (with the logo) to his
         // spot at the top of the panel.
         val at = spot
+        val helloW = if (wide) 300.dp else 270.dp
         if (at != null) {
             Row(
-                NoA11y.width(spotW).height(BOOT_CAT_ROW_HEIGHT)
+                // A compact speaker for the hello (centred under the logo), the panel's full width once landed
+                // (the bubble is hidden while the width changes).
+                NoA11y.width(if (move() < 1f) helloW else spotW).height(BOOT_CAT_ROW_HEIGHT)
                     .offset {
                         val root = box[0]
                         val w = root?.size?.width?.toFloat() ?: 0f
                         val h = root?.size?.height?.toFloat() ?: 0f
-                        val hello = Offset((w - spotW.toPx()) / 2f, h / 2f + logoH.toPx() / 2f + 16.dp.toPx())
-                        val m = FastOutSlowInEasing.transform(move())
+                        val hello = Offset((w - helloW.toPx()) / 2f, h / 2f + logoH.toPx() / 2f + 30.dp.toPx())
+                        // A jump: eased across, with an arc on top (his hop, made bigger), and the hop-in on arrival.
+                        // Sideways first, then up (his path curves away from the logo instead of
+                        // crossing its tail), with a small arc on top.
+                        val raw = move()
+                        val mx = FastOutSlowInEasing.transform(raw)
+                        val my = FastOutSlowInEasing.transform(((raw - 0.2f) / 0.8f).coerceIn(0f, 1f))
+                        val arc = -kotlin.math.sin(raw * kotlin.math.PI.toFloat()) * BOOT_CAT_JUMP_ARC.toPx()
                         val p = catIn()
                         val hop = -kotlin.math.sin(p * kotlin.math.PI.toFloat()) * 18.dp.toPx()
                         IntOffset(
-                            (hello.x + (at.x - hello.x) * m).toInt(),
-                            (hello.y + (at.y - hello.y) * m + hop).toInt()
+                            (hello.x + (at.x - hello.x) * mx).toInt(),
+                            (hello.y + (at.y - hello.y) * my + arc + hop).toInt()
                         )
                     }
                     .graphicsLayer { alpha = (catIn() * 3f).coerceAtMost(1f) * (1f - out()) },
@@ -1204,33 +1228,61 @@ private fun WelcomeLayout(
             ) {
                 BootCat(mark, 0, Modifier.size(if (wide) 40.dp else 36.dp), celebrate = celebrate && next >= steps.size && mark == Mark.Done)
                 Spacer(Modifier.width(8.dp))
-                // The bubble's tail, pointing at him (drawn over the bubble's edge so the edge doesn't cross it).
-                Spacer(Modifier.zIndex(1f).size(9.dp, 14.dp).offset(x = 1.dp).drawBehind {
-                    val tail = androidx.compose.ui.graphics.Path().apply {
-                        moveTo(size.width, 0f); lineTo(0f, size.height / 2f); lineTo(size.width, size.height); close()
-                    }
-                    drawPath(tail, GremlinColors.Card)
-                    val tip = Offset(0f, size.height / 2f)
-                    drawLine(mood, Offset(size.width, 0f), tip, 1.dp.toPx())
-                    drawLine(mood, tip, Offset(size.width, size.height), 1.dp.toPx())
-                })
-                Box(
-                    Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
-                        .animatedOutline({ mood }, corner = 14.dp).padding(horizontal = 14.dp),
-                    contentAlignment = Alignment.CenterStart
+                // His bubble tucks away as he jumps and grows back out of him once he's landed.
+                Row(
+                    Modifier.weight(1f).fillMaxHeight().graphicsLayer {
+                        val m = move()
+                        val back = bubbleBack.value
+                        alpha = if (m < 1f) (1f - m * 4f).coerceAtLeast(0f) else back
+                        val sc = if (m < 1f) 1f - 0.3f * (m * 4f).coerceAtMost(1f) else 0.7f + 0.3f * back
+                        scaleX = sc; scaleY = 0.85f + 0.15f * sc
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
+                    },
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Crossfade(line, label = "bootCatLine") {
-                        Text(
-                            it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
-                            color = when (mark) { Mark.Failed -> GremlinColors.Negative; Mark.Warn, Mark.Maintenance -> GremlinColors.Caution; else -> GremlinColors.Text },
-                            maxLines = 1, overflow = TextOverflow.Ellipsis
-                        )
+                    // The bubble's tail, pointing at him (drawn over the bubble's edge so the edge doesn't cross it).
+                    Spacer(Modifier.zIndex(1f).size(9.dp, 14.dp).offset(x = 1.dp).drawBehind {
+                        val tail = androidx.compose.ui.graphics.Path().apply {
+                            moveTo(size.width, 0f); lineTo(0f, size.height / 2f); lineTo(size.width, size.height); close()
+                        }
+                        drawPath(tail, GremlinColors.Card)
+                        val tip = Offset(0f, size.height / 2f)
+                        drawLine(mood, Offset(size.width, 0f), tip, 1.dp.toPx())
+                        drawLine(mood, tip, Offset(size.width, size.height), 1.dp.toPx())
+                    })
+                    Box(
+                        Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
+                            .animatedOutline({ mood }, corner = 14.dp).padding(horizontal = 14.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        // The old line leaves upwards, then the new one rises in (a crossfade on the spot
+                        // overlapped the two mid-change, user 2026-10-23).
+                        AnimatedContent(
+                            line,
+                            transitionSpec = {
+                                (fadeIn(tween(200, delayMillis = 120)) + slideInVertically(tween(260, delayMillis = 100, easing = FastOutSlowInEasing)) { it / 2 }) togetherWith
+                                    (fadeOut(tween(120)) + slideOutVertically(tween(180, easing = FastOutSlowInEasing)) { -it / 2 })
+                            },
+                            contentAlignment = Alignment.CenterStart,
+                            label = "bootCatLine"
+                        ) {
+                            Text(
+                                it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+                                color = when (mark) { Mark.Failed -> GremlinColors.Negative; Mark.Warn, Mark.Maintenance -> GremlinColors.Caution; else -> GremlinColors.Text },
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
             }
         }
     }
 }
+
+/** Boot Cat's jump to the panel: when it starts after the logo begins gliding, how long, how high. */
+private const val BOOT_CAT_JUMP_DELAY_MS = 60L
+private const val BOOT_CAT_JUMP_MS = 900
+private val BOOT_CAT_JUMP_ARC = 26.dp
 
 /** Boot Cat's row (him + his bubble). */
 private val BOOT_CAT_ROW_HEIGHT = 46.dp
