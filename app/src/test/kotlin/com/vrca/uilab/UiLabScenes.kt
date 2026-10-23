@@ -573,7 +573,7 @@ java.lang.IllegalStateException: Expected a preset but found none
     }
 
     @Composable
-    private fun ButtonSheet() {
+    private fun ButtonSheet(buttonsAll: Boolean = false) {
         val I = androidx.compose.material.icons.Icons.Filled
         val P = com.vrca.ui.common.GremlinButtonKind.Primary
         // (label, kind, icon, pressed, loading) per column.
@@ -594,7 +594,11 @@ java.lang.IllegalStateException: Expected a preset but found none
                 Spacer(Modifier.width(110.dp))
                 heads.forEach { Text(it, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = com.vrca.ui.theme.GremlinColors.TextMuted) }
             }
-            for (style in com.vrca.ui.common.GremlinButtonStyle.entries) {
+            // `show buttons [all]`: B for comparison plus the newest looks, or every look.
+            val looks = com.vrca.ui.common.GremlinButtonStyle.entries.let { all ->
+                if (buttonsAll) all else all.filter { it.name in setOf("Outline", "Bubble", "BootLines", "Brackets", "Echo", "Doodle") }
+            }
+            for (style in looks) {
                 androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Bottom) {
                     Text(style.label, Modifier.width(110.dp).padding(bottom = 8.dp), style = MaterialTheme.typography.titleSmall, color = com.vrca.ui.theme.GremlinColors.Text)
                     for (c in cols) {
@@ -633,7 +637,7 @@ java.lang.IllegalStateException: Expected a preset but found none
             // `show cats`: every boot cat animation on a loop, labelled (a sheet for testers).
             "cats" -> CatGallery()
             // `show buttons`: the button sheet (GremlinButton): both looks, every kind and state.
-            "buttons" -> ButtonSheet()
+            "buttons" -> ButtonSheet(buttonsAll = rest.trim() == "all")
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.
