@@ -701,8 +701,8 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
     val chipPop = remember { Animatable(1f) }
     LaunchedEffect(done) {
         if (!done) { sweep.snapTo(-2f); return@LaunchedEffect }
-        launch { chipPop.animateTo(1.18f, tween(140)); chipPop.animateTo(1f, spring(dampingRatio = 0.4f)) }
         sweep.snapTo(-1f)
+        launch { delay(SWEEP_TO_CHIP_MS); chipPop.animateTo(1.18f, tween(140)); chipPop.animateTo(1f, spring(dampingRatio = 0.4f)) }
         sweep.animateTo(checks.size + 1f, tween(650, easing = FastOutSlowInEasing))
     }
     Column {
@@ -712,16 +712,12 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
                 style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
             )
-            // The app version (user, 2026-10-22: it replaced the "4/7" count; the bar already shows
-            // progress). Still takes the header tone and pops when boot lands.
-            Text(
-                "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
-                style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
-                modifier = Modifier.graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }.background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
-            )
         }
-        Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth().height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Spacer(Modifier.height(10.dp))
+        // The bar, then the app version at its end (user, 2026-10-23: next to the title it sat oddly).
+        // The chip takes the header tone and pops when the Ready sweep reaches it.
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.weight(1f).height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             checks.forEachIndexed { i, c ->
                 val seg = animateColorAsState(
                     when (c.state) {
@@ -744,6 +740,13 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
                         }
                 )
             }
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
+            style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
+            modifier = Modifier.graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }.background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
+        )
         }
     }
 }
@@ -1157,7 +1160,6 @@ private fun WelcomeLayout(
     val box = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
     var spot by remember { mutableStateOf<Offset?>(null) }
     var spotW by remember { mutableStateOf(0.dp) }
-    var chipW by remember { mutableIntStateOf(0) }
     // The logo's drawn width (it keeps its picture's shape), read where Boot Cat is placed.
     var logoW by remember { mutableIntStateOf(0) }
     val logoWidth = Modifier.onSizeChanged { if (it.width != logoW) logoW = it.width }
@@ -1171,9 +1173,7 @@ private fun WelcomeLayout(
                 if (!root.isAttached || !c.isAttached) return@onGloballyPositioned
                 val at = root.localPositionOf(c, Offset.Zero) + pad
                 if (at != spot) spot = at
-                // His row stops short of the version chip on the right (on a phone the chip sits by the strip).
-                val w = if (wide) with(density) { (c.size.width - 2 * pad.x - chipW).toDp() } - 10.dp
-                    else with(density) { (c.size.width - 2 * pad.x).toDp() }
+                val w = with(density) { (c.size.width - 2 * pad.x).toDp() }
                 if (w != spotW) spotW = w
             }.then(NoA11y)) {
                 Layer(Modifier.fillMaxWidth()) {
@@ -1190,23 +1190,19 @@ private fun WelcomeLayout(
                             Text(
                                 "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
                                 style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
-                                modifier = Modifier.onSizeChanged { if (it.width != chipW) chipW = it.width }
-                                    .graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }
+                                modifier = Modifier.graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }
                                     .background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
                             )
                         }
-                        Row(Modifier.fillMaxWidth().height(BOOT_CAT_ROW_HEIGHT), verticalAlignment = Alignment.CenterVertically) {
-                            Spacer(Modifier.weight(1f)) // his spot
-                            if (wide) { Spacer(Modifier.width(10.dp)); chip() }
-                        }
+                        Spacer(Modifier.fillMaxWidth().height(BOOT_CAT_ROW_HEIGHT)) // his spot
                         Spacer(Modifier.height(12.dp))
                         // One segment per check, in check order (the normal boot's bar): its result's colour
                         // once listed, the accent (breathing) on the one he's doing, dark while still to come.
                         // All done: a light sweeps along the strip and the chip pops (the normal boot's Ready moment).
                         LaunchedEffect(allDone) {
                             if (!allDone) { sweep.snapTo(-2f); return@LaunchedEffect }
-                            launch { chipPop.animateTo(1.18f, tween(140)); chipPop.animateTo(1f, spring(dampingRatio = 0.4f)) }
                             sweep.snapTo(-1f)
+                            launch { delay(SWEEP_TO_CHIP_MS); chipPop.animateTo(1.18f, tween(140)); chipPop.animateTo(1f, spring(dampingRatio = 0.4f)) }
                             sweep.animateTo(steps.size + 1f, tween(650, easing = FastOutSlowInEasing))
                         }
                         val pulse = rememberInfiniteTransition(label = "welcomePulse").animateFloat(
@@ -1238,8 +1234,8 @@ private fun WelcomeLayout(
                                 })
                             }
                         }
-                        // A phone's row is too narrow for his longer lines and the chip: the chip sits here.
-                        if (!wide) { Spacer(Modifier.width(10.dp)); chip() }
+                        // The version at the strip's end, as on the normal boot.
+                        Spacer(Modifier.width(10.dp)); chip()
                         }
                         Spacer(Modifier.height(12.dp))
                         // Finished checks on top (newest first), then the ones still to come as faint rows in
@@ -1397,6 +1393,9 @@ private fun ComingRow(icon: BootIcon, name: String, modifier: Modifier, height: 
 private const val BOOT_CAT_JUMP_DELAY_MS = 60L
 private const val BOOT_CAT_JUMP_MS = 900
 private val BOOT_CAT_JUMP_ARC = 26.dp
+
+/** When the Ready sweep reaches the version chip at the strip's end (it pops then). */
+private const val SWEEP_TO_CHIP_MS = 480L
 
 /** Boot Cat's row (him + his bubble). */
 private val BOOT_CAT_ROW_HEIGHT = 46.dp
