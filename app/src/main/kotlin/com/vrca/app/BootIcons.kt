@@ -167,6 +167,42 @@ object BootIcons {
         }
     )
 
+    /** First open: the tutorial's pictures (an open book, paw on the page). */
+    val Tutorial = BootIcon(
+        glyph("Tutorial") {
+            line("M12 7c-2.2-1.6-5.3-2-8.5-1.5v13c3.2-.5 6.3-.1 8.5 1.5 2.2-1.6 5.3-2 8.5-1.5v-13c-3.2-.5-6.3-.1-8.5 1.5z")
+            line("M12 7v13")
+        },
+        glyph("TutorialDetail") {
+            solid("M16 15.2c-1 0-1.5-.5-1.5-1.1 0-.8.7-1.4 1.5-1.4s1.5.6 1.5 1.4c0 .6-.5 1.1-1.5 1.1z")
+            solid("M13.9 11.6a.65 .65 0 1 0 1.3 0a.65 .65 0 1 0 -1.3 0z")
+            solid("M15.35 10.8a.65 .65 0 1 0 1.3 0a.65 .65 0 1 0 -1.3 0z")
+            solid("M16.8 11.6a.65 .65 0 1 0 1.3 0a.65 .65 0 1 0 -1.3 0z")
+        }
+    )
+    /** First open's "What VRC-A does" panel: now playing. */
+    val Music = BootIcon(
+        glyph("Music") {
+            line("M9.5 17.5V6.6l9-2.2v11.1")
+            line("M9.5 9.6l9-2.2")
+        },
+        glyph("MusicDetail") {
+            solid("M5.3 17.5a2.1 2.1 0 1 0 4.2 0a2.1 2.1 0 1 0 -4.2 0z")
+            solid("M14.3 15.5a2.1 2.1 0 1 0 4.2 0a2.1 2.1 0 1 0 -4.2 0z")
+        }
+    )
+    /** First open's "What VRC-A does" panel: alerts (an eared bell). */
+    val Alerts = BootIcon(
+        glyph("Alerts") {
+            line("M7.6 8.4 7.4 4.6l2.4 1.6")
+            line("M16.4 8.4l.2-3.8-2.4 1.6")
+            line("M6.5 16.5v-4.6a5.5 5.5 0 0 1 11 0v4.6l1.5 2h-14z")
+        },
+        glyph("AlertsDetail") {
+            solid("M10.2 19.8a1.8 1.8 0 0 0 3.6 0z")
+        }
+    )
+
     private class Glyph(val b: ImageVector.Builder) {
         fun line(d: String, width: Float = 1.9f, clipped: Boolean = false) = add(d, clipped) { nodes ->
             b.addPath(nodes, stroke = SolidColor(Color.Black), strokeLineWidth = width,

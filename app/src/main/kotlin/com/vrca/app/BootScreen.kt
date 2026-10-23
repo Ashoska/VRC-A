@@ -86,6 +86,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -150,6 +151,9 @@ enum class BootNote(val text: String) {
     Accepted("Accepted"),
     NewTerms("New terms"),
     CantConnect("Can't connect"),
+    Ready("Ready"),
+    Downloading("Downloading"),
+    WillRetry("Will retry"),
     TimedOut("Timed out")
 }
 
@@ -258,6 +262,11 @@ fun BootScreen(
     backdrop: BootBackdrop = BootBackdrop.Lanes,
     /** The VRChat display name for the checklist's "Welcome back" title; null before sign-in. */
     userName: String? = null,
+    /**
+     * A new install's first open (tutorial not done): "Welcome to VRC-A", the Internet / VRChat /
+     * VRC-A servers rows move into the checklist, and the Status card's place shows what VRC-A does.
+     */
+    firstOpen: Boolean = false,
     /**
      * False holds the checklist header's Ready moment (sweep + chip pop) even once every row has
      * settled; it plays when this turns true (AppBoot builds the app behind the screen first).
@@ -433,11 +442,12 @@ fun BootScreen(
                         logo(WIDE_LOGO_HEIGHT)
                         Spacer(Modifier.height(WIDE_LOGO_GAP))
                         Unfold({ panelR.value }, Modifier.fillMaxWidth().then(NoA11y)) {
-                            StatusPanel(status, Modifier.fillMaxWidth(), { partsR.value }, rowHeight = WIDE_ROW_HEIGHT)
+                            if (firstOpen) AboutPanel(Modifier.fillMaxWidth(), { partsR.value }, rowHeight = WIDE_ABOUT_ROW_HEIGHT)
+                            else StatusPanel(status, Modifier.fillMaxWidth(), { partsR.value }, rowHeight = WIDE_ROW_HEIGHT)
                         }
                     }
                     Unfold({ panelL.value }, Modifier.weight(1.15f).then(NoA11y)) {
-                        LoadingPanel(checks, Modifier.fillMaxWidth(), { partsL.value }, userName = userName, celebrate = celebrate)
+                        LoadingPanel(checks, Modifier.fillMaxWidth(), { partsL.value }, userName = userName, celebrate = celebrate, status = status.takeIf { firstOpen })
                     }
                 }
                 pills()
@@ -465,11 +475,12 @@ fun BootScreen(
                     Spacer(Modifier.height(PHONE_GAP + 4.dp))
                     Column(Modifier.widthIn(max = PHONE_MAX_WIDTH).fillMaxWidth()) {
                         Unfold({ panelR.value }, Modifier.fillMaxWidth().then(NoA11y)) {
-                            StatusPanel(status, Modifier.fillMaxWidth(), { partsR.value }, rowHeight = rowH, rowGap = rowGap)
+                            if (firstOpen) AboutPanel(Modifier.fillMaxWidth(), { partsR.value }, rowHeight = rowH + 8.dp, rowGap = rowGap)
+                            else StatusPanel(status, Modifier.fillMaxWidth(), { partsR.value }, rowHeight = rowH, rowGap = rowGap)
                         }
                         Spacer(Modifier.height(PHONE_GAP))
                         Unfold({ panelL.value }, Modifier.fillMaxWidth().then(NoA11y)) {
-                            LoadingPanel(checks, Modifier.fillMaxWidth(), { partsL.value }, userName = userName, rowHeight = rowH, rowGap = rowGap, celebrate = celebrate)
+                            LoadingPanel(checks, Modifier.fillMaxWidth(), { partsL.value }, userName = userName, rowHeight = rowH, rowGap = rowGap, celebrate = celebrate, status = status.takeIf { firstOpen })
                         }
                         pills()
                     }
@@ -565,6 +576,8 @@ private val PHONE_GAP = 12.dp
 private val PHONE_MAX_WIDTH = 480.dp
 /** Headset row height, shared by check rows and status rows so both panels match. */
 private val WIDE_ROW_HEIGHT = 38.dp
+/** First open's "What VRC-A does" rows: two lines each. */
+private val WIDE_ABOUT_ROW_HEIGHT = 46.dp
 /** Headset gap between the left column and the checklist; the error buttons meet across it. */
 private val WIDE_GAP = 28.dp
 
@@ -639,7 +652,7 @@ private fun revealedCount(reveal: () -> Float, pieces: Int): Int {
  * 15 characters, so the title always fits one line.
  */
 @Composable
-private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Boolean = true) {
+private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Boolean = true, firstOpen: Boolean = false) {
     val accent = MaterialTheme.colorScheme.primary
     val target = when {
         checks.any { it.state == BootState.Failed } -> GremlinColors.Negative
@@ -667,7 +680,11 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
     Column {
         Row(Modifier.height(30.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                if (userName.isNullOrBlank()) "Welcome back" else "Welcome back, $userName",
+                when {
+                    firstOpen -> "Welcome to VRC-A"
+                    userName.isNullOrBlank() -> "Welcome back"
+                    else -> "Welcome back, $userName"
+                },
                 style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
             )
@@ -711,24 +728,32 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
 @Composable
 private fun LoadingPanel(
     checks: List<BootCheck>, modifier: Modifier, reveal: () -> Float = { 1f }, userName: String? = null,
-    rowHeight: Dp = WIDE_ROW_HEIGHT, rowGap: Dp = 8.dp, celebrate: Boolean = true
+    rowHeight: Dp = WIDE_ROW_HEIGHT, rowGap: Dp = 8.dp, celebrate: Boolean = true,
+    /** First open: the Status card's rows, shown at the top of the checklist (see BootScreen.firstOpen). */
+    status: BootStatus? = null
 ) {
-    val pieces = checks.size + 1 // the header, then each check
+    val serviceRows = if (status != null) STATUS_ROWS else 0
+    val pieces = checks.size + 1 + serviceRows // the header, the status rows, then each check
     // A row shows "waiting" until it has fully appeared, so a check that finished during the intro
     // still lands its tick on screen instead of arriving already ticked.
     val shown = revealedCount(reveal, pieces)
     val checks = checks.mapIndexed { i, c ->
-        if (1 + i >= shown) c.copy(state = BootState.Waiting, note = null) else c
+        if (1 + serviceRows + i >= shown) c.copy(state = BootState.Waiting, note = null) else c
     }
     Layer(modifier) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
-            Box(Modifier.widenIn { stagger(reveal(), 0, pieces) }) { BootHeader(checks, userName, celebrate) }
+            Box(Modifier.widenIn { stagger(reveal(), 0, pieces) }) {
+                // First open: the bar has a segment for the status rows too, so it covers the whole list.
+                val bar = if (status == null) checks else statusAsChecks(status, shown - 1) + checks
+                BootHeader(bar, userName, celebrate, firstOpen = status != null)
+            }
             Spacer(Modifier.height(14.dp))
             // Every check landed well: the cats hop one after another down the list, with the bar's sweep.
             val allDone = celebrate && checks.isNotEmpty() && checks.all { it.state in Settled } && checks.none { it.state == BootState.Failed }
             Column(verticalArrangement = Arrangement.spacedBy(rowGap)) {
+                if (status != null) StatusRows(status, shown - 1, { stagger(reveal(), 1 + it, pieces) }, rowHeight)
                 checks.forEachIndexed { i, c ->
-                    BootCheckTile(c, Modifier.widenIn { stagger(reveal(), 1 + i, pieces) }, height = rowHeight, index = i, celebrate = allDone)
+                    BootCheckTile(c, Modifier.widenIn { stagger(reveal(), 1 + serviceRows + i, pieces) }, height = rowHeight, index = i, celebrate = allDone)
                 }
             }
         }
@@ -896,40 +921,114 @@ private fun ServiceRow(icon: BootIcon, name: String, text: String, mark: Mark, m
 /** Is VRChat up, and are our own servers up. Wraps its rows (no fixed height). */
 @Composable
 private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: () -> Float = { 1f }, rowHeight: Dp = WIDE_ROW_HEIGHT, rowGap: Dp = 8.dp) {
-    val shown = revealedCount(reveal, 3)
+    val shown = revealedCount(reveal, STATUS_ROWS)
     Layer(modifier) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
             // No header (user): the rows speak for themselves.
             Column(verticalArrangement = Arrangement.spacedBy(rowGap)) {
-                // Same as the checklist: a row says "Checking..." until it has fully appeared.
-                val net = if (0 >= shown) InternetLink.Checking else status.internet
-                ServiceRow(
-                    if (net == InternetLink.None) BootIcons.NoInternet else BootIcons.Internet, "Internet",
-                    if (status.internetMbps > 0 && net != InternetLink.None && net != InternetLink.Checking && net != InternetLink.NoAccess)
-                        "${net.text} · ${status.internetMbps.coerceAtMost(9999)} Mbps" else net.text,
-                    when (net) {
-                        InternetLink.Checking -> Mark.Working
-                        InternetLink.None -> Mark.Failed
-                        // Amber: the headset is fine, the network it's on isn't (user, 2026-10-23).
-                        InternetLink.NoAccess -> Mark.Warn
-                        else -> Mark.Done
-                    },
-                    Modifier.widenIn { stagger(reveal(), 0, 3) }, rowHeight
-                )
-                for ((i, row) in listOf(
-                    // Each service has its own icon now (user, 2026-10-22; they used to share one).
-                    Triple(BootIcons.Vrchat, "VRChat", if (1 >= shown) ServiceState.Checking else status.vrchat),
-                    // Never names the backend (public UI rule): just "VRC-A servers".
-                    Triple(BootIcons.VrcaServers, "VRC-A servers", if (2 >= shown) ServiceState.Checking else status.servers)
-                ).withIndex()) {
-                    val (icon, name, state) = row
-                    ServiceRow(icon, name, state.text, state.mark(), Modifier.widenIn { stagger(reveal(), 1 + i, 3) }, rowHeight, variant = 2 + i)
-                }
+                StatusRows(status, shown, { stagger(reveal(), it, STATUS_ROWS) }, rowHeight)
             }
         }
     }
 }
 
+/** The status rows as checks, for the first-open header bar (a row not yet shown reads as waiting). */
+private fun statusAsChecks(status: BootStatus, shown: Int): List<BootCheck> {
+    fun of(s: ServiceState) = when (s) {
+        ServiceState.Checking -> BootState.Working
+        ServiceState.Online -> BootState.Done
+        ServiceState.Issues, ServiceState.Maintenance -> BootState.Warn
+        ServiceState.Down -> BootState.Failed
+    }
+    val net = when (status.internet) {
+        InternetLink.Checking -> BootState.Working
+        InternetLink.None -> BootState.Failed
+        InternetLink.NoAccess -> BootState.Warn
+        else -> BootState.Done
+    }
+    return listOf(net, of(status.vrchat), of(status.servers)).mapIndexed { i, st ->
+        BootCheck("", if (i >= shown) BootState.Waiting else st)
+    }
+}
+
+/** Internet, VRChat and VRC-A servers rows; the Status card's, or the first-open checklist's top. */
+private const val STATUS_ROWS = 3
+
+/**
+ * The [STATUS_ROWS] service rows. [shown] = how many have fully appeared (a row says "Checking..."
+ * until it has); [widen] = row i's widen-in progress, read while laying out.
+ */
+@Composable
+private fun StatusRows(status: BootStatus, shown: Int, widen: (Int) -> Float, rowHeight: Dp) {
+    // Same as the checklist: a row says "Checking..." until it has fully appeared.
+    val net = if (0 >= shown) InternetLink.Checking else status.internet
+    ServiceRow(
+        if (net == InternetLink.None) BootIcons.NoInternet else BootIcons.Internet, "Internet",
+        if (status.internetMbps > 0 && net != InternetLink.None && net != InternetLink.Checking && net != InternetLink.NoAccess)
+            "${net.text} · ${status.internetMbps.coerceAtMost(9999)} Mbps" else net.text,
+        when (net) {
+            InternetLink.Checking -> Mark.Working
+            InternetLink.None -> Mark.Failed
+            // Amber: the headset is fine, the network it's on isn't (user, 2026-10-23).
+            InternetLink.NoAccess -> Mark.Warn
+            else -> Mark.Done
+        },
+        Modifier.widenIn { widen(0) }, rowHeight
+    )
+    for ((i, row) in listOf(
+        // Each service has its own icon now (user, 2026-10-22; they used to share one).
+        Triple(BootIcons.Vrchat, "VRChat", if (1 >= shown) ServiceState.Checking else status.vrchat),
+        // Never names the backend (public UI rule): just "VRC-A servers".
+        Triple(BootIcons.VrcaServers, "VRC-A servers", if (2 >= shown) ServiceState.Checking else status.servers)
+    ).withIndex()) {
+        val (icon, name, state) = row
+        ServiceRow(icon, name, state.text, state.mark(), Modifier.widenIn { widen(1 + i) }, rowHeight, variant = 2 + i)
+    }
+}
+
+/**
+ * First open: what VRC-A does, in the Status card's place (a new user has nothing to be welcomed
+ * back to yet). Each row: icon (its detail in the accent), name, one short line.
+ */
+@Composable
+private fun AboutPanel(modifier: Modifier, reveal: () -> Float = { 1f }, rowHeight: Dp = WIDE_ABOUT_ROW_HEIGHT, rowGap: Dp = 8.dp) {
+    val discord = ImageVector.vectorResource(com.vrca.R.drawable.ic_discord)
+    val rows = remember(discord) {
+        listOf(
+            Triple(BootIcons.VrchatHere, "Chatbox", "Your status, song and time in VRChat"),
+            Triple(BootIcons.Music, "Now playing", "What you're listening to, as it plays"),
+            Triple(BootIcons.Alerts, "Alerts", "Friends, invites and group posts"),
+            if (BuildConfig.IS_HEADSET_BUILD) Triple(BootIcons.VrchatSignIn, "Instance roster", "Who's in your world with you")
+            else Triple(BootIcon(discord), "Discord status", "Show what you're up to in VRChat")
+        )
+    }
+    val pieces = rows.size + 1
+    val accent = MaterialTheme.colorScheme.primary
+    Layer(modifier) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+            Box(Modifier.widenIn { stagger(reveal(), 0, pieces) }.height(30.dp), contentAlignment = Alignment.CenterStart) {
+                Text("What VRC-A does", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text, maxLines = 1)
+            }
+            Spacer(Modifier.height(10.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(rowGap)) {
+                rows.forEachIndexed { i, (icon, name, line) ->
+                    Row(
+                        Modifier.widenIn { stagger(reveal(), 1 + i, pieces) }.fillMaxWidth().height(rowHeight)
+                            .clip(RoundedCornerShape(12.dp)).background(GremlinColors.Card).padding(start = 10.dp, end = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        BootIconView(icon, { GremlinColors.TextMuted }, { accent }, Modifier.size(19.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.Text, maxLines = 1)
+                            Text(line, style = MaterialTheme.typography.bodySmall, color = GremlinColors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 /**
  * The Retry pill. Its countdown to the automatic retry drains as a ring round the seconds left

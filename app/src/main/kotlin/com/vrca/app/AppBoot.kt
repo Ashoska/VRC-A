@@ -67,7 +67,9 @@ private enum class Row(val label: String, val blocking: Boolean) {
     VrchatSignIn("VRChat sign-in", true),
     Discord("Discord", false),
     VrchatHere("VRChat on this headset", false),
-    Updates("Updates", true);
+    Updates("Updates", true),
+    /** First open only: the tutorial's pictures, fetched while the screen is up. */
+    Tutorial("Tutorial", false);
 
     /** Rows a build doesn't have: the VRChat log is only on the headset, and the admin build
      *  never checks for updates. */
@@ -80,7 +82,20 @@ private enum class Row(val label: String, val blocking: Boolean) {
 }
 
 /** This build's rows, in screen order. */
-private val ROWS = Row.entries.filter { it.inThisBuild }
+private val ROWS = Row.entries.filter { it.inThisBuild && it != Row.Tutorial }
+
+/**
+ * A new install's first open shows only what can really pass or fail before the tutorial (user,
+ * 2026-10-23): VRChat sign-in, terms, updates and Discord could only read "not done yet" there, and
+ * the tutorial handles them next. Terms and updates still run hidden (the terms read carries the
+ * maintenance switch; the release check feeds the update dialog).
+ */
+private val FIRST_OPEN_ROWS = listOf(Row.Device, Row.Account, Row.Tutorial)
+
+/** A new install's first open: the tutorial isn't done, and this isn't an install from before it existed (VrcaApp's pre-seed). */
+private fun isFirstOpen(ctx: Context): Boolean =
+    !com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx) &&
+        (com.vrca.ui.onboarding.OnboardingPrefs.wasStarted(ctx) || TosPrefs.acceptedVersion(ctx) <= 0)
 
 private data class RowState(val state: BootState = BootState.Waiting, val note: BootNote? = null)
 
@@ -118,9 +133,12 @@ internal fun AppBoot(
     var tutorialDone by remember { mutableStateOf(false) }
     var signInAttempt by remember { mutableIntStateOf(0) }
     var showLogin by remember { mutableStateOf(false) }
+    // Decided once per boot: which version of the screen this is.
+    val firstOpen = remember { isFirstOpen(ctx) }
+    val visible = if (firstOpen) FIRST_OPEN_ROWS else ROWS
     // Boot may go on once every blocking row has settled without failing (a failed device session
     // waits on Retry, a failed VRChat sign-in waits on signing in).
-    val blockingDone = tutorialDone && ROWS.filter { it.blocking }.all { rows[it.ordinal].state in SETTLED }
+    val blockingDone = tutorialDone && visible.filter { it.blocking }.all { rows[it.ordinal].state in SETTLED }
     val signInNeeded = rows[Row.VrchatSignIn.ordinal].let { it.state == BootState.Failed && it.note == BootNote.SignInNeeded }
     // VRChat's status-page answer, once it's in (the sign-in row needs it to judge a failure).
     suspend fun vrchatStatus(): ServiceState =
@@ -158,7 +176,7 @@ internal fun AppBoot(
         mapOf(
             Row.Device to BootIcons.DeviceSession, Row.Terms to BootIcons.Terms, Row.Account to BootIcons.Account,
             Row.VrchatSignIn to BootIcons.VrchatSignIn, Row.Discord to discordIcon,
-            Row.VrchatHere to BootIcons.VrchatHere, Row.Updates to BootIcons.Updates
+            Row.VrchatHere to BootIcons.VrchatHere, Row.Updates to BootIcons.Updates, Row.Tutorial to BootIcons.Tutorial
         )
     }
     // When each part of boot started and finished (ms from this screen's first frame), written to the
@@ -210,9 +228,12 @@ internal fun AppBoot(
         Row.entries.forEach { set(it, BootState.Waiting) }
         coroutineScope {
             // Rows that don't need the device session start straight away.
-            launch { vrchatSignIn(ctx, { vrchatStatus() }) { s, n -> set(Row.VrchatSignIn, s, n) } }
-            launch { discord(ctx) { s, n -> set(Row.Discord, s, n) } }
-            if (Row.VrchatHere.inThisBuild) launch { vrchatHere { s, n -> set(Row.VrchatHere, s, n) } }
+            // (A first open has no session or Discord to check, and doesn't show these rows.)
+            if (!firstOpen) {
+                launch { vrchatSignIn(ctx, { vrchatStatus() }) { s, n -> set(Row.VrchatSignIn, s, n) } }
+                launch { discord(ctx) { s, n -> set(Row.Discord, s, n) } }
+                if (Row.VrchatHere.inThisBuild) launch { vrchatHere { s, n -> set(Row.VrchatHere, s, n) } }
+            }
             val worker = async(Dispatchers.IO) { AvatarGlobalDb.fetchHealth() != null }
             val maintenance = kotlinx.coroutines.CompletableDeferred<Boolean>()
 
@@ -269,13 +290,16 @@ internal fun AppBoot(
                     else -> set(Row.Updates, BootState.Failed, BootNote.CantConnect)
                 }
             }
-            // A new user's first open: fetch the tutorial's pictures while the screen is up.
+            // A new user's first open: fetch the tutorial's pictures while the screen is up. Never
+            // holds boot: the tutorial fetches whatever is still missing when it opens.
             val tutorial = launch {
-                val newUser = withContext(Dispatchers.IO) {
-                    !VrchatAuthManager.isLoggedIn(ctx) && !com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
-                }
-                if (newUser) {
-                    withTimeoutOrNull(TUTORIAL_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx) }
+                if (firstOpen) {
+                    set(Row.Tutorial, BootState.Working)
+                    when (withTimeoutOrNull(TUTORIAL_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx) }) {
+                        true -> set(Row.Tutorial, BootState.Done, BootNote.Ready)
+                        null -> set(Row.Tutorial, BootState.Background, BootNote.Downloading)
+                        false -> set(Row.Tutorial, BootState.Warn, BootNote.WillRetry)
+                    }
                 }
             }
             terms.join(); account.join(); updates?.join(); tutorial.join()
@@ -284,7 +308,7 @@ internal fun AppBoot(
             // anyway"): the device session, terms, account standing (moderation) and updates have
             // to actually reach the server. Same Retry pill + 5 s auto-retry as a failed device session.
             timeline.event("blocking checks finished")
-            if (listOf(Row.Terms, Row.Account, Row.Updates).any { it.inThisBuild && rows[it.ordinal].state == BootState.Failed }) {
+            if (listOf(Row.Terms, Row.Account, Row.Updates).any { it in visible && rows[it.ordinal].state == BootState.Failed }) {
                 error = "Can't connect"
                 timeline.write(ctx, "held on Retry")
             }
@@ -335,8 +359,8 @@ internal fun AppBoot(
             // wouldn't land on the hand-off, and the page draws when it loads, before it connects.
             // So once every other row is settled, Discord waits only until the page has drawn (capped);
             // if it's still connecting then, the row goes to Background and keeps going after boot.
-            snapshotFlow { ROWS.filter { it != Row.Discord }.all { rows[it.ordinal].state in SETTLED } }.first { it }
-            if (rows[Row.Discord.ordinal].state == BootState.Working) {
+            snapshotFlow { visible.filter { it != Row.Discord }.all { rows[it.ordinal].state in SETTLED } }.first { it }
+            if (Row.Discord in visible && rows[Row.Discord.ordinal].state == BootState.Working) {
                 withTimeoutOrNull(DISCORD_HANDOFF_WAIT_MS) {
                     snapshotFlow { rows[Row.Discord.ordinal].state != BootState.Working || DiscordRpcState.pageDrawn }.first { it }
                 }
@@ -345,7 +369,7 @@ internal fun AppBoot(
                     set(Row.Discord, BootState.Background, BootNote.Connecting)
                 }
             }
-            snapshotFlow { ROWS.all { rows[it.ordinal].state in SETTLED } }.first { it }
+            snapshotFlow { visible.all { rows[it.ordinal].state in SETTLED } }.first { it }
             timeline.event("every row settled")
             val mainNext = withContext(Dispatchers.IO) { mainAppNext() }
             if (mainNext) {
@@ -372,7 +396,7 @@ internal fun AppBoot(
 
     androidx.compose.foundation.layout.Box {
     BootScreen(
-        checks = ROWS.map { r ->
+        checks = visible.map { r ->
             val s = rows[r.ordinal]
             BootCheck(r.label, s.state, s.note, r.blocking, icons[r])
         },
@@ -381,6 +405,7 @@ internal fun AppBoot(
         retryInSec = retryIn,
         onRetry = { attempt++ },
         userName = userName,
+        firstOpen = firstOpen,
         onShown = { shown = true },
         celebrate = celebrate,
         exit = exiting,
