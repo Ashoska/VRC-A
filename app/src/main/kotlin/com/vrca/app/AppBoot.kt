@@ -13,7 +13,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -33,7 +32,6 @@ import com.vrca.vrchat.AvatarGlobalDb
 import com.vrca.vrchat.InstanceRosterManager
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatBanChecker
-import com.vrca.vrchat.VrchatPipelineState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlin.math.min

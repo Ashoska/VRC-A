@@ -14,7 +14,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,10 +33,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -49,7 +46,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -69,6 +65,15 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
     val version = remember(report) { CrashReport.versionOf(report) }
     // The other crashes of the past 3 days (the history includes this one).
     val earlier = remember(report) { CrashReport.recent(ctx).drop(1) }
+    // The Details rows, worked out once here (opening Details built them on that frame: a dropped frame in the lab).
+    val details = remember(report) {
+        listOf(
+            "Build" to CrashReport.field(report, "VersionCode"),
+            "Device" to listOf(CrashReport.field(report, "Device"), CrashReport.field(report, "SDK").let { if (it.isBlank()) "" else "Android SDK $it" })
+                .filter { it.isNotBlank() }.joinToString("  ·  "),
+            "Earlier" to earlier.joinToString("\n") { "${niceTime(CrashReport.time(it.text))}  ·  ${CrashReport.whereOf(it.text)}" },
+        ).filter { it.second.isNotBlank() }.map { it.first to sanitizeBackendRefs(it.second) }
+    }
     // What Download report saves: this crash in full, then the earlier ones.
     val file = remember(report) { CrashReport.fullReport(ctx, report) }
     var open by remember { mutableStateOf(false) }
@@ -140,12 +145,7 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             // Only what isn't already shown above (where, what, version and time are).
-                            DetailRow("Build", CrashReport.field(report, "VersionCode"))
-                            DetailRow("Device", listOf(CrashReport.field(report, "Device"), CrashReport.field(report, "SDK").let { if (it.isBlank()) "" else "Android SDK $it" })
-                                .filter { it.isNotBlank() }.joinToString("  ·  "))
-                            if (earlier.isNotEmpty()) DetailRow(
-                                "Earlier", earlier.joinToString("\n") { "${niceTime(CrashReport.time(it.text))}  ·  ${CrashReport.whereOf(it.text)}" }
-                            )
+                            details.forEach { (label, value) -> DetailRow(label, value) }
                         }
                     }
                 }
@@ -188,8 +188,8 @@ private const val LEAVE_MS = 260
 private fun DetailRow(label: String, value: String) {
     if (value.isBlank()) return
     Row {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = GremlinColors.TextMuted, modifier = Modifier.width(110.dp))
-        Text(sanitizeBackendRefs(value), style = MaterialTheme.typography.bodySmall, color = GremlinColors.Text)
+        Text(label, style = MaterialTheme.typography.bodySmall, color = GremlinColors.TextMuted, modifier = Modifier.width(84.dp))
+        Text(value, style = MaterialTheme.typography.bodySmall, color = GremlinColors.Text)
     }
 }
 
