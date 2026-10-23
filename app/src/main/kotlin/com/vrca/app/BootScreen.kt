@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.drawWithContent
 import com.vrca.ui.common.animatedOutline
 import com.vrca.ui.common.widenIn
@@ -56,6 +57,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
@@ -1042,22 +1044,49 @@ private fun WelcomeLayout(
     ) {
         logo(if (wide) 210.dp else PHONE_LOGO_HEIGHT)
         Spacer(Modifier.height(if (wide) 26.dp else 32.dp))
-        Column(
-            NoA11y.graphicsLayer {
+        // Boot Cat just left of centre, his line in a speech bubble to his right (user, 2026-10-23).
+        // The cat's spot is fixed (the two sides split the width), so a longer line only grows the
+        // bubble rightwards instead of shifting him.
+        Row(
+            NoA11y.widthIn(max = 720.dp).fillMaxWidth().graphicsLayer {
                 val p = catIn()
-                alpha = p * (1f - out()); scaleX = 0.6f + 0.4f * p; scaleY = 0.6f + 0.4f * p
+                alpha = p * (1f - out())
                 translationY = (1f - p) * 16.dp.toPx()
             },
-            horizontalAlignment = Alignment.CenterHorizontally
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            BootCat(mark, 0, Modifier.size(if (wide) 108.dp else 100.dp), celebrate = greeted && mark == Mark.Done)
-            Spacer(Modifier.height(14.dp))
-            Crossfade(line, label = "bootCatLine") {
-                Text(
-                    it, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium,
-                    color = if (mark == Mark.Failed) GremlinColors.Negative else if (mark == Mark.Warn) GremlinColors.Caution else GremlinColors.Text,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center, maxLines = 1
+            Box(Modifier.weight(if (wide) 0.8f else 0.62f), contentAlignment = Alignment.CenterEnd) {
+                BootCat(
+                    mark, 0,
+                    Modifier.size(if (wide) 52.dp else 46.dp).graphicsLayer { val p = catIn(); scaleX = 0.6f + 0.4f * p; scaleY = scaleX },
+                    celebrate = greeted && mark == Mark.Done
                 )
+            }
+            Spacer(Modifier.width(10.dp))
+            Row(Modifier.weight(if (wide) 1.2f else 1f), verticalAlignment = Alignment.CenterVertically) {
+                // The bubble's tail, pointing at him (overlaps the bubble's edge by 1dp to hide it).
+                Spacer(Modifier.zIndex(1f).size(9.dp, 14.dp).offset(x = 1.dp).drawBehind {
+                    val tail = androidx.compose.ui.graphics.Path().apply {
+                        moveTo(size.width, 0f); lineTo(0f, size.height / 2f); lineTo(size.width, size.height); close()
+                    }
+                    drawPath(tail, GremlinColors.Card)
+                    drawLine(GremlinColors.Edge, androidx.compose.ui.geometry.Offset(size.width, 0f), androidx.compose.ui.geometry.Offset(0f, size.height / 2f), 1.dp.toPx())
+                    drawLine(GremlinColors.Edge, androidx.compose.ui.geometry.Offset(0f, size.height / 2f), androidx.compose.ui.geometry.Offset(size.width, size.height), 1.dp.toPx())
+                })
+                Box(
+                    Modifier.animateContentSize(tween(220, easing = FastOutSlowInEasing))
+                        .clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
+                        .border(1.dp, GremlinColors.Edge, RoundedCornerShape(14.dp))
+                        .padding(horizontal = 14.dp, vertical = 9.dp)
+                ) {
+                    Crossfade(line, label = "bootCatLine") {
+                        Text(
+                            it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+                            color = if (mark == Mark.Failed) GremlinColors.Negative else if (mark == Mark.Warn) GremlinColors.Caution else GremlinColors.Text,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
             }
         }
         pills()
