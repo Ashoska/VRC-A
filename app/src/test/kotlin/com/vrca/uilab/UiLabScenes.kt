@@ -778,9 +778,10 @@ object UiLabScenes {
                         com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), err(IllegalStateException("x"), "com.vrca.discord.c"))
                     }
                     com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), err(IllegalStateException("x"), "com.vrca.discord.a"))
-                    com.vrca.app.CrashReport.text(ctx)
+                    com.vrca.app.CrashReport.loadForScreen(ctx)
+                    com.vrca.app.CrashReport.screenReport
                 }
-                CrashScreen(report, onStart = {})
+                CrashScreen(report, com.vrca.app.CrashReport.screenHistory, onStart = {})
                 if ("update" in words) com.vrca.app.UpdatePopup(
                     ReleaseInfo(480, "v1.4.80", "https://example.com/vrc-a.apk", 0, "", SAMPLE_NOTES), forced = true, visible = true, onDismiss = {}
                 )

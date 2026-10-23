@@ -4,7 +4,6 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -48,21 +47,22 @@ import androidx.compose.ui.unit.dp
 import com.vrca.ui.theme.GremlinColors
 
 /**
- * Shown on the open after a crash, during the safe start (CrashReport): what crashed, the full
- * report folded away, and two buttons (user, 2026-10-23): Start VRC-A, and Download report (a .txt
- * in Downloads, for sending to the developer). Boot Cat's failed face sets the tone.
+ * Shown on the open after a crash, during the safe start (CrashReport): where it crashed and what went
+ * wrong in plain words, a few plain facts (no code), and two buttons (user, 2026-10-23): Start VRC-A,
+ * and Download report (a .txt in Downloads with the full report, for sending to the developer). Boot
+ * Cat's failed face sets the tone. [history] = the crashes of the past 3 days, newest (this one) first.
  */
 @Composable
-internal fun CrashScreen(report: String, onStart: () -> Unit) {
+internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onStart: () -> Unit) {
     val ctx = LocalContext.current
     val where = remember(report) { CrashReport.whereOf(report) }
     val what = remember(report) { CrashReport.whatOf(report) }
     val time = remember(report) { niceTime(CrashReport.time(report)) }
     val version = remember(report) { CrashReport.versionOf(report) }
     // The other crashes of the past 3 days (the history includes this one).
-    val earlier = remember(report) { CrashReport.recent(ctx).drop(1) }
+    val earlier = remember(history) { history.drop(1) }
     // The Details rows, worked out once here (not while drawing).
-    val details = remember(report) {
+    val details = remember(report, earlier) {
         listOf(
             "Build" to CrashReport.field(report, "VersionCode"),
             "Device" to listOf(CrashReport.field(report, "Device"), CrashReport.field(report, "SDK").let { if (it.isBlank()) "" else "Android SDK $it" })
@@ -71,7 +71,7 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
         ).filter { it.second.isNotBlank() }.map { it.first to sanitizeBackendRefs(it.second) }
     }
     // What Download report saves: this crash in full, then the earlier ones.
-    val file = remember(report) { CrashReport.fullReport(ctx, report) }
+    val file = remember(report, history) { CrashReport.fullReport(report, history) }
     // Start VRC-A: the screen fades out to the bare backdrop first, then the app starts (the held
     // start-up work runs there, unseen) and the boot screen's intro fades its logo in on the same backdrop.
     var leaving by remember { mutableStateOf(false) }
@@ -109,7 +109,7 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
             }
             Spacer(Modifier.height(18.dp))
             Layer(Modifier.fillMaxWidth()) {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp).animateContentSize(tween(260, easing = FastOutSlowInEasing))) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
                     // Where it crashed and what went wrong, in plain words (never code names).
                     Text(
                         "Crashed in $where", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,

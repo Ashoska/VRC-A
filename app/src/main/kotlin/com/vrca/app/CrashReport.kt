@@ -171,6 +171,19 @@ object CrashReport {
             fromExitInfo(ctx)?.let { save(ctx, it.second, it.first) }
         }
         safeStart = !prefs.getString(KEY_TEXT, "").isNullOrBlank()
+        if (safeStart) loadForScreen(ctx)
+    }
+
+    /** The waiting report and the recent crashes, read once before any UI (the crash screen shows these,
+     *  never reading storage while drawing). Set at launch by [checkAtLaunch]; the UI Lab calls it too. */
+    var screenReport: String = ""
+        private set
+    var screenHistory: List<Entry> = emptyList()
+        private set
+
+    fun loadForScreen(ctx: Context) {
+        screenReport = text(ctx)
+        screenHistory = recent(ctx)
     }
 
     /** The waiting report's full text ("" if none). */
@@ -231,9 +244,9 @@ object CrashReport {
      * The downloadable report: the waiting crash in full, then the other crashes of the past 3 days
      * (the developer reads these; release builds' code names are renamed, so nothing readable leaks).
      */
-    fun fullReport(ctx: Context, current: String): String = buildString {
+    fun fullReport(current: String, history: List<Entry>): String = buildString {
         append(current.trimEnd()).append('\n')
-        recent(ctx).filter { it.text.trimEnd() != current.trimEnd().take(HISTORY_CHARS).trimEnd() }.forEach {
+        history.filter { it.text.trimEnd() != current.trimEnd().take(HISTORY_CHARS).trimEnd() }.forEach {
             append("\n\n----- EARLIER CRASH -----\n").append(it.text.trimEnd()).append('\n')
         }
     }
