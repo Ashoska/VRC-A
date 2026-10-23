@@ -360,6 +360,24 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
+    private val SAMPLE_CRASH = """=== VRC-A LAST CRASH ===
+Time: 2026-10-23 11:40:12
+Process: 12345
+SDK: 32
+Device: Oculus Quest 3
+AppId: com.gremlin.inc.headset
+VersionName: 1.2.79
+VersionCode: 279
+Thread: main
+
+java.lang.IllegalStateException: Expected a preset but found none
+	at com.vrca.ui.screen.HomePage.PresetChips(HomePage.kt:212)
+	at com.vrca.ui.screen.HomePage.HomePage(HomePage.kt:88)
+	at androidx.compose.runtime.internal.ComposableLambdaImpl.invoke(ComposableLambda.jvm.kt:109)
+	at androidx.compose.runtime.Recomposer.performRecompose(Recomposer.kt:1145)
+	at android.os.Looper.loop(Looper.java:288)
+	at android.app.ActivityThread.main(ActivityThread.java:7918)
+"""
     private val FULL = setOf("boot", "cats", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
@@ -620,10 +638,7 @@ object UiLabScenes {
                     VrcaApp()
                 } else com.vrca.app.AppBoot(onDone = { _ -> })
             }
-            "crash" -> CrashScreen(
-                crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",
-                onClear = {}, onContinue = {}
-            )
+            "crash" -> CrashScreen(SAMPLE_CRASH, onStart = {})
             "banned" -> BannedScreen(reason = rest.ifBlank { "Repeated harassment after warnings." })
             "tos" -> TosGate(3, SAMPLE_TOS, "https://example.com/tos", onOpenUrl = {}, onAccept = {})
             "onboarding" -> OnboardingFlow(

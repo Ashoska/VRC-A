@@ -140,30 +140,11 @@ private fun VrcaAppContent() {
        Crash gate
        ------------------------- */
 
-    val crashPrefs = remember {
-        ctx.getSharedPreferences(VrcaApplication.CRASH_PREFS_FILE, Context.MODE_PRIVATE)
-    }
-    val lastCrashText = remember {
-        crashPrefs.getString(VrcaApplication.CRASH_KEY_TEXT, "").orEmpty()
-    }
-
-    var allowBoot by remember { mutableStateOf(lastCrashText.isBlank()) }
-
-    if (!allowBoot) {
-        CrashScreen(
-            crashText = lastCrashText,
-            onClear = {
-                crashPrefs.edit()
-                    .remove(VrcaApplication.CRASH_KEY_TEXT)
-                    .commit()
-            },
-            onContinue = {
-                crashPrefs.edit()
-                    .remove(VrcaApplication.CRASH_KEY_TEXT)
-                    .commit()
-                allowBoot = true
-            }
-        )
+    // A crash report waiting means this is a safe start (CrashReport): nothing optional has
+    // started, so the crash screen always gets to show. "Start VRC-A" ends it and boot goes on.
+    if (CrashReport.safeStart) {
+        val report = remember { CrashReport.text(ctx) }
+        CrashScreen(report, onStart = { CrashReport.release(ctx) })
         return
     }
 
@@ -1343,59 +1324,6 @@ internal fun sanitizeBackendRefs(text: String): String = text
     // Then any remaining brand tokens, e.g. "FirebaseFirestoreException:
     // PERMISSION_DENIED" -> "server: PERMISSION_DENIED".
     .replace(Regex("""Fire(base|store)\w*""", RegexOption.IGNORE_CASE), "server")
-
-@Composable
-internal fun CrashScreen(
-    crashText: String,
-    onClear: () -> Unit,
-    onContinue: () -> Unit
-) {
-    Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("VRC-A crashed on last launch", style = MaterialTheme.typography.headlineSmall)
-
-            ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        // Sanitized on display only — the stored crash log keeps
-                        // the raw stack trace for real debugging via Logcat/file.
-                        sanitizeBackendRefs(crashText).ifBlank { "(no crash text saved)" },
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-
-            Button(
-                onClick = onContinue,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp)
-            ) {
-                Text("Clear crash + Try boot")
-            }
-
-            OutlinedButton(onClick = onClear, modifier = Modifier.fillMaxWidth()) {
-                Text("Clear crash log only")
-            }
-
-            Text(
-                "If this screen shows \u201Cno crash text saved\u201D, the process may be dying before the handler can write the log.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
 
 /* =========================================================
    VRChat Phase-2 ban check + pipeline start

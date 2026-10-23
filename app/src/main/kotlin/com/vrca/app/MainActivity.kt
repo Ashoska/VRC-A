@@ -74,10 +74,13 @@ class MainActivity : ComponentActivity() {
         // The onboarding tutorial's Permissions step and Settings → Permissions
         // own that prompt; the foreground service starts fine without it (its
         // notification just stays hidden until the permission is granted).
-        KeepAliveService.start(applicationContext)
+        // (Both wait for "Start VRC-A" during a safe start after a crash, CrashReport.)
+        CrashReport.whenStarted {
+            KeepAliveService.start(applicationContext)
 
-        // Periodic watchdog: re-arms the pipeline/keep-alive if an OEM kills the process.
-        PipelineWatchdogWorker.ensureScheduled(applicationContext)
+            // Periodic watchdog: re-arms the pipeline/keep-alive if an OEM kills the process.
+            PipelineWatchdogWorker.ensureScheduled(applicationContext)
+        }
 
         setContent {
             GremlinTheme(themeMode = com.vrca.ui.theme.ThemeMode.Dark) {
@@ -85,7 +88,8 @@ class MainActivity : ComponentActivity() {
                 VrcaApp()
 
                 //Overlay MUST stay inside Compose because OverlayDaemon is @Composable
-                OverlayDaemon(this@MainActivity)
+                // (Not during a safe start after a crash: CrashReport.)
+                if (!CrashReport.safeStart) OverlayDaemon(this@MainActivity)
             }
         }
     }

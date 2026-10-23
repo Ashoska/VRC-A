@@ -17,11 +17,6 @@ import com.vrca.BuildConfig
 import com.vrca.data.UserPreferencesRepository
 import com.vrca.ui.viewmodel.VrcaViewModel
 import java.io.File
-import java.io.PrintWriter
-import java.io.StringWriter
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlin.system.exitProcess
 
 /**
@@ -79,16 +74,48 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
         // Records main-thread freezes in the first 2 minutes (Settings → Debug).
         MainThreadWatch.start(applicationContext)
 
+        // A crash report waiting = a SAFE START: only what the crash screen needs starts now; the
+        // rest waits for "Start VRC-A" (CrashReport), so a crash in it can't crash this open too.
+        CrashReport.checkAtLaunch(applicationContext)
+
         // Parse the logo's big vector off the main thread (~0.6 s on the Quest when the boot
         // screen parsed it in its first frame; MainThreadWatch).
         com.vrca.ui.common.AppLogo.preload(applicationContext)
 
+        // Your repo expects Context
+        userPreferencesRepository = UserPreferencesRepository(applicationContext)
+
+        CrashReport.whenStarted { startOptional() }
+
+        // Track app foreground state (started-activity count) so background
+        // workers (e.g. the friends-profile refresh) can poll fast while the
+        // user is on-screen and back off when not. Dependency-free.
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            private var startedActivities = 0
+            override fun onActivityStarted(activity: android.app.Activity) {
+                startedActivities++
+                com.vrca.vrchat.VrchatPipelineState.appForeground = startedActivities > 0
+            }
+            override fun onActivityStopped(activity: android.app.Activity) {
+                startedActivities = (startedActivities - 1).coerceAtLeast(0)
+                com.vrca.vrchat.VrchatPipelineState.appForeground = startedActivities > 0
+            }
+            override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: android.os.Bundle?) {}
+            override fun onActivityResumed(activity: android.app.Activity) {}
+            override fun onActivityPaused(activity: android.app.Activity) {}
+            override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: android.os.Bundle) {}
+            override fun onActivityDestroyed(activity: android.app.Activity) {}
+        })
+    }
+
+    /**
+     * Everything at launch the crash screen doesn't need. Runs from onCreate normally, or when a
+     * safe start ends ("Start VRC-A", [CrashReport.release]).
+     */
+    private fun startOptional() {
         // Open the encrypted VRChat store in the background now, so it's ready by the time
         // anything asks (slow right after the headset turns on; VrchatAuthManager.getPrefs).
         com.vrca.vrchat.VrchatAuthManager.warmUp(applicationContext)
-
-        // Your repo expects Context
-        userPreferencesRepository = UserPreferencesRepository(applicationContext)
 
         // Load Chromium's WebView provider off the main thread when Discord will need a WebView
         // (~1 s on the Quest, previously all inside the boot screen's pre-first-frame warm-up).
@@ -138,10 +165,14 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
         }
 
         // Cap Firestore offline cache (default is 100 MB — far more than needed).
-        FirebaseFirestore.getInstance().firestoreSettings =
-            FirebaseFirestoreSettings.Builder()
-                .setCacheSizeBytes(25L * 1024 * 1024)
-                .build()
+        // (After a safe start something may already have used the database, and then settings
+        // can't change; the default cache is fine for that one run.)
+        runCatching {
+            FirebaseFirestore.getInstance().firestoreSettings =
+                FirebaseFirestoreSettings.Builder()
+                    .setCacheSizeBytes(25L * 1024 * 1024)
+                    .build()
+        }
 
         cleanStaleUpdateApks()
 
@@ -161,26 +192,6 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
         runCatching {
             com.vrca.richcontent.RichMediaStore.clearUpdateMedia(applicationContext)
         }
-
-        // Track app foreground state (started-activity count) so background
-        // workers (e.g. the friends-profile refresh) can poll fast while the
-        // user is on-screen and back off when not. Dependency-free.
-        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
-            private var startedActivities = 0
-            override fun onActivityStarted(activity: android.app.Activity) {
-                startedActivities++
-                com.vrca.vrchat.VrchatPipelineState.appForeground = startedActivities > 0
-            }
-            override fun onActivityStopped(activity: android.app.Activity) {
-                startedActivities = (startedActivities - 1).coerceAtLeast(0)
-                com.vrca.vrchat.VrchatPipelineState.appForeground = startedActivities > 0
-            }
-            override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: android.os.Bundle?) {}
-            override fun onActivityResumed(activity: android.app.Activity) {}
-            override fun onActivityPaused(activity: android.app.Activity) {}
-            override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: android.os.Bundle) {}
-            override fun onActivityDestroyed(activity: android.app.Activity) {}
-        })
     }
 
     /**
@@ -230,31 +241,8 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
         val prev = Thread.getDefaultUncaughtExceptionHandler()
 
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
-            try {
-                val sw = StringWriter()
-                val pw = PrintWriter(sw)
-
-                val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
-
-                pw.println("=== VRC-A LAST CRASH ===")
-                pw.println("Time: $stamp")
-                pw.println("Thread: ${t.name}")
-                pw.println("Process: ${Process.myPid()}")
-                pw.println("SDK: ${Build.VERSION.SDK_INT}")
-                pw.println("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
-                pw.println("AppId: ${applicationContext.packageName}")
-                pw.println("VersionName: ${BuildConfig.VERSION_NAME}")
-                pw.println("VersionCode: ${BuildConfig.VERSION_CODE}")
-                pw.println()
-                e.printStackTrace(pw)
-                pw.flush()
-
-                val text = sw.toString().take(80_000) // keep prefs sane
-                val prefs = applicationContext.getSharedPreferences(CRASH_PREFS_FILE, Context.MODE_PRIVATE)
-                prefs.edit().putString(CRASH_KEY_TEXT, text).apply()
-            } catch (_: Throwable) {
-                // If even this fails, fall through to previous handler
-            }
+            // Saved synchronously (CrashReport.record): the old apply() lost most reports.
+            runCatching { CrashReport.record(applicationContext, t, e) }
 
             // Let Android still treat it as a crash
             prev?.uncaughtException(t, e) ?: run {

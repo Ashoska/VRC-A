@@ -233,7 +233,7 @@ private val DropLayer = Color.Black.copy(alpha = 0.38f)
  * (the edge facing the light) and a flat [DropLayer] [drop] dp below it.
  */
 @Composable
-private fun Layer(
+internal fun Layer(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(20.dp),
     color: Color = GremlinColors.Panel,

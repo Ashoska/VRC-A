@@ -211,6 +211,14 @@ class NowPlayingListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        // A safe start after a crash (CrashReport): ignore media until "Start VRC-A", which asks
+        // Android to reconnect this listener so it starts fresh.
+        if (com.vrca.app.CrashReport.safeStart) {
+            com.vrca.app.CrashReport.whenStarted {
+                runCatching { requestRebind(android.content.ComponentName(applicationContext, NowPlayingListenerService::class.java)) }
+            }
+            return
+        }
         NowPlayingState.setConnected(true)
 
         // Recompute the installed-browser set on every (re)connect so a browser
@@ -278,7 +286,7 @@ class NowPlayingListenerService : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
-        if (sbn == null) return
+        if (sbn == null || com.vrca.app.CrashReport.safeStart) return
 
         val pkg = sbn.packageName ?: return
         val notif = sbn.notification ?: return
@@ -292,7 +300,7 @@ class NowPlayingListenerService : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
-        if (sbn == null) return
+        if (sbn == null || com.vrca.app.CrashReport.safeStart) return
         val pkg = sbn.packageName ?: return
 
         teardownController(pkg)
