@@ -1152,6 +1152,7 @@ private fun WelcomeLayout(
     val box = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
     var spot by remember { mutableStateOf<Offset?>(null) }
     var spotW by remember { mutableStateOf(0.dp) }
+    var chipW by remember { mutableIntStateOf(0) }
     Box(Modifier.fillMaxSize().onGloballyPositioned { box[0] = it }) {
         val panel: @Composable (Modifier) -> Unit = { m ->
             Unfold(panelIn, m.onGloballyPositioned { c ->
@@ -1159,22 +1160,72 @@ private fun WelcomeLayout(
                 if (!root.isAttached || !c.isAttached) return@onGloballyPositioned
                 val at = root.localPositionOf(c, Offset.Zero) + pad
                 if (at != spot) spot = at
-                val w = with(density) { (c.size.width - 2 * pad.x).toDp() }
+                // His row stops short of the version chip on the right.
+                val w = with(density) { (c.size.width - 2 * pad.x - chipW).toDp() } - 10.dp
                 if (w != spotW) spotW = w
             }.then(NoA11y)) {
                 Layer(Modifier.fillMaxWidth()) {
                     Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
-                        Spacer(Modifier.fillMaxWidth().height(BOOT_CAT_ROW_HEIGHT)) // his spot
-                        Spacer(Modifier.height(14.dp))
+                        Row(Modifier.fillMaxWidth().height(BOOT_CAT_ROW_HEIGHT), verticalAlignment = Alignment.CenterVertically) {
+                            Spacer(Modifier.weight(1f)) // his spot
+                            Spacer(Modifier.width(10.dp))
+                            // The version, like the normal boot's header chip, in the colour of how it's going.
+                            val tone by animateColorAsState(
+                                when {
+                                    error != null -> GremlinColors.Negative
+                                    next >= steps.size && celebrate -> GremlinColors.Positive
+                                    else -> accent
+                                }, label = "welcomeChip"
+                            )
+                            Text(
+                                "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
+                                style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
+                                modifier = Modifier.onSizeChanged { if (it.width != chipW) chipW = it.width }
+                                    .background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        // One segment per check, in check order (the normal boot's bar): its result's colour
+                        // once listed, the accent (breathing) on the one he's doing, dark while still to come.
+                        val pulse = rememberInfiniteTransition(label = "welcomePulse").animateFloat(
+                            0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "welcomePulseA"
+                        )
+                        Row(Modifier.fillMaxWidth().height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            steps.indices.forEach { i ->
+                                val done = i in listed
+                                val current = i == next && error == null
+                                val seg by animateColorAsState(
+                                    when {
+                                        done -> when (results[i]?.first) {
+                                            Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
+                                            Mark.Failed -> GremlinColors.Negative
+                                            else -> GremlinColors.Positive
+                                        }
+                                        i == next && error != null -> GremlinColors.Negative
+                                        current -> accent
+                                        else -> GremlinColors.Raised
+                                    }, label = "welcomeSeg"
+                                )
+                                Box(Modifier.weight(1f).fillMaxHeight().drawBehind {
+                                    val a = if (current) pulse.value else 1f
+                                    drawRoundRect(seg.copy(alpha = seg.alpha * a), cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2, size.height / 2))
+                                })
+                            }
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        // Finished checks on top (newest first), then the ones still to come as faint rows in
+                        // check order. A check keeps its key, so finishing one moves its row from the faint
+                        // part up to the top.
+                        val order = listed.toList() + steps.indices.filter { it !in listed }
                         androidx.compose.foundation.lazy.LazyColumn(
                             Modifier.fillMaxWidth().height(rowH * steps.size + rowGap * (steps.size - 1)),
                             verticalArrangement = Arrangement.spacedBy(rowGap), userScrollEnabled = false
                         ) {
-                            items(listed.size, key = { listed[it] }) { k ->
-                                val i = listed[k]
+                            items(order.size, key = { order[it] }) { k ->
+                                val i = order[k]
                                 val r = results[i]
-                                // Settled rows only; a row that just lost its result is about to be cleared.
-                                if (r != null) ServiceRow(steps[i].icon, steps[i].name, r.second, r.first, Modifier.animateItem(), rowH, variant = i)
+                                if (i in listed && r != null) ServiceRow(steps[i].icon, steps[i].name, r.second, r.first, Modifier.animateItem(), rowH, variant = i)
+                                else ComingRow(steps[i].icon, steps[i].name, Modifier.animateItem(), rowH)
                             }
                         }
                     }
@@ -1284,6 +1335,21 @@ private fun WelcomeLayout(
                 }
             }
         }
+    }
+}
+
+/** A check Boot Cat hasn't got to yet: a faint outline with its icon and name. */
+@Composable
+private fun ComingRow(icon: BootIcon, name: String, modifier: Modifier, height: Dp) {
+    Row(
+        modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
+            .border(1.dp, GremlinColors.Edge, RoundedCornerShape(12.dp)).padding(start = 10.dp, end = 12.dp)
+            .graphicsLayer { alpha = 0.5f },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        BootIconView(icon, { GremlinColors.TextMuted }, { GremlinColors.TextMuted }, Modifier.size(19.dp))
+        Spacer(Modifier.width(10.dp))
+        Text(name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.TextMuted, maxLines = 1)
     }
 }
 
