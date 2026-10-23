@@ -140,6 +140,7 @@ internal fun AppBoot(
             // quick request, so started with them it finished long after (user: "looks silly").
             // Started now, its load overlaps the launch splash + intro (~3 s head start).
             startDiscordRpc(ctx)
+            BootTimeline.discordStartedEarly = true
         }
         // The rows' thinking cats (AnimatedVectorDrawables): their first load parses the XML and the
         // animators, ~0.2 s on the Quest the first time a row starts working (third user video).
@@ -159,13 +160,21 @@ internal fun AppBoot(
             Row.VrchatHere to BootIcons.VrchatHere, Row.Updates to BootIcons.Updates
         )
     }
-    fun set(row: Row, state: BootState, note: BootNote? = null) { rows[row.ordinal] = RowState(state, note) }
+    // When each part of boot started and finished (ms from this screen's first frame), written to the
+    // debug log (Settings > Debug > Main-thread stalls) at the hand-off or on a Retry, so the order and
+    // any slow or late check can be read off a real headset boot.
+    val timeline = remember { BootTimeline() }
+    fun set(row: Row, state: BootState, note: BootNote? = null) {
+        if (rows[row.ordinal].state != state) timeline.mark(row.label, state, note)
+        rows[row.ordinal] = RowState(state, note)
+    }
 
     // Internet: re-read every second so plugging in / dropping Wi-Fi shows straight away.
     LaunchedEffect(Unit) {
         while (true) {
             // Off the main thread, and only written when it changed (a write rebuilds the Status card).
             val (link, mbps) = withContext(Dispatchers.IO) { internetStatus(ctx) }
+            if (link != status.internet) timeline.event("Internet: ${link.text}")
             if (link != status.internet || mbps != status.internetMbps) status = status.copy(internet = link, internetMbps = mbps)
             delay(1000)
         }
@@ -176,12 +185,15 @@ internal fun AppBoot(
     // landed meanwhile (the VRC-A servers row stuck on "Checking..." on the headset).
     LaunchedEffect(shown) {
         if (!shown) return@LaunchedEffect
+        timeline.event("VRChat status: started")
         val vrchat = fetchVrchatPlatform()
+        timeline.event("VRChat status: ${vrchat.text}")
         status = status.copy(vrchat = vrchat)
     }
 
     LaunchedEffect(attempt, shown) {
         if (!shown) return@LaunchedEffect
+        timeline.event(if (attempt == 0) "intro done, checks start" else "retry $attempt: checks start again")
         error = null
         retryIn = null
         tutorialDone = false
@@ -197,6 +209,7 @@ internal fun AppBoot(
             val deviceOk = orNull { kotlinx.coroutines.withTimeout(30_000L) { bootstrapFirebaseAndCache(ctx) } } != null
             launch {
                 val workerOk = worker.await()
+                timeline.event("VRC-A servers: device session ${if (deviceOk) "ok" else "failed"}, worker ${if (workerOk) "ok" else "failed"}")
                 status = status.copy(
                     servers = when {
                         deviceOk && workerOk -> ServiceState.Online
@@ -208,6 +221,7 @@ internal fun AppBoot(
             if (!deviceOk) {
                 set(Row.Device, BootState.Failed, BootNote.CantConnect)
                 error = "Can't connect"
+                timeline.write(ctx, "held on Retry")
                 return@coroutineScope
             }
             set(Row.Device, BootState.Done, BootNote.Connected)
@@ -255,8 +269,10 @@ internal fun AppBoot(
             // User rule: a blocking check that couldn't get an answer holds boot (no "Continue
             // anyway"): the device session, terms, account standing (moderation) and updates have
             // to actually reach the server. Same Retry pill + 5 s auto-retry as a failed device session.
+            timeline.event("blocking checks finished")
             if (listOf(Row.Terms, Row.Account, Row.Updates).any { it.inThisBuild && rows[it.ordinal].state == BootState.Failed }) {
                 error = "Can't connect"
+                timeline.write(ctx, "held on Retry")
             }
         }
     }
@@ -301,15 +317,20 @@ internal fun AppBoot(
     LaunchedEffect(blockingDone, shown) {
         if (blockingDone && shown) {
             snapshotFlow { ROWS.all { rows[it.ordinal].state in SETTLED } }.first { it }
+            timeline.event("every row settled")
             val mainNext = withContext(Dispatchers.IO) { mainAppNext() }
             if (mainNext) {
                 prepareApp()
                 withTimeoutOrNull(APP_BUILD_CAP_MS) { snapshotFlow { appReadyNow }.first { it } }
                 // ...and DRAWN: its first draw (text, icons, images) is the other first-time cost.
                 repeat(2) { androidx.compose.runtime.withFrameNanos { } }
+                timeline.event("app built behind the boot screen")
             }
             celebrate = true
+            timeline.event("Ready")
             delay(READY_HOLD_MS)
+            timeline.event("hand-off (fold starts)")
+            timeline.write(ctx, "handed off")
             toMainApp = BuildConfig.IS_HEADSET_BUILD && mainNext
             // The app shows through during the logo's glide (BootScreen): keep its own top-bar logo
             // hidden until the flying one lands on that spot, so there are never two.
@@ -578,3 +599,35 @@ internal fun BootRevealOverlay() {
 
 private const val DISCORD_PICTURE_CAP_MS = 1_500L
 private const val REVEAL_MS = 450
+
+/**
+ * A boot's timeline: each event with its time (ms) from the boot screen's first composition, and how
+ * long the app process had been up by then. Written as one note to [MainThreadWatch]'s log so it shows
+ * in Settings > Debug next to the stalls, e.g.
+ * `boot timeline (handed off), process up 1240 ms before the boot screen: 0 Discord: started early | 2890 intro done...`
+ */
+private class BootTimeline {
+    private val t0 = android.os.SystemClock.uptimeMillis()
+    private val events = mutableListOf<String>()
+    private var written = 0
+
+    init { if (discordStartedEarly) { events += "0 Discord: started early"; discordStartedEarly = false } }
+
+    private fun at() = android.os.SystemClock.uptimeMillis() - t0
+
+    fun event(text: String) { synchronized(events) { events += "${at()} $text" } }
+
+    fun mark(label: String, state: BootState, note: BootNote?) =
+        event("$label: ${state.name}${note?.let { " (${it.text})" } ?: ""}")
+
+    /** Writes everything since the last write (a retry adds a second block). */
+    fun write(ctx: Context, why: String) {
+        val lines = synchronized(events) { events.drop(written).also { written = events.size } }
+        if (lines.isEmpty()) return
+        val processUp = t0 - android.os.Process.getStartUptimeMillis()
+        MainThreadWatch.note(ctx, "boot timeline ($why), process up $processUp ms before the boot screen:\n" +
+            lines.joinToString("\n") { "    $it" })
+    }
+
+    companion object { @Volatile var discordStartedEarly = false }
+}

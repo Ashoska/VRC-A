@@ -271,6 +271,8 @@ class UiLabDriver(
             "show" -> UiLabScenes.show(this, arg)
             "hide" -> { overlay.value = null; if (base.value.startsWith("show:")) base.value = "screen"; "hidden" }
             "record" -> record(arg)
+            // The app's debug log (Settings > Debug: main-thread stalls + notes such as the boot timeline).
+            "debuglog" -> "debug log:\n" + com.vrca.app.MainThreadWatch.read(app).ifBlank { "(empty)" }
             "perf" -> perf(arg)
             "touch" -> touch(arg, TAP_HOLD_MS, "touch")
             "press" -> touch(arg, PRESS_HOLD_MS, "press")
