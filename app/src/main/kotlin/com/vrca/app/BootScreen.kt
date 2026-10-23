@@ -1250,8 +1250,11 @@ private fun WelcomeLayout(
                         drawLine(mood, Offset(size.width, 0f), tip, 1.dp.toPx())
                         drawLine(mood, tip, Offset(size.width, size.height), 1.dp.toPx())
                     })
+                    // Fits its line (up to the panel's width); a new length grows or shrinks it smoothly to
+                    // the right, so he never moves.
                     Box(
-                        Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
+                        Modifier.weight(1f, fill = false).animateContentSize(spring(dampingRatio = 0.85f, stiffness = 420f))
+                            .fillMaxHeight().clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
                             .animatedOutline({ mood }, corner = 14.dp).padding(horizontal = 14.dp),
                         contentAlignment = Alignment.CenterStart
                     ) {
