@@ -903,7 +903,10 @@ private fun Modifier.rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean 
 
 /** One service in the Status panel: icon, name, its fixed state word and a coloured dot. Built like a check row. */
 @Composable
-private fun ServiceRow(icon: BootIcon, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp, variant: Int = 0) {
+private fun ServiceRow(
+    icon: BootIcon, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp, variant: Int = 0,
+    celebrate: Boolean = false, hopDelayMs: Long = 0
+) {
     val target = when (mark) {
         Mark.Done -> GremlinColors.Positive
         Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
@@ -930,7 +933,7 @@ private fun ServiceRow(icon: BootIcon, name: String, text: String, mark: Mark, m
         val textColor by animateColorAsState(if (warn) target else GremlinColors.TextMuted, label = "serviceText")
         Crossfade(text, label = "serviceText") { Text(it, style = MaterialTheme.typography.bodySmall, color = textColor, maxLines = 1) }
         Spacer(Modifier.width(10.dp))
-        StateMark(mark, variant)
+        StateMark(mark, variant, celebrate, hopDelayMs)
     }
 }
 
@@ -1155,6 +1158,9 @@ private fun WelcomeLayout(
     var spot by remember { mutableStateOf<Offset?>(null) }
     var spotW by remember { mutableStateOf(0.dp) }
     var chipW by remember { mutableIntStateOf(0) }
+    val allDone = celebrate && next >= steps.size && error == null
+    val sweep = remember { Animatable(-2f) }
+    val chipPop = remember { Animatable(1f) }
     Box(Modifier.fillMaxSize().onGloballyPositioned { box[0] = it }) {
         val panel: @Composable (Modifier) -> Unit = { m ->
             Unfold(panelIn, m.onGloballyPositioned { c ->
@@ -1182,6 +1188,7 @@ private fun WelcomeLayout(
                                 "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
                                 style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
                                 modifier = Modifier.onSizeChanged { if (it.width != chipW) chipW = it.width }
+                                    .graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }
                                     .background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
                             )
                         }
@@ -1192,6 +1199,13 @@ private fun WelcomeLayout(
                         Spacer(Modifier.height(12.dp))
                         // One segment per check, in check order (the normal boot's bar): its result's colour
                         // once listed, the accent (breathing) on the one he's doing, dark while still to come.
+                        // All done: a light sweeps along the strip and the chip pops (the normal boot's Ready moment).
+                        LaunchedEffect(allDone) {
+                            if (!allDone) { sweep.snapTo(-2f); return@LaunchedEffect }
+                            launch { chipPop.animateTo(1.18f, tween(140)); chipPop.animateTo(1f, spring(dampingRatio = 0.4f)) }
+                            sweep.snapTo(-1f)
+                            sweep.animateTo(steps.size + 1f, tween(650, easing = FastOutSlowInEasing))
+                        }
                         val pulse = rememberInfiniteTransition(label = "welcomePulse").animateFloat(
                             0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "welcomePulseA"
                         )
@@ -1212,9 +1226,12 @@ private fun WelcomeLayout(
                                         else -> GremlinColors.Raised
                                     }, label = "welcomeSeg"
                                 )
-                                Box(Modifier.weight(1f).fillMaxHeight().drawBehind {
+                                // How much of the all-done sweep is on this segment right now (0..1).
+                                fun glow() = (1f - kotlin.math.abs(sweep.value - i - 0.5f)).coerceIn(0f, 1f)
+                                Box(Modifier.weight(1f).fillMaxHeight().graphicsLayer { scaleY = 1f + glow() * 0.6f }.drawBehind {
                                     val a = if (current) pulse.value else 1f
-                                    drawRoundRect(seg.copy(alpha = seg.alpha * a), cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2, size.height / 2))
+                                    val c = androidx.compose.ui.graphics.lerp(seg.copy(alpha = seg.alpha * a), GremlinColors.Text, glow() * 0.75f)
+                                    drawRoundRect(c, cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2, size.height / 2))
                                 })
                             }
                         }
@@ -1233,7 +1250,11 @@ private fun WelcomeLayout(
                             items(order.size, key = { order[it] }) { k ->
                                 val i = order[k]
                                 val r = results[i]
-                                if (i in listed && r != null) ServiceRow(steps[i].icon, steps[i].name, r.second, r.first, Modifier.animateItem(), rowH, variant = i)
+                                // All done: the cats hop one after another down the list, like the normal boot.
+                                if (i in listed && r != null) ServiceRow(
+                                    steps[i].icon, steps[i].name, r.second, r.first, Modifier.animateItem(), rowH, variant = i,
+                                    celebrate = allDone, hopDelayMs = 250L + k * 130L
+                                )
                                 else ComingRow(steps[i].icon, steps[i].name, Modifier.animateItem(), rowH)
                             }
                         }
