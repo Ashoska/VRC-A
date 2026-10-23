@@ -20,6 +20,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.drawWithContent
 import com.vrca.ui.common.animatedOutline
@@ -270,6 +272,8 @@ fun BootScreen(
      * then Boot Cat under it narrating what he's preparing ([WelcomeLayout]).
      */
     firstOpen: Boolean = false,
+    /** First open: Boot Cat has listed every check (AppBoot waits for it before the Ready moment). */
+    onWelcomeListed: () -> Unit = {},
     /**
      * False holds the checklist header's Ready moment (sweep + chip pop) even once every row has
      * settled; it plays when this turns true (AppBoot builds the app behind the screen first).
@@ -300,6 +304,8 @@ fun BootScreen(
     val panelR = remember { Animatable(start) }
     val partsL = remember { Animatable(start) }
     val partsR = remember { Animatable(start) }
+    // First open: Boot Cat's entrance under the logo (WelcomeLayout).
+    val catIn = remember { Animatable(start) }
     // Both coordinates are kept and the logo's centre is derived from them. Computing it in the
     // logo's own callback needed the box's callback to have run first (their order isn't
     // guaranteed), which could leave the intro waiting on a blank screen until something moved.
@@ -329,6 +335,12 @@ fun BootScreen(
     LaunchedEffect(placed) {
         if (!playIntro || !placed || logoIn.value > 0f) return@LaunchedEffect
         logoIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
+        if (firstOpen) {
+            // First open: Boot Cat hops in under the centred logo and says hi before anything moves.
+            delay(260)
+            catIn.animateTo(1f, tween(560, easing = FastOutSlowInEasing))
+            delay(BOOT_CAT_HELLO_MS)
+        }
         delay(420)
         launch { settle.animateTo(1f, tween(760, easing = FastOutSlowInEasing)) }
         delay(300)
@@ -356,8 +368,6 @@ fun BootScreen(
     val shownCallback by rememberUpdatedState(onShown)
     LaunchedEffect(Unit) {
         snapshotFlow { partsL.value >= 1f && partsR.value >= 1f }.first { it }
-        // First open: Boot Cat says hi before the checks start (WelcomeLayout, same timing).
-        if (firstOpen) delay(BOOT_CAT_HELLO_MS)
         shownCallback()
     }
     val rise = with(LocalDensity.current) { 22.dp.toPx() }
@@ -427,7 +437,11 @@ fun BootScreen(
                 )
             }
             if (firstOpen) {
-                WelcomeLayout(checks, status, wide, error, logo = logo, pills = pills, catIn = { partsR.value }, out = { exitP.value }, celebrate = celebrate)
+                WelcomeLayout(
+                    checks, status, wide, error, logo = logo, pills = pills,
+                    catIn = { catIn.value }, move = { settle.value }, panelIn = { panelR.value }, out = { exitP.value },
+                    celebrate = celebrate, onListed = onWelcomeListed
+                )
             } else if (wide) {
                 // Headset (or any wide screen): logo and the Status card on the left; the checklist
                 // on the right. Both panels wrap their content (no empty strips) and sit bottom-aligned so their lower
@@ -1014,85 +1028,196 @@ private fun SignInPill(onClick: () -> Unit) {
     }
 }
 
+/** One check Boot Cat goes through on the first open: what he says while it runs, and its row once done. */
+private class WelcomeStep(val icon: BootIcon, val name: String, val working: String, val result: Pair<Mark, String>?)
+
+/** The first open's checks, in the order Boot Cat goes through them; a result is null while it's running (or failed). */
+private fun welcomeSteps(checks: List<BootCheck>, status: BootStatus): List<WelcomeStep> {
+    fun check(label: String) = checks.firstOrNull { it.label == label }
+    fun row(c: BootCheck?): Pair<Mark, String>? = when (c?.state) {
+        BootState.Done, BootState.Warn, BootState.Skipped, BootState.Background -> c.state.mark() to (c.note?.text ?: "")
+        else -> null
+    }
+    fun service(s: ServiceState): Pair<Mark, String>? = if (s == ServiceState.Checking) null else s.mark() to s.text
+    val net = status.internet
+    return listOf(
+        WelcomeStep(
+            BootIcons.Internet, "Internet", "Checking your internet...",
+            when (net) {
+                InternetLink.Checking, InternetLink.None -> null
+                InternetLink.NoAccess -> Mark.Warn to net.text
+                else -> Mark.Done to (if (status.internetMbps > 0) "${net.text} · ${status.internetMbps.coerceAtMost(9999)} Mbps" else net.text)
+            }
+        ),
+        WelcomeStep(BootIcons.DeviceSession, "Device session", "Setting up this device...", row(check("Device session"))),
+        WelcomeStep(BootIcons.VrcaServers, "VRC-A servers", "Reaching VRC-A servers...", service(status.servers)),
+        WelcomeStep(BootIcons.Vrchat, "VRChat", "Checking on VRChat...", service(status.vrchat)),
+        WelcomeStep(BootIcons.Account, "Account standing", "Checking your account...", row(check("Account standing"))),
+        WelcomeStep(BootIcons.Tutorial, "Tutorial", "Getting the tutorial ready...", row(check("Tutorial")))
+    )
+}
+
 /**
- * First open: the logo, then Boot Cat (testers' name for the state cat) appears under it, says hi,
- * and narrates what he's preparing, so a new user learns he's the loading indicator they'll see on
- * every boot. Same wall, logo, cat faces and fold as every boot.
+ * First open, with Boot Cat (testers' name for the state cat) as the guide: the logo fades in, he
+ * hops in under it and says hi; then the logo glides left like every boot, he glides with his
+ * speech bubble to the top of the panel that unfolds on the right, and goes through the checks one
+ * by one. Each finished check drops into the list under him, newest on top, pushing the older ones
+ * down. His bubble is a fixed size (a bubble sized to its line kept jumping, user 2026-10-23).
  */
 @Composable
 private fun WelcomeLayout(
     checks: List<BootCheck>, status: BootStatus, wide: Boolean, error: String?,
-    logo: @Composable (Dp) -> Unit, pills: @Composable () -> Unit, catIn: () -> Float, out: () -> Float, celebrate: Boolean
+    logo: @Composable (Dp) -> Unit, pills: @Composable () -> Unit,
+    catIn: () -> Float, move: () -> Float, panelIn: () -> Float, out: () -> Float,
+    celebrate: Boolean, onListed: () -> Unit
 ) {
-    // He says hi first, for a moment after he's fully in, before the work starts showing.
-    var greeted by remember { mutableStateOf(false) }
+    val steps = welcomeSteps(checks, status)
+    val results by rememberUpdatedState(steps.map { it.result })
+    // Indexes into [steps], newest first. A Retry restarts the checks (rows back to Waiting), so a
+    // listed check that loses its result empties the list and he starts over.
+    val listed = remember { mutableStateListOf<Int>() }
+    var next by remember { mutableIntStateOf(0) }
+    val listedCallback by rememberUpdatedState(onListed)
+    LaunchedEffect(Unit) {
+        snapshotFlow { panelIn() >= 1f }.first { it }
+        while (true) {
+            fun regressed() = listed.any { results[it] == null }
+            if (next >= steps.size) {
+                listedCallback()
+                snapshotFlow { regressed() }.first { it }
+            } else {
+                val t0 = android.os.SystemClock.uptimeMillis()
+                snapshotFlow { results[next] != null || regressed() }.first { it }
+                if (!regressed()) {
+                    // Each line stays up a moment, so a quick check is still seen being done.
+                    delay((BOOT_CAT_LINE_MS - (android.os.SystemClock.uptimeMillis() - t0)).coerceAtLeast(0L))
+                    if (!regressed()) { listed.add(0, next); next++; continue }
+                }
+            }
+            listed.clear(); next = 0
+        }
+    }
+    // What he says: hello (until he starts moving), then the check he's on, a failure, or his verdict.
+    var helloTwo by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         snapshotFlow { catIn() >= 1f }.first { it }
-        delay(BOOT_CAT_HELLO_MS)
-        greeted = true
+        delay(BOOT_CAT_HELLO_MS / 2)
+        helloTwo = true
     }
-    val step by rememberUpdatedState(if (!greeted) Mark.Done to "Hi, I'm Boot Cat!" else welcomeStep(checks, status, error, celebrate))
-    // Each line stays up a moment, so a quick check is still seen being done instead of flashing by.
-    var said by remember { mutableStateOf(step) }
-    LaunchedEffect(Unit) {
-        snapshotFlow { step }.conflate().collect { said = it; delay(BOOT_CAT_LINE_MS) }
+    val moving by remember { derivedStateOf { move() > 0f } }
+    val (mark, line) = when {
+        !moving && !helloTwo -> Mark.Done to "Hi, I'm Boot Cat!"
+        !moving || panelIn() < 1f && next == 0 -> Mark.Done to "Let's get you set up!"
+        error != null || status.internet == InternetLink.None -> Mark.Failed to welcomeFailure(checks, status)
+        next < steps.size -> Mark.Working to steps[next].working
+        !celebrate -> Mark.Working to "Almost there..."
+        else -> welcomeVerdict(checks, status)
     }
-    val (mark, line) = said
-    Column(
-        Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        // The logo's real width (it keeps its picture's shape), so Boot Cat can line up with its left edge.
-        val density = LocalDensity.current
-        var logoW by remember { mutableStateOf(0.dp) }
-        Box(Modifier.onSizeChanged { val w = with(density) { it.width.toDp() }; if (w != logoW) logoW = w }) {
-            // A phone has room to spare around the welcome: a slightly bigger logo there.
-            logo(if (wide) 210.dp else PHONE_LOGO_HEIGHT * 1.15f)
+    val accent = MaterialTheme.colorScheme.primary
+    val mood by animateColorAsState(
+        when (mark) {
+            Mark.Done -> GremlinColors.Positive
+            Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
+            Mark.Failed -> GremlinColors.Negative
+            else -> accent
+        }.copy(alpha = 0.75f), tween(300), label = "bootCatMood"
+    )
+    val rowH = if (wide) WIDE_ROW_HEIGHT else 34.dp
+    val rowGap = if (wide) 8.dp else 6.dp
+    val logoH = if (wide) WIDE_LOGO_HEIGHT else PHONE_LOGO_HEIGHT * 1.15f
+    // Where his spot in the panel is (the panel's outer box isn't scaled by its unfold, so this is
+    // the open panel's real place), as state written only when it moves.
+    val density = LocalDensity.current
+    val pad = with(density) { Offset(18.dp.toPx(), 16.dp.toPx()) }
+    val box = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
+    var spot by remember { mutableStateOf<Offset?>(null) }
+    var spotW by remember { mutableStateOf(0.dp) }
+    Box(Modifier.fillMaxSize().onGloballyPositioned { box[0] = it }) {
+        val panel: @Composable (Modifier) -> Unit = { m ->
+            Unfold(panelIn, m.onGloballyPositioned { c ->
+                val root = box[0] ?: return@onGloballyPositioned
+                if (!root.isAttached || !c.isAttached) return@onGloballyPositioned
+                val at = root.localPositionOf(c, Offset.Zero) + pad
+                if (at != spot) spot = at
+                val w = with(density) { (c.size.width - 2 * pad.x).toDp() }
+                if (w != spotW) spotW = w
+            }.then(NoA11y)) {
+                Layer(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+                        Spacer(Modifier.fillMaxWidth().height(BOOT_CAT_ROW_HEIGHT)) // his spot
+                        Spacer(Modifier.height(14.dp))
+                        androidx.compose.foundation.lazy.LazyColumn(
+                            Modifier.fillMaxWidth().height(rowH * steps.size + rowGap * (steps.size - 1)),
+                            verticalArrangement = Arrangement.spacedBy(rowGap), userScrollEnabled = false
+                        ) {
+                            items(listed.size, key = { listed[it] }) { k ->
+                                val i = listed[k]
+                                val r = results[i]
+                                // Settled rows only; a row that just lost its result is about to be cleared.
+                                if (r != null) ServiceRow(steps[i].icon, steps[i].name, r.second, r.first, Modifier.animateItem(), rowH, variant = i)
+                            }
+                        }
+                    }
+                }
+            }
         }
-        Spacer(Modifier.height(if (wide) 17.dp else 22.dp))
-        val accent = MaterialTheme.colorScheme.primary
-        // The bubble's outline takes his mood, so the line reads as his: purple thinking, green done,
-        // amber / red on a problem.
-        val mood by animateColorAsState(
-            when (mark) {
-                Mark.Done -> GremlinColors.Positive
-                Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
-                Mark.Failed -> GremlinColors.Negative
-                else -> accent
-            }.copy(alpha = 0.75f), tween(300), label = "bootCatMood"
-        )
-        // Boot Cat under the logo's left edge, his line in a speech bubble to his right (user,
-        // 2026-10-23). His spot is fixed, so a longer line only grows the bubble rightwards.
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val start = ((maxWidth - logoW) / 2).coerceAtLeast(0.dp)
+        if (wide) {
+            Column(Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 32.dp, vertical = 22.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(WIDE_GAP)) {
+                    Box(Modifier.weight(0.85f), contentAlignment = Alignment.Center) { logo(logoH) }
+                    panel(Modifier.weight(1.15f))
+                }
+                pills()
+            }
+        } else {
+            Column(
+                Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center
+            ) {
+                logo(logoH)
+                Spacer(Modifier.height(PHONE_GAP + 4.dp))
+                panel(Modifier.widthIn(max = PHONE_MAX_WIDTH).fillMaxWidth())
+                pills()
+            }
+        }
+        // Boot Cat and his bubble: first under the centred logo, then gliding (with the logo) to his
+        // spot at the top of the panel.
+        val at = spot
+        if (at != null) {
             Row(
-                NoA11y.fillMaxWidth().padding(start = start).graphicsLayer {
-                    // He hops in (the same hop as his all-done celebration), so his first move shows
-                    // he's the one who reacts.
-                    val p = catIn()
-                    alpha = (p * 3f).coerceAtMost(1f) * (1f - out())
-                    translationY = -kotlin.math.sin(p * kotlin.math.PI.toFloat()) * 18.dp.toPx()
-                },
+                NoA11y.width(spotW).height(BOOT_CAT_ROW_HEIGHT)
+                    .offset {
+                        val root = box[0]
+                        val w = root?.size?.width?.toFloat() ?: 0f
+                        val h = root?.size?.height?.toFloat() ?: 0f
+                        val hello = Offset((w - spotW.toPx()) / 2f, h / 2f + logoH.toPx() / 2f + 16.dp.toPx())
+                        val m = FastOutSlowInEasing.transform(move())
+                        val p = catIn()
+                        val hop = -kotlin.math.sin(p * kotlin.math.PI.toFloat()) * 18.dp.toPx()
+                        IntOffset(
+                            (hello.x + (at.x - hello.x) * m).toInt(),
+                            (hello.y + (at.y - hello.y) * m + hop).toInt()
+                        )
+                    }
+                    .graphicsLayer { alpha = (catIn() * 3f).coerceAtMost(1f) * (1f - out()) },
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                BootCat(mark, 0, Modifier.size(if (wide) 52.dp else 46.dp), celebrate = greeted && mark == Mark.Done)
-                Spacer(Modifier.width(10.dp))
+                BootCat(mark, 0, Modifier.size(if (wide) 40.dp else 36.dp), celebrate = celebrate && next >= steps.size && mark == Mark.Done)
+                Spacer(Modifier.width(8.dp))
                 // The bubble's tail, pointing at him (drawn over the bubble's edge so the edge doesn't cross it).
                 Spacer(Modifier.zIndex(1f).size(9.dp, 14.dp).offset(x = 1.dp).drawBehind {
                     val tail = androidx.compose.ui.graphics.Path().apply {
                         moveTo(size.width, 0f); lineTo(0f, size.height / 2f); lineTo(size.width, size.height); close()
                     }
                     drawPath(tail, GremlinColors.Card)
-                    val tip = androidx.compose.ui.geometry.Offset(0f, size.height / 2f)
-                    drawLine(mood, androidx.compose.ui.geometry.Offset(size.width, 0f), tip, 1.dp.toPx())
-                    drawLine(mood, tip, androidx.compose.ui.geometry.Offset(size.width, size.height), 1.dp.toPx())
+                    val tip = Offset(0f, size.height / 2f)
+                    drawLine(mood, Offset(size.width, 0f), tip, 1.dp.toPx())
+                    drawLine(mood, tip, Offset(size.width, size.height), 1.dp.toPx())
                 })
                 Box(
-                    Modifier.weight(1f, fill = false).animateContentSize(tween(220, easing = FastOutSlowInEasing))
-                        .clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
-                        .animatedOutline({ mood }, corner = 14.dp)
-                        .padding(horizontal = 14.dp, vertical = 9.dp)
+                    Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
+                        .animatedOutline({ mood }, corner = 14.dp).padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.CenterStart
                 ) {
                     Crossfade(line, label = "bootCatLine") {
                         Text(
@@ -1104,44 +1229,34 @@ private fun WelcomeLayout(
                 }
             }
         }
-        pills()
     }
 }
 
-/** How long Boot Cat's hello stays before he starts narrating. */
-internal const val BOOT_CAT_HELLO_MS = 1_400L
+/** Boot Cat's row (him + his bubble). */
+private val BOOT_CAT_ROW_HEIGHT = 46.dp
+
+/** How long Boot Cat's hello stays before the logo and he move (two lines, half each). */
+internal const val BOOT_CAT_HELLO_MS = 2_600L
 /** Shortest time one of Boot Cat's lines stays up. */
 private const val BOOT_CAT_LINE_MS = 650L
 
-/**
- * What Boot Cat is doing right now: the first check still running, in the order a user would care
- * about; once all are in, his verdict (the first problem, or all set).
- */
-private fun welcomeStep(checks: List<BootCheck>, status: BootStatus, error: String?, celebrate: Boolean): Pair<Mark, String> {
+/** What Boot Cat says when a check failed (boot is held on Retry: nothing that fails lets boot through). */
+private fun welcomeFailure(checks: List<BootCheck>, status: BootStatus): String {
     fun state(label: String) = checks.firstOrNull { it.label == label }?.state
-    fun busy(label: String) = state(label).let { it == BootState.Working || it == BootState.Waiting }
-    // Something failed: boot is held on Retry (user rule: nothing that fails lets boot through).
-    if (error != null) return Mark.Failed to when {
+    return when {
         status.internet == InternetLink.None -> "No internet, check your Wi-Fi"
         state("Device session") == BootState.Failed -> "I can't set up this device, trying again"
         state("Account standing") == BootState.Failed -> "I can't check your account, trying again"
         state("Tutorial") == BootState.Failed -> "I can't get the tutorial, trying again"
         else -> "I can't reach VRC-A servers, trying again"
     }
-    if (status.internet == InternetLink.None) return Mark.Failed to "No internet, check your Wi-Fi"
-    val working = listOf(
-        (status.internet == InternetLink.Checking) to "Checking your internet...",
-        busy("Device session") to "Setting up this device...",
-        (status.servers == ServiceState.Checking) to "Reaching VRC-A servers...",
-        (status.vrchat == ServiceState.Checking) to "Checking on VRChat...",
-        busy("Account standing") to "Checking your account...",
-        busy("Tutorial") to "Getting the tutorial ready..."
-    ).firstOrNull { it.first }
-    // (Everything's in but the app isn't ready to open yet: "Almost there...")
-    if (working != null || !celebrate) return Mark.Working to (working?.second ?: "Almost there...")
-    // Everything passed; the first thing worth knowing, else all set.
+}
+
+/** Boot Cat's verdict once everything passed: the first thing worth knowing, else all set. */
+private fun welcomeVerdict(checks: List<BootCheck>, status: BootStatus): Pair<Mark, String> {
+    val account = checks.firstOrNull { it.label == "Account standing" }?.state
     return when {
-        state("Account standing") == BootState.Warn -> Mark.Warn to "Your account has been restricted"
+        account == BootState.Warn -> Mark.Warn to "Your account has been restricted"
         status.internet == InternetLink.NoAccess -> Mark.Warn to "This network has no internet"
         status.servers == ServiceState.Maintenance -> Mark.Maintenance to "VRC-A servers are under maintenance"
         status.servers != ServiceState.Online -> Mark.Warn to "VRC-A servers are having issues"

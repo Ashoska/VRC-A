@@ -139,6 +139,7 @@ internal fun AppBoot(
     var showLogin by remember { mutableStateOf(false) }
     // Decided once per boot: which version of the screen this is.
     val firstOpen = remember { isFirstOpen(ctx) }
+    var welcomeListed by remember { mutableStateOf(false) }
     val visible = if (firstOpen) FIRST_OPEN_ROWS else ROWS
     // The rows that must pass: what's shown, plus the first open's hidden terms and updates checks.
     val gating = if (firstOpen) FIRST_OPEN_ROWS + listOf(Row.Terms, Row.Updates).filter { it.inThisBuild } else ROWS
@@ -231,6 +232,7 @@ internal fun AppBoot(
         error = null
         retryIn = null
         tutorialDone = false
+        welcomeListed = false
         Row.entries.forEach { set(it, BootState.Waiting) }
         coroutineScope {
             // Rows that don't need the device session start straight away.
@@ -377,6 +379,8 @@ internal fun AppBoot(
             }
             snapshotFlow { visible.all { rows[it.ordinal].state in SETTLED } }.first { it }
             timeline.event("every row settled")
+            // First open: the Ready moment waits until Boot Cat has listed every check.
+            if (firstOpen) { snapshotFlow { welcomeListed }.first { it }; timeline.event("Boot Cat listed every check") }
             val mainNext = withContext(Dispatchers.IO) { mainAppNext() }
             if (mainNext) {
                 prepareApp()
@@ -413,6 +417,7 @@ internal fun AppBoot(
         onRetry = { attempt++ },
         userName = userName,
         firstOpen = firstOpen,
+        onWelcomeListed = { welcomeListed = true },
         onShown = { shown = true },
         celebrate = celebrate,
         exit = exiting,
