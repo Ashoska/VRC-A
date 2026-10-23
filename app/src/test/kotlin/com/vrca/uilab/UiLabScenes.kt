@@ -775,7 +775,28 @@ java.lang.IllegalStateException: Expected a preset but found none
                     true
                 }
                 VrcaApp()
-            } else CrashScreen(SAMPLE_CRASH, onStart = {})
+            } else {
+                // `show crash [history] [update]`: real reports made by CrashReport.record from errors with
+                // stack frames in VRC-A's packages (so "where" works like a release build); `history` adds two
+                // earlier crashes; `update` puts the update popup over the screen.
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                val words = rest.split(' ')
+                val report = androidx.compose.runtime.remember {
+                    fun err(e: Throwable, cls: String) = e.apply {
+                        stackTrace = arrayOf(StackTraceElement(cls, "a", "SourceFile", 212), StackTraceElement("android.os.Looper", "loop", "Looper.java", 288))
+                    }
+                    if ("history" in words) {
+                        com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), err(OutOfMemoryError(), "com.vrca.speech.b"))
+                        com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), err(IllegalStateException("x"), "com.vrca.discord.c"))
+                    }
+                    com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), err(IllegalStateException("x"), "com.vrca.discord.a"))
+                    com.vrca.app.CrashReport.text(ctx)
+                }
+                CrashScreen(report, onStart = {})
+                if ("update" in words) com.vrca.app.UpdatePopup(
+                    ReleaseInfo(480, "v1.4.80", "https://example.com/vrc-a.apk", 0, "", SAMPLE_NOTES), forced = true, visible = true, onDismiss = {}
+                )
+            }
             "banned" -> BannedScreen(reason = rest.ifBlank { "Repeated harassment after warnings." })
             "tos" -> TosGate(3, SAMPLE_TOS, "https://example.com/tos", onOpenUrl = {}, onAccept = {})
             "onboarding" -> OnboardingFlow(

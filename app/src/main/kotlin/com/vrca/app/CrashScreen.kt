@@ -63,8 +63,14 @@ import com.vrca.ui.theme.GremlinColors
 @Composable
 internal fun CrashScreen(report: String, onStart: () -> Unit) {
     val ctx = LocalContext.current
-    val summary = remember(report) { CrashReport.summary(report) }
-    val time = remember(report) { CrashReport.time(report).substringBeforeLast(':') }
+    val where = remember(report) { CrashReport.whereOf(report) }
+    val what = remember(report) { CrashReport.whatOf(report) }
+    val time = remember(report) { niceTime(CrashReport.time(report)) }
+    val version = remember(report) { CrashReport.versionOf(report) }
+    // The other crashes of the past 3 days (the history includes this one).
+    val earlier = remember(report) { CrashReport.recent(ctx).drop(1) }
+    // What Download report saves: this crash in full, then the earlier ones.
+    val file = remember(report) { CrashReport.fullReport(ctx, report) }
     var open by remember { mutableStateOf(false) }
     // Start VRC-A: the screen fades out to the bare backdrop first, then the app starts (the held
     // start-up work runs there, unseen) and the boot screen's intro fades its logo in on the same backdrop.
@@ -80,7 +86,7 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
     // Android 9 and older: the system picker chooses where the .txt goes.
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null) saved = runCatching {
-            ctx.contentResolver.openOutputStream(uri)?.use { it.write(report.toByteArray()) }
+            ctx.contentResolver.openOutputStream(uri)?.use { it.write(file.toByteArray()) }
             "Report saved"
         }.getOrDefault("Couldn't save the report")
     }
@@ -95,16 +101,25 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
                 Spacer(Modifier.width(14.dp))
                 Column {
                     Text("VRC-A crashed last time", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text)
-                    if (time.isNotBlank()) Text(time, style = MaterialTheme.typography.bodyMedium, color = GremlinColors.TextMuted)
+                    Text(
+                        listOf(version, time).filter { it.isNotBlank() }.joinToString("  ·  "),
+                        style = MaterialTheme.typography.bodyMedium, color = GremlinColors.TextMuted
+                    )
                 }
             }
             Spacer(Modifier.height(18.dp))
             Layer(Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp).animateContentSize(tween(260, easing = FastOutSlowInEasing))) {
-                    // What failed and where, in one line.
+                    // Where it crashed and what went wrong, in plain words (never code names).
                     Text(
-                        sanitizeBackendRefs(summary), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+                        "Crashed in $where", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
                         color = GremlinColors.Negative, maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                    Text(what, style = MaterialTheme.typography.bodyMedium, color = GremlinColors.Text, modifier = Modifier.padding(top = 2.dp))
+                    // Only when it isn't a one-off.
+                    if (earlier.isNotEmpty()) Text(
+                        "Crashed ${earlier.size + 1} times in the last 3 days", style = MaterialTheme.typography.bodySmall,
+                        color = GremlinColors.Caution, modifier = Modifier.padding(top = 6.dp)
                     )
                     Spacer(Modifier.height(12.dp))
                     // The full report, folded away.
@@ -117,15 +132,19 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
                         Icon(Icons.Filled.KeyboardArrowDown, null, tint = GremlinColors.TextMuted, modifier = Modifier.graphicsLayer { rotationZ = turn })
                     }
                     AnimatedVisibility(open, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                        Box(
-                            Modifier.padding(top = 8.dp).fillMaxWidth().height(220.dp).clip(RoundedCornerShape(12.dp))
-                                .background(GremlinColors.Card).verticalScroll(rememberScrollState())
-                                .horizontalScroll(rememberScrollState()).padding(12.dp)
+                        // Plain facts only (user: don't expose our code): the full report, stack trace
+                        // included, is only in the downloaded file.
+                        Column(
+                            Modifier.padding(top = 8.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                .background(GremlinColors.Card).padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            // Sanitized on screen only; the downloaded report keeps the raw text.
-                            Text(
-                                sanitizeBackendRefs(report).ifBlank { "(no report text)" }, fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall, color = GremlinColors.TextMuted, softWrap = false
+                            // Only what isn't already shown above (where, what, version and time are).
+                            DetailRow("Build", CrashReport.field(report, "VersionCode"))
+                            DetailRow("Device", listOf(CrashReport.field(report, "Device"), CrashReport.field(report, "SDK").let { if (it.isBlank()) "" else "Android SDK $it" })
+                                .filter { it.isNotBlank() }.joinToString("  ·  "))
+                            if (earlier.isNotEmpty()) DetailRow(
+                                "Earlier", earlier.joinToString("\n") { "${niceTime(CrashReport.time(it.text))}  ·  ${CrashReport.whereOf(it.text)}" }
                             )
                         }
                     }
@@ -140,7 +159,7 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
                     onClick = {
                         if (leaving) return@GremlinButton
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            val name = CrashReport.saveToDownloads(ctx, report)
+                            val name = CrashReport.saveToDownloads(ctx, file)
                             saved = if (name != null) "Saved to Downloads: $name" else "Couldn't save the report"
                         } else picker.launch(CrashReport.fileName())
                     },
@@ -164,3 +183,18 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
 
 /** How long the crash screen takes to fade out after Start VRC-A. */
 private const val LEAVE_MS = 260
+
+@Composable
+private fun DetailRow(label: String, value: String) {
+    if (value.isBlank()) return
+    Row {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = GremlinColors.TextMuted, modifier = Modifier.width(110.dp))
+        Text(sanitizeBackendRefs(value), style = MaterialTheme.typography.bodySmall, color = GremlinColors.Text)
+    }
+}
+
+/** "2026-10-23 22:59:04" → "23 Oct 22:59" (the report's own text if it doesn't parse). */
+private fun niceTime(t: String): String = runCatching {
+    val d = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).parse(t)!!
+    java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.getDefault()).format(d)
+}.getOrDefault(t)

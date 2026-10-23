@@ -39,6 +39,12 @@ object CrashReport {
     private const val KEY_TEXT = VrcaApplication.CRASH_KEY_TEXT
     /** Android's exit records already looked at (newest timestamp), so one isn't shown twice. */
     private const val KEY_EXIT_SEEN = "exit_seen_ms"
+    /** Recent crashes (user, 2026-10-23: the past 3 days, up to 5), newest first, as a JSON array of
+     *  {at, text, sent}. Kept after Start VRC-A, for the "crashed N times" line and the report file. */
+    private const val KEY_HISTORY = "history"
+    private const val KEEP_MS = 3L * 24 * 60 * 60 * 1000
+    private const val KEEP_COUNT = 5
+    private const val HISTORY_CHARS = 20_000
 
     /** True from launch while a crash report is waiting; the app's optional start-up is held.
      *  Watched state, so the screen's overlay appears once the safe start ends. */
@@ -52,13 +58,107 @@ object CrashReport {
         val sw = StringWriter()
         val pw = PrintWriter(sw)
         header(pw, "VRC-A LAST CRASH", ctx)
+        pw.println("Where: ${where(e)}")
+        pw.println("What: ${what(e)}")
         pw.println("Thread: ${t.name}")
+        runCatching {
+            val rt = Runtime.getRuntime()
+            pw.println("Memory: ${(rt.totalMemory() - rt.freeMemory()) shr 20} MB used of ${rt.maxMemory() shr 20} MB")
+        }
+        runCatching {
+            val sending = ctx.getSharedPreferences(AppShutdown.PREFS, Context.MODE_PRIVATE).getBoolean("feature_osc_sending", false)
+            pw.println("Chatbox sending: ${if (sending) "on" else "off"}")
+            pw.println("Discord: ${com.vrca.discord.DiscordRpcState.status}")
+        }
         pw.println()
         e.printStackTrace(pw)
         pw.flush()
+        save(ctx, sw.toString())
+    }
+
+    /** Saves a new report as the waiting one AND into the history, in one synchronous write. */
+    private fun save(ctx: Context, text: String, at: Long = System.currentTimeMillis()) {
+        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val list = history(prefs).toMutableList()
+        list.add(0, Entry(at, text.take(HISTORY_CHARS), false))
         // commit(), not apply(): apply() writes later, and the process is killed before then.
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_TEXT, sw.toString().take(MAX_CHARS)).commit()
+        prefs.edit().putString(KEY_TEXT, text.take(MAX_CHARS)).putString(KEY_HISTORY, encode(list)).commit()
+    }
+
+    /** One remembered crash. [sent] = already uploaded to the developer (CrashUpload). */
+    class Entry(val at: Long, val text: String, val sent: Boolean)
+
+    /** The crashes of the past 3 days, up to 5, newest first. */
+    fun recent(ctx: Context): List<Entry> = history(ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE))
+
+    private fun history(prefs: android.content.SharedPreferences): List<Entry> = runCatching {
+        val a = org.json.JSONArray(prefs.getString(KEY_HISTORY, "[]"))
+        val now = System.currentTimeMillis()
+        (0 until a.length()).map { a.getJSONObject(it) }
+            .map { Entry(it.getLong("at"), it.optString("text"), it.optBoolean("sent")) }
+            .filter { now - it.at in 0..KEEP_MS }
+            .sortedByDescending { it.at }
+            .take(KEEP_COUNT)
+    }.getOrDefault(emptyList())
+
+    private fun encode(list: List<Entry>): String {
+        val now = System.currentTimeMillis()
+        val a = org.json.JSONArray()
+        list.filter { now - it.at in 0..KEEP_MS }.take(KEEP_COUNT).forEach {
+            a.put(org.json.JSONObject().put("at", it.at).put("text", it.text).put("sent", it.sent))
+        }
+        return a.toString()
+    }
+
+    /** Marks these crashes (by time) as uploaded. */
+    fun markSent(ctx: Context, ats: Set<Long>) {
+        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val list = history(prefs).map { if (it.at in ats) Entry(it.at, it.text, true) else it }
+        prefs.edit().putString(KEY_HISTORY, encode(list)).apply()
+    }
+
+    /**
+     * The part of VRC-A that crashed, in plain words, from the first frame in VRC-A's own code. Release
+     * builds rename classes but keep their packages (`-keeppackagenames com.vrca.**`), so this works there.
+     */
+    private fun where(e: Throwable): String {
+        var c: Throwable? = e
+        var depth = 0
+        while (c != null && depth++ < 8) {
+            val pkg = c.stackTrace.firstOrNull { it.className.startsWith("com.vrca.") }?.className
+                ?.removePrefix("com.vrca.")?.substringBefore('.')
+            if (pkg != null) return AREAS[pkg] ?: "VRC-A"
+            c = c.cause
+        }
+        return "Android or a library"
+    }
+
+    private val AREAS = mapOf(
+        "admin" to "Admin tools", "app" to "Starting VRC-A", "data" to "Saved settings",
+        "discord" to "Discord", "discordbot" to "Discord bot", "keepalive" to "Running in the background",
+        "nowplaying" to "Now Playing", "osc" to "Chatbox", "overlay" to "Overlay", "richcontent" to "Announcements",
+        "speech" to "Voice to text", "sync" to "Syncing", "ui" to "The app's screens", "update" to "Updates",
+        "vrchat" to "VRChat connection",
+    )
+
+    /** What went wrong, in plain words (the Java/Android error name only; never a message or our code). */
+    private fun what(e: Throwable): String {
+        val n = e.javaClass.name
+        val plain = when {
+            e is OutOfMemoryError -> "Ran out of memory"
+            e is StackOverflowError -> "Got stuck in a loop"
+            e is NullPointerException || e is KotlinNullPointerException -> "Something it needed was missing"
+            e is SecurityException -> "Android blocked a permission"
+            e is IllegalStateException -> "Something was in the wrong state"
+            e is IllegalArgumentException -> "Got a value it didn't expect"
+            e is IndexOutOfBoundsException || e is NoSuchElementException -> "Looked for something that wasn't there"
+            e is ConcurrentModificationException -> "Two things changed the same data at once"
+            e is ClassCastException -> "Got the wrong kind of data"
+            e is UnsatisfiedLinkError -> "A built-in library failed to load"
+            else -> "Unexpected error"
+        }
+        val known = n.startsWith("java.") || n.startsWith("javax.") || n.startsWith("android.") || n.startsWith("kotlin.")
+        return if (known) "$plain (${n.substringAfterLast('.')})" else plain
     }
 
     /**
@@ -68,7 +168,7 @@ object CrashReport {
     fun checkAtLaunch(ctx: Context) {
         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (prefs.getString(KEY_TEXT, "").isNullOrBlank()) {
-            fromExitInfo(ctx)?.let { prefs.edit().putString(KEY_TEXT, it.take(MAX_CHARS)).commit() }
+            fromExitInfo(ctx)?.let { save(ctx, it.second, it.first) }
         }
         safeStart = !prefs.getString(KEY_TEXT, "").isNullOrBlank()
     }
@@ -92,30 +192,49 @@ object CrashReport {
         return true
     }
 
-    /** "Start VRC-A": clear the report and run the start-up work that was held. Main thread. */
+    /** "Start VRC-A": clear the waiting report (the history keeps it) and run the start-up work that was held. Main thread. */
     fun release(ctx: Context) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_TEXT).commit()
         safeStart = false
         val held = synchronized(onRelease) { onRelease.toList().also { onRelease.clear() } }
         held.forEach { runCatching(it) }
+        // Now that the app runs normally, send the developer any crashes not sent yet.
+        runCatching { CrashUpload.sendPending(ctx) }
+    }
+
+    /** A report header line's value ("" if missing), e.g. field(text, "Where"). */
+    fun field(text: String, name: String): String =
+        text.lineSequence().firstOrNull { it.startsWith("$name: ") }?.removePrefix("$name: ").orEmpty()
+
+    /** Where it crashed, in plain words, for the screen (never code names). */
+    fun whereOf(text: String): String = when {
+        text.startsWith("=== VRC-A NOT RESPONDING") -> "VRC-A stopped responding"
+        text.startsWith("=== VRC-A NATIVE CRASH") -> "A built-in library"
+        else -> field(text, "Where").ifBlank { "VRC-A" }
+    }
+
+    /** What went wrong, in plain words, for the screen. */
+    fun whatOf(text: String): String = when {
+        text.startsWith("=== VRC-A NOT RESPONDING") -> "The app froze and Android closed it"
+        text.startsWith("=== VRC-A NATIVE CRASH") -> "A crash in native code"
+        else -> field(text, "What").ifBlank { "Unexpected error" }
+    }
+
+    /** The build this report came from, in plain words: "v1.4.80 · Quest". */
+    fun versionOf(text: String): String {
+        val v = field(text, "VersionName").ifBlank { BuildConfig.VERSION_NAME }
+        val b = field(text, "Build")
+        return if (b.isBlank()) v else "$v · $b"
     }
 
     /**
-     * A short line for the crash screen: what failed and where, e.g. "NullPointerException in
-     * HomePage.kt:212" (the first frame in VRC-A's own code), or the kind of failure.
+     * The downloadable report: the waiting crash in full, then the other crashes of the past 3 days
+     * (the developer reads these; release builds' code names are renamed, so nothing readable leaks).
      */
-    fun summary(text: String): String {
-        if (text.startsWith("=== VRC-A NOT RESPONDING")) return "VRC-A stopped responding"
-        if (text.startsWith("=== VRC-A NATIVE CRASH")) return "A crash in native code"
-        val lines = text.lines()
-        val ex = lines.firstOrNull { Regex("""^[\w.$]+(Exception|Error|Throwable)\b""").containsMatchIn(it.trim()) }
-            ?.trim()?.substringBefore(':')?.substringAfterLast('.')
-        val at = lines.firstOrNull { it.trim().startsWith("at com.vrca.") }
-            ?.substringAfterLast('(')?.substringBefore(')')
-        return when {
-            ex != null && at != null -> "$ex in $at"
-            ex != null -> ex
-            else -> "Unknown error"
+    fun fullReport(ctx: Context, current: String): String = buildString {
+        append(current.trimEnd()).append('\n')
+        recent(ctx).filter { it.text.trimEnd() != current.trimEnd().take(HISTORY_CHARS).trimEnd() }.forEach {
+            append("\n\n----- EARLIER CRASH -----\n").append(it.text.trimEnd()).append('\n')
         }
     }
 
@@ -155,10 +274,11 @@ object CrashReport {
         pw.println("AppId: ${ctx.packageName}")
         pw.println("VersionName: ${BuildConfig.VERSION_NAME}")
         pw.println("VersionCode: ${BuildConfig.VERSION_CODE}")
+        pw.println("Build: ${if (BuildConfig.IS_HEADSET_BUILD) "Quest" else if (BuildConfig.IS_ADMIN_BUILD) "Admin" else "Phone"}")
     }
 
     /** The newest native crash / not-responding exit since the last one seen, as report text. */
-    private fun fromExitInfo(ctx: Context): String? {
+    private fun fromExitInfo(ctx: Context): Pair<Long, String>? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         return runCatching {
             val am = ctx.getSystemService(ActivityManager::class.java) ?: return null
@@ -181,7 +301,7 @@ object CrashReport {
             pw.println()
             info.traceInputStream?.use { pw.print(it.bufferedReader().readText().take(MAX_CHARS)) }
             pw.flush()
-            sw.toString()
+            info.timestamp to sw.toString()
         }.getOrNull()
     }
 
