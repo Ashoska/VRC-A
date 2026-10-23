@@ -72,13 +72,24 @@ fun GremlinButton(
     loading: Boolean = false,
     size: GremlinButtonSize = GremlinButtonSize.Medium,
     leading: (@Composable () -> Unit)? = null,
+    /** One of VRC-A's own icons (BootIcons) instead of a Material [icon]. */
+    bootIcon: com.vrca.app.BootIcon? = null,
+    /** Downloading: the downloading Boot Cat replaces the icon, his outline filling with this
+     *  (0..1; null = size unknown). Taps are ignored meanwhile. */
+    downloading: Boolean = false,
+    downloadProgress: Float? = null,
     pressedPreview: Boolean = false
 ) {
-    GremlinButtonFrame(onClick, modifier, kind, enabled, loading, size, pressedPreview) { labelColor ->
+    GremlinButtonFrame(onClick, modifier, kind, enabled, loading || downloading, size, pressedPreview) { labelColor ->
         val iconSize = if (size == GremlinButtonSize.Small) 16.dp else 20.dp
-        Crossfade(loading, label = "busy") { busy ->
+        val state = when { downloading -> 2; loading -> 1; else -> 0 }
+        Crossfade(state, label = "busy") { st ->
             when {
-                busy -> Row { BootCat(Mark.Working, 0, Modifier.size(iconSize + 4.dp)); Spacer(Modifier.width(8.dp)) }
+                st == 2 -> Row { com.vrca.app.BootCatDownload(downloadProgress, Modifier.size(iconSize + 6.dp)); Spacer(Modifier.width(8.dp)) }
+                st == 1 -> Row { BootCat(Mark.Working, 0, Modifier.size(iconSize + 4.dp)); Spacer(Modifier.width(8.dp)) }
+                bootIcon != null -> Row {
+                    com.vrca.app.BootIconView(bootIcon, { labelColor }, { labelColor }, Modifier.size(iconSize + 2.dp)); Spacer(Modifier.width(8.dp))
+                }
                 leading != null -> Row(verticalAlignment = Alignment.CenterVertically) { leading(); Spacer(Modifier.width(10.dp)) }
                 icon != null -> Row { Icon(icon, null, tint = labelColor, modifier = Modifier.size(iconSize)); Spacer(Modifier.width(8.dp)) }
             }

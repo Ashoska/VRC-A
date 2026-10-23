@@ -124,7 +124,7 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 com.vrca.ui.common.GremlinButton(
                     "Download report", kind = com.vrca.ui.common.GremlinButtonKind.Secondary,
-                    icon = androidx.compose.material.icons.Icons.Filled.Download,
+                    bootIcon = BootIcons.Updates,
                     size = com.vrca.ui.common.GremlinButtonSize.Large,
                     onClick = {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

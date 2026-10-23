@@ -349,6 +349,8 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
     var releaseCheckResult by remember { mutableStateOf<ReleaseCheckResult?>(null) }
     var updateDismissed    by remember { mutableStateOf(false) }
     var downloadId         by remember { mutableLongStateOf(-1L) }
+    // The update download's progress (0..1, null = size not known yet), for the downloading Boot Cat.
+    var downloadProgress   by remember { mutableStateOf<Float?>(null) }
     var downloadDone       by remember { mutableStateOf(false) }
     var downloadError      by remember { mutableStateOf<String?>(null) }
 
@@ -597,6 +599,27 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
         }
     }
 
+    // Read the download's bytes from DownloadManager twice a second while it runs (off the main thread).
+    LaunchedEffect(downloadId, downloadDone) {
+        downloadProgress = null
+        if (downloadId < 0L || downloadDone) return@LaunchedEffect
+        val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager ?: return@LaunchedEffect
+        while (true) {
+            downloadProgress = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    dm.query(DownloadManager.Query().setFilterById(downloadId))?.use { c ->
+                        if (!c.moveToFirst()) null else {
+                            val done = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                            val total = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                            if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else null
+                        }
+                    }
+                }.getOrNull()
+            }
+            kotlinx.coroutines.delay(500)
+        }
+    }
+
     val updateToShow = releaseCheckResult
     if (!BuildConfig.IS_ADMIN_BUILD &&
         updateToShow is ReleaseCheckResult.UpdateAvailable &&
@@ -606,6 +629,7 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
             info = updateToShow.info,
             forced = updateToShow.forced,
             downloading = downloadId >= 0L && !downloadDone,
+            progress = downloadProgress,
             error = downloadError,
             onDismiss = { updateDismissed = true },
             onDownload = { url ->
@@ -837,6 +861,8 @@ internal fun UpdateDialog(
     info: ReleaseInfo,
     forced: Boolean,
     downloading: Boolean = false,
+    /** Download progress 0..1 (null = size not known yet), shown by the downloading Boot Cat. */
+    progress: Float? = null,
     error: String? = null,
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
@@ -970,12 +996,12 @@ internal fun UpdateDialog(
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (forced) {
                         com.vrca.ui.common.GremlinButton(
+                            if (downloading) "Downloading" + (progress?.let { " ${(it * 100).toInt()}%" } ?: "")
+                            else if (error != null) "Retry Download" else "Download Update",
                             onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                            loading = downloading,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(if (downloading) "Downloading" else if (error != null) "Retry Download" else "Download Update")
-                        }
+                            modifier = Modifier.fillMaxWidth(),
+                            bootIcon = BootIcons.Updates, downloading = downloading, downloadProgress = progress
+                        )
                     } else {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -983,11 +1009,11 @@ internal fun UpdateDialog(
                         ) {
                             com.vrca.ui.common.GremlinSecondaryButton(onClick = onDismiss) { Text("Later") }
                             com.vrca.ui.common.GremlinButton(
+                                if (downloading) "Downloading" + (progress?.let { " ${(it * 100).toInt()}%" } ?: "")
+                                else if (error != null) "Retry" else "Download",
                                 onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                                loading = downloading
-                            ) {
-                                Text(if (downloading) "Downloading" else if (error != null) "Retry" else "Download")
-                            }
+                                bootIcon = BootIcons.Updates, downloading = downloading, downloadProgress = progress
+                            )
                         }
                     }
 

@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.background
@@ -386,7 +387,7 @@ java.lang.IllegalStateException: Expected a preset but found none
 	at android.os.Looper.loop(Looper.java:288)
 	at android.app.ActivityThread.main(ActivityThread.java:7918)
 """
-    private val FULL = setOf("boot", "cats", "buttons", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "buttons", "download", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -609,6 +610,64 @@ java.lang.IllegalStateException: Expected a preset but found none
     }
 
     @Composable
+    private fun DownloadSheet() {
+        val G = com.vrca.ui.theme.GremlinColors
+        val anim = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
+        LaunchedEffect(Unit) { kotlinx.coroutines.delay(600); anim.animateTo(1f, androidx.compose.animation.core.tween(5000, easing = androidx.compose.animation.core.LinearEasing)) }
+        val live = anim.value
+        @Composable fun label(t: String) = Text(t, style = MaterialTheme.typography.labelMedium, color = G.TextMuted)
+        androidx.compose.foundation.layout.Column(
+            Modifier.fillMaxSize().background(G.Backdrop).padding(horizontal = 20.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // 1. Boot Cat downloading, big: fixed points and the live one.
+            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(26.dp), verticalAlignment = Alignment.Bottom) {
+                for ((t, p) in listOf("Size unknown" to null, "10%" to 0.1f, "45%" to 0.45f, "80%" to 0.8f, "Live" to live)) {
+                    androidx.compose.foundation.layout.Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        com.vrca.app.BootCatDownload(p, Modifier.size(64.dp))
+                        Spacer(Modifier.height(4.dp)); label(if (t == "Live") "Live ${(live * 100).toInt()}%" else t)
+                    }
+                }
+                androidx.compose.foundation.layout.Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    com.vrca.app.BootCat(com.vrca.app.Mark.Done, 0, Modifier.size(64.dp))
+                    Spacer(Modifier.height(4.dp)); label("Done")
+                }
+            }
+            // 2. In the button: before, downloading, done.
+            label("In the button")
+            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                com.vrca.ui.common.GremlinButton("Download update", {}, Modifier.weight(1f), bootIcon = com.vrca.app.BootIcons.Updates)
+                com.vrca.ui.common.GremlinButton("Downloading ${(live * 100).toInt()}%", {}, Modifier.weight(1f), downloading = true, downloadProgress = live)
+                com.vrca.ui.common.GremlinButton("Downloading", {}, Modifier.weight(1f), downloading = true, downloadProgress = null)
+                com.vrca.ui.common.GremlinButton("Signing in", {}, Modifier.weight(1f), loading = true)
+            }
+            // 3. Where it's used.
+            label("Where it goes")
+            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                @Composable fun card(title: String, sub: String, button: @Composable () -> Unit) {
+                    androidx.compose.foundation.layout.Column(
+                        Modifier.weight(1f).background(G.Panel, androidx.compose.foundation.shape.RoundedCornerShape(16.dp)).padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(title, style = MaterialTheme.typography.titleSmall, color = G.Text)
+                        Text(sub, style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
+                        button()
+                    }
+                }
+                card("Update popup", "v1.2.80 is ready") {
+                    com.vrca.ui.common.GremlinButton("Downloading ${(live * 100).toInt()}%", {}, Modifier.fillMaxWidth(), downloading = true, downloadProgress = live)
+                }
+                card("Voice pack (Settings)", "English · Large · 310 MB") {
+                    com.vrca.ui.common.GremlinButton("${(live * 310).toInt()} of 310 MB", {}, Modifier.fillMaxWidth(), kind = com.vrca.ui.common.GremlinButtonKind.Secondary, downloading = true, downloadProgress = live)
+                }
+                card("Crash screen", "Save the report as a .txt") {
+                    com.vrca.ui.common.GremlinButton("Download report", {}, Modifier.fillMaxWidth(), kind = com.vrca.ui.common.GremlinButtonKind.Secondary, bootIcon = com.vrca.app.BootIcons.Updates)
+                }
+            }
+        }
+    }
+
+    @Composable
     private fun FullShow(d: UiLabDriver, arg: String) {
         val name = arg.substringBefore(' ')
         val rest = arg.substringAfter(' ', "")
@@ -633,6 +692,9 @@ java.lang.IllegalStateException: Expected a preset but found none
             "cats" -> CatGallery()
             // `show buttons`: the button sheet (GremlinButton): both looks, every kind and state.
             "buttons" -> ButtonSheet()
+            // `show download`: the downloading Boot Cat, in buttons and where downloads happen; its
+            // progress runs 0 -> 100% over 5 s (record it), then holds.
+            "download" -> DownloadSheet()
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.
