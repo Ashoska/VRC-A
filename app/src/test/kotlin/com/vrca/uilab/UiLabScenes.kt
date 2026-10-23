@@ -582,7 +582,7 @@ object UiLabScenes {
                 // (default 6000, about a Quest load).
                 val ctx = androidx.compose.ui.platform.LocalContext.current
                 val words = rest.split(' ').filter { it.isNotBlank() }
-                val mode = words.firstOrNull { !it.startsWith("discord") }.orEmpty()
+                val mode = words.firstOrNull { !it.startsWith("discord") && it != "online" }.orEmpty()
                 val discordArg = words.firstOrNull { it.startsWith("discord") }
                 if (discordArg != null) {
                     val ms = discordArg.substringAfter('=', "6000").toLongOrNull() ?: 6000L
@@ -598,6 +598,17 @@ object UiLabScenes {
                         com.vrca.discord.DiscordRpcState.status =
                             if (fail) com.vrca.discord.DiscordRpcStatus.FAILED else com.vrca.discord.DiscordRpcStatus.CONNECTED
                     }
+                }
+                // `... online`: the lab's network reads as Wi-Fi that reaches the internet (Robolectric's
+                // default network isn't validated, so the Internet row otherwise says "No internet access").
+                if ("online" in words) androidx.compose.runtime.remember {
+                    val cm = ctx.getSystemService(android.net.ConnectivityManager::class.java)
+                    val caps = org.robolectric.shadows.ShadowNetworkCapabilities.newInstance()
+                    org.robolectric.Shadows.shadowOf(caps).addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                    org.robolectric.Shadows.shadowOf(caps).addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    org.robolectric.Shadows.shadowOf(caps).addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                    org.robolectric.Shadows.shadowOf(cm).setNetworkCapabilities(cm.activeNetwork, caps)
+                    true
                 }
                 if (mode == "onboarded" || mode == "full") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
                 if (mode == "full") {

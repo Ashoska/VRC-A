@@ -1095,6 +1095,7 @@ private fun WelcomeLayout(
     // Indexes into [steps], newest first. A Retry restarts the checks (rows back to Waiting), so a
     // listed check that loses its result empties the list and he starts over.
     val listed = remember { mutableStateListOf<Int>() }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     var next by remember { mutableIntStateOf(0) }
     val listedCallback by rememberUpdatedState(onListed)
     LaunchedEffect(Unit) {
@@ -1110,7 +1111,12 @@ private fun WelcomeLayout(
                 if (!regressed()) {
                     // Each line stays up a moment, so a quick check is still seen being done.
                     delay((BOOT_CAT_LINE_MS - (android.os.SystemClock.uptimeMillis() - t0)).coerceAtLeast(0L))
-                    if (!regressed()) { listed.add(0, next); next++; continue }
+                    if (!regressed()) {
+                        // A lazy list keeps its first row in place when one is added above it (the new
+                        // row landed half out of view, scrolled up); keep the list at its top instead.
+                        listState.requestScrollToItem(0)
+                        listed.add(0, next); next++; continue
+                    }
                 }
             }
             listed.clear(); next = 0
@@ -1244,6 +1250,7 @@ private fun WelcomeLayout(
                         val order = listed.toList() + steps.indices.filter { it !in listed }
                         androidx.compose.foundation.lazy.LazyColumn(
                             Modifier.fillMaxWidth().height(rowH * steps.size + rowGap * (steps.size - 1)),
+                            state = listState,
                             verticalArrangement = Arrangement.spacedBy(rowGap), userScrollEnabled = false
                         ) {
                             items(order.size, key = { order[it] }) { k ->
