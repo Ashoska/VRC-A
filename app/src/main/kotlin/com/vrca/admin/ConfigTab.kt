@@ -99,10 +99,14 @@ internal fun ConfigTab(
                 "tosText" to tosText,
                 "tosUrl" to tosUrl,
                 "discordInvite" to discordInvite.trim(),
-                "serversMaintenance" to serversMaintenance,
-                "updatedAt" to FieldValue.serverTimestamp()
+                "serversMaintenance" to serversMaintenance
             )
-            if (Triple(tosVersion, tosText, tosUrl) != savedTos) data["tosUpdatedAt"] = FieldValue.serverTimestamp()
+            // Only a real terms change is stamped: `tosUpdatedAt` for this version's apps, and the doc's
+            // `updatedAt` too, because apps from before this fix still re-ask the terms when THAT moves.
+            if (Triple(tosVersion, tosText, tosUrl) != savedTos) {
+                data["tosUpdatedAt"] = FieldValue.serverTimestamp()
+                data["updatedAt"] = FieldValue.serverTimestamp()
+            }
             db.collection("config").document("app")
                 .set(data, SetOptions.merge())
                 .await()
