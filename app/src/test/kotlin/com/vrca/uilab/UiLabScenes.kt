@@ -387,7 +387,7 @@ java.lang.IllegalStateException: Expected a preset but found none
 	at android.os.Looper.loop(Looper.java:288)
 	at android.app.ActivityThread.main(ActivityThread.java:7918)
 """
-    private val FULL = setOf("boot", "cats", "buttons", "download", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "buttons", "download", "downloadcat", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -609,6 +609,16 @@ java.lang.IllegalStateException: Expected a preset but found none
         }
     }
 
+    /** One big download Boot Cat for a looping GIF: 0% for 1.2 s, 0->100% over 10.8 s, then 100%. */
+    @Composable
+    private fun DownloadCatLoop() {
+        val anim = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
+        LaunchedEffect(Unit) { kotlinx.coroutines.delay(1200); anim.animateTo(1f, androidx.compose.animation.core.tween(10800, easing = androidx.compose.animation.core.LinearEasing)) }
+        androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().background(com.vrca.ui.theme.GremlinColors.Backdrop), contentAlignment = Alignment.Center) {
+            com.vrca.app.BootCatDownload(anim.value, Modifier.size(200.dp))
+        }
+    }
+
     @Composable
     private fun DownloadSheet() {
         val G = com.vrca.ui.theme.GremlinColors
@@ -695,6 +705,7 @@ java.lang.IllegalStateException: Expected a preset but found none
             // `show download`: the downloading Boot Cat, in buttons and where downloads happen; its
             // progress runs 0 -> 100% over 5 s (record it), then holds.
             "download" -> DownloadSheet()
+            "downloadcat" -> DownloadCatLoop()
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.

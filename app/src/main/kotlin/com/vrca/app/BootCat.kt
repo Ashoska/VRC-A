@@ -210,19 +210,26 @@ internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color 
                     }
                 }
             }
-            // The eyes: small v's (user's pick over full arrows) that do a download beat every 1.6 s:
-            // rest, glide down and fade out, drop back in from above and settle (eased, no jumps).
+            // The eyes: small v's (user's pick over full arrows), in a 4.8 s loop of three 1.6 s beats.
+            // Beats 1-2, the download beat: rest, glide down and fade out, drop back in from above and settle.
+            // Beat 3, the second state (like the thinking cat's "hmm"): the v's squint flat, hold, and open.
             val st = Stroke(1.3f, cap = StrokeCap.Round, join = StrokeJoin.Round)
             val c = (t % 1600f) / 1600f
-            val dy: Float; val a: Float
-            when {
-                c < 0.35f -> { dy = 0f; a = 1f }
+            var dy = 0f; var a = 1f; var open = 1f
+            if ((t / 1600f).toInt() % 3 == 2) {
+                open = when {
+                    c < 0.25f -> 1f - 0.85f * sm(c / 0.25f)
+                    c < 0.7f -> 0.15f
+                    else -> 0.15f + 0.85f * sm((c - 0.7f) / 0.3f)
+                }
+            } else when {
+                c < 0.35f -> {}
                 c < 0.65f -> { val k = sm((c - 0.35f) / 0.3f); dy = 1.6f * k; a = 1f - k }
                 else -> { val k = sm((c - 0.65f) / 0.35f); dy = -1.6f * (1f - k); a = k }
             }
             for (x in floatArrayOf(9.3f, 14.7f)) {
                 val y = Y0 - 0.1f + dy
-                drawPath(Path().apply { moveTo(x - 1.25f, y - 0.6f); lineTo(x, y + 0.65f); lineTo(x + 1.25f, y - 0.6f) }, color.copy(alpha = color.alpha * a), style = st)
+                drawPath(Path().apply { moveTo(x - 1.25f, y - 0.6f * open); lineTo(x, y + 0.65f * open); lineTo(x + 1.25f, y - 0.6f * open) }, color.copy(alpha = color.alpha * a), style = st)
             }
         }
     }
