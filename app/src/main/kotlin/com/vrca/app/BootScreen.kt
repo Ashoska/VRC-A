@@ -1160,16 +1160,14 @@ private fun WelcomeLayout(
                 if (!root.isAttached || !c.isAttached) return@onGloballyPositioned
                 val at = root.localPositionOf(c, Offset.Zero) + pad
                 if (at != spot) spot = at
-                // His row stops short of the version chip on the right.
-                val w = with(density) { (c.size.width - 2 * pad.x - chipW).toDp() } - 10.dp
+                // His row stops short of the version chip on the right (on a phone the chip sits by the strip).
+                val w = if (wide) with(density) { (c.size.width - 2 * pad.x - chipW).toDp() } - 10.dp
+                    else with(density) { (c.size.width - 2 * pad.x).toDp() }
                 if (w != spotW) spotW = w
             }.then(NoA11y)) {
                 Layer(Modifier.fillMaxWidth()) {
                     Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
-                        Row(Modifier.fillMaxWidth().height(BOOT_CAT_ROW_HEIGHT), verticalAlignment = Alignment.CenterVertically) {
-                            Spacer(Modifier.weight(1f)) // his spot
-                            Spacer(Modifier.width(10.dp))
-                            // The version, like the normal boot's header chip, in the colour of how it's going.
+                        // The version, like the normal boot's header chip, in the colour of how it's going.
                             val tone by animateColorAsState(
                                 when {
                                     error != null -> GremlinColors.Negative
@@ -1177,6 +1175,7 @@ private fun WelcomeLayout(
                                     else -> accent
                                 }, label = "welcomeChip"
                             )
+                        val chip: @Composable () -> Unit = {
                             Text(
                                 "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
                                 style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
@@ -1184,13 +1183,18 @@ private fun WelcomeLayout(
                                     .background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
                             )
                         }
+                        Row(Modifier.fillMaxWidth().height(BOOT_CAT_ROW_HEIGHT), verticalAlignment = Alignment.CenterVertically) {
+                            Spacer(Modifier.weight(1f)) // his spot
+                            if (wide) { Spacer(Modifier.width(10.dp)); chip() }
+                        }
                         Spacer(Modifier.height(12.dp))
                         // One segment per check, in check order (the normal boot's bar): its result's colour
                         // once listed, the accent (breathing) on the one he's doing, dark while still to come.
                         val pulse = rememberInfiniteTransition(label = "welcomePulse").animateFloat(
                             0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "welcomePulseA"
                         )
-                        Row(Modifier.fillMaxWidth().height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.weight(1f).height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                             steps.indices.forEach { i ->
                                 val done = i in listed
                                 val current = i == next && error == null
@@ -1211,6 +1215,9 @@ private fun WelcomeLayout(
                                     drawRoundRect(seg.copy(alpha = seg.alpha * a), cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2, size.height / 2))
                                 })
                             }
+                        }
+                        // A phone's row is too narrow for his longer lines and the chip: the chip sits here.
+                        if (!wide) { Spacer(Modifier.width(10.dp)); chip() }
                         }
                         Spacer(Modifier.height(12.dp))
                         // Finished checks on top (newest first), then the ones still to come as faint rows in
@@ -1326,7 +1333,7 @@ private fun WelcomeLayout(
                             label = "bootCatLine"
                         ) {
                             Text(
-                                it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+                                it, style = if (wide) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium,
                                 color = when (mark) { Mark.Failed -> GremlinColors.Negative; Mark.Warn, Mark.Maintenance -> GremlinColors.Caution; else -> GremlinColors.Text },
                                 maxLines = 1, overflow = TextOverflow.Ellipsis
                             )
