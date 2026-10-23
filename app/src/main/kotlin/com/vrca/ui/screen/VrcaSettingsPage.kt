@@ -421,6 +421,28 @@ internal fun SettingsPage(
                             Text(stalls.ifBlank { "(none)" }.let { com.vrca.app.sanitizeBackendRefs(it) }, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                         }
 
+                        // Test crash: checks the crash screen + safe start (CrashReport) on a real device.
+                        var confirmCrash by remember { mutableStateOf(false) }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Crash screen", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                            androidx.compose.material3.TextButton(onClick = { confirmCrash = true }) { Text("Test crash") }
+                        }
+                        if (confirmCrash) {
+                            com.vrca.ui.common.VrcaConfirmDialog(
+                                title = "Test crash",
+                                body = "VRC-A will crash now. Open it again to see the crash screen.",
+                                confirmLabel = "Crash VRC-A",
+                                destructive = true,
+                                onConfirm = {
+                                    // Thrown on the main thread after the dialog closes, like a real crash.
+                                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                        throw RuntimeException("Test crash from Settings > Debug")
+                                    }
+                                },
+                                onDismiss = { confirmCrash = false }
+                            )
+                        }
+
                         Text("Sync (last issue)", style = MaterialTheme.typography.labelMedium)
                         Text(
                             text = lastFirebaseIssue?.let { com.vrca.app.sanitizeBackendRefs(it) }
