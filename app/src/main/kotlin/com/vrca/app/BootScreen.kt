@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.drawWithContent
 import com.vrca.ui.common.animatedOutline
@@ -1042,41 +1043,55 @@ private fun WelcomeLayout(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        logo(if (wide) 210.dp else PHONE_LOGO_HEIGHT)
-        Spacer(Modifier.height(if (wide) 26.dp else 32.dp))
-        // Boot Cat just left of centre, his line in a speech bubble to his right (user, 2026-10-23).
-        // The cat's spot is fixed (the two sides split the width), so a longer line only grows the
-        // bubble rightwards instead of shifting him.
-        Row(
-            NoA11y.widthIn(max = 720.dp).fillMaxWidth().graphicsLayer {
-                val p = catIn()
-                alpha = p * (1f - out())
-                translationY = (1f - p) * 16.dp.toPx()
-            },
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(Modifier.weight(if (wide) 0.8f else 0.62f), contentAlignment = Alignment.CenterEnd) {
-                BootCat(
-                    mark, 0,
-                    Modifier.size(if (wide) 52.dp else 46.dp).graphicsLayer { val p = catIn(); scaleX = 0.6f + 0.4f * p; scaleY = scaleX },
-                    celebrate = greeted && mark == Mark.Done
-                )
-            }
-            Spacer(Modifier.width(10.dp))
-            Row(Modifier.weight(if (wide) 1.2f else 1f), verticalAlignment = Alignment.CenterVertically) {
-                // The bubble's tail, pointing at him (overlaps the bubble's edge by 1dp to hide it).
+        // The logo's real width (it keeps its picture's shape), so Boot Cat can line up with its left edge.
+        val density = LocalDensity.current
+        var logoW by remember { mutableStateOf(0.dp) }
+        Box(Modifier.onSizeChanged { val w = with(density) { it.width.toDp() }; if (w != logoW) logoW = w }) {
+            // A phone has room to spare around the welcome: a slightly bigger logo there.
+            logo(if (wide) 210.dp else PHONE_LOGO_HEIGHT * 1.15f)
+        }
+        Spacer(Modifier.height(if (wide) 17.dp else 22.dp))
+        val accent = MaterialTheme.colorScheme.primary
+        // The bubble's outline takes his mood, so the line reads as his: purple thinking, green done,
+        // amber / red on a problem.
+        val mood by animateColorAsState(
+            when (mark) {
+                Mark.Done -> GremlinColors.Positive
+                Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
+                Mark.Failed -> GremlinColors.Negative
+                else -> accent
+            }.copy(alpha = 0.75f), tween(300), label = "bootCatMood"
+        )
+        // Boot Cat under the logo's left edge, his line in a speech bubble to his right (user,
+        // 2026-10-23). His spot is fixed, so a longer line only grows the bubble rightwards.
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val start = ((maxWidth - logoW) / 2).coerceAtLeast(0.dp)
+            Row(
+                NoA11y.fillMaxWidth().padding(start = start).graphicsLayer {
+                    // He hops in (the same hop as his all-done celebration), so his first move shows
+                    // he's the one who reacts.
+                    val p = catIn()
+                    alpha = (p * 3f).coerceAtMost(1f) * (1f - out())
+                    translationY = -kotlin.math.sin(p * kotlin.math.PI.toFloat()) * 18.dp.toPx()
+                },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                BootCat(mark, 0, Modifier.size(if (wide) 52.dp else 46.dp), celebrate = greeted && mark == Mark.Done)
+                Spacer(Modifier.width(10.dp))
+                // The bubble's tail, pointing at him (drawn over the bubble's edge so the edge doesn't cross it).
                 Spacer(Modifier.zIndex(1f).size(9.dp, 14.dp).offset(x = 1.dp).drawBehind {
                     val tail = androidx.compose.ui.graphics.Path().apply {
                         moveTo(size.width, 0f); lineTo(0f, size.height / 2f); lineTo(size.width, size.height); close()
                     }
                     drawPath(tail, GremlinColors.Card)
-                    drawLine(GremlinColors.Edge, androidx.compose.ui.geometry.Offset(size.width, 0f), androidx.compose.ui.geometry.Offset(0f, size.height / 2f), 1.dp.toPx())
-                    drawLine(GremlinColors.Edge, androidx.compose.ui.geometry.Offset(0f, size.height / 2f), androidx.compose.ui.geometry.Offset(size.width, size.height), 1.dp.toPx())
+                    val tip = androidx.compose.ui.geometry.Offset(0f, size.height / 2f)
+                    drawLine(mood, androidx.compose.ui.geometry.Offset(size.width, 0f), tip, 1.dp.toPx())
+                    drawLine(mood, tip, androidx.compose.ui.geometry.Offset(size.width, size.height), 1.dp.toPx())
                 })
                 Box(
-                    Modifier.animateContentSize(tween(220, easing = FastOutSlowInEasing))
+                    Modifier.weight(1f, fill = false).animateContentSize(tween(220, easing = FastOutSlowInEasing))
                         .clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
-                        .border(1.dp, GremlinColors.Edge, RoundedCornerShape(14.dp))
+                        .animatedOutline({ mood }, corner = 14.dp)
                         .padding(horizontal = 14.dp, vertical = 9.dp)
                 ) {
                     Crossfade(line, label = "bootCatLine") {
