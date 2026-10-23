@@ -1158,6 +1158,9 @@ private fun WelcomeLayout(
     var spot by remember { mutableStateOf<Offset?>(null) }
     var spotW by remember { mutableStateOf(0.dp) }
     var chipW by remember { mutableIntStateOf(0) }
+    // The logo's drawn width (it keeps its picture's shape), read where Boot Cat is placed.
+    var logoW by remember { mutableIntStateOf(0) }
+    val logoWidth = Modifier.onSizeChanged { if (it.width != logoW) logoW = it.width }
     val allDone = celebrate && next >= steps.size && error == null
     val sweep = remember { Animatable(-2f) }
     val chipPop = remember { Animatable(1f) }
@@ -1265,7 +1268,7 @@ private fun WelcomeLayout(
         if (wide) {
             Column(Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 32.dp, vertical = 22.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(WIDE_GAP)) {
-                    Box(Modifier.weight(0.85f), contentAlignment = Alignment.Center) { logo(logoH) }
+                    Box(Modifier.weight(0.85f), contentAlignment = Alignment.Center) { Box(logoWidth) { logo(logoH) } }
                     panel(Modifier.weight(1.15f))
                 }
                 pills()
@@ -1275,7 +1278,7 @@ private fun WelcomeLayout(
                 Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center
             ) {
-                logo(logoH)
+                Box(logoWidth) { logo(logoH) }
                 Spacer(Modifier.height(PHONE_GAP + 4.dp))
                 panel(Modifier.widthIn(max = PHONE_MAX_WIDTH).fillMaxWidth())
                 pills()
@@ -1294,14 +1297,17 @@ private fun WelcomeLayout(
                         val root = box[0]
                         val w = root?.size?.width?.toFloat() ?: 0f
                         val h = root?.size?.height?.toFloat() ?: 0f
-                        val hello = Offset((w - helloW.toPx()) / 2f, h / 2f + logoH.toPx() / 2f + 30.dp.toPx())
+                        // Under the centred logo, his left edge in line with the logo's left edge.
+                        val hello = Offset((w - logoW) / 2f, h / 2f + logoH.toPx() / 2f + 14.dp.toPx())
                         // A jump: eased across, with an arc on top (his hop, made bigger), and the hop-in on arrival.
                         // Sideways first, then up (his path curves away from the logo instead of
                         // crossing its tail), with a small arc on top.
                         val raw = move()
                         val mx = FastOutSlowInEasing.transform(raw)
-                        val my = FastOutSlowInEasing.transform(((raw - 0.2f) / 0.8f).coerceIn(0f, 1f))
-                        val arc = -kotlin.math.sin(raw * kotlin.math.PI.toFloat()) * BOOT_CAT_JUMP_ARC.toPx()
+                        // (He starts under the logo, so he stays low until he's past its tail, then rises.)
+                        val ry = ((raw - 0.4f) / 0.6f).coerceIn(0f, 1f)
+                        val my = FastOutSlowInEasing.transform(ry)
+                        val arc = -kotlin.math.sin(ry * kotlin.math.PI.toFloat()) * BOOT_CAT_JUMP_ARC.toPx()
                         val p = catIn()
                         val hop = -kotlin.math.sin(p * kotlin.math.PI.toFloat()) * 18.dp.toPx()
                         IntOffset(
