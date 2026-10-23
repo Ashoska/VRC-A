@@ -776,10 +776,24 @@ java.lang.IllegalStateException: Expected a preset but found none
     private fun Overlay(d: UiLabDriver, arg: String) {
         val name = arg.substringBefore(' ')
         when (name) {
-            "update", "update-optional" -> UpdateDialog(
-                info = ReleaseInfo(480, "v1.4.80", "https://example.com/vrc-a.apk", 0, "", SAMPLE_NOTES),
-                forced = name == "update", onDismiss = { d.overlay.value = null }, onDownload = {}
-            )
+            "update", "update-optional" -> {
+                // Download runs a pretend download: 0->100% over 6 s, Boot Cat lands into Done, then back to idle
+                // (the app opens the installer there), like VrcaApp's DownloadManager flow.
+                val dl = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
+                var running by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+                var landed by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+                LaunchedEffect(running) {
+                    if (!running) return@LaunchedEffect
+                    dl.snapTo(0f); kotlinx.coroutines.delay(500)
+                    dl.animateTo(1f, androidx.compose.animation.core.tween(6000, easing = androidx.compose.animation.core.LinearEasing))
+                    landed = true; kotlinx.coroutines.delay(1100); landed = false; running = false
+                }
+                UpdateDialog(
+                    info = ReleaseInfo(480, "v1.4.80", "https://example.com/vrc-a.apk", 0, "", SAMPLE_NOTES),
+                    forced = name == "update", downloading = running, progress = if (running && dl.value > 0f) dl.value else null,
+                    landed = landed, onDismiss = { d.overlay.value = null }, onDownload = { running = true }
+                )
+            }
             "whatsnew" -> {
                 LaunchedEffect(Unit) {
                     com.vrca.richcontent.WhatsNewStore.cache(d.app, com.vrca.BuildConfig.VERSION_CODE.toLong(), "v1.4.80", SAMPLE_NOTES, "")
