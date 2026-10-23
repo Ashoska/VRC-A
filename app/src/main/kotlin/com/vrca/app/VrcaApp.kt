@@ -302,7 +302,10 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
                     remoteTosVersion = (snap.getLong("tosVersion") ?: 1L).toInt().coerceAtLeast(1)
                     remoteTosText = snap.getString("tosText") ?: ""
                     remoteTosUrl = snap.getString("tosUrl") ?: ""
-                    remoteTosUpdatedAtMs = snap.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
+                    // The terms' own change time (admin stamps it only when the version, text or link
+                    // changes). NOT the doc's updatedAt: every Config-tab save stamps that, and keying
+                    // on it re-asked everyone for the terms when the admin flipped any setting.
+                    remoteTosUpdatedAtMs = snap.getTimestamp("tosUpdatedAt")?.toDate()?.time ?: 0L
                     remoteDiscordInvite = (snap.getString("discordInvite") ?: "").trim()
                     // Global owner VRChat id → local exemption so friend-list
                     // notifications about the admin are never surfaced (self-invite dance).

@@ -63,6 +63,9 @@ internal fun ConfigTab(
     // Shows "Maintenance" on everyone's boot screen VRC-A servers row (read with the terms, no extra read).
     var serversMaintenance by rememberSaveable { mutableStateOf(false) }
     var loadedAt by remember { mutableStateOf<Timestamp?>(null) }
+    // The terms as last loaded: a save stamps `tosUpdatedAt` (which asks users to accept again) only
+    // when one of these actually changed, never for the other settings on this tab.
+    var savedTos by remember { mutableStateOf(Triple(1, "", "")) }
 
     suspend fun load() {
         setGlobalLoading(true)
@@ -77,6 +80,7 @@ internal fun ConfigTab(
             discordInvite = snap.getString("discordInvite") ?: ""
             serversMaintenance = snap.getBoolean("serversMaintenance") ?: false
             loadedAt = snap.getTimestamp("updatedAt")
+            savedTos = Triple(tosVersion, tosText, tosUrl)
             setGlobalLoading(false)
         }.onFailure { e ->
             setGlobalLoading(false)
@@ -89,7 +93,7 @@ internal fun ConfigTab(
         setError(null)
 
         runCatching {
-            val data = hashMapOf(
+            val data = hashMapOf<String, Any>(
                 "ownerUid" to ownerUid.trim(),
                 "tosVersion" to tosVersion,
                 "tosText" to tosText,
@@ -98,6 +102,7 @@ internal fun ConfigTab(
                 "serversMaintenance" to serversMaintenance,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
+            if (Triple(tosVersion, tosText, tosUrl) != savedTos) data["tosUpdatedAt"] = FieldValue.serverTimestamp()
             db.collection("config").document("app")
                 .set(data, SetOptions.merge())
                 .await()

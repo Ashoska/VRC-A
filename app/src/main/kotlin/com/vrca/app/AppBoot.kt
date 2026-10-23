@@ -564,7 +564,8 @@ private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.Completa
     // The admin's "VRC-A servers maintenance" switch (Config tab) rides on this same read.
     maintenance.complete(snap.getBoolean("serversMaintenance") == true)
     val version = (snap.getLong("tosVersion") ?: 1L).toInt().coerceAtLeast(1)
-    val updatedAt = snap.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
+    // The terms' own change time, not the doc's updatedAt (any Config-tab save stamps that; see VrcaApp).
+    val updatedAt = snap.getTimestamp("tosUpdatedAt")?.toDate()?.time ?: 0L
     val accepted = TosPrefs.acceptedVersion(ctx) >= version && TosPrefs.acceptedAtMs(ctx) >= updatedAt
     if (accepted) set(BootState.Done, BootNote.Accepted) else set(BootState.Warn, BootNote.NewTerms)
 }
