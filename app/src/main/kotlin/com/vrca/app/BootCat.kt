@@ -210,16 +210,19 @@ internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color 
                     }
                 }
             }
-            // The eyes: small v's (user's pick over full arrows) that keep sliding down and fading,
-            // two per eye half a beat apart, so there is always one on its way down.
+            // The eyes: small v's (user's pick over full arrows) that do a download beat every 1.6 s:
+            // rest, glide down and fade out, drop back in from above and settle (eased, no jumps).
             val st = Stroke(1.3f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-            for (k in 0..1) {
-                val p = ((t / 950f) + k * 0.5f) % 1f
-                val y = Y0 - 1.5f + 2.6f * p
-                val a = kotlin.math.sin(PI.toFloat() * p)
-                for (x in floatArrayOf(9.3f, 14.7f)) {
-                    drawPath(Path().apply { moveTo(x - 1.25f, y - 0.6f); lineTo(x, y + 0.65f); lineTo(x + 1.25f, y - 0.6f) }, color.copy(alpha = color.alpha * a), style = st)
-                }
+            val c = (t % 1600f) / 1600f
+            val dy: Float; val a: Float
+            when {
+                c < 0.35f -> { dy = 0f; a = 1f }
+                c < 0.65f -> { val k = sm((c - 0.35f) / 0.3f); dy = 1.6f * k; a = 1f - k }
+                else -> { val k = sm((c - 0.65f) / 0.35f); dy = -1.6f * (1f - k); a = k }
+            }
+            for (x in floatArrayOf(9.3f, 14.7f)) {
+                val y = Y0 - 0.1f + dy
+                drawPath(Path().apply { moveTo(x - 1.25f, y - 0.6f); lineTo(x, y + 0.65f); lineTo(x + 1.25f, y - 0.6f) }, color.copy(alpha = color.alpha * a), style = st)
             }
         }
     }
