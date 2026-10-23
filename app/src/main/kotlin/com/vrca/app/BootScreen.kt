@@ -72,6 +72,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.fadeOut
 import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material.icons.filled.Remove
@@ -1141,7 +1143,8 @@ private fun WelcomeLayout(
     }
     val (mark, line) = when {
         !moving && !helloTwo -> Mark.Done to "Hi! I'm Boot Cat"
-        !moving || panelIn() < 1f && next == 0 -> Mark.Done to "I'll get everything ready for you"
+        // (`narrating`, not panelIn() itself: reading the unfold here rebuilt this every frame of it.)
+        !moving || !narrating && next == 0 -> Mark.Done to "I'll get everything ready for you"
         error != null || status.internet == InternetLink.None -> Mark.Failed to welcomeFailure(checks, status)
         next < steps.size -> Mark.Working to (if (slow) "This one's taking a while..." else steps[next].working)
         !celebrate -> Mark.Working to "Almost there..."
@@ -1272,9 +1275,9 @@ private fun WelcomeLayout(
             Column(Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 32.dp, vertical = 22.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(WIDE_GAP)) {
                     Box(Modifier.weight(0.85f), contentAlignment = Alignment.Center) { Box(logoWidth) { logo(logoH) } }
-                    panel(Modifier.weight(1.15f))
+                    // Retry opens under the panel, centred on it.
+                    Column(Modifier.weight(1.15f)) { panel(Modifier.fillMaxWidth()); pills() }
                 }
-                pills()
             }
         } else {
             Column(
@@ -1349,9 +1352,14 @@ private fun WelcomeLayout(
                     // Fits its line (up to the panel's width); a new length grows or shrinks it smoothly to
                     // the right, so he never moves.
                     Box(
-                        Modifier.weight(1f, fill = false).animateContentSize(spring(dampingRatio = 0.85f, stiffness = 420f))
-                            .fillMaxHeight().clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
-                            .animatedOutline({ mood }, corner = 14.dp).padding(horizontal = 14.dp),
+                        // The shape, fill and outline go OUTSIDE the resize, so they're drawn at the bubble's
+                        // in-between size (inside it they were drawn at the final size and clipped square
+                        // at the right while it grew, user 2026-10-23). No bounce: it settles on the line.
+                        Modifier.weight(1f, fill = false).fillMaxHeight()
+                            .clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
+                            .animatedOutline({ mood }, corner = 14.dp)
+                            .animateContentSize(tween(240, easing = FastOutSlowInEasing))
+                            .padding(horizontal = 14.dp),
                         contentAlignment = Alignment.CenterStart
                     ) {
                         // The old line leaves upwards, then the new one rises in (a crossfade on the spot
@@ -1359,8 +1367,10 @@ private fun WelcomeLayout(
                         AnimatedContent(
                             line,
                             transitionSpec = {
-                                (fadeIn(tween(200, delayMillis = 120)) + slideInVertically(tween(260, delayMillis = 100, easing = FastOutSlowInEasing)) { it / 2 }) togetherWith
-                                    (fadeOut(tween(120)) + slideOutVertically(tween(180, easing = FastOutSlowInEasing)) { -it / 2 })
+                                ((fadeIn(tween(200, delayMillis = 120)) + slideInVertically(tween(260, delayMillis = 100, easing = FastOutSlowInEasing)) { it / 2 }) togetherWith
+                                    (fadeOut(tween(120)) + slideOutVertically(tween(180, easing = FastOutSlowInEasing)) { -it / 2 }))
+                                    // Only the bubble resizes (this one animating too made the edge move twice).
+                                    .using(SizeTransform(clip = false) { _, _ -> snap() })
                             },
                             contentAlignment = Alignment.CenterStart,
                             label = "bootCatLine"

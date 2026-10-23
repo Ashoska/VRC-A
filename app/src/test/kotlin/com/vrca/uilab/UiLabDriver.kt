@@ -420,7 +420,9 @@ class UiLabDriver(
     // -------------------------------------------------------------- recording
 
     /** Frames being captured (`record start`): app time since start, and when the last frame was. */
-    private class Recording(val name: String, val everyMs: Long) {
+    /** [fullDir] non-null = `full`: every frame is written there at full resolution as it's taken
+     *  (only a small copy is kept, for the filmstrip), so a long recording fits in memory. */
+    private class Recording(val name: String, val everyMs: Long, val fullDir: File? = null) {
         val frames = mutableListOf<Bitmap>()
         val times = mutableListOf<Long>()
         var appMs = 0L
@@ -442,10 +444,12 @@ class UiLabDriver(
         val parts = arg.split(Regex("\\s+")).filter { it.isNotEmpty() }
         return when (parts.firstOrNull()) {
             "start" -> {
-                val name = parts.getOrNull(1) ?: error("record start <name> [everyMs]")
+                val name = parts.getOrNull(1) ?: error("record start <name> [everyMs] [full]")
                 val every = (parts.getOrNull(2)?.toLongOrNull() ?: 32L).coerceAtLeast(FRAME_MS)
-                rec = Recording(name, every).also { capture(it) } // the "before" frame
-                "recording $name every $every ms"
+                val full = "full" in parts.drop(2)
+                val dir = if (full) File(outDir, "$name-frames").apply { deleteRecursively(); mkdirs() } else null
+                rec = Recording(name, every, dir).also { capture(it) } // the "before" frame
+                "recording $name every $every ms${if (full) " at full resolution" else ""}"
             }
             "stop" -> {
                 val r = rec ?: error("not recording")
@@ -463,9 +467,13 @@ class UiLabDriver(
      *  resolution is tens of MB). Stops adding past [MAX_FRAMES]. */
     private fun capture(r: Recording) {
         r.lastAt = r.appMs
-        if (r.frames.size >= MAX_FRAMES) return
+        if (r.frames.size >= (if (r.fullDir != null) MAX_FULL_FRAMES else MAX_FRAMES)) return
         val (full, _) = render()
-        val k = minOf(1f, MAX_FRAME_SIDE.toFloat() / maxOf(full.width, full.height))
+        r.fullDir?.let { d ->
+            File(d, "%04d.png".format(r.times.size)).outputStream().use { full.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        val side = if (r.fullDir != null) FULL_KEEP_SIDE else MAX_FRAME_SIDE
+        val k = minOf(1f, side.toFloat() / maxOf(full.width, full.height))
         val frame = if (k < 1f) Bitmap.createScaledBitmap(full, (full.width * k).toInt(), (full.height * k).toInt(), true)
             .also { full.recycle() } else full
         r.frames += frame
@@ -476,9 +484,14 @@ class UiLabDriver(
      *  ui.sh / uictl.sh afterwards) makes the GIF from them. The unit-test classpath is the
      *  Android SDK's, which has no javax.imageio/java.awt to write a GIF here. */
     private fun writeFrames(dir: File, r: Recording) {
-        dir.deleteRecursively(); dir.mkdirs()
-        r.frames.forEachIndexed { i, bmp ->
-            File(dir, "%04d.png".format(i)).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        if (r.fullDir == null) {
+            dir.deleteRecursively(); dir.mkdirs()
+            r.frames.forEachIndexed { i, bmp ->
+                File(dir, "%04d.png".format(i)).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            }
+        } else {
+            // Already written at full size; drop any past the last kept frame (a removed "before" frame).
+            dir.listFiles { f -> f.name.endsWith(".png") && (f.nameWithoutExtension.toIntOrNull() ?: 0) >= r.times.size }?.forEach { it.delete() }
         }
         File(dir, "times.txt").writeText(r.times.joinToString("\n", postfix = "\n"))
     }
@@ -1202,6 +1215,9 @@ class UiLabDriver(
         private const val LONG_AGO = Long.MIN_VALUE / 4
         // Recording: frame size, how many are kept, and the filmstrip's grid.
         private const val MAX_FRAME_SIDE = 1024
+        /** `record … full`: frames go straight to disk, so many more fit; the kept copy is small. */
+        private const val MAX_FULL_FRAMES = 1500
+        private const val FULL_KEEP_SIDE = 480
         private const val MAX_FRAMES = 240
         private const val SHEET_FRAMES = 24
         private const val SHEET_COLS = 4
