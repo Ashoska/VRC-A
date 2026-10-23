@@ -167,18 +167,15 @@ object BootIcons {
         }
     )
 
-    /** Start (crash screen's Start VRC-A), option A: a rounded play triangle. TRIAL: one of A/B stays. */
-    val StartPlain = BootIcon(
-        glyph("StartPlain") { line("M8.4 5.2c-.8-.5-1.6 0-1.6.9v11.8c0 .9.8 1.4 1.6.9l9.3-5.9c.7-.5.7-1.4 0-1.8z") }
-    )
-    /** Start, option B: the eared tile of the download icon with a play triangle inside. TRIAL. */
-    val StartTile = BootIcon(
-        glyph("StartTile") {
+    /** Start (the crash screen's Start VRC-A; user pick 2026-10-23): the eared tile of the download icon
+     *  with a play triangle inside, so the two crash-screen buttons read as a pair. */
+    val Start = BootIcon(
+        glyph("Start") {
             line("M5.6 7.6 6.8 3.8l2.8 3.8")
             line("M14.4 7.6l2.8-3.8 1.2 3.8")
             line("M7 7.6h10a3 3 0 0 1 3 3v7a3 3 0 0 1 -3 3h-10a3 3 0 0 1 -3 -3v-7a3 3 0 0 1 3 -3z")
         },
-        glyph("StartTileDetail") { line("M10.2 10.9c-.4-.3-.9 0-.9.5v5.9c0 .5.5.8.9.5l4.7-3c.4-.3.4-.8 0-1z") }
+        glyph("StartDetail") { line("M10.2 10.9c-.4-.3-.9 0-.9.5v5.9c0 .5.5.8.9.5l4.7-3c.4-.3.4-.8 0-1z") }
     )
 
     /** First open: the tutorial's pictures (an open book, paw on the page). */

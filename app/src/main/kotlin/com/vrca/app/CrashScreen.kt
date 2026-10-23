@@ -150,7 +150,7 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
                 )
                 com.vrca.ui.common.GremlinButton(
                     "Start VRC-A", { leaving = true }, Modifier.weight(1f),
-                    icon = androidx.compose.material.icons.Icons.Filled.PlayArrow, size = com.vrca.ui.common.GremlinButtonSize.Large
+                    bootIcon = BootIcons.Start, size = com.vrca.ui.common.GremlinButtonSize.Large
                 )
             }
             AnimatedVisibility(saved != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
