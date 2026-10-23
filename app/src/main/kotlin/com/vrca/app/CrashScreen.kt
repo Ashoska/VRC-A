@@ -6,14 +6,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,10 +28,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -65,7 +61,7 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
     val version = remember(report) { CrashReport.versionOf(report) }
     // The other crashes of the past 3 days (the history includes this one).
     val earlier = remember(report) { CrashReport.recent(ctx).drop(1) }
-    // The Details rows, worked out once here (opening Details built them on that frame: a dropped frame in the lab).
+    // The Details rows, worked out once here (not while drawing).
     val details = remember(report) {
         listOf(
             "Build" to CrashReport.field(report, "VersionCode"),
@@ -76,7 +72,6 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
     }
     // What Download report saves: this crash in full, then the earlier ones.
     val file = remember(report) { CrashReport.fullReport(ctx, report) }
-    var open by remember { mutableStateOf(false) }
     // Start VRC-A: the screen fades out to the bare backdrop first, then the app starts (the held
     // start-up work runs there, unseen) and the boot screen's intro fades its logo in on the same backdrop.
     var leaving by remember { mutableStateOf(false) }
@@ -126,27 +121,15 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
                         "Crashed ${earlier.size + 1} times in the last 3 days", style = MaterialTheme.typography.bodySmall,
                         color = GremlinColors.Caution, modifier = Modifier.padding(top = 6.dp)
                     )
-                    Spacer(Modifier.height(12.dp))
-                    // The full report, folded away.
-                    val turn by animateFloatAsState(if (open) 180f else 0f, tween(220), label = "detailsArrow")
-                    Row(
-                        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { open = !open }.padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    // Details, always shown (user: no expand/collapse). Plain facts only (user: don't
+                    // expose our code): the full report, stack trace included, is only in the downloaded file.
+                    if (details.isNotEmpty()) Column(
+                        Modifier.padding(top = 14.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                            .background(GremlinColors.Card).padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text("Details", style = MaterialTheme.typography.labelLarge, color = GremlinColors.TextMuted, modifier = Modifier.weight(1f))
-                        Icon(Icons.Filled.KeyboardArrowDown, null, tint = GremlinColors.TextMuted, modifier = Modifier.graphicsLayer { rotationZ = turn })
-                    }
-                    AnimatedVisibility(open, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                        // Plain facts only (user: don't expose our code): the full report, stack trace
-                        // included, is only in the downloaded file.
-                        Column(
-                            Modifier.padding(top = 8.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                                .background(GremlinColors.Card).padding(horizontal = 14.dp, vertical = 12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            // Only what isn't already shown above (where, what, version and time are).
-                            details.forEach { (label, value) -> DetailRow(label, value) }
-                        }
+                        // Only what isn't already shown above (where, what, version and time are).
+                        details.forEach { (label, value) -> DetailRow(label, value) }
                     }
                 }
             }

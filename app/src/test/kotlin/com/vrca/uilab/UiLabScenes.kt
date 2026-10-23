@@ -767,6 +767,12 @@ object UiLabScenes {
                     fun err(e: Throwable, cls: String) = e.apply {
                         stackTrace = arrayOf(StackTraceElement(cls, "a", "SourceFile", 212), StackTraceElement("android.os.Looper", "loop", "Looper.java", 288))
                     }
+                    // A real device name in the report (Robolectric says "robolectric").
+                    if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+                        org.robolectric.shadows.ShadowBuild.setManufacturer("Oculus"); org.robolectric.shadows.ShadowBuild.setModel("Quest 3")
+                    } else {
+                        org.robolectric.shadows.ShadowBuild.setManufacturer("Google"); org.robolectric.shadows.ShadowBuild.setModel("Pixel 8")
+                    }
                     if ("history" in words) {
                         com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), err(OutOfMemoryError(), "com.vrca.speech.b"))
                         com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), err(IllegalStateException("x"), "com.vrca.discord.c"))
