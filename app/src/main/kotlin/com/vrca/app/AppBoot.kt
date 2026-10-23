@@ -36,6 +36,7 @@ import com.vrca.vrchat.VrchatBanChecker
 import com.vrca.vrchat.VrchatPipelineState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlin.math.min
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -186,7 +187,16 @@ internal fun AppBoot(
     LaunchedEffect(shown) {
         if (!shown) return@LaunchedEffect
         timeline.event("VRChat status: started")
-        val vrchat = fetchVrchatPlatform()
+        // The status page is always up, so a failed read is our network: stay on "Checking..." and
+        // retry (1, 2, then every 3 s) until it answers. The sign-in row waits on this answer.
+        var tries = 0
+        var vrchat = fetchVrchatPlatform()
+        while (vrchat == null) {
+            tries++
+            timeline.event("VRChat status: no answer, retry $tries")
+            delay(min(3_000L, 1_000L * tries))
+            vrchat = fetchVrchatPlatform()
+        }
         timeline.event("VRChat status: ${vrchat.text}")
         status = status.copy(vrchat = vrchat)
     }
@@ -204,14 +214,18 @@ internal fun AppBoot(
             launch { discord(ctx) { s, n -> set(Row.Discord, s, n) } }
             if (Row.VrchatHere.inThisBuild) launch { vrchatHere { s, n -> set(Row.VrchatHere, s, n) } }
             val worker = async(Dispatchers.IO) { AvatarGlobalDb.fetchHealth() != null }
+            val maintenance = kotlinx.coroutines.CompletableDeferred<Boolean>()
 
             set(Row.Device, BootState.Working)
             val deviceOk = orNull { kotlinx.coroutines.withTimeout(30_000L) { bootstrapFirebaseAndCache(ctx) } } != null
             launch {
                 val workerOk = worker.await()
-                timeline.event("VRC-A servers: device session ${if (deviceOk) "ok" else "failed"}, worker ${if (workerOk) "ok" else "failed"}")
+                // The admin's maintenance switch comes with the terms read (only once the device session is up).
+                val down = deviceOk && withTimeoutOrNull(9_000L) { maintenance.await() } == true
+                timeline.event("VRC-A servers: device session ${if (deviceOk) "ok" else "failed"}, worker ${if (workerOk) "ok" else "failed"}${if (down) ", maintenance on" else ""}")
                 status = status.copy(
                     servers = when {
+                        down -> ServiceState.Maintenance
                         deviceOk && workerOk -> ServiceState.Online
                         deviceOk || workerOk -> ServiceState.Issues
                         else -> ServiceState.Down
@@ -230,7 +244,7 @@ internal fun AppBoot(
             val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
             val deviceHash = prefs.getString("device_id_hash", "").orEmpty()
             val authUid = prefs.getString("auth_uid", "").orEmpty()
-            val terms = launch { terms(ctx) { s, n -> set(Row.Terms, s, n) } }
+            val terms = launch { terms(ctx, maintenance) { s, n -> set(Row.Terms, s, n) } }
             val account = launch {
                 set(Row.Account, BootState.Working)
                 val result = orNull { VrchatBanChecker.checkPhase1(deviceHash, authUid) }
@@ -487,6 +501,11 @@ private fun discordWillStart(ctx: Context): Boolean {
 private suspend fun discord(ctx: Context, set: (BootState, BootNote?) -> Unit) {
     val repo = (ctx.applicationContext as VrcaApplication).userPreferencesRepository
     if (!repo.discordRpcEnabled.first()) { set(BootState.Skipped, BootNote.Off); return }
+    // On, but this headset was never signed in to Discord (or signed out): nothing will connect,
+    // so say so now instead of sitting on "Connecting" until boot moves it to the background.
+    if (!repo.discordSessionSeeded.first() && !com.vrca.discord.DiscordRpcService.isRunning) {
+        set(BootState.Warn, BootNote.SignInNeeded); return
+    }
     set(BootState.Working, BootNote.Connecting)
     // Normally already started at the very start of boot (see AppBoot's first composition); this
     // covers a retry, or prefs that weren't readable then. Not via the VRChat pipeline's onOpen
@@ -535,20 +554,23 @@ private suspend fun vrchatHere(set: (BootState, BootNote?) -> Unit) {
  * Terms of Service: one `config/app` read (the terms version the admin last set) against what this
  * headset accepted. New terms don't fail boot; the terms screen after boot asks for them.
  */
-private suspend fun terms(ctx: Context, set: (BootState, BootNote?) -> Unit) {
+private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.CompletableDeferred<Boolean>, set: (BootState, BootNote?) -> Unit) {
     set(BootState.Working, null)
+    var failed = false
     val snap = withTimeoutOrNull(8_000L) {
-        orNull { FirebaseFirestore.getInstance().collection("config").document("app").get().await() }
+        orNull { FirebaseFirestore.getInstance().collection("config").document("app").get().await() }.also { if (it == null) failed = true }
     }
-    if (snap == null) { set(BootState.Failed, BootNote.CantConnect); return }
+    if (snap == null) { maintenance.complete(false); set(BootState.Failed, if (failed) BootNote.CantConnect else BootNote.TimedOut); return }
+    // The admin's "VRC-A servers maintenance" switch (Config tab) rides on this same read.
+    maintenance.complete(snap.getBoolean("serversMaintenance") == true)
     val version = (snap.getLong("tosVersion") ?: 1L).toInt().coerceAtLeast(1)
     val updatedAt = snap.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
     val accepted = TosPrefs.acceptedVersion(ctx) >= version && TosPrefs.acceptedAtMs(ctx) >= updatedAt
     if (accepted) set(BootState.Done, BootNote.Accepted) else set(BootState.Warn, BootNote.NewTerms)
 }
 
-/** VRChat's public status page, as one of the Status row's fixed words. */
-private suspend fun fetchVrchatPlatform(): ServiceState = withContext(Dispatchers.IO) {
+/** VRChat's public status page as one of the Status row's fixed words, or null if it couldn't be read. */
+private suspend fun fetchVrchatPlatform(): ServiceState? = withContext(Dispatchers.IO) {
     try {
         val conn = java.net.URL("https://status.vrchat.com/api/v2/summary.json").openConnection() as java.net.HttpURLConnection
         conn.connectTimeout = 6000; conn.readTimeout = 6000; conn.useCaches = false
@@ -564,8 +586,10 @@ private suspend fun fetchVrchatPlatform(): ServiceState = withContext(Dispatcher
             "maintenance" -> ServiceState.Maintenance
             else -> ServiceState.Down
         }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
     } catch (_: Throwable) {
-        ServiceState.Issues
+        null
     }
 }
 

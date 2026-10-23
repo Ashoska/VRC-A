@@ -138,7 +138,6 @@ enum class BootNote(val text: String) {
     SignInNeeded("Sign in needed"),
     Good("Good"),
     Restricted("Restricted"),
-    Online("Online"),
     Connecting("Connecting"),
     Found("Found"),
     NotOpen("VRChat not open"),

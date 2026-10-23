@@ -60,6 +60,8 @@ internal fun ConfigTab(
     var tosUrl by rememberSaveable { mutableStateOf("") }
     var ownerUid by rememberSaveable { mutableStateOf("") }
     var discordInvite by rememberSaveable { mutableStateOf("") }
+    // Shows "Maintenance" on everyone's boot screen VRC-A servers row (read with the terms, no extra read).
+    var serversMaintenance by rememberSaveable { mutableStateOf(false) }
     var loadedAt by remember { mutableStateOf<Timestamp?>(null) }
 
     suspend fun load() {
@@ -73,6 +75,7 @@ internal fun ConfigTab(
             tosUrl = snap.getString("tosUrl") ?: ""
             ownerUid = snap.getString("ownerUid") ?: ""
             discordInvite = snap.getString("discordInvite") ?: ""
+            serversMaintenance = snap.getBoolean("serversMaintenance") ?: false
             loadedAt = snap.getTimestamp("updatedAt")
             setGlobalLoading(false)
         }.onFailure { e ->
@@ -92,6 +95,7 @@ internal fun ConfigTab(
                 "tosText" to tosText,
                 "tosUrl" to tosUrl,
                 "discordInvite" to discordInvite.trim(),
+                "serversMaintenance" to serversMaintenance,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             db.collection("config").document("app")
@@ -142,6 +146,18 @@ internal fun ConfigTab(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                Text("VRC-A servers maintenance", style = MaterialTheme.typography.labelLarge)
+                androidx.compose.material3.Switch(
+                    checked = serversMaintenance,
+                    onCheckedChange = { serversMaintenance = it; scope.launch { saveConfig() } }
+                )
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
