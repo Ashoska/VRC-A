@@ -596,7 +596,7 @@ java.lang.IllegalStateException: Expected a preset but found none
             }
             // `show buttons [all]`: B for comparison plus the newest looks, or every look.
             val looks = com.vrca.ui.common.GremlinButtonStyle.entries.let { all ->
-                if (buttonsAll) all else all.filter { it.name in setOf("Outline", "Bubble", "BootLines", "Brackets", "Echo", "Doodle") }
+                if (buttonsAll) all else all.filter { it.name in setOf("Outline", "LayeredOutline", "Weighted", "Asymmetric", "IconChip") }
             }
             for (style in looks) {
                 androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Bottom) {

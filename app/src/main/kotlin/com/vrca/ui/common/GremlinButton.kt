@@ -31,6 +31,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -73,7 +74,15 @@ enum class GremlinButtonStyle(val label: String) {
     /** A second outline offset behind, like a sticker's shadow; pressing snaps the face onto it. */
     Echo("K  Echo"),
     /** A hand-drawn, slightly wobbly outline, like the boot wall's doodles and the logo. */
-    Doodle("L  Doodle")
+    Doodle("L  Doodle"),
+    /** B on the panels' layers: a light top lip and a flat drop under it. */
+    LayeredOutline("M  Layered outline"),
+    /** B with the outline thicker along the bottom, grounded like a key. */
+    Weighted("N  Weighted"),
+    /** B with two opposite corners rounder (a quiet nod to the speech-bubble logo). */
+    Asymmetric("O  Asymmetric"),
+    /** B with the icon in a small tinted square, like the boot rows' icons. */
+    IconChip("P  Icon chip")
 }
 
 /** Button heights: big actions (Start sending), normal, and small inline ones. */
@@ -112,7 +121,7 @@ fun GremlinButton(
     val filled = layered && (kind == GremlinButtonKind.Primary || kind == GremlinButtonKind.Danger)
     val quiet = kind == GremlinButtonKind.Quiet
     val secondary = kind == GremlinButtonKind.Secondary
-    val drop = if (layered && !quiet) 4.dp else 0.dp
+    val drop = if ((layered || style == GremlinButtonStyle.LayeredOutline) && !quiet) 4.dp else 0.dp
     // Room above the face for the cat ears.
     val top = if (style == GremlinButtonStyle.Ears && !quiet) 10.dp else 0.dp
     // Room below for the bubble's tail, and below / right for the echo.
@@ -269,6 +278,35 @@ fun GremlinButton(
                         drawPath(sketch(7, jit), edge.copy(alpha = 0.45f), style = Stroke(stroke, join = androidx.compose.ui.graphics.StrokeJoin.Round))
                         drawPath(sketch(2, jit * 0.7f), edge, style = Stroke(2.dp.toPx(), join = androidx.compose.ui.graphics.StrokeJoin.Round))
                     }
+                    GremlinButtonStyle.LayeredOutline -> {
+                        val sz = Size(w, faceH)
+                        drawRoundRect(Color.Black.copy(alpha = 0.38f), topLeft = Offset(0f, d), size = sz, cornerRadius = r)
+                        drawRoundRect(lerp(GremlinColors.Card, toneA, 0.22f * press), topLeft = Offset(0f, sink), size = sz, cornerRadius = r)
+                        drawRoundRect(edge, topLeft = Offset(0f, sink), size = sz, cornerRadius = r, style = Stroke(stroke))
+                        drawLine(Color.White.copy(alpha = 0.10f * (1f - press)), Offset(rr, sink + 2.dp.toPx()), Offset(w - rr, sink + 2.dp.toPx()), 1.dp.toPx())
+                    }
+                    GremlinButtonStyle.Weighted -> {
+                        val sz = Size(w, faceH)
+                        drawRoundRect(lerp(GremlinColors.Card, toneA, 0.22f * press), size = sz, cornerRadius = r)
+                        drawRoundRect(edge, size = sz, cornerRadius = r, style = Stroke(1.25.dp.toPx()))
+                        // The heavier bottom: the same outline, thicker, kept to the bottom strip.
+                        val heavy = (3f - 1.5f * press).dp.toPx()
+                        clipRect(top = faceH - rr) {
+                            drawRoundRect(edge, topLeft = Offset(heavy / 2, heavy / 2 - 0.5f), size = Size(w - heavy, faceH - heavy), cornerRadius = CornerRadius(rr - heavy / 2), style = Stroke(heavy))
+                        }
+                    }
+                    GremlinButtonStyle.Asymmetric -> {
+                        val big = CornerRadius(18.dp.toPx()); val small = CornerRadius(6.dp.toPx())
+                        val p = androidx.compose.ui.graphics.Path().apply {
+                            addRoundRect(androidx.compose.ui.geometry.RoundRect(0f, 0f, w, faceH, big, small, big, small))
+                        }
+                        drawPath(p, lerp(GremlinColors.Card, toneA, 0.22f * press))
+                        drawPath(p, edge.copy(alpha = 0.85f + 0.15f * press), style = Stroke((1.5f + press).dp.toPx()))
+                    }
+                    GremlinButtonStyle.IconChip -> {
+                        drawRoundRect(lerp(GremlinColors.Card, toneA, 0.22f * press), size = Size(w, faceH), cornerRadius = r)
+                        drawRoundRect(edge.copy(alpha = 0.85f + 0.15f * press), size = Size(w, faceH), cornerRadius = r, style = Stroke((1.5f + press).dp.toPx()))
+                    }
                     GremlinButtonStyle.IconBlock -> {
                         drawRoundRect(lerp(GremlinColors.Card, GremlinColors.Raised, press), cornerRadius = r)
                         drawRoundRect(GremlinColors.Edge, cornerRadius = r, style = Stroke(1.dp.toPx()))
@@ -315,6 +353,15 @@ fun GremlinButton(
                             Icon(icon!!, null, tint = if (secondary) GremlinColors.Text else GremlinColors.Backdrop, modifier = Modifier.size(iconSize))
                         }
                         Spacer(Modifier.width(12.dp))
+                    }
+                    icon != null && style == GremlinButtonStyle.IconChip && !quiet -> Row {
+                        Box(
+                            Modifier.size(iconSize + 10.dp).drawBehind {
+                                drawRoundRect((if (secondary) GremlinColors.Raised else toneA.copy(alpha = 0.2f)), cornerRadius = CornerRadius(7.dp.toPx()))
+                            },
+                            contentAlignment = Alignment.Center
+                        ) { Icon(icon, null, tint = labelColor, modifier = Modifier.size(iconSize - 2.dp)) }
+                        Spacer(Modifier.width(10.dp))
                     }
                     icon != null -> Row { Icon(icon, null, tint = labelColor, modifier = Modifier.size(iconSize)); Spacer(Modifier.width(8.dp)) }
                 }
