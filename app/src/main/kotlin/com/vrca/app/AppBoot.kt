@@ -381,7 +381,8 @@ internal fun AppBoot(
             }
             celebrate = true
             timeline.event("Ready")
-            delay(READY_HOLD_MS)
+            // First open: long enough for Boot Cat's last line to land and be read.
+            delay(if (firstOpen) FIRST_OPEN_READY_HOLD_MS else READY_HOLD_MS)
             timeline.event("hand-off (fold starts)")
             timeline.write(ctx, "handed off")
             toMainApp = BuildConfig.IS_HEADSET_BUILD && mainNext
@@ -444,6 +445,7 @@ private suspend fun <T> orNull(block: suspend () -> T): T? = try {
 
 /** How long Ready stays up before the app opens (covers the Ready sweep). */
 private const val READY_HOLD_MS = 900L
+private const val FIRST_OPEN_READY_HOLD_MS = 1_900L
 /** Longest the Ready sweep waits for the app to be built behind the boot screen. */
 private const val APP_BUILD_CAP_MS = 6_000L
 

@@ -111,6 +111,7 @@ import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.conflate
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.derivedStateOf
@@ -262,9 +263,8 @@ fun BootScreen(
     /** The VRChat display name for the checklist's "Welcome back" title; null before sign-in. */
     userName: String? = null,
     /**
-     * A new install's first open (tutorial not done): a welcome instead of the two panels. The logo
-     * stays centred over "Welcome to VRC-A", and the checks (status rows included) shrink to a strip
-     * of small tiles underneath ([WelcomeLayout]).
+     * A new install's first open (tutorial not done): a welcome instead of the two panels. The logo,
+     * then Boot Cat under it narrating what he's preparing ([WelcomeLayout]).
      */
     firstOpen: Boolean = false,
     /**
@@ -353,6 +353,8 @@ fun BootScreen(
     val shownCallback by rememberUpdatedState(onShown)
     LaunchedEffect(Unit) {
         snapshotFlow { partsL.value >= 1f && partsR.value >= 1f }.first { it }
+        // First open: Boot Cat says hi before the checks start (WelcomeLayout, same timing).
+        if (firstOpen) delay(BOOT_CAT_HELLO_MS)
         shownCallback()
     }
     val rise = with(LocalDensity.current) { 22.dp.toPx() }
@@ -422,10 +424,7 @@ fun BootScreen(
                 )
             }
             if (firstOpen) {
-                WelcomeLayout(
-                    checks, status, wide, error, stripReveal = { partsL.value },
-                    logo = logo, pills = pills, textIn = { partsR.value }, stripIn = { panelL.value }, celebrate = celebrate
-                )
+                WelcomeLayout(checks, status, wide, error, logo = logo, pills = pills, catIn = { partsR.value }, out = { exitP.value }, celebrate = celebrate)
             } else if (wide) {
                 // Headset (or any wide screen): logo and the Status card on the left; the checklist
                 // on the right. Both panels wrap their content (no empty strips) and sit bottom-aligned so their lower
@@ -1012,130 +1011,85 @@ private fun SignInPill(onClick: () -> Unit) {
     }
 }
 
-/** UI Lab switch: the first-open welcome with the waving cat and its speech bubble (option 2). */
-internal object WelcomeLab { @Volatile var cat = false }
-
 /**
- * First open: the welcome. The logo stays big and centred, "Welcome to VRC-A" under it, then the
- * checks as a strip of small tiles (Internet, VRChat, servers, then this screen's checks), each with
- * its icon and cat. Same wall, logo, cats and fold as every boot, but the greeting leads.
+ * First open: the logo, then Boot Cat (testers' name for the state cat) appears under it, says hi,
+ * and narrates what he's preparing, so a new user learns he's the loading indicator they'll see on
+ * every boot. Same wall, logo, cat faces and fold as every boot.
  */
 @Composable
 private fun WelcomeLayout(
-    checks: List<BootCheck>, status: BootStatus, wide: Boolean, error: String?, stripReveal: () -> Float,
-    logo: @Composable (Dp) -> Unit, pills: @Composable () -> Unit,
-    textIn: () -> Float, stripIn: () -> Float, celebrate: Boolean
+    checks: List<BootCheck>, status: BootStatus, wide: Boolean, error: String?,
+    logo: @Composable (Dp) -> Unit, pills: @Composable () -> Unit, catIn: () -> Float, out: () -> Float, celebrate: Boolean
 ) {
-    val net = when (status.internet) {
-        InternetLink.Checking -> Mark.Working
-        InternetLink.None -> Mark.Failed
-        InternetLink.NoAccess -> Mark.Warn
-        else -> Mark.Done
+    // He says hi first, for a moment after he's fully in, before the work starts showing.
+    var greeted by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { catIn() >= 1f }.first { it }
+        delay(BOOT_CAT_HELLO_MS)
+        greeted = true
     }
-    val tiles = listOf(
-        Triple(if (status.internet == InternetLink.None) BootIcons.NoInternet else BootIcons.Internet, "Internet", net),
-        Triple(BootIcons.Vrchat, "VRChat", status.vrchat.mark()),
-        Triple(BootIcons.VrcaServers, "Servers", status.servers.mark())
-    ) + checks.map { c -> Triple(c.icon ?: BootIcons.Internet, WELCOME_LABELS[c.label] ?: c.label, c.state.mark()) }
-    val failed = error != null || tiles.any { it.third == Mark.Failed }
-    val allDone = celebrate && tiles.none { it.third == Mark.Working || it.third == Mark.Waiting || it.third == Mark.Failed }
-    val textLayer = Modifier.graphicsLayer { alpha = textIn(); translationY = (1f - textIn()) * 12.dp.toPx() }
+    val step by rememberUpdatedState(if (!greeted) Mark.Done to "Hi, I'm Boot Cat!" else welcomeStep(checks, status, error, celebrate))
+    // Each line stays up a moment, so a quick check is still seen being done instead of flashing by.
+    var said by remember { mutableStateOf(step) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { step }.conflate().collect { said = it; delay(BOOT_CAT_LINE_MS) }
+    }
+    val (mark, line) = said
     Column(
-        Modifier.fillMaxSize().padding(horizontal = if (wide) 48.dp else 16.dp, vertical = 20.dp),
+        Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        logo(if (wide) 190.dp else PHONE_LOGO_HEIGHT)
-        Spacer(Modifier.height(if (wide) 14.dp else 18.dp))
-        Text(
-            "Welcome to VRC-A", modifier = textLayer,
-            style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "Your VRChat companion", modifier = textLayer,
-            style = MaterialTheme.typography.bodyLarge, color = GremlinColors.TextMuted
-        )
-        if (WelcomeLab.cat) {
+        logo(if (wide) 210.dp else PHONE_LOGO_HEIGHT)
+        Spacer(Modifier.height(if (wide) 26.dp else 32.dp))
+        Column(
+            NoA11y.graphicsLayer {
+                val p = catIn()
+                alpha = p * (1f - out()); scaleX = 0.6f + 0.4f * p; scaleY = 0.6f + 0.4f * p
+                translationY = (1f - p) * 16.dp.toPx()
+            },
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            BootCat(mark, 0, Modifier.size(if (wide) 108.dp else 100.dp), celebrate = greeted && mark == Mark.Done)
             Spacer(Modifier.height(14.dp))
-            CatHello(if (failed) Mark.Failed else if (allDone) Mark.Done else Mark.Working, allDone, textLayer)
-        }
-        Spacer(Modifier.height(if (wide) 20.dp else 22.dp))
-        Unfold(stripIn, Modifier.widthIn(max = if (wide) 900.dp else PHONE_MAX_WIDTH).fillMaxWidth().then(NoA11y)) {
-            WelcomeStrip(tiles, if (wide) 3 else 2, stripReveal, allDone)
+            Crossfade(line, label = "bootCatLine") {
+                Text(
+                    it, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium,
+                    color = if (mark == Mark.Failed) GremlinColors.Negative else if (mark == Mark.Warn) GremlinColors.Caution else GremlinColors.Text,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center, maxLines = 1
+                )
+            }
         }
         pills()
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "v" + BuildConfig.VERSION_NAME.removePrefix("v"), modifier = textLayer,
-            style = MaterialTheme.typography.labelMedium, color = GremlinColors.TextMuted
-        )
     }
 }
 
-/** The welcome's shorter tile names (a tile is a third of the strip). */
-private val WELCOME_LABELS = mapOf("Device session" to "Device", "Account standing" to "Account")
+/** How long Boot Cat's hello stays before he starts narrating. */
+internal const val BOOT_CAT_HELLO_MS = 1_400L
+/** Shortest time one of Boot Cat's lines stays up. */
+private const val BOOT_CAT_LINE_MS = 650L
 
-/** The welcome's checks: one Gremlin layer holding [columns] tiles a row. */
-@Composable
-private fun WelcomeStrip(tiles: List<Triple<BootIcon, String, Mark>>, columns: Int, reveal: () -> Float, allDone: Boolean) {
-    val shown = revealedCount(reveal, tiles.size)
-    Layer(Modifier.fillMaxWidth()) {
-        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            tiles.withIndex().chunked(columns).forEach { row ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    row.forEach { (i, t) ->
-                        // Like the checklist: a tile waits until it has fully appeared.
-                        val mark = if (i >= shown) Mark.Waiting else t.third
-                        WelcomeTile(t.first, t.second, mark, i, allDone, Modifier.weight(1f).widenIn { stagger(reveal(), i, tiles.size) })
-                    }
-                    repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun WelcomeTile(icon: BootIcon, label: String, mark: Mark, index: Int, celebrate: Boolean, modifier: Modifier) {
-    val accent = MaterialTheme.colorScheme.primary
-    val tone by animateColorAsState(
-        when (mark) {
-            Mark.Done -> GremlinColors.Positive
-            Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
-            Mark.Failed -> GremlinColors.Negative
-            Mark.Working, Mark.Background -> accent
-            else -> GremlinColors.TextMuted
-        }, tween(300), label = "welcomeTile"
-    )
-    Row(
-        modifier.height(40.dp).clip(RoundedCornerShape(12.dp)).background(GremlinColors.Card)
-            .rowEdge(mark, tone, edgeWhileWorking = false).padding(start = 10.dp, end = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        BootIconView(icon, { GremlinColors.TextMuted }, { tone }, Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
-        Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.Text, maxLines = 1, modifier = Modifier.weight(1f))
-        StateMark(mark, variant = index, celebrate = celebrate, hopDelayMs = 150L + index * 110L)
-    }
-}
-
-/** Option 2: a big boot cat with a speech bubble that follows how setup is going. */
-@Composable
-private fun CatHello(mark: Mark, celebrate: Boolean, modifier: Modifier) {
-    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        BootCat(mark, 0, Modifier.size(52.dp), celebrate, 0)
-        Spacer(Modifier.width(10.dp))
-        Layer(shape = RoundedCornerShape(16.dp), color = GremlinColors.Card, drop = 4.dp) {
-            Crossfade(
-                when (mark) {
-                    Mark.Failed -> "Hmm, something can't connect"
-                    Mark.Done -> "All set! Let's get you started"
-                    else -> "Hi! Getting things ready..."
-                }, label = "catHello"
-            ) {
-                Text(it, style = MaterialTheme.typography.bodyMedium, color = GremlinColors.Text, modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
-            }
-        }
+/**
+ * What Boot Cat is doing right now: the first check still running, in the order a user would care
+ * about; once all are in, his verdict (the first problem, or all set).
+ */
+private fun welcomeStep(checks: List<BootCheck>, status: BootStatus, error: String?, celebrate: Boolean): Pair<Mark, String> {
+    if (error != null) return Mark.Failed to "I can't connect, trying again"
+    fun check(label: String) = checks.firstOrNull { it.label == label }
+    val working = listOf(
+        (status.internet == InternetLink.Checking) to "Checking your internet...",
+        (check("Device session")?.state.let { it == BootState.Working || it == BootState.Waiting }) to "Setting up this device...",
+        (status.servers == ServiceState.Checking) to "Reaching VRC-A servers...",
+        (status.vrchat == ServiceState.Checking) to "Checking on VRChat...",
+        (check("Account standing")?.state.let { it == BootState.Working || it == BootState.Waiting }) to "Checking your account...",
+        (check("Tutorial")?.state.let { it == BootState.Working || it == BootState.Waiting }) to "Getting the tutorial ready..."
+    ).firstOrNull { it.first }
+    if (working != null || !celebrate) return Mark.Working to (working?.second ?: "Almost there...")
+    return when {
+        status.internet == InternetLink.None -> Mark.Failed to "No internet connection"
+        status.internet == InternetLink.NoAccess -> Mark.Warn to "This network has no internet"
+        status.vrchat != ServiceState.Online -> Mark.Warn to "VRChat is having issues"
+        status.servers != ServiceState.Online -> Mark.Warn to "VRC-A servers are having issues"
+        else -> Mark.Done to "All set! Welcome to VRC-A"
     }
 }
