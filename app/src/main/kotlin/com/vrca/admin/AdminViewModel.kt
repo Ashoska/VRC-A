@@ -288,6 +288,7 @@ class AdminViewModel(
                     "tosVersion" to version,
                     "tosText" to text,
                     "tosUrl" to url,
+                    "tosUpdatedAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 ),
                 com.google.firebase.firestore.SetOptions.merge()
