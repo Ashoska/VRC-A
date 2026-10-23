@@ -582,7 +582,9 @@ object UiLabScenes {
                 // (default 6000, about a Quest load).
                 val ctx = androidx.compose.ui.platform.LocalContext.current
                 val words = rest.split(' ').filter { it.isNotBlank() }
-                val mode = words.firstOrNull { !it.startsWith("discord") }.orEmpty()
+                // `... welcomecat`: the first-open welcome with the waving cat (WelcomeLab).
+                com.vrca.app.WelcomeLab.cat = "welcomecat" in words
+                val mode = words.firstOrNull { !it.startsWith("discord") && it != "welcomecat" }.orEmpty()
                 val discordArg = words.firstOrNull { it.startsWith("discord") }
                 if (discordArg != null) {
                     val ms = discordArg.substringAfter('=', "6000").toLongOrNull() ?: 6000L
