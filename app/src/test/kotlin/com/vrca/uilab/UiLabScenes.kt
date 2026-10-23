@@ -369,7 +369,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "cats", "buttons", "download", "downloadcat", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "buttons", "download", "downloadcat", "starticon", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -692,6 +692,22 @@ object UiLabScenes {
             // progress runs 0 -> 100% over 5 s (record it), then holds.
             "download" -> DownloadSheet()
             "downloadcat" -> DownloadCatLoop()
+            // TRIAL sheet: the crash screen's two buttons with each Start icon option.
+            "starticon" -> androidx.compose.foundation.layout.Column(
+                Modifier.fillMaxSize().background(com.vrca.ui.theme.GremlinColors.Backdrop).padding(horizontal = 180.dp, vertical = 70.dp),
+                verticalArrangement = Arrangement.spacedBy(26.dp)
+            ) {
+                for ((label, opt) in listOf("Now (Material arrow)" to 0, "A  Plain play" to 1, "B  Eared tile, like Download" to 2)) {
+                    Text(label, style = MaterialTheme.typography.labelLarge, color = com.vrca.ui.theme.GremlinColors.TextMuted)
+                    androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        com.vrca.ui.common.GremlinButton("Download report", {}, Modifier.weight(1f), kind = com.vrca.ui.common.GremlinButtonKind.Secondary,
+                            bootIcon = com.vrca.app.BootIcons.Updates, size = com.vrca.ui.common.GremlinButtonSize.Large)
+                        com.vrca.ui.common.GremlinButton("Start VRC-A", {}, Modifier.weight(1f), size = com.vrca.ui.common.GremlinButtonSize.Large,
+                            icon = if (opt == 0) androidx.compose.material.icons.Icons.Filled.PlayArrow else null,
+                            bootIcon = when (opt) { 1 -> com.vrca.app.BootIcons.StartPlain; 2 -> com.vrca.app.BootIcons.StartTile; else -> null })
+                    }
+                }
+            }
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.
