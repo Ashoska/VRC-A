@@ -16,17 +16,19 @@ checked in the UI Lab and merged before the next.
 - Process per page: mock-up sheet (every state) → user approval → build → lab screenshots / recording →
   merge. Sheets for users come from the lab, not hand-made mocks.
 
-## Pages
-| # | Page | Status |
-|---|---|---|
-| 1 | Boot screen (row icons, cat state marks, version chip, timeline, Discord no longer blocks) | DONE 2026-10-23 |
-| 2 | Home (headset 3-column + phone) | next |
-| 3 | Automations | |
-| 4 | Media | |
-| 5 | VRChat tab + roster | |
-| 6 | Settings | |
-| 7 | Gates: onboarding, ToS, login, update dialog | |
-| 8 | Admin (all tabs; the Config tab's VRC-A servers maintenance switch is a placeholder for this) | |
+## Pages (in the order a user meets them, starting from the boot screen)
+| # | Page | When users see it | Status |
+|---|---|---|---|
+| 1 | Boot screen (row icons, cat state marks, version chip, timeline, Discord no longer blocks) | every open | DONE 2026-10-23 |
+| 2 | Terms of Service gate (+ the rare banned / crash screens, same building blocks) | first open, or when the terms change | next |
+| 3 | Onboarding + VRChat login | new users, right after the terms | |
+| 4 | Update dialog + What's New | first open after an update | |
+| 5 | Home (headset 3-column + phone) | where everyone lands | |
+| 6 | Automations | bottom-bar order | |
+| 7 | Media | | |
+| 8 | VRChat tab + roster | | |
+| 9 | Settings | | |
+| 10 | Admin (all tabs; the Config tab's VRC-A servers maintenance switch is a placeholder for this) | admin build only | |
 
 Cleanup done at the start: the unused pre-revamp Home / Automations / Media pages
 (`LegacyPagesAndSettingsPage.kt`, ~770 lines) were deleted.
