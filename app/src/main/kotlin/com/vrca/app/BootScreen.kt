@@ -22,6 +22,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.drawWithContent
 import com.vrca.ui.common.animatedOutline
@@ -1119,7 +1120,8 @@ private fun WelcomeLayout(
     val moving by remember { derivedStateOf { move() > 0f } }
     // A check that's taking long gets a second line, so a slow boot doesn't look stuck.
     var slow by remember { mutableStateOf(false) }
-    LaunchedEffect(next) { slow = false; delay(BOOT_CAT_SLOW_MS); slow = true }
+    val narrating by remember { derivedStateOf { panelIn() >= 1f } }
+    LaunchedEffect(next, narrating) { slow = false; if (!narrating) return@LaunchedEffect; delay(BOOT_CAT_SLOW_MS); slow = true }
     val bubbleBack = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         snapshotFlow { move() >= 1f }.first { it }
@@ -1261,7 +1263,7 @@ private fun WelcomeLayout(
         // Boot Cat and his bubble: first under the centred logo, then gliding (with the logo) to his
         // spot at the top of the panel.
         val at = spot
-        val helloW = if (wide) 300.dp else 270.dp
+        val helloW = if (wide) 380.dp else 340.dp
         if (at != null) {
             Row(
                 // A compact speaker for the hello (centred under the logo), the panel's full width once landed
@@ -1286,7 +1288,8 @@ private fun WelcomeLayout(
                             (hello.y + (at.y - hello.y) * my + arc + hop).toInt()
                         )
                     }
-                    .graphicsLayer { alpha = (catIn() * 3f).coerceAtMost(1f) * (1f - out()) },
+                    // Leaves with his panel as it folds away (then the rest fades).
+                    .graphicsLayer { alpha = (catIn() * 3f).coerceAtMost(1f) * (1f - out()) * (if (move() >= 1f) panelIn() else 1f) },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 BootCat(mark, 0, Modifier.size(if (wide) 40.dp else 36.dp), celebrate = celebrate && next >= steps.size && mark == Mark.Done)
@@ -1335,7 +1338,10 @@ private fun WelcomeLayout(
                             Text(
                                 it, style = if (wide) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium,
                                 color = when (mark) { Mark.Failed -> GremlinColors.Negative; Mark.Warn, Mark.Maintenance -> GremlinColors.Caution; else -> GremlinColors.Text },
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                                // Laid out at its full width and clipped by the bubble, so while the bubble grows
+                                // to a longer line the text is uncovered instead of squeezed into "...".
+                                maxLines = 1, softWrap = false, overflow = TextOverflow.Clip,
+                                modifier = Modifier.wrapContentWidth(Alignment.Start, unbounded = true)
                             )
                         }
                     }
