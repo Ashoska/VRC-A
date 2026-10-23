@@ -22,7 +22,7 @@ revamped with that page. A page is DONE only when everything listed under it is 
 
 | # | Page | When users see it | Status |
 |---|---|---|---|
-| 1 | Boot screen | every open | returning version DONE 2026-10-23; first-install version next |
+| 1 | Boot screen | every open | DONE 2026-10-23 (returning + first-install Boot Cat welcome) |
 | 2 | Gates | first open, terms change, rare failures | next |
 | 3 | Onboarding + VRChat login | new users, right after the terms | |
 | 4 | Update + What's New | first open after an update, or a forced update | |
@@ -36,13 +36,7 @@ revamped with that page. A page is DONE only when everything listed under it is 
 
 ### What each page includes
 1. **Boot screen** (`BootScreen`, `BootRevealOverlay`): row icons, cat state marks, version chip,
-   timeline, Discord no longer blocks. Two versions were planned from the start (user: "main version
-   then the first time install version"); only the returning one is built. **First-install version**
-   (not built yet; today new users get the returning screen, which says "Welcome back" and shows
-   sign-in / terms / updates as not done): "Welcome to VRC-A / Setting things up"; rows: device
-   session, tutorial images download, VRChat status (no rows that can only be "not done yet" on a
-   first open); the side panel shows a short "what this app does" instead of status / what's new;
-   hands off to the terms and the tutorial.
+   timeline, Discord no longer blocks. Two versions, both built: the returning boot and the first-install welcome where Boot Cat guides the checks (details in `docs/systems/onboarding-startup.md`).
 2. **Gates**: `TosGate` (terms + accept), `BannedScreen` (both copies: `VrcaApp` and the one in
    `VrcaScreen`, merged into one when revamped), `CrashScreen`.
 3. **Onboarding + VRChat login**: `OnboardingFlow` (every step), `VrchatLoginScreen` (login, 2FA),

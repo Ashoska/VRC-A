@@ -167,6 +167,20 @@ object BootIcons {
         }
     )
 
+    /** First open: the tutorial's pictures (an open book, paw on the page). */
+    val Tutorial = BootIcon(
+        glyph("Tutorial") {
+            line("M12 7c-2.2-1.6-5.3-2-8.5-1.5v13c3.2-.5 6.3-.1 8.5 1.5 2.2-1.6 5.3-2 8.5-1.5v-13c-3.2-.5-6.3-.1-8.5 1.5z")
+            line("M12 7v13")
+        },
+        glyph("TutorialDetail") {
+            solid("M16 15.2c-1 0-1.5-.5-1.5-1.1 0-.8.7-1.4 1.5-1.4s1.5.6 1.5 1.4c0 .6-.5 1.1-1.5 1.1z")
+            solid("M13.9 11.6a.65 .65 0 1 0 1.3 0a.65 .65 0 1 0 -1.3 0z")
+            solid("M15.35 10.8a.65 .65 0 1 0 1.3 0a.65 .65 0 1 0 -1.3 0z")
+            solid("M16.8 11.6a.65 .65 0 1 0 1.3 0a.65 .65 0 1 0 -1.3 0z")
+        }
+    )
+
     private class Glyph(val b: ImageVector.Builder) {
         fun line(d: String, width: Float = 1.9f, clipped: Boolean = false) = add(d, clipped) { nodes ->
             b.addPath(nodes, stroke = SolidColor(Color.Black), strokeLineWidth = width,

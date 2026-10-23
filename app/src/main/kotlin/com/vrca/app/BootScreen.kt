@@ -19,6 +19,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.drawWithContent
 import com.vrca.ui.common.animatedOutline
 import com.vrca.ui.common.widenIn
@@ -56,6 +61,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
@@ -63,6 +69,11 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.fadeOut
 import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material.icons.filled.Remove
@@ -111,6 +122,7 @@ import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.conflate
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.derivedStateOf
@@ -150,6 +162,9 @@ enum class BootNote(val text: String) {
     Accepted("Accepted"),
     NewTerms("New terms"),
     CantConnect("Can't connect"),
+    Ready("Ready"),
+    Downloading("Downloading"),
+    WillRetry("Will retry"),
     TimedOut("Timed out")
 }
 
@@ -259,6 +274,13 @@ fun BootScreen(
     /** The VRChat display name for the checklist's "Welcome back" title; null before sign-in. */
     userName: String? = null,
     /**
+     * A new install's first open (tutorial not done): a welcome instead of the two panels. The logo,
+     * then Boot Cat under it narrating what he's preparing ([WelcomeLayout]).
+     */
+    firstOpen: Boolean = false,
+    /** First open: Boot Cat has listed every check (AppBoot waits for it before the Ready moment). */
+    onWelcomeListed: () -> Unit = {},
+    /**
      * False holds the checklist header's Ready moment (sweep + chip pop) even once every row has
      * settled; it plays when this turns true (AppBoot builds the app behind the screen first).
      */
@@ -288,6 +310,9 @@ fun BootScreen(
     val panelR = remember { Animatable(start) }
     val partsL = remember { Animatable(start) }
     val partsR = remember { Animatable(start) }
+    // First open: Boot Cat's entrance under the logo (WelcomeLayout).
+    val catIn = remember { Animatable(start) }
+    val catMove = remember { Animatable(start) }
     // Both coordinates are kept and the logo's centre is derived from them. Computing it in the
     // logo's own callback needed the box's callback to have run first (their order isn't
     // guaranteed), which could leave the intro waiting on a blank screen until something moved.
@@ -317,14 +342,26 @@ fun BootScreen(
     LaunchedEffect(placed) {
         if (!playIntro || !placed || logoIn.value > 0f) return@LaunchedEffect
         logoIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
+        if (firstOpen) {
+            // First open: Boot Cat hops in under the centred logo and says hi before anything moves.
+            delay(260)
+            catIn.animateTo(1f, tween(560, easing = FastOutSlowInEasing))
+            delay(BOOT_CAT_HELLO_MS)
+        }
         delay(420)
         launch { settle.animateTo(1f, tween(760, easing = FastOutSlowInEasing)) }
+        // First open: Boot Cat jumps across just behind the logo's glide, landing as his panel opens.
+        if (firstOpen) {
+            launch { delay(BOOT_CAT_JUMP_DELAY_MS); catMove.animateTo(1f, tween(BOOT_CAT_JUMP_MS, easing = LinearEasing)) }
+            // His panel opens while he's in the air, so he lands in it rather than waiting on an empty wall.
+            launch { delay(160); panelR.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
+        }
         delay(300)
         launch { contentIn.animateTo(1f, tween(520, easing = FastOutSlowInEasing)) }
         delay(220)
         launch { panelL.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
         delay(130)
-        launch { panelR.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
+        if (!firstOpen) launch { panelR.animateTo(1f, tween(700, easing = FastOutSlowInEasing)) }
         delay(470)
         launch { partsL.animateTo(1f, tween(700)) }
         delay(130)
@@ -409,10 +446,16 @@ fun BootScreen(
             val pills: @Composable () -> Unit = {
                 BootPills(
                     error, retryInSec, onRetry, onSignIn,
-                    centreAt = if (wide) { width, gap -> ((width - gap) * 0.85f / 2f + gap / 2f).toInt() } else null
+                    centreAt = if (wide && !firstOpen) { width, gap -> ((width - gap) * 0.85f / 2f + gap / 2f).toInt() } else null
                 )
             }
-            if (wide) {
+            if (firstOpen) {
+                WelcomeLayout(
+                    checks, status, wide, error, logo = logo, pills = pills,
+                    catIn = { catIn.value }, move = { catMove.value }, panelIn = { panelR.value }, out = { exitP.value },
+                    celebrate = celebrate, onListed = onWelcomeListed
+                )
+            } else if (wide) {
                 // Headset (or any wide screen): logo and the Status card on the left; the checklist
                 // on the right. Both panels wrap their content (no empty strips) and sit bottom-aligned so their lower
                 // edges line up; the pair is centred on the screen. On an error, Retry / Continue
@@ -660,8 +703,8 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
     val chipPop = remember { Animatable(1f) }
     LaunchedEffect(done) {
         if (!done) { sweep.snapTo(-2f); return@LaunchedEffect }
-        launch { chipPop.animateTo(1.18f, tween(140)); chipPop.animateTo(1f, spring(dampingRatio = 0.4f)) }
         sweep.snapTo(-1f)
+        launch { delay(SWEEP_TO_CHIP_MS); chipPop.animateTo(1.18f, tween(140)); chipPop.animateTo(1f, spring(dampingRatio = 0.4f)) }
         sweep.animateTo(checks.size + 1f, tween(650, easing = FastOutSlowInEasing))
     }
     Column {
@@ -671,16 +714,12 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
                 style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = GremlinColors.Text,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
             )
-            // The app version (user, 2026-10-22: it replaced the "4/7" count; the bar already shows
-            // progress). Still takes the header tone and pops when boot lands.
-            Text(
-                "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
-                style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
-                modifier = Modifier.graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }.background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
-            )
         }
-        Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth().height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Spacer(Modifier.height(10.dp))
+        // The bar, then the app version at its end (user, 2026-10-23: next to the title it sat oddly).
+        // The chip takes the header tone and pops when the Ready sweep reaches it.
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.weight(1f).height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             checks.forEachIndexed { i, c ->
                 val seg = animateColorAsState(
                     when (c.state) {
@@ -703,6 +742,13 @@ private fun BootHeader(checks: List<BootCheck>, userName: String?, celebrate: Bo
                         }
                 )
             }
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
+            style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
+            modifier = Modifier.graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }.background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
+        )
         }
     }
 }
@@ -862,7 +908,10 @@ private fun Modifier.rowEdge(mark: Mark, tone: Color, edgeWhileWorking: Boolean 
 
 /** One service in the Status panel: icon, name, its fixed state word and a coloured dot. Built like a check row. */
 @Composable
-private fun ServiceRow(icon: BootIcon, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp, variant: Int = 0) {
+private fun ServiceRow(
+    icon: BootIcon, name: String, text: String, mark: Mark, modifier: Modifier, height: Dp, variant: Int = 0,
+    celebrate: Boolean = false, hopDelayMs: Long = 0
+) {
     val target = when (mark) {
         Mark.Done -> GremlinColors.Positive
         Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
@@ -889,7 +938,7 @@ private fun ServiceRow(icon: BootIcon, name: String, text: String, mark: Mark, m
         val textColor by animateColorAsState(if (warn) target else GremlinColors.TextMuted, label = "serviceText")
         Crossfade(text, label = "serviceText") { Text(it, style = MaterialTheme.typography.bodySmall, color = textColor, maxLines = 1) }
         Spacer(Modifier.width(10.dp))
-        StateMark(mark, variant)
+        StateMark(mark, variant, celebrate, hopDelayMs)
     }
 }
 
@@ -995,5 +1044,408 @@ private fun SignInPill(onClick: () -> Unit) {
             Spacer(Modifier.width(10.dp))
             Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = GremlinColors.Backdrop, modifier = Modifier.size(18.dp))
         }
+    }
+}
+
+/** One check Boot Cat goes through on the first open: what he says while it runs, and its row once done. */
+private class WelcomeStep(val icon: BootIcon, val name: String, val working: String, val result: Pair<Mark, String>?)
+
+/** The first open's checks, in the order Boot Cat goes through them; a result is null while it's running (or failed). */
+private fun welcomeSteps(checks: List<BootCheck>, status: BootStatus): List<WelcomeStep> {
+    fun check(label: String) = checks.firstOrNull { it.label == label }
+    fun row(c: BootCheck?): Pair<Mark, String>? = when (c?.state) {
+        BootState.Done, BootState.Warn, BootState.Skipped, BootState.Background -> c.state.mark() to (c.note?.text ?: "")
+        else -> null
+    }
+    fun service(s: ServiceState): Pair<Mark, String>? = if (s == ServiceState.Checking) null else s.mark() to s.text
+    val net = status.internet
+    return listOf(
+        WelcomeStep(
+            BootIcons.Internet, "Internet", "Sniffing out your Wi-Fi...",
+            when (net) {
+                InternetLink.Checking, InternetLink.None -> null
+                InternetLink.NoAccess -> Mark.Warn to net.text
+                else -> Mark.Done to (if (status.internetMbps > 0) "${net.text} · ${status.internetMbps.coerceAtMost(9999)} Mbps" else net.text)
+            }
+        ),
+        // Order (like the normal boot's dependency order): the connection, then VRC-A's side (this
+        // device's session, our servers, the account check), then VRChat, then what comes next.
+        WelcomeStep(BootIcons.DeviceSession, "Device session", "Getting this device its name tag...", row(check("Device session"))),
+        WelcomeStep(BootIcons.VrcaServers, "VRC-A servers", "Saying hi to the VRC-A servers...", service(status.servers)),
+        WelcomeStep(BootIcons.Account, "Account standing", "Checking your paws are clean...", row(check("Account standing"))),
+        WelcomeStep(BootIcons.Vrchat, "VRChat", "Checking VRChat is awake...", service(status.vrchat)),
+        WelcomeStep(BootIcons.Tutorial, "Tutorial", "Fetching your tutorial...", row(check("Tutorial")))
+    )
+}
+
+/**
+ * First open, with Boot Cat (testers' name for the state cat) as the guide: the logo fades in, he
+ * hops in under it and says hi; then the logo glides left like every boot, he glides with his
+ * speech bubble to the top of the panel that unfolds on the right, and goes through the checks one
+ * by one. Each finished check drops into the list under him, newest on top, pushing the older ones
+ * down. His bubble is a fixed size (a bubble sized to its line kept jumping, user 2026-10-23).
+ */
+@Composable
+private fun WelcomeLayout(
+    checks: List<BootCheck>, status: BootStatus, wide: Boolean, error: String?,
+    logo: @Composable (Dp) -> Unit, pills: @Composable () -> Unit,
+    catIn: () -> Float, move: () -> Float, panelIn: () -> Float, out: () -> Float,
+    celebrate: Boolean, onListed: () -> Unit
+) {
+    val steps = welcomeSteps(checks, status)
+    val results by rememberUpdatedState(steps.map { it.result })
+    // Indexes into [steps], newest first. A Retry restarts the checks (rows back to Waiting), so a
+    // listed check that loses its result empties the list and he starts over.
+    val listed = remember { mutableStateListOf<Int>() }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    var next by remember { mutableIntStateOf(0) }
+    val listedCallback by rememberUpdatedState(onListed)
+    LaunchedEffect(Unit) {
+        snapshotFlow { panelIn() >= 1f }.first { it }
+        while (true) {
+            fun regressed() = listed.any { results[it] == null }
+            if (next >= steps.size) {
+                listedCallback()
+                snapshotFlow { regressed() }.first { it }
+            } else {
+                val t0 = android.os.SystemClock.uptimeMillis()
+                snapshotFlow { results[next] != null || regressed() }.first { it }
+                if (!regressed()) {
+                    // Each line stays up a moment, so a quick check is still seen being done.
+                    delay((BOOT_CAT_LINE_MS - (android.os.SystemClock.uptimeMillis() - t0)).coerceAtLeast(0L))
+                    if (!regressed()) {
+                        // A lazy list keeps its first row in place when one is added above it (the new
+                        // row landed half out of view, scrolled up); keep the list at its top instead.
+                        listState.requestScrollToItem(0)
+                        listed.add(0, next); next++; continue
+                    }
+                }
+            }
+            listed.clear(); next = 0
+        }
+    }
+    // What he says: hello (until he starts moving), then the check he's on, a failure, or his verdict.
+    var helloTwo by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { catIn() >= 1f }.first { it }
+        delay(BOOT_CAT_HELLO_MS / 2)
+        helloTwo = true
+    }
+    val moving by remember { derivedStateOf { move() > 0f } }
+    // A check that's taking long gets a second line, so a slow boot doesn't look stuck.
+    var slow by remember { mutableStateOf(false) }
+    val narrating by remember { derivedStateOf { panelIn() >= 1f } }
+    LaunchedEffect(next, narrating) { slow = false; if (!narrating) return@LaunchedEffect; delay(BOOT_CAT_SLOW_MS); slow = true }
+    val bubbleBack = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { move() >= 1f }.first { it }
+        bubbleBack.animateTo(1f, spring(dampingRatio = 0.7f, stiffness = 380f))
+    }
+    val (mark, line) = when {
+        !moving && !helloTwo -> Mark.Done to "Hi! I'm Boot Cat"
+        // (`narrating`, not panelIn() itself: reading the unfold here rebuilt this every frame of it.)
+        !moving || !narrating && next == 0 -> Mark.Done to "I'll get everything ready for you"
+        error != null || status.internet == InternetLink.None -> Mark.Failed to welcomeFailure(checks, status)
+        next < steps.size -> Mark.Working to (if (slow) "This one's taking a while..." else steps[next].working)
+        !celebrate -> Mark.Working to "Almost there..."
+        else -> welcomeVerdict(checks, status)
+    }
+    val accent = MaterialTheme.colorScheme.primary
+    val mood by animateColorAsState(
+        when (mark) {
+            Mark.Done -> GremlinColors.Positive
+            Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
+            Mark.Failed -> GremlinColors.Negative
+            else -> accent
+        }.copy(alpha = 0.75f), tween(300), label = "bootCatMood"
+    )
+    val rowH = if (wide) WIDE_ROW_HEIGHT else 34.dp
+    val rowGap = if (wide) 8.dp else 6.dp
+    val logoH = if (wide) WIDE_LOGO_HEIGHT else PHONE_LOGO_HEIGHT * 1.15f
+    // Where his spot in the panel is (the panel's outer box isn't scaled by its unfold, so this is
+    // the open panel's real place), as state written only when it moves.
+    val density = LocalDensity.current
+    val pad = with(density) { Offset(18.dp.toPx(), 16.dp.toPx()) }
+    val box = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
+    var spot by remember { mutableStateOf<Offset?>(null) }
+    var spotW by remember { mutableStateOf(0.dp) }
+    // The logo's drawn width (it keeps its picture's shape), read where Boot Cat is placed.
+    var logoW by remember { mutableIntStateOf(0) }
+    val logoWidth = Modifier.onSizeChanged { if (it.width != logoW) logoW = it.width }
+    val allDone = celebrate && next >= steps.size && error == null
+    val sweep = remember { Animatable(-2f) }
+    val chipPop = remember { Animatable(1f) }
+    Box(Modifier.fillMaxSize().onGloballyPositioned { box[0] = it }) {
+        val panel: @Composable (Modifier) -> Unit = { m ->
+            Unfold(panelIn, m.onGloballyPositioned { c ->
+                val root = box[0] ?: return@onGloballyPositioned
+                if (!root.isAttached || !c.isAttached) return@onGloballyPositioned
+                val at = root.localPositionOf(c, Offset.Zero) + pad
+                if (at != spot) spot = at
+                val w = with(density) { (c.size.width - 2 * pad.x).toDp() }
+                if (w != spotW) spotW = w
+            }.then(NoA11y)) {
+                Layer(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+                        // The version, like the normal boot's header chip, in the colour of how it's going.
+                            val tone by animateColorAsState(
+                                when {
+                                    error != null -> GremlinColors.Negative
+                                    next >= steps.size && celebrate -> GremlinColors.Positive
+                                    else -> accent
+                                }, label = "welcomeChip"
+                            )
+                        val chip: @Composable () -> Unit = {
+                            Text(
+                                "v" + BuildConfig.VERSION_NAME.removePrefix("v"),
+                                style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
+                                modifier = Modifier.graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }
+                                    .background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
+                            )
+                        }
+                        Spacer(Modifier.fillMaxWidth().height(BOOT_CAT_ROW_HEIGHT)) // his spot
+                        Spacer(Modifier.height(12.dp))
+                        // One segment per check, in check order (the normal boot's bar): its result's colour
+                        // once listed, the accent (breathing) on the one he's doing, dark while still to come.
+                        // All done: a light sweeps along the strip and the chip pops (the normal boot's Ready moment).
+                        LaunchedEffect(allDone) {
+                            if (!allDone) { sweep.snapTo(-2f); return@LaunchedEffect }
+                            sweep.snapTo(-1f)
+                            launch { delay(SWEEP_TO_CHIP_MS); chipPop.animateTo(1.18f, tween(140)); chipPop.animateTo(1f, spring(dampingRatio = 0.4f)) }
+                            sweep.animateTo(steps.size + 1f, tween(650, easing = FastOutSlowInEasing))
+                        }
+                        val pulse = rememberInfiniteTransition(label = "welcomePulse").animateFloat(
+                            0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "welcomePulseA"
+                        )
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.weight(1f).height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            steps.indices.forEach { i ->
+                                val done = i in listed
+                                val current = i == next && error == null
+                                val seg by animateColorAsState(
+                                    when {
+                                        done -> when (results[i]?.first) {
+                                            Mark.Warn, Mark.Maintenance -> GremlinColors.Caution
+                                            Mark.Failed -> GremlinColors.Negative
+                                            else -> GremlinColors.Positive
+                                        }
+                                        i == next && error != null -> GremlinColors.Negative
+                                        current -> accent
+                                        else -> GremlinColors.Raised
+                                    }, label = "welcomeSeg"
+                                )
+                                // How much of the all-done sweep is on this segment right now (0..1).
+                                fun glow() = (1f - kotlin.math.abs(sweep.value - i - 0.5f)).coerceIn(0f, 1f)
+                                Box(Modifier.weight(1f).fillMaxHeight().graphicsLayer { scaleY = 1f + glow() * 0.6f }.drawBehind {
+                                    val a = if (current) pulse.value else 1f
+                                    val c = androidx.compose.ui.graphics.lerp(seg.copy(alpha = seg.alpha * a), GremlinColors.Text, glow() * 0.75f)
+                                    drawRoundRect(c, cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2, size.height / 2))
+                                })
+                            }
+                        }
+                        // The version at the strip's end, as on the normal boot.
+                        Spacer(Modifier.width(10.dp)); chip()
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        // Finished checks on top (newest first), then the ones still to come as faint rows in
+                        // check order. A check keeps its key, so finishing one moves its row from the faint
+                        // part up to the top.
+                        val order = listed.toList() + steps.indices.filter { it !in listed }
+                        androidx.compose.foundation.lazy.LazyColumn(
+                            Modifier.fillMaxWidth().height(rowH * steps.size + rowGap * (steps.size - 1)),
+                            state = listState,
+                            verticalArrangement = Arrangement.spacedBy(rowGap), userScrollEnabled = false
+                        ) {
+                            items(order.size, key = { order[it] }) { k ->
+                                val i = order[k]
+                                val r = results[i]
+                                // All done: the cats hop one after another down the list, like the normal boot.
+                                if (i in listed && r != null) ServiceRow(
+                                    steps[i].icon, steps[i].name, r.second, r.first, Modifier.animateItem(), rowH, variant = i,
+                                    celebrate = allDone, hopDelayMs = 250L + k * 130L
+                                )
+                                else ComingRow(steps[i].icon, steps[i].name, Modifier.animateItem(), rowH)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (wide) {
+            Column(Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 32.dp, vertical = 22.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(WIDE_GAP)) {
+                    Box(Modifier.weight(0.85f), contentAlignment = Alignment.Center) { Box(logoWidth) { logo(logoH) } }
+                    // Retry opens under the panel, centred on it.
+                    Column(Modifier.weight(1.15f)) { panel(Modifier.fillMaxWidth()); pills() }
+                }
+            }
+        } else {
+            Column(
+                Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center
+            ) {
+                Box(logoWidth) { logo(logoH) }
+                Spacer(Modifier.height(PHONE_GAP + 4.dp))
+                panel(Modifier.widthIn(max = PHONE_MAX_WIDTH).fillMaxWidth())
+                pills()
+            }
+        }
+        // Boot Cat and his bubble: first under the centred logo, then gliding (with the logo) to his
+        // spot at the top of the panel.
+        val at = spot
+        val helloW = if (wide) 380.dp else 340.dp
+        if (at != null) {
+            Row(
+                // A compact speaker for the hello (centred under the logo), the panel's full width once landed
+                // (the bubble is hidden while the width changes).
+                NoA11y.width(if (move() < 1f) helloW else spotW).height(BOOT_CAT_ROW_HEIGHT)
+                    .offset {
+                        val root = box[0]
+                        val w = root?.size?.width?.toFloat() ?: 0f
+                        val h = root?.size?.height?.toFloat() ?: 0f
+                        // Under the centred logo, his left edge in line with the logo's left edge.
+                        val hello = Offset((w - logoW) / 2f, h / 2f + logoH.toPx() / 2f + 14.dp.toPx())
+                        // A jump: eased across, with an arc on top (his hop, made bigger), and the hop-in on arrival.
+                        // Sideways first, then up (his path curves away from the logo instead of
+                        // crossing its tail), with a small arc on top.
+                        val raw = move()
+                        val mx = FastOutSlowInEasing.transform(raw)
+                        // (He starts under the logo, so he stays low until he's past its tail, then rises.)
+                        val ry = ((raw - 0.4f) / 0.6f).coerceIn(0f, 1f)
+                        val my = FastOutSlowInEasing.transform(ry)
+                        val arc = -kotlin.math.sin(ry * kotlin.math.PI.toFloat()) * BOOT_CAT_JUMP_ARC.toPx()
+                        val p = catIn()
+                        val hop = -kotlin.math.sin(p * kotlin.math.PI.toFloat()) * 18.dp.toPx()
+                        IntOffset(
+                            (hello.x + (at.x - hello.x) * mx).toInt(),
+                            (hello.y + (at.y - hello.y) * my + arc + hop).toInt()
+                        )
+                    }
+                    // Leaves with his panel as it folds away (then the rest fades).
+                    .graphicsLayer { alpha = (catIn() * 3f).coerceAtMost(1f) * (1f - out()) * (if (move() >= 1f) panelIn() else 1f) },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                BootCat(mark, 0, Modifier.size(if (wide) 40.dp else 36.dp), celebrate = celebrate && next >= steps.size && mark == Mark.Done)
+                Spacer(Modifier.width(8.dp))
+                // His bubble tucks away as he jumps and grows back out of him once he's landed.
+                Row(
+                    Modifier.weight(1f).fillMaxHeight().graphicsLayer {
+                        val m = move()
+                        val back = bubbleBack.value
+                        alpha = if (m < 1f) (1f - m * 4f).coerceAtLeast(0f) else back
+                        val sc = if (m < 1f) 1f - 0.3f * (m * 4f).coerceAtMost(1f) else 0.7f + 0.3f * back
+                        scaleX = sc; scaleY = 0.85f + 0.15f * sc
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
+                    },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // The bubble's tail, pointing at him (drawn over the bubble's edge so the edge doesn't cross it).
+                    Spacer(Modifier.zIndex(1f).size(9.dp, 14.dp).offset(x = 1.dp).drawBehind {
+                        val tail = androidx.compose.ui.graphics.Path().apply {
+                            moveTo(size.width, 0f); lineTo(0f, size.height / 2f); lineTo(size.width, size.height); close()
+                        }
+                        drawPath(tail, GremlinColors.Card)
+                        val tip = Offset(0f, size.height / 2f)
+                        drawLine(mood, Offset(size.width, 0f), tip, 1.dp.toPx())
+                        drawLine(mood, tip, Offset(size.width, size.height), 1.dp.toPx())
+                    })
+                    // Fits its line (up to the panel's width); a new length grows or shrinks it smoothly to
+                    // the right, so he never moves.
+                    Box(
+                        // The shape, fill and outline go OUTSIDE the resize, so they're drawn at the bubble's
+                        // in-between size (inside it they were drawn at the final size and clipped square
+                        // at the right while it grew, user 2026-10-23). No bounce: it settles on the line.
+                        Modifier.weight(1f, fill = false).fillMaxHeight()
+                            .clip(RoundedCornerShape(14.dp)).background(GremlinColors.Card)
+                            .animatedOutline({ mood }, corner = 14.dp)
+                            .animateContentSize(tween(240, easing = FastOutSlowInEasing))
+                            .padding(horizontal = 14.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        // The old line leaves upwards, then the new one rises in (a crossfade on the spot
+                        // overlapped the two mid-change, user 2026-10-23).
+                        AnimatedContent(
+                            line,
+                            transitionSpec = {
+                                ((fadeIn(tween(200, delayMillis = 120)) + slideInVertically(tween(260, delayMillis = 100, easing = FastOutSlowInEasing)) { it / 2 }) togetherWith
+                                    (fadeOut(tween(120)) + slideOutVertically(tween(180, easing = FastOutSlowInEasing)) { -it / 2 }))
+                                    // Only the bubble resizes (this one animating too made the edge move twice).
+                                    .using(SizeTransform(clip = false) { _, _ -> snap() })
+                            },
+                            contentAlignment = Alignment.CenterStart,
+                            label = "bootCatLine"
+                        ) {
+                            Text(
+                                it, style = if (wide) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium,
+                                color = when (mark) { Mark.Failed -> GremlinColors.Negative; Mark.Warn, Mark.Maintenance -> GremlinColors.Caution; else -> GremlinColors.Text },
+                                // Laid out at its full width and clipped by the bubble, so while the bubble grows
+                                // to a longer line the text is uncovered instead of squeezed into "...".
+                                maxLines = 1, softWrap = false, overflow = TextOverflow.Clip,
+                                modifier = Modifier.wrapContentWidth(Alignment.Start, unbounded = true)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A check Boot Cat hasn't got to yet: a faint outline with its icon and name. */
+@Composable
+private fun ComingRow(icon: BootIcon, name: String, modifier: Modifier, height: Dp) {
+    Row(
+        modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
+            .border(1.dp, GremlinColors.Edge, RoundedCornerShape(12.dp)).padding(start = 10.dp, end = 12.dp)
+            .graphicsLayer { alpha = 0.5f },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        BootIconView(icon, { GremlinColors.TextMuted }, { GremlinColors.TextMuted }, Modifier.size(19.dp))
+        Spacer(Modifier.width(10.dp))
+        Text(name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = GremlinColors.TextMuted, maxLines = 1)
+    }
+}
+
+/** Boot Cat's jump to the panel: when it starts after the logo begins gliding, how long, how high. */
+private const val BOOT_CAT_JUMP_DELAY_MS = 60L
+private const val BOOT_CAT_JUMP_MS = 900
+private val BOOT_CAT_JUMP_ARC = 26.dp
+
+/** When the Ready sweep reaches the version chip at the strip's end (it pops then). */
+private const val SWEEP_TO_CHIP_MS = 480L
+
+/** Boot Cat's row (him + his bubble). */
+private val BOOT_CAT_ROW_HEIGHT = 46.dp
+
+/** How long Boot Cat's hello stays before the logo and he move (two lines, half each). */
+internal const val BOOT_CAT_HELLO_MS = 2_600L
+/** How long a check runs before Boot Cat says it's taking a while. */
+private const val BOOT_CAT_SLOW_MS = 5_000L
+/** Shortest time one of Boot Cat's lines stays up. */
+private const val BOOT_CAT_LINE_MS = 650L
+
+/** What Boot Cat says when a check failed (boot is held on Retry: nothing that fails lets boot through). */
+private fun welcomeFailure(checks: List<BootCheck>, status: BootStatus): String {
+    fun state(label: String) = checks.firstOrNull { it.label == label }?.state
+    return when {
+        status.internet == InternetLink.None -> "I can't find any internet, check your Wi-Fi"
+        state("Device session") == BootState.Failed -> "This device won't let me in, trying again"
+        state("Account standing") == BootState.Failed -> "I couldn't check your account, trying again"
+        state("Tutorial") == BootState.Failed -> "The tutorial got stuck, trying again"
+        else -> "VRC-A servers aren't answering, trying again"
+    }
+}
+
+/** Boot Cat's verdict once everything passed: the first thing worth knowing, else all set. */
+private fun welcomeVerdict(checks: List<BootCheck>, status: BootStatus): Pair<Mark, String> {
+    val account = checks.firstOrNull { it.label == "Account standing" }?.state
+    return when {
+        account == BootState.Warn -> Mark.Warn to "Your account has been restricted"
+        status.internet == InternetLink.NoAccess -> Mark.Warn to "This Wi-Fi has no internet behind it"
+        status.servers == ServiceState.Maintenance -> Mark.Maintenance to "VRC-A servers are having a nap (maintenance)"
+        status.servers != ServiceState.Online -> Mark.Warn to "VRC-A servers are a bit wobbly right now"
+        status.vrchat == ServiceState.Maintenance -> Mark.Maintenance to "VRChat is under maintenance"
+        status.vrchat != ServiceState.Online -> Mark.Warn to "VRChat is having a rough day"
+        else -> Mark.Done to "All set! Welcome to VRC-A"
     }
 }
