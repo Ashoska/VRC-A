@@ -1052,18 +1052,20 @@ private fun welcomeSteps(checks: List<BootCheck>, status: BootStatus): List<Welc
     val net = status.internet
     return listOf(
         WelcomeStep(
-            BootIcons.Internet, "Internet", "Checking your internet...",
+            BootIcons.Internet, "Internet", "Sniffing out your Wi-Fi...",
             when (net) {
                 InternetLink.Checking, InternetLink.None -> null
                 InternetLink.NoAccess -> Mark.Warn to net.text
                 else -> Mark.Done to (if (status.internetMbps > 0) "${net.text} · ${status.internetMbps.coerceAtMost(9999)} Mbps" else net.text)
             }
         ),
-        WelcomeStep(BootIcons.DeviceSession, "Device session", "Setting up this device...", row(check("Device session"))),
-        WelcomeStep(BootIcons.VrcaServers, "VRC-A servers", "Reaching VRC-A servers...", service(status.servers)),
-        WelcomeStep(BootIcons.Vrchat, "VRChat", "Checking on VRChat...", service(status.vrchat)),
-        WelcomeStep(BootIcons.Account, "Account standing", "Checking your account...", row(check("Account standing"))),
-        WelcomeStep(BootIcons.Tutorial, "Tutorial", "Getting the tutorial ready...", row(check("Tutorial")))
+        // Order (like the normal boot's dependency order): the connection, then VRC-A's side (this
+        // device's session, our servers, the account check), then VRChat, then what comes next.
+        WelcomeStep(BootIcons.DeviceSession, "Device session", "Getting this device its name tag...", row(check("Device session"))),
+        WelcomeStep(BootIcons.VrcaServers, "VRC-A servers", "Saying hi to the VRC-A servers...", service(status.servers)),
+        WelcomeStep(BootIcons.Account, "Account standing", "Checking your paws are clean...", row(check("Account standing"))),
+        WelcomeStep(BootIcons.Vrchat, "VRChat", "Checking VRChat is awake...", service(status.vrchat)),
+        WelcomeStep(BootIcons.Tutorial, "Tutorial", "Fetching your tutorial...", row(check("Tutorial")))
     )
 }
 
@@ -1115,16 +1117,19 @@ private fun WelcomeLayout(
         helloTwo = true
     }
     val moving by remember { derivedStateOf { move() > 0f } }
+    // A check that's taking long gets a second line, so a slow boot doesn't look stuck.
+    var slow by remember { mutableStateOf(false) }
+    LaunchedEffect(next) { slow = false; delay(BOOT_CAT_SLOW_MS); slow = true }
     val bubbleBack = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         snapshotFlow { move() >= 1f }.first { it }
         bubbleBack.animateTo(1f, spring(dampingRatio = 0.7f, stiffness = 380f))
     }
     val (mark, line) = when {
-        !moving && !helloTwo -> Mark.Done to "Hi, I'm Boot Cat!"
-        !moving || panelIn() < 1f && next == 0 -> Mark.Done to "Let's get you set up!"
+        !moving && !helloTwo -> Mark.Done to "Hi! I'm Boot Cat"
+        !moving || panelIn() < 1f && next == 0 -> Mark.Done to "I'll get everything ready for you"
         error != null || status.internet == InternetLink.None -> Mark.Failed to welcomeFailure(checks, status)
-        next < steps.size -> Mark.Working to steps[next].working
+        next < steps.size -> Mark.Working to (if (slow) "This one's taking a while..." else steps[next].working)
         !celebrate -> Mark.Working to "Almost there..."
         else -> welcomeVerdict(checks, status)
     }
@@ -1292,6 +1297,8 @@ private val BOOT_CAT_ROW_HEIGHT = 46.dp
 
 /** How long Boot Cat's hello stays before the logo and he move (two lines, half each). */
 internal const val BOOT_CAT_HELLO_MS = 2_600L
+/** How long a check runs before Boot Cat says it's taking a while. */
+private const val BOOT_CAT_SLOW_MS = 5_000L
 /** Shortest time one of Boot Cat's lines stays up. */
 private const val BOOT_CAT_LINE_MS = 650L
 
@@ -1299,11 +1306,11 @@ private const val BOOT_CAT_LINE_MS = 650L
 private fun welcomeFailure(checks: List<BootCheck>, status: BootStatus): String {
     fun state(label: String) = checks.firstOrNull { it.label == label }?.state
     return when {
-        status.internet == InternetLink.None -> "No internet, check your Wi-Fi"
-        state("Device session") == BootState.Failed -> "I can't set up this device, trying again"
-        state("Account standing") == BootState.Failed -> "I can't check your account, trying again"
-        state("Tutorial") == BootState.Failed -> "I can't get the tutorial, trying again"
-        else -> "I can't reach VRC-A servers, trying again"
+        status.internet == InternetLink.None -> "I can't find any internet, check your Wi-Fi"
+        state("Device session") == BootState.Failed -> "This device won't let me in, trying again"
+        state("Account standing") == BootState.Failed -> "I couldn't check your account, trying again"
+        state("Tutorial") == BootState.Failed -> "The tutorial got stuck, trying again"
+        else -> "VRC-A servers aren't answering, trying again"
     }
 }
 
@@ -1312,11 +1319,11 @@ private fun welcomeVerdict(checks: List<BootCheck>, status: BootStatus): Pair<Ma
     val account = checks.firstOrNull { it.label == "Account standing" }?.state
     return when {
         account == BootState.Warn -> Mark.Warn to "Your account has been restricted"
-        status.internet == InternetLink.NoAccess -> Mark.Warn to "This network has no internet"
-        status.servers == ServiceState.Maintenance -> Mark.Maintenance to "VRC-A servers are under maintenance"
-        status.servers != ServiceState.Online -> Mark.Warn to "VRC-A servers are having issues"
+        status.internet == InternetLink.NoAccess -> Mark.Warn to "This Wi-Fi has no internet behind it"
+        status.servers == ServiceState.Maintenance -> Mark.Maintenance to "VRC-A servers are having a nap (maintenance)"
+        status.servers != ServiceState.Online -> Mark.Warn to "VRC-A servers are a bit wobbly right now"
         status.vrchat == ServiceState.Maintenance -> Mark.Maintenance to "VRChat is under maintenance"
-        status.vrchat != ServiceState.Online -> Mark.Warn to "VRChat is having issues"
+        status.vrchat != ServiceState.Online -> Mark.Warn to "VRChat is having a rough day"
         else -> Mark.Done to "All set! Welcome to VRC-A"
     }
 }
