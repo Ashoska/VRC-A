@@ -423,7 +423,7 @@ fun BootScreen(
             val pills: @Composable () -> Unit = {
                 BootPills(
                     error, retryInSec, onRetry, onSignIn,
-                    centreAt = if (wide) { width, gap -> ((width - gap) * 0.85f / 2f + gap / 2f).toInt() } else null
+                    centreAt = if (wide && !firstOpen) { width, gap -> ((width - gap) * 0.85f / 2f + gap / 2f).toInt() } else null
                 )
             }
             if (firstOpen) {
@@ -1097,7 +1097,7 @@ private fun WelcomeLayout(
                     Crossfade(line, label = "bootCatLine") {
                         Text(
                             it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
-                            color = if (mark == Mark.Failed) GremlinColors.Negative else if (mark == Mark.Warn) GremlinColors.Caution else GremlinColors.Text,
+                            color = when (mark) { Mark.Failed -> GremlinColors.Negative; Mark.Warn, Mark.Maintenance -> GremlinColors.Caution; else -> GremlinColors.Text },
                             maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
                     }
@@ -1118,22 +1118,35 @@ private const val BOOT_CAT_LINE_MS = 650L
  * about; once all are in, his verdict (the first problem, or all set).
  */
 private fun welcomeStep(checks: List<BootCheck>, status: BootStatus, error: String?, celebrate: Boolean): Pair<Mark, String> {
-    if (error != null) return Mark.Failed to "I can't connect, trying again"
-    fun check(label: String) = checks.firstOrNull { it.label == label }
+    fun state(label: String) = checks.firstOrNull { it.label == label }?.state
+    fun busy(label: String) = state(label).let { it == BootState.Working || it == BootState.Waiting }
+    // Something failed: boot is held on Retry (user rule: nothing that fails lets boot through).
+    if (error != null) return Mark.Failed to when {
+        status.internet == InternetLink.None -> "No internet, check your Wi-Fi"
+        state("Device session") == BootState.Failed -> "I can't set up this device, trying again"
+        state("Account standing") == BootState.Failed -> "I can't check your account, trying again"
+        state("Tutorial") == BootState.Failed -> "I can't get the tutorial, trying again"
+        else -> "I can't reach VRC-A servers, trying again"
+    }
+    if (status.internet == InternetLink.None) return Mark.Failed to "No internet, check your Wi-Fi"
     val working = listOf(
         (status.internet == InternetLink.Checking) to "Checking your internet...",
-        (check("Device session")?.state.let { it == BootState.Working || it == BootState.Waiting }) to "Setting up this device...",
+        busy("Device session") to "Setting up this device...",
         (status.servers == ServiceState.Checking) to "Reaching VRC-A servers...",
         (status.vrchat == ServiceState.Checking) to "Checking on VRChat...",
-        (check("Account standing")?.state.let { it == BootState.Working || it == BootState.Waiting }) to "Checking your account...",
-        (check("Tutorial")?.state.let { it == BootState.Working || it == BootState.Waiting }) to "Getting the tutorial ready..."
+        busy("Account standing") to "Checking your account...",
+        busy("Tutorial") to "Getting the tutorial ready..."
     ).firstOrNull { it.first }
+    // (Everything's in but the app isn't ready to open yet: "Almost there...")
     if (working != null || !celebrate) return Mark.Working to (working?.second ?: "Almost there...")
+    // Everything passed; the first thing worth knowing, else all set.
     return when {
-        status.internet == InternetLink.None -> Mark.Failed to "No internet connection"
+        state("Account standing") == BootState.Warn -> Mark.Warn to "Your account has been restricted"
         status.internet == InternetLink.NoAccess -> Mark.Warn to "This network has no internet"
-        status.vrchat != ServiceState.Online -> Mark.Warn to "VRChat is having issues"
+        status.servers == ServiceState.Maintenance -> Mark.Maintenance to "VRC-A servers are under maintenance"
         status.servers != ServiceState.Online -> Mark.Warn to "VRC-A servers are having issues"
+        status.vrchat == ServiceState.Maintenance -> Mark.Maintenance to "VRChat is under maintenance"
+        status.vrchat != ServiceState.Online -> Mark.Warn to "VRChat is having issues"
         else -> Mark.Done to "All set! Welcome to VRC-A"
     }
 }

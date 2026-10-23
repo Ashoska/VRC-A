@@ -68,8 +68,9 @@ private enum class Row(val label: String, val blocking: Boolean) {
     Discord("Discord", false),
     VrchatHere("VRChat on this headset", false),
     Updates("Updates", true),
-    /** First open only: the tutorial's pictures, fetched while the screen is up. */
-    Tutorial("Tutorial", false);
+    /** First open only: the tutorial's pictures, fetched while the screen is up. Blocking like the
+     *  rest (user rule: nothing that fails lets boot through); a Retry resumes where it stopped. */
+    Tutorial("Tutorial", true);
 
     /** Rows a build doesn't have: the VRChat log is only on the headset, and the admin build
      *  never checks for updates. */
@@ -91,6 +92,9 @@ private val ROWS = Row.entries.filter { it.inThisBuild && it != Row.Tutorial }
  * maintenance switch; the release check feeds the update dialog).
  */
 private val FIRST_OPEN_ROWS = listOf(Row.Device, Row.Account, Row.Tutorial)
+
+/** The checks after the device session that hold boot on Retry when they fail. */
+private val HOLDING = setOf(Row.Terms, Row.Account, Row.Updates, Row.Tutorial)
 
 /** A new install's first open: the tutorial isn't done, and this isn't an install from before it existed (VrcaApp's pre-seed). */
 private fun isFirstOpen(ctx: Context): Boolean =
@@ -136,9 +140,11 @@ internal fun AppBoot(
     // Decided once per boot: which version of the screen this is.
     val firstOpen = remember { isFirstOpen(ctx) }
     val visible = if (firstOpen) FIRST_OPEN_ROWS else ROWS
+    // The rows that must pass: what's shown, plus the first open's hidden terms and updates checks.
+    val gating = if (firstOpen) FIRST_OPEN_ROWS + listOf(Row.Terms, Row.Updates).filter { it.inThisBuild } else ROWS
     // Boot may go on once every blocking row has settled without failing (a failed device session
     // waits on Retry, a failed VRChat sign-in waits on signing in).
-    val blockingDone = tutorialDone && visible.filter { it.blocking }.all { rows[it.ordinal].state in SETTLED }
+    val blockingDone = tutorialDone && gating.filter { it.blocking }.all { rows[it.ordinal].state in SETTLED }
     val signInNeeded = rows[Row.VrchatSignIn.ordinal].let { it.state == BootState.Failed && it.note == BootNote.SignInNeeded }
     // VRChat's status-page answer, once it's in (the sign-in row needs it to judge a failure).
     suspend fun vrchatStatus(): ServiceState =
@@ -290,15 +296,15 @@ internal fun AppBoot(
                     else -> set(Row.Updates, BootState.Failed, BootNote.CantConnect)
                 }
             }
-            // A new user's first open: fetch the tutorial's pictures while the screen is up. Never
-            // holds boot: the tutorial fetches whatever is still missing when it opens.
+            // A new user's first open: fetch the tutorial's pictures while the screen is up. A failure
+            // holds boot on Retry like any check (a retry keeps the pictures already fetched).
             val tutorial = launch {
                 if (firstOpen) {
                     set(Row.Tutorial, BootState.Working)
                     when (withTimeoutOrNull(TUTORIAL_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx) }) {
                         true -> set(Row.Tutorial, BootState.Done, BootNote.Ready)
-                        null -> set(Row.Tutorial, BootState.Background, BootNote.Downloading)
-                        false -> set(Row.Tutorial, BootState.Warn, BootNote.WillRetry)
+                        null -> set(Row.Tutorial, BootState.Failed, BootNote.TimedOut)
+                        false -> set(Row.Tutorial, BootState.Failed, BootNote.CantConnect)
                     }
                 }
             }
@@ -308,7 +314,7 @@ internal fun AppBoot(
             // anyway"): the device session, terms, account standing (moderation) and updates have
             // to actually reach the server. Same Retry pill + 5 s auto-retry as a failed device session.
             timeline.event("blocking checks finished")
-            if (listOf(Row.Terms, Row.Account, Row.Updates).any { it in visible && rows[it.ordinal].state == BootState.Failed }) {
+            if (gating.any { it in HOLDING && rows[it.ordinal].state == BootState.Failed }) {
                 error = "Can't connect"
                 timeline.write(ctx, "held on Retry")
             }
