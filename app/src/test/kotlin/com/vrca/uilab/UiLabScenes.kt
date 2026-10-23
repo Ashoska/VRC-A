@@ -517,7 +517,7 @@ object UiLabScenes {
         }
         if (v == "live" || v == "livefail" || v == "demo") { bootLive(::c, fail = v == "livefail", demo = v == "demo", toApp = toApp); return }
         val status = com.vrca.app.BootStatus(
-            internet = if (v == "offline") com.vrca.app.InternetLink.None else com.vrca.app.InternetLink.WiFi,
+            internet = when (v) { "offline" -> com.vrca.app.InternetLink.None; "noaccess" -> com.vrca.app.InternetLink.NoAccess; else -> com.vrca.app.InternetLink.WiFi },
             internetMbps = if (v == "offline") 0 else 240,
             vrchat = when (v) { "incident", "vrcdown" -> com.vrca.app.ServiceState.Issues; "mid" -> com.vrca.app.ServiceState.Checking; else -> com.vrca.app.ServiceState.Online },
             servers = when (v) { "mid" -> com.vrca.app.ServiceState.Checking; "error" -> com.vrca.app.ServiceState.Down; else -> com.vrca.app.ServiceState.Online }
