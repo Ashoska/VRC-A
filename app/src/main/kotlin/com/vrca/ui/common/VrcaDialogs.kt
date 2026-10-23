@@ -170,14 +170,11 @@ fun VrcaConfirmDialog(
                 horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = onDismiss) { Text(dismissLabel) }
-                Button(
+                com.vrca.ui.common.GremlinQuietButton(onClick = onDismiss) { Text(dismissLabel) }
+                com.vrca.ui.common.GremlinButton(
                     onClick = onConfirm,
                     enabled = confirmEnabled,
-                    colors = if (destructive) ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError
-                    ) else ButtonDefaults.buttonColors()
+                    kind = if (destructive) com.vrca.ui.common.GremlinButtonKind.Danger else com.vrca.ui.common.GremlinButtonKind.Primary
                 ) { Text(confirmLabel) }
             }
         }

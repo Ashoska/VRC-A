@@ -1072,10 +1072,9 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     if (subs.size < SubLineCodec.MAX_SUB_LINES) {
-                                        TextButton(
+                                        com.vrca.ui.common.GremlinQuietButton(
                                             onClick = { vm.addCycleSubLine(idx) },
-                                            enabled = !isBanned,
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                            enabled = !isBanned
                                         ) {
                                             Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                                             Spacer(Modifier.width(4.dp))
@@ -1101,7 +1100,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { vm.addCycleLine() },
                     enabled = !isBanned && vm.cycleLines.size < MAX_CYCLE_LINES,
                     modifier = Modifier.weight(1f)
@@ -1111,7 +1110,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     Text("Add line (${vm.cycleLines.size}/$MAX_CYCLE_LINES)")
                 }
 
-                OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { vm.clearCycleLines() },
                     enabled = !isBanned && vm.cycleLines.isNotEmpty(),
                     modifier = Modifier.weight(1f)
@@ -1375,8 +1374,8 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TextButton(onClick = { peek = null }) { Text("Close") }
-                    Button(
+                    com.vrca.ui.common.GremlinQuietButton(onClick = { peek = null }) { Text("Close") }
+                    com.vrca.ui.common.GremlinButton(
                         onClick = { p.onLoad(); peek = null },
                         enabled = !isBanned
                     ) { Text("Switch to this preset") }
@@ -1569,10 +1568,9 @@ private fun SubLineEditor(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (subs.size < SubLineCodec.MAX_SUB_LINES) {
-                    TextButton(
+                    com.vrca.ui.common.GremlinQuietButton(
                         onClick = onAdd,
-                        enabled = enabled,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        enabled = enabled
                     ) {
                         Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))

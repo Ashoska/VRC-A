@@ -199,10 +199,9 @@ fun SettingsPage(
             ) {
                 SettingsSection.entries.forEach { s ->
                     val selected = (s == section)
-                    Button(
+                    com.vrca.ui.common.GremlinButton(
                         onClick = { section = s },
-                        colors = if (selected) ButtonDefaults.buttonColors()
-                        else ButtonDefaults.outlinedButtonColors()
+                        kind = if (selected) com.vrca.ui.common.GremlinButtonKind.Primary else com.vrca.ui.common.GremlinButtonKind.Secondary
                     ) { Text(s.title) }
                 }
             }
@@ -214,17 +213,17 @@ fun SettingsPage(
                     title = "Setup",
                     subtitle = "Permissions that keep OSC + Now Playing stable."
                 ) {
-                    Button(
+                    com.vrca.ui.common.GremlinButton(
                         onClick = { vm.launchNotificationAccess(ctx) },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Open Notification Access") }
 
-                    OutlinedButton(
+                    com.vrca.ui.common.GremlinSecondaryButton(
                         onClick = { ctx.startActivity(vm.overlayPermissionIntent()) },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Open Overlay Permission") }
 
-                    OutlinedButton(
+                    com.vrca.ui.common.GremlinSecondaryButton(
                         onClick = { ctx.startActivity(vm.batteryOptimizationIntent()) },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Disable Battery Optimization (request)") }
@@ -275,12 +274,12 @@ fun SettingsPage(
                     )
 
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
+                        com.vrca.ui.common.GremlinButton(
                             onClick = { vm.ipAddressApply(ip.text.trim()) },
                             modifier = Modifier.weight(1f)
                         ) { Text("Apply") }
 
-                        OutlinedButton(
+                        com.vrca.ui.common.GremlinSecondaryButton(
                             onClick = { ip = TextFieldValue(uiState.ipAddress) },
                             modifier = Modifier.weight(1f)
                         ) { Text("Reset") }
@@ -321,7 +320,7 @@ Troubleshoot:
 
                     Divider()
 
-                    OutlinedButton(
+                    com.vrca.ui.common.GremlinSecondaryButton(
                         onClick = { vm.launchNotificationAccess(ctx) },
                         modifier = Modifier.fillMaxWidth()
                     ) {

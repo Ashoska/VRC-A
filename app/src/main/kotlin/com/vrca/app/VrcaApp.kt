@@ -969,44 +969,24 @@ internal fun UpdateDialog(
                 val dialogCtx = LocalContext.current
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (forced) {
-                        Button(
+                        com.vrca.ui.common.GremlinButton(
                             onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                            enabled = !downloading,
+                            loading = downloading,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            if (downloading) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.height(18.dp).widthIn(max = 18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.onPrimary
-                                )
-                                Spacer(Modifier.widthIn(min = 8.dp))
-                                Text("Downloading")
-                            } else {
-                                Text(if (error != null) "Retry Download" else "Download Update")
-                            }
+                            Text(if (downloading) "Downloading" else if (error != null) "Retry Download" else "Download Update")
                         }
                     } else {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)
                         ) {
-                            OutlinedButton(onClick = onDismiss) { Text("Later") }
-                            Button(
+                            com.vrca.ui.common.GremlinSecondaryButton(onClick = onDismiss) { Text("Later") }
+                            com.vrca.ui.common.GremlinButton(
                                 onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                                enabled = !downloading
+                                loading = downloading
                             ) {
-                                if (downloading) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.height(18.dp).widthIn(max = 18.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.onPrimary
-                                    )
-                                    Spacer(Modifier.widthIn(min = 8.dp))
-                                    Text("Downloading")
-                                } else {
-                                    Text(if (error != null) "Retry" else "Download")
-                                }
+                                Text(if (downloading) "Downloading" else if (error != null) "Retry" else "Download")
                             }
                         }
                     }
@@ -1601,7 +1581,7 @@ If you do not agree, close the app.
                     }
                 }
                 if (tosUrl.isNotBlank()) {
-                    OutlinedButton(
+                    com.vrca.ui.common.GremlinSecondaryButton(
                         onClick = { onOpenUrl(tosUrl.trim()) },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -1635,7 +1615,7 @@ If you do not agree, close the app.
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
-                    Button(
+                    com.vrca.ui.common.GremlinButton(
                         onClick = onAccept,
                         enabled = checked,
                         modifier = Modifier.fillMaxWidth()

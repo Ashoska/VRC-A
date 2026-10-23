@@ -132,14 +132,12 @@ internal fun MessengerMessageField(chatboxViewModel: VrcaViewModel, collapse: ()
 
         val interactionSource = remember { MutableInteractionSource() }
 
-        Button(
+        com.vrca.ui.common.GremlinButton(
             onClick = {},
             modifier = Modifier
                 .fillMaxHeight()
                 .scale(0.9f),
-            contentPadding = PaddingValues(0.dp),
-            shape = RoundedCornerShape(16.dp),
-            interactionSource = interactionSource
+            size = com.vrca.ui.common.GremlinButtonSize.Small
         ) {
             Icon(
                 imageVector = Icons.AutoMirrored.Default.Send,

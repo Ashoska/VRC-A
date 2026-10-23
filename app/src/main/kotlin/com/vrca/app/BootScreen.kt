@@ -990,27 +990,21 @@ private fun RetryPill(retryInSec: Int?, onRetry: () -> Unit) {
     var longest by remember { mutableIntStateOf(1) }
     if ((retryInSec ?: 0) > longest) longest = retryInSec ?: 0
     val ring by animateFloatAsState(((retryInSec ?: 0).toFloat() / longest).coerceIn(0f, 1f), label = "retryRing")
-    Layer(Modifier.height(50.dp), shape = CircleShape, color = GremlinColors.Raised, drop = 4.dp) {
-        Row(Modifier.fillMaxHeight().padding(5.dp), verticalAlignment = Alignment.CenterVertically) {
-            Row(
-                Modifier.fillMaxHeight().clip(CircleShape).background(accent).clickable(onClick = onRetry).padding(start = 8.dp, end = 20.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(
-                        progress = ring,
-                        modifier = Modifier.fillMaxSize(), strokeWidth = 2.5.dp,
-                        color = GremlinColors.Backdrop, trackColor = GremlinColors.Backdrop.copy(alpha = 0.18f)
-                    )
-                    Text("${retryInSec ?: ""}", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = GremlinColors.Backdrop)
-                }
-                Spacer(Modifier.width(10.dp))
-                Text("Retry", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Backdrop)
+    // The app's button (GremlinButton) with the countdown to the automatic retry as its icon: a ring
+    // that drains round the seconds left.
+    com.vrca.ui.common.GremlinButton(
+        "Retry", onRetry, size = com.vrca.ui.common.GremlinButtonSize.Large,
+        leading = {
+            Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(
+                    progress = { ring }, modifier = Modifier.fillMaxSize(), strokeWidth = 2.5.dp,
+                    color = accent, trackColor = accent.copy(alpha = 0.2f)
+                )
+                Text("${retryInSec ?: ""}", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = accent)
             }
         }
-    }
+    )
 }
-
 
 /** The Internet row: the active connection's type and Android's download-speed estimate (Mbps, 0 = unknown). */
 fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
@@ -1032,19 +1026,10 @@ fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
 /** "Sign in to VRChat": shown under the panels while the VRChat session needs signing in. */
 @Composable
 private fun SignInPill(onClick: () -> Unit) {
-    val accent = MaterialTheme.colorScheme.primary
-    Layer(
-        Modifier.height(50.dp).clip(CircleShape).clickable(onClick = onClick),
-        shape = CircleShape, color = accent, edge = Color.Transparent, drop = 4.dp
-    ) {
-        Row(Modifier.fillMaxHeight().padding(start = 20.dp, end = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Person, null, tint = GremlinColors.Backdrop, modifier = Modifier.size(19.dp))
-            Spacer(Modifier.width(10.dp))
-            Text("Sign in to VRChat", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Backdrop)
-            Spacer(Modifier.width(10.dp))
-            Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = GremlinColors.Backdrop, modifier = Modifier.size(18.dp))
-        }
-    }
+    com.vrca.ui.common.GremlinButton(
+        "Sign in to VRChat", onClick, size = com.vrca.ui.common.GremlinButtonSize.Large,
+        icon = Icons.Filled.Person, trailingIcon = Icons.AutoMirrored.Filled.ArrowForward
+    )
 }
 
 /** One check Boot Cat goes through on the first open: what he says while it runs, and its row once done. */

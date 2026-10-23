@@ -32,6 +32,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -120,7 +122,10 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
             }
             Spacer(Modifier.height(18.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(
+                com.vrca.ui.common.GremlinButton(
+                    "Download report", kind = com.vrca.ui.common.GremlinButtonKind.Secondary,
+                    icon = androidx.compose.material.icons.Icons.Filled.Download,
+                    size = com.vrca.ui.common.GremlinButtonSize.Large,
                     onClick = {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                             val name = CrashReport.saveToDownloads(ctx, report)
@@ -128,8 +133,11 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
                         } else picker.launch(CrashReport.fileName())
                     },
                     modifier = Modifier.weight(1f)
-                ) { Text("Download report") }
-                Button(onClick = onStart, modifier = Modifier.weight(1f)) { Text("Start VRC-A") }
+                )
+                com.vrca.ui.common.GremlinButton(
+                    "Start VRC-A", onStart, Modifier.weight(1f),
+                    icon = androidx.compose.material.icons.Icons.Filled.PlayArrow, size = com.vrca.ui.common.GremlinButtonSize.Large
+                )
             }
             AnimatedVisibility(saved != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                 Text(

@@ -572,42 +572,37 @@ java.lang.IllegalStateException: Expected a preset but found none
         }
     }
 
+    /** `show buttons`: the app's button (GremlinButton) in every kind and state, and its sizes. */
     @Composable
-    private fun ButtonSheet(buttonsAll: Boolean = false) {
+    private fun ButtonSheet() {
         val I = androidx.compose.material.icons.Icons.Filled
-        val P = com.vrca.ui.common.GremlinButtonKind.Primary
-        // (label, kind, icon, pressed, loading) per column.
-        val cols = listOf(
-            listOf("Start", P, I.PlayArrow, false, false),
-            listOf("Download", com.vrca.ui.common.GremlinButtonKind.Secondary, I.Download, false, false),
-            listOf("Stop", com.vrca.ui.common.GremlinButtonKind.Danger, I.Stop, false, false),
-            listOf("Edit", com.vrca.ui.common.GremlinButtonKind.Quiet, null, false, false),
-            listOf("Start", P, I.PlayArrow, true, false),
-            listOf("Start", P, I.PlayArrow, false, true)
-        )
-        val heads = listOf("Primary", "Secondary", "Danger", "Quiet", "Pressed", "Loading")
+        val K = com.vrca.ui.common.GremlinButtonKind.entries
+        val labels = listOf("Start", "Download", "Stop", "Edit")
+        val icons = listOf(I.PlayArrow, I.Download, I.Stop, null)
+        val states = listOf("Normal", "Pressed", "Disabled", "Loading")
         androidx.compose.foundation.layout.Column(
             Modifier.fillMaxSize().background(com.vrca.ui.theme.GremlinColors.Backdrop).padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Spacer(Modifier.width(110.dp))
-                heads.forEach { Text(it, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = com.vrca.ui.theme.GremlinColors.TextMuted) }
+                states.forEach { Text(it, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = com.vrca.ui.theme.GremlinColors.TextMuted) }
             }
-            // `show buttons [all]`: B for comparison plus the newest looks, or every look.
-            val looks = com.vrca.ui.common.GremlinButtonStyle.entries.let { all ->
-                if (buttonsAll) all else all.filter { it.name in setOf("Outline", "LayeredOutline", "Weighted", "Asymmetric", "IconChip") }
-            }
-            for (style in looks) {
-                androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Bottom) {
-                    Text(style.label, Modifier.width(110.dp).padding(bottom = 8.dp), style = MaterialTheme.typography.titleSmall, color = com.vrca.ui.theme.GremlinColors.Text)
-                    for (c in cols) {
+            K.forEachIndexed { k, kind ->
+                androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(kind.name, Modifier.width(110.dp), style = MaterialTheme.typography.titleSmall, color = com.vrca.ui.theme.GremlinColors.Text)
+                    states.forEach { st ->
                         com.vrca.ui.common.GremlinButton(
-                            c[0] as String, onClick = {}, modifier = Modifier.weight(1f), kind = c[1] as com.vrca.ui.common.GremlinButtonKind,
-                            icon = c[2] as androidx.compose.ui.graphics.vector.ImageVector?, style = style,
-                            size = com.vrca.ui.common.GremlinButtonSize.Medium, pressedPreview = c[3] as Boolean, loading = c[4] as Boolean
+                            labels[k], onClick = {}, modifier = Modifier.weight(1f), kind = kind, icon = icons[k],
+                            enabled = st != "Disabled", loading = st == "Loading", pressedPreview = st == "Pressed"
                         )
                     }
+                }
+            }
+            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Sizes", Modifier.width(110.dp), style = MaterialTheme.typography.titleSmall, color = com.vrca.ui.theme.GremlinColors.Text)
+                for (sz in com.vrca.ui.common.GremlinButtonSize.entries) {
+                    com.vrca.ui.common.GremlinButton("Start VRC-A", {}, Modifier.weight(1f), icon = I.PlayArrow, size = sz)
                 }
             }
         }
@@ -637,7 +632,7 @@ java.lang.IllegalStateException: Expected a preset but found none
             // `show cats`: every boot cat animation on a loop, labelled (a sheet for testers).
             "cats" -> CatGallery()
             // `show buttons`: the button sheet (GremlinButton): both looks, every kind and state.
-            "buttons" -> ButtonSheet(buttonsAll = rest.trim() == "all")
+            "buttons" -> ButtonSheet()
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.

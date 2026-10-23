@@ -351,7 +351,7 @@ private fun ConnectionButton(vm: com.vrca.ui.viewmodel.VrcaViewModel) {
                     chatboxViewModel = vm,
                     modifier = Modifier.fillMaxWidth()
                 )
-                TextButton(
+                com.vrca.ui.common.GremlinQuietButton(
                     onClick = { editOpen = false },
                     modifier = Modifier.align(Alignment.End)
                 ) { Text("Done") }
@@ -1006,8 +1006,8 @@ private fun BannedScreen(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(onClick = onOpenSettings, modifier = Modifier.weight(1f)) { Text("Settings") }
-                OutlinedButton(onClick = onOpenInfo, modifier = Modifier.weight(1f)) { Text("Info") }
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onOpenSettings, modifier = Modifier.weight(1f)) { Text("Settings") }
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onOpenInfo, modifier = Modifier.weight(1f)) { Text("Info") }
             }
         }
     }

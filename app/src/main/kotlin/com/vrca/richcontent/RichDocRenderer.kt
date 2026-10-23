@@ -543,7 +543,7 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(8.dp)
                             )
-                            androidx.compose.material3.OutlinedButton(onClick = {
+                            com.vrca.ui.common.GremlinSecondaryButton(onClick = {
                                 downloadFailed = false
                                 retryScope.launch {
                                     val f = RichMediaStore.ensureCached(ctx, block.url, mediaScope)

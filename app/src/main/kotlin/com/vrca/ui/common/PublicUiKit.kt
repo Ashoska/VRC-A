@@ -514,13 +514,10 @@ fun VrchatSessionExpiredBanner(onSignIn: () -> Unit, modifier: Modifier = Modifi
                 style = MaterialTheme.typography.bodySmall,
                 color = cs.onErrorContainer
             )
-            Button(
+            com.vrca.ui.common.GremlinButton(
                 onClick = onSignIn,
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = cs.error,
-                    contentColor = cs.onError
-                )
+                kind = com.vrca.ui.common.GremlinButtonKind.Danger
             ) { Text("Sign in to VRChat") }
         }
     }
