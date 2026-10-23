@@ -73,6 +73,12 @@ object DiscordRpcState {
         get() = _pageDrawn.value
         set(value) { _pageDrawn.value = value }
 
+    // When this run's page started/finished loading and the gateway was found (SystemClock
+    // uptime ms, first time each, cleared per new page): the boot timeline shows them, to see where
+    // Discord's connect time goes on a real headset.
+    val phases = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    fun phase(name: String) { phases.putIfAbsent(name, android.os.SystemClock.uptimeMillis()) }
+
     fun reset() {
         status = DiscordRpcStatus.IDLE
         failureMessage = null
@@ -117,7 +123,7 @@ class DiscordRpcService : Service() {
         private const val MAX_SHIM_RETRIES = 5
         private const val MAX_SESSION_RECOVERIES = 3
         private const val SHIM_RETRY_BASE_DELAY_MS = 3000L
-        private const val SHIM_POLL_MS = 750L
+        private const val SHIM_POLL_MS = 300L
         private const val SHIM_POLL_WINDOW_MS = 20_000L
         private const val PUSH_MIN_INTERVAL_MS = 1500L
         private const val PUSH_TIMER_INTERVAL_MS = 10_000L
@@ -418,6 +424,8 @@ class DiscordRpcService : Service() {
             shimRetryCount = 0
             consecutivePushFailures = 0
             DiscordRpcState.pageDrawn = false
+            DiscordRpcState.phases.clear()
+            DiscordRpcState.phase("page load requested")
 
             val wv = object : WebView(applicationContext) {
                 // Chromium background-throttles (and eventually freezes) JS timers when
@@ -451,16 +459,25 @@ class DiscordRpcService : Service() {
                         if (u.contains("discord.com")) {
                             view?.evaluateJavascript(WS_HOOK_JS, null)
                         }
+                        // Look for the gateway from the moment the app page starts, not only once
+                        // it has finished loading: Discord's JS can open its gateway before every
+                        // sub-resource is in, and the finder does nothing until it's open.
+                        if (u.contains("discord.com/channels") || u.contains("discord.com/app")) {
+                            DiscordRpcState.phase("page started")
+                            if (!shimReady) injectShimDelayed()
+                        }
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         val u = url ?: ""
                         if (u.contains("discord.com/channels") || u.contains("discord.com/app")) {
+                            DiscordRpcState.phase("page finished")
                             view?.evaluateJavascript(WS_HOOK_JS, null)
-                            injectShimDelayed()
+                            // Already polling since the page started; only restart it if that found nothing.
+                            if (!shimReady) injectShimDelayed()
                             runCatching {
                                 view?.postVisualStateCallback(1L, object : WebView.VisualStateCallback() {
-                                    override fun onComplete(requestId: Long) { DiscordRpcState.pageDrawn = true }
+                                    override fun onComplete(requestId: Long) { DiscordRpcState.phase("first picture"); DiscordRpcState.pageDrawn = true }
                                 })
                             }
                         } else if (u.contains("discord.com/login")) {
@@ -740,6 +757,7 @@ class DiscordRpcService : Service() {
                 parkOffline()
             } else if (cleaned == "ok") {
                 Log.i(TAG, "JS shim injected — module finder succeeded")
+                DiscordRpcState.phase("gateway found, connected")
                 shimReady = true
                 shimRetryCount = 0
                 consecutivePushFailures = 0
