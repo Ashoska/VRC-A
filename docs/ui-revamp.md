@@ -1,8 +1,8 @@
 # VRC-A — UI Revamp + Onboarding Design Doc
 
-Status: **APPROVED SPEC — not yet implemented.** This captures the full brainstorm
-(June 2026 session) so implementation can start from here without re-deriving
-decisions. No app code has been changed for this doc.
+Status: **DONE (first revamp, all 7 steps shipped; archived 2026-10-23).** Kept for the
+decisions it records (what was rejected and why). The next, full revamp is planned in
+`docs/revamp-2.md`.
 
 ---
 

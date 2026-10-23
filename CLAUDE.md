@@ -50,7 +50,7 @@ This file is only the rules plus a **map**. The details of every feature and sys
 | `storage.md` | Every cache/on-disk store and its cap or cleanup |
 | `labs.md` | UI Lab (`tools/ui-lab/`: shots, recordings, real touch/press/drag/swipe/hover input, toasts, `targets` touch-target audit, `perf` lag check (composable calls per frame, rebuild streaks), simulated Discord RPC for the real boot), Cardinal Lab (`tools/cardinal-lab/`), Symbol Lab (`tools/symbol-lab/`: drawing → `BootSymbol.fromSvg`) |
 
-Other reference docs in `docs/`: `ui-revamp.md` (public UI + onboarding design spec; read before public UI work), `wake-word-plan.md` (hands-free wake word + fixed phrase list, not started; separate from the Cardinal AI), `cardinal-audit.md`, `account-system-plan.md`, `avatar-catalog-sharding-plan.md`, `backend-migration-plan.md`, `vrc-nexus-teardown.md`.
+Other reference docs in `docs/`: `revamp-2.md` (the current full-app revamp: the standard, page order, status; read before any UI work), `ui-revamp.md` (the first revamp, done; its decisions), `wake-word-plan.md` (hands-free wake word + fixed phrase list, not started; separate from the Cardinal AI), `cardinal-audit.md`, `account-system-plan.md`, `avatar-catalog-sharding-plan.md`, `backend-migration-plan.md`, `vrc-nexus-teardown.md`.
 
 ## Build Commands
 ```bash
