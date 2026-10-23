@@ -316,6 +316,21 @@ internal fun AppBoot(
     var toMainApp by remember { mutableStateOf(false) }
     LaunchedEffect(blockingDone, shown) {
         if (blockingDone && shown) {
+            // Discord doesn't hold boot (user, 2026-10-23: it was the slowest row by far). Boot only
+            // waited for it so its hidden page's first draw (~0.4 s main-thread freeze on the Quest)
+            // wouldn't land on the hand-off, and the page draws when it loads, before it connects.
+            // So once every other row is settled, Discord waits only until the page has drawn (capped);
+            // if it's still connecting then, the row goes to Background and keeps going after boot.
+            snapshotFlow { ROWS.filter { it != Row.Discord }.all { rows[it.ordinal].state in SETTLED } }.first { it }
+            if (rows[Row.Discord.ordinal].state == BootState.Working) {
+                withTimeoutOrNull(DISCORD_HANDOFF_WAIT_MS) {
+                    snapshotFlow { rows[Row.Discord.ordinal].state != BootState.Working || DiscordRpcState.pageDrawn }.first { it }
+                }
+                if (rows[Row.Discord.ordinal].state == BootState.Working) {
+                    timeline.event("Discord: still connecting, page ${if (DiscordRpcState.pageDrawn) "drawn" else "not drawn"}, moved to background")
+                    set(Row.Discord, BootState.Background, BootNote.Connecting)
+                }
+            }
             snapshotFlow { ROWS.all { rows[it.ordinal].state in SETTLED } }.first { it }
             timeline.event("every row settled")
             val mainNext = withContext(Dispatchers.IO) { mainAppNext() }
@@ -598,6 +613,8 @@ internal fun BootRevealOverlay() {
 }
 
 private const val DISCORD_PICTURE_CAP_MS = 1_500L
+/** Once every other row is done, the longest boot waits for Discord's page to have drawn before handing off. */
+private const val DISCORD_HANDOFF_WAIT_MS = 3_000L
 private const val REVEAL_MS = 450
 
 /**
