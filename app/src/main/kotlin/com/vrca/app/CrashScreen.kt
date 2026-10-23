@@ -66,6 +66,15 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
     val summary = remember(report) { CrashReport.summary(report) }
     val time = remember(report) { CrashReport.time(report).substringBeforeLast(':') }
     var open by remember { mutableStateOf(false) }
+    // Start VRC-A: the screen fades out to the bare backdrop first, then the app starts (the held
+    // start-up work runs there, unseen) and the boot screen's intro fades its logo in on the same backdrop.
+    var leaving by remember { mutableStateOf(false) }
+    val fade = remember { androidx.compose.animation.core.Animatable(1f) }
+    androidx.compose.runtime.LaunchedEffect(leaving) {
+        if (!leaving) return@LaunchedEffect
+        fade.animateTo(0f, tween(LEAVE_MS, easing = FastOutSlowInEasing))
+        onStart()
+    }
     // "Saved to Downloads: <name>" / "Couldn't save the report" once Download report is pressed.
     var saved by remember { mutableStateOf<String?>(null) }
     // Android 9 and older: the system picker chooses where the .txt goes.
@@ -77,7 +86,9 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
     }
     Box(Modifier.fillMaxSize().background(GremlinColors.Backdrop), contentAlignment = Alignment.Center) {
         Column(
-            Modifier.widthIn(max = 640.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 24.dp)
+            Modifier.widthIn(max = 640.dp).fillMaxWidth()
+                .graphicsLayer { alpha = fade.value; val k = 0.98f + 0.02f * fade.value; scaleX = k; scaleY = k }
+                .verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 24.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 BootCat(Mark.Failed, 0, Modifier.size(52.dp))
@@ -127,6 +138,7 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
                     bootIcon = BootIcons.Updates,
                     size = com.vrca.ui.common.GremlinButtonSize.Large,
                     onClick = {
+                        if (leaving) return@GremlinButton
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                             val name = CrashReport.saveToDownloads(ctx, report)
                             saved = if (name != null) "Saved to Downloads: $name" else "Couldn't save the report"
@@ -135,7 +147,7 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
                     modifier = Modifier.weight(1f)
                 )
                 com.vrca.ui.common.GremlinButton(
-                    "Start VRC-A", onStart, Modifier.weight(1f),
+                    "Start VRC-A", { leaving = true }, Modifier.weight(1f),
                     icon = androidx.compose.material.icons.Icons.Filled.PlayArrow, size = com.vrca.ui.common.GremlinButtonSize.Large
                 )
             }
@@ -149,3 +161,6 @@ internal fun CrashScreen(report: String, onStart: () -> Unit) {
         }
     }
 }
+
+/** How long the crash screen takes to fade out after Start VRC-A. */
+private const val LEAVE_MS = 260

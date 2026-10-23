@@ -761,7 +761,21 @@ java.lang.IllegalStateException: Expected a preset but found none
                     VrcaApp()
                 } else com.vrca.app.AppBoot(onDone = { _ -> })
             }
-            "crash" -> CrashScreen(SAMPLE_CRASH, onStart = {})
+            // `show crash boot`: the real path after a crash: a recorded report puts the app in its safe
+            // start, VrcaApp's gate shows the crash screen, and Start VRC-A goes on into the real boot
+            // (as a returning user, like `headsetboot full`).
+            "crash" -> if (rest.startsWith("boot")) {
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                androidx.compose.runtime.remember {
+                    com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), RuntimeException("Test crash from Settings > Debug"))
+                    com.vrca.app.CrashReport.checkAtLaunch(ctx)
+                    com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx)
+                    com.vrca.app.TosPrefs.accept(ctx, 1_000)
+                    com.vrca.app.VrcaApplication.openedFromSwipe = true
+                    true
+                }
+                VrcaApp()
+            } else CrashScreen(SAMPLE_CRASH, onStart = {})
             "banned" -> BannedScreen(reason = rest.ifBlank { "Repeated harassment after warnings." })
             "tos" -> TosGate(3, SAMPLE_TOS, "https://example.com/tos", onOpenUrl = {}, onAccept = {})
             "onboarding" -> OnboardingFlow(
