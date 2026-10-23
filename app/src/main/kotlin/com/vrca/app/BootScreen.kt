@@ -179,6 +179,8 @@ enum class InternetLink(val text: String) {
     WiFi("Wi-Fi"),
     Ethernet("Ethernet"),
     Mobile("Mobile data"),
+    /** Connected to a network, but it doesn't reach the internet (no internet behind the Wi-Fi, or a sign-in page). */
+    NoAccess("No internet access"),
     None("Not connected")
 }
 
@@ -904,11 +906,13 @@ private fun StatusPanel(status: BootStatus, modifier: Modifier, reveal: () -> Fl
                 val net = if (0 >= shown) InternetLink.Checking else status.internet
                 ServiceRow(
                     if (net == InternetLink.None) BootIcons.NoInternet else BootIcons.Internet, "Internet",
-                    if (status.internetMbps > 0 && net != InternetLink.None && net != InternetLink.Checking)
+                    if (status.internetMbps > 0 && net != InternetLink.None && net != InternetLink.Checking && net != InternetLink.NoAccess)
                         "${net.text} · ${status.internetMbps.coerceAtMost(9999)} Mbps" else net.text,
                     when (net) {
                         InternetLink.Checking -> Mark.Working
                         InternetLink.None -> Mark.Failed
+                        // Amber: the headset is fine, the network it's on isn't (user, 2026-10-23).
+                        InternetLink.NoAccess -> Mark.Warn
                         else -> Mark.Done
                     },
                     Modifier.widenIn { stagger(reveal(), 0, 3) }, rowHeight
@@ -964,7 +968,11 @@ private fun RetryPill(retryInSec: Int?, onRetry: () -> Unit) {
 fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
     val cm = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return InternetLink.None to 0
     val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-    if (caps == null || !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return InternetLink.None to 0
+    if (caps == null) return InternetLink.None to 0
+    // On a network that Android couldn't confirm reaches the internet (nothing behind the Wi-Fi, or a
+    // café / hotel sign-in page): a warning, not "Not connected".
+    if (!caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) ||
+        caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)) return InternetLink.NoAccess to 0
     val link = when {
         caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> InternetLink.Ethernet
         caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> InternetLink.Mobile

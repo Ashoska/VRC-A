@@ -63,7 +63,7 @@ The engine itself can't run on the JVM. Expand Manual Send to see the row:
 `ui.sh run headset "preset voice-loading; tap Manual Send; shot v"`.
 
 **Shows:** update, update-optional, whatsnew, confirm, confirm-destructive, timezone (dialogs);
-boot [mid|error|done|incident|offline|signin|vrcdown|live|livefail|demo] [none] (samples), headsetboot [onboarded|full] [discord[=ms]|discordfail[=ms]] (the real boot run; `discord=ms` turns Discord RPC on and simulates it (Connecting from the start, Connected/Failed after ms of app time, default 6000: the real hidden discord.com WebView can't run here); `full` = the whole real start as a returning user: VrcaApp, app built behind the boot screen, fold + reveal into the app), crash, banned [reason], tos, onboarding <step 0-7>, login [nocancel] (full screens).
+boot [mid|error|done|incident|offline|noaccess|signin|vrcdown|live|livefail|demo] [none] (samples), headsetboot [onboarded|full] [discord[=ms]|discordfail[=ms]] (the real boot run; `discord=ms` turns Discord RPC on and simulates it (Connecting from the start, Connected/Failed after ms of app time, default 6000: the real hidden discord.com WebView can't run here); `full` = the whole real start as a returning user: VrcaApp, app built behind the boot screen, fold + reveal into the app), crash, banned [reason], tos, onboarding <step 0-7>, login [nocancel] (full screens).
 
 Everything else is reached the way a user gets there: tap through the tabs, sub-tabs, cards,
 chips and buttons (`tree` lists what's tappable).
