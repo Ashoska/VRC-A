@@ -78,6 +78,8 @@ fun GremlinButton(
      *  (0..1; null = size unknown). Taps are ignored meanwhile. */
     downloading: Boolean = false,
     downloadProgress: Float? = null,
+    /** The download finished: the downloading Boot Cat lands into his Done face. */
+    downloaded: Boolean = false,
     pressedPreview: Boolean = false
 ) {
     GremlinButtonFrame(onClick, modifier, kind, enabled, loading || downloading, size, pressedPreview) { labelColor ->
@@ -85,7 +87,7 @@ fun GremlinButton(
         val state = when { downloading -> 2; loading -> 1; else -> 0 }
         Crossfade(state, label = "busy") { st ->
             when {
-                st == 2 -> Row { com.vrca.app.BootCatDownload(downloadProgress, Modifier.size(iconSize + 6.dp)); Spacer(Modifier.width(8.dp)) }
+                st == 2 -> Row { com.vrca.app.BootCatDownload(downloadProgress, Modifier.size(iconSize + 6.dp), done = downloaded); Spacer(Modifier.width(8.dp)) }
                 st == 1 -> Row { BootCat(Mark.Working, 0, Modifier.size(iconSize + 4.dp)); Spacer(Modifier.width(8.dp)) }
                 bootIcon != null -> Row {
                     com.vrca.app.BootIconView(bootIcon, { labelColor }, { labelColor }, Modifier.size(iconSize + 2.dp)); Spacer(Modifier.width(8.dp))

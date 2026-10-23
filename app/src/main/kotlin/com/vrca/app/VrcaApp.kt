@@ -351,6 +351,8 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
     var downloadId         by remember { mutableLongStateOf(-1L) }
     // The update download's progress (0..1, null = size not known yet), for the downloading Boot Cat.
     var downloadProgress   by remember { mutableStateOf<Float?>(null) }
+    // Download finished: Boot Cat lands into Done for a moment before the installer opens.
+    var downloadLanded     by remember { mutableStateOf(false) }
     var downloadDone       by remember { mutableStateOf(false) }
     var downloadError      by remember { mutableStateOf<String?>(null) }
 
@@ -573,9 +575,12 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
                                 }
                                 // A missing FileProvider authority / no installer activity throws —
                                 // surface it instead of crashing the app mid-update.
-                                runCatching { context.startActivity(install) }
-                                    .onFailure { downloadError = "Couldn't open the installer. Tap the download link to install manually." }
-                                downloadDone = true
+                                downloadLanded = true
+                                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                    runCatching { context.startActivity(install) }
+                                        .onFailure { downloadError = "Couldn't open the installer. Tap the download link to install manually." }
+                                    downloadDone = true
+                                }, LANDED_HOLD_MS)
                             }
                         }
                     }
@@ -630,6 +635,7 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
             forced = updateToShow.forced,
             downloading = downloadId >= 0L && !downloadDone,
             progress = downloadProgress,
+            landed = downloadLanded,
             error = downloadError,
             onDismiss = { updateDismissed = true },
             onDownload = { url ->
@@ -654,6 +660,7 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
                         }
                         downloadId = dm.enqueue(request)
                         downloadDone = false
+                        downloadLanded = false
                         enqueued = true
                     }
                 } catch (_: Throwable) {
@@ -863,6 +870,8 @@ internal fun UpdateDialog(
     downloading: Boolean = false,
     /** Download progress 0..1 (null = size not known yet), shown by the downloading Boot Cat. */
     progress: Float? = null,
+    /** The download finished: Boot Cat lands into his Done face just before the installer opens. */
+    landed: Boolean = false,
     error: String? = null,
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
@@ -1000,7 +1009,7 @@ internal fun UpdateDialog(
                             else if (error != null) "Retry Download" else "Download Update",
                             onClick = { if (!downloading) onDownload(info.downloadUrl) },
                             modifier = Modifier.fillMaxWidth(),
-                            bootIcon = BootIcons.Updates, downloading = downloading, downloadProgress = progress
+                            bootIcon = BootIcons.Updates, downloading = downloading, downloadProgress = progress, downloaded = landed
                         )
                     } else {
                         Row(
@@ -1012,7 +1021,7 @@ internal fun UpdateDialog(
                                 if (downloading) "Downloading" + (progress?.let { " ${(it * 100).toInt()}%" } ?: "")
                                 else if (error != null) "Retry" else "Download",
                                 onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                                bootIcon = BootIcons.Updates, downloading = downloading, downloadProgress = progress
+                                bootIcon = BootIcons.Updates, downloading = downloading, downloadProgress = progress, downloaded = landed
                             )
                         }
                     }
@@ -1653,3 +1662,6 @@ If you do not agree, close the app.
         }
     }
 }
+
+/** How long Boot Cat's Done landing (~1 s) shows before the installer opens. */
+private const val LANDED_HOLD_MS = 1100L

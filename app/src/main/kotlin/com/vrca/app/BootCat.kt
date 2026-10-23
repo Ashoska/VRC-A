@@ -48,13 +48,17 @@ import kotlin.math.sin
  * when this row's all-done hop starts after [celebrate] turns true (one after another down the list).
  */
 @Composable
-internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Boolean = false, hopDelayMs: Long = 0) {
+internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Boolean = false, hopDelayMs: Long = 0, startFrom: Mark? = null) {
     val accent = MaterialTheme.colorScheme.primary
     val v = Math.floorMod(variant, THINK.size)
     // The mark before this one (what a transition starts from) and how far the transition is.
-    var from by remember { mutableStateOf<Mark?>(null) }
+    // [startFrom]: appear already landing from that mark (the download cat hands over to Done this way).
+    var from by remember { mutableStateOf(startFrom) }
     var shown by remember { mutableStateOf(mark) }
-    val t = remember { Animatable(Float.MAX_VALUE) }
+    val t = remember { Animatable(if (startFrom != null) 0f else Float.MAX_VALUE) }
+    LaunchedEffect(Unit) {
+        if (startFrom != null) { val dur = transitionMs(startFrom, mark); t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing)) }
+    }
     var looping by remember { mutableStateOf(mark == Mark.Working || mark == Mark.Background) }
     LaunchedEffect(mark) {
         if (mark == shown) return@LaunchedEffect
@@ -166,7 +170,9 @@ private fun LabLoop(calm: Boolean, v: Int, accent: Color, modifier: Modifier) {
  * while drawing.
  */
 @Composable
-internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary) {
+internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary, done: Boolean = false) {
+    // Finished: he lands into the Done face, the same blink-and-pop the boot rows land with.
+    if (done) { BootCat(Mark.Done, 0, modifier, startFrom = Mark.Working); return }
     val head = remember { headPath() }
     // Where the fill starts: the top middle of the head (its prefix up to there, measured once).
     val start = remember {

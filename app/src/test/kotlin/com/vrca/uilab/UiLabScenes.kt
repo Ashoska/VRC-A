@@ -609,13 +609,17 @@ java.lang.IllegalStateException: Expected a preset but found none
         }
     }
 
-    /** One big download Boot Cat for a looping GIF: 0% for 1.2 s, 0->100% over 10.8 s, then 100%. */
+    /** One big download Boot Cat: 0% for 1.2 s, 0->100% over 10.8 s, then lands into Done 0.3 s later. */
     @Composable
     private fun DownloadCatLoop() {
         val anim = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
-        LaunchedEffect(Unit) { kotlinx.coroutines.delay(1200); anim.animateTo(1f, androidx.compose.animation.core.tween(10800, easing = androidx.compose.animation.core.LinearEasing)) }
+        val done = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            kotlinx.coroutines.delay(1200); anim.animateTo(1f, androidx.compose.animation.core.tween(10800, easing = androidx.compose.animation.core.LinearEasing))
+            kotlinx.coroutines.delay(300); done.value = true
+        }
         androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().background(com.vrca.ui.theme.GremlinColors.Backdrop), contentAlignment = Alignment.Center) {
-            com.vrca.app.BootCatDownload(anim.value, Modifier.size(200.dp))
+            com.vrca.app.BootCatDownload(anim.value, Modifier.size(200.dp), done = done.value)
         }
     }
 
