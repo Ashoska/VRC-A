@@ -639,6 +639,13 @@ private class BootTimeline {
 
     /** Writes everything since the last write (a retry adds a second block). */
     fun write(ctx: Context, why: String) {
+        // Discord's own phases (from its service), on the first write: where its connect time went.
+        if (written == 0) {
+            synchronized(events) {
+                DiscordRpcState.phases.forEach { (name, at) -> events += "${at - t0} Discord ${name}" }
+                events.sortBy { it.substringBefore(' ').toLongOrNull() ?: 0L }
+            }
+        }
         val lines = synchronized(events) { events.drop(written).also { written = events.size } }
         if (lines.isEmpty()) return
         val processUp = t0 - android.os.Process.getStartUptimeMillis()
