@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -89,39 +88,53 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
             Spacer(Modifier.height(18.dp))
             Layer(Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
-                    // Where it crashed and what went wrong, in plain words (never code names).
-                    Text(
-                        "Crashed in $where", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
-                        color = GremlinColors.Negative, maxLines = 2, overflow = TextOverflow.Ellipsis
-                    )
-                    Text(what, style = MaterialTheme.typography.bodyMedium, color = GremlinColors.Text, modifier = Modifier.padding(top = 2.dp))
-                    // Only when it isn't a one-off.
-                    if (earlier.isNotEmpty()) Text(
-                        "Crashed ${earlier.size + 1} times in the last 3 days", style = MaterialTheme.typography.bodySmall,
-                        color = GremlinColors.Caution, modifier = Modifier.padding(top = 6.dp)
-                    )
-                    // Details, always shown (user: no expand/collapse). Plain facts only (user: don't
-                    // expose our code): the full report, stack trace included, only goes to the developer (CrashUpload).
-                    if (details.isNotEmpty()) Column(
-                        Modifier.padding(top = 14.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                            .background(GremlinColors.Card).padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        // Only what isn't already shown above (where, what, version and time are).
-                        details.forEach { (label, value) -> DetailRow(label, value) }
+                    // Start VRC-A beside the title block (user pick 2026-10-24) when the card is wide enough; on a
+                    // narrow phone that squeezed the text into short lines, so there it goes full width at the bottom.
+                    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        val wide = maxWidth >= WIDE_CARD
+                        Column {
+                            Row(verticalAlignment = Alignment.Top) {
+                                Column(Modifier.weight(1f).padding(end = if (wide) 14.dp else 0.dp)) {
+                                    // Where it crashed and what went wrong, in plain words (never code names).
+                                    Text(
+                                        "Crashed in $where", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+                                        color = GremlinColors.Negative, maxLines = 2, overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(what, style = MaterialTheme.typography.bodyMedium, color = GremlinColors.Text, modifier = Modifier.padding(top = 2.dp))
+                                    // Only when it isn't a one-off.
+                                    if (earlier.isNotEmpty()) Text(
+                                        "Crashed ${earlier.size + 1} times in the last 3 days", style = MaterialTheme.typography.bodySmall,
+                                        color = GremlinColors.Caution, modifier = Modifier.padding(top = 6.dp)
+                                    )
+                                }
+                                if (wide) StartButton(Modifier) { leaving = true }
+                            }
+                            // Details, always shown (user: no expand/collapse). Plain facts only (user: don't expose
+                            // our code): the full report, stack trace included, only goes to the developer (CrashUpload).
+                            if (details.isNotEmpty()) Column(
+                                Modifier.padding(top = 14.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                    .background(GremlinColors.Card).padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                // Only what isn't already shown above (where, what, version and time are).
+                                details.forEach { (label, value) -> DetailRow(label, value) }
+                            }
+                            if (!wide) StartButton(Modifier.fillMaxWidth().padding(top = 14.dp)) { leaving = true }
+                        }
                     }
                 }
             }
-            Spacer(Modifier.height(18.dp))
-            // One button (user, 2026-10-24: crashes reach the developer by themselves now, so
-            // Download report went).
-            com.vrca.ui.common.GremlinButton(
-                "Start VRC-A", { leaving = true }, Modifier.fillMaxWidth(),
-                bootIcon = BootIcons.Start, size = com.vrca.ui.common.GremlinButtonSize.Large
-            )
         }
     }
 }
+
+@Composable
+private fun StartButton(modifier: Modifier, onClick: () -> Unit) = com.vrca.ui.common.GremlinButton(
+    "Start VRC-A", onClick, modifier, bootIcon = BootIcons.Start, size = com.vrca.ui.common.GremlinButtonSize.Large
+)
+
+/** From this card width the button sits beside the title (narrower: full width at the bottom). */
+private val WIDE_CARD = 440.dp
 
 /** How long the crash screen takes to fade out after Start VRC-A. */
 private const val LEAVE_MS = 260

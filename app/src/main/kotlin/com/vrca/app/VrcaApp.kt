@@ -145,6 +145,9 @@ private fun VrcaAppContent() {
     if (CrashReport.safeStart) {
         // Read at launch, before any UI (CrashReport.checkAtLaunch).
         CrashScreen(CrashReport.screenReport, CrashReport.screenHistory, onStart = { CrashReport.release(ctx) })
+        // Send the crash to the developer now, not only after Start VRC-A (a crash was never reported when
+        // the app was closed on this screen). The sign-in is kept from the last run, so the boot isn't needed.
+        LaunchedEffect(Unit) { CrashUpload.sendPending(ctx) }
         // A newer version may already fix it (user, 2026-10-23): the update popup over the crash screen.
         // One read of the release docs; the app's own check runs again after Start VRC-A.
         if (!BuildConfig.IS_ADMIN_BUILD) {
