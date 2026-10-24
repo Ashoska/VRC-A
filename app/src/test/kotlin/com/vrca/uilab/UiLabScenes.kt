@@ -704,7 +704,7 @@ object UiLabScenes {
                     com.vrca.app.AnimatedLock(open, MaterialTheme.colorScheme.primary, Modifier.size(24.dp))
                 }
             }
-            "tosmock" -> when (rest.trim().substringBefore(' ')) { "b" -> TosMockB(); "b3" -> TosMockB3(); "b2" -> TosMockB2(rest.trim().substringAfter(' ', "2").toIntOrNull() ?: 2); else -> TosMockA() }
+            "tosmock" -> when (rest.trim().substringBefore(' ')) { "b" -> TosMockB(); "b3" -> TosMockB3(rest.trim().substringAfter(' ', "0").toIntOrNull() ?: 0); "b2" -> TosMockB2(rest.trim().substringAfter(' ', "2").toIntOrNull() ?: 2); else -> TosMockA() }
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.

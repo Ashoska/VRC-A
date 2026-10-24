@@ -30,7 +30,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
@@ -136,7 +135,7 @@ private fun StatusStrip() {
                     modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 StatusPill(status.name.lowercase().replaceFirstChar { it.uppercase() }, tone)
                 if (running) IconButton(onClick = { DiscordBotService.stop(ctx) }) { Icon(Icons.Filled.Stop, "Stop", tint = MaterialTheme.colorScheme.error) }
-                else IconButton(onClick = { DiscordBotStore.setEnabled(ctx, true); DiscordBotService.start(ctx) }) { Icon(Icons.Filled.PlayArrow, "Start", tint = MaterialTheme.colorScheme.primary) }
+                else IconButton(onClick = { DiscordBotStore.setEnabled(ctx, true); DiscordBotService.start(ctx) }) { Icon(com.vrca.app.BootIcons.StartVector, "Start", tint = MaterialTheme.colorScheme.primary) }
             }
             if (detail.isNotBlank() && status != DiscordBotState.Status.CONNECTED) Small(detail)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {

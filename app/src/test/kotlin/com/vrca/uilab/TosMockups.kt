@@ -544,10 +544,12 @@ private fun ListRow3(i: Int, s: Sec2, mark: com.vrca.app.Mark, selected: Boolean
 
 
 @Composable
-internal fun TosMockB3() {
+internal fun TosMockB3(accept: Int = 0) {
     val total = SECTIONS2.size
-    var open by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
-    var reached by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    // accept > 0: an accept-placement idea, opened on the last section (0 = the current layout from the start).
+    val start = if (accept > 0) total - 1 else 0
+    var open by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(start) }
+    var reached by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(start) }
     var agreed by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     // Read = passed with Next; the furthest one reached is being read (thinking); later ones are asleep.
     val marks = List(total) { i ->
@@ -565,10 +567,12 @@ internal fun TosMockB3() {
             Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
                 ReaderTitle(open, SECTIONS2[open], total)
                 ReaderBody(SECTIONS2[open], wide = w)
+                if (last && accept == 2) AgreeCard(agreed) { agreed = it }
             }
         }
         val footer: @Composable () -> Unit = {
-            if (last) Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (last && accept > 0) AcceptIdea(accept, wide, agreed, { agreed = it }, { go(open - 1) })
+            else if (last) Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Raised).clickable { agreed = !agreed }
                         .padding(horizontal = 6.dp, vertical = 2.dp),
@@ -625,3 +629,87 @@ internal fun TosMockB3() {
         }
     }
 }
+
+
+// ---- Accept placement ideas (show tosmock b3 1|2|3) ----
+
+@Composable
+private fun AgreeTick(agreed: Boolean, label: String, onAgree: (Boolean) -> Unit, modifier: Modifier = Modifier) = Row(
+    modifier.clip(RoundedCornerShape(12.dp)).clickable { onAgree(!agreed) }.padding(end = 10.dp),
+    verticalAlignment = Alignment.CenterVertically
+) {
+    Checkbox(agreed, onAgree, colors = CheckboxDefaults.colors(checkedColor = G.Accent, uncheckedColor = G.TextMuted))
+    Text(label, style = MaterialTheme.typography.bodyLarge, color = G.Text)
+}
+
+@Composable
+private fun BackAccept(onBack: () -> Unit, enabled: Boolean) = Row(verticalAlignment = Alignment.CenterVertically) {
+    com.vrca.ui.common.GremlinButton("Back", onBack, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Large)
+    Spacer(Modifier.width(10.dp))
+    GremlinButton("Accept", {}, enabled = enabled, size = GremlinButtonSize.Large, bootIcon = BootIcons.Start)
+}
+
+/** 2: the agreement is the last thing you read, a card at the end of the section. */
+@Composable
+private fun AgreeCard(agreed: Boolean, onAgree: (Boolean) -> Unit) {
+    val edge by androidx.compose.animation.animateColorAsState(if (agreed) G.Positive else G.Accent.copy(alpha = 0.5f), label = "agreeEdge")
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(G.Raised)
+            .border(1.5.dp, edge, RoundedCornerShape(14.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            com.vrca.app.BootCat(if (agreed) com.vrca.app.Mark.Done else com.vrca.app.Mark.Waiting, 0, Modifier.size(34.dp))
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text("Your agreement", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = G.Text)
+                Text("You've read all ${SECTIONS2.size} sections of version 4", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
+            }
+        }
+        AgreeTick(agreed, "I agree to these terms", onAgree)
+    }
+}
+
+@Composable
+private fun AcceptIdea(idea: Int, wide: Boolean, agreed: Boolean, onAgree: (Boolean) -> Unit, onBack: () -> Unit) {
+    when (idea) {
+        // 1: the tick on the same line as the buttons (stacked above them on a narrow phone).
+        1 -> if (wide) Row(verticalAlignment = Alignment.CenterVertically) {
+            AgreeTick(agreed, "I agree to these terms", onAgree)
+            Spacer(Modifier.weight(1f))
+            BackAccept(onBack, agreed)
+        } else Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            AgreeTick(agreed, "I agree to these terms", onAgree)
+            Row { Spacer(Modifier.weight(1f)); BackAccept(onBack, agreed) }
+        }
+        // 2: the tick lives in the agreement card in the reading; only the buttons stay here.
+        2 -> Row { Spacer(Modifier.weight(1f)); BackAccept(onBack, agreed) }
+        // 3: no tick: Accept is the agreement, with one quiet line saying so, kept right beside the buttons
+        // (user: at the far left it looked separate). Accept waits ACCEPT_WAIT s after the last section opens,
+        // its Boot Cat draining like the boot Retry (user: someone speeding through mustn't accept by accident).
+        else -> {
+            // Remembered only while the last section is open: Back leaves it, so coming back starts the wait again (user).
+            var left by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(ACCEPT_WAIT) }
+            androidx.compose.runtime.LaunchedEffect(Unit) { while (left > 0) { kotlinx.coroutines.delay(1000); left-- } }
+            val note = @Composable { Text("By tapping Accept you agree to these terms", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted) }
+            val buttons = @Composable {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    com.vrca.ui.common.GremlinButton("Back", onBack, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Large)
+                    Spacer(Modifier.width(10.dp))
+                    if (left > 0) GremlinButton(
+                        "Accept  $left", {}, enabled = false, size = GremlinButtonSize.Large,
+                        leading = { com.vrca.app.BootCatCountdown(left.toFloat() / ACCEPT_WAIT, left, Modifier.size(28.dp), G.Accent.copy(alpha = 0.55f)) }
+                    ) else GremlinButton("Accept", {}, size = GremlinButtonSize.Large, bootIcon = BootIcons.Start)
+                }
+            }
+            if (wide) Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f)); note(); Spacer(Modifier.width(18.dp)); buttons()
+            } else Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
+                note(); buttons()
+            }
+        }
+    }
+}
+
+/** Seconds before Accept can be tapped once the last section opens. */
+private const val ACCEPT_WAIT = 5

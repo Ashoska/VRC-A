@@ -44,7 +44,6 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Schedule
@@ -1295,18 +1294,9 @@ private fun PreviewAndTogglesCard(
             }
         } else {
             com.vrca.ui.common.GremlinButton(
-                onClick = { vm.startSending() },
-                enabled = !isBanned,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(
-                    Icons.Filled.PlayArrow,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("Start sending")
-            }
+                "Start sending", { vm.startSending() }, Modifier.fillMaxWidth(),
+                enabled = !isBanned, bootIcon = com.vrca.app.BootIcons.Start
+            )
         }
 
         // Warning chips under the preview
