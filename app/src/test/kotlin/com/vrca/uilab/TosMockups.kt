@@ -578,12 +578,13 @@ internal fun TosMockB3() {
                     Text("I've read and agree to these terms", style = MaterialTheme.typography.bodyLarge, color = G.Text)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Quiet, size = GremlinButtonSize.Medium)
+                    com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Medium)
                     Spacer(Modifier.weight(1f))
                     GremlinButton("Accept", {}, enabled = agreed, size = GremlinButtonSize.Large, bootIcon = BootIcons.Start)
                 }
             } else Row(verticalAlignment = Alignment.CenterVertically) {
-                if (open > 0) com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Quiet, size = GremlinButtonSize.Medium)
+                // Back on every section, the real button (user: not plain text); greyed out on the first.
+                com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Medium, enabled = open > 0)
                 Spacer(Modifier.weight(1f))
                 com.vrca.ui.common.GremlinButton("Next: ${SECTIONS2[open + 1].title}", { go(open + 1) }, size = GremlinButtonSize.Medium)
             }
