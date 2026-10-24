@@ -241,6 +241,46 @@ internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color 
     }
 }
 
+/**
+ * Boot Cat counting down (the boot's Retry button; user, 2026-10-24: like the download cat, instead of a
+ * plain timer circle): his head outline is the time left, draining back to the top middle as the seconds
+ * pass ([left], 0..1, eased between whole seconds), and he blinks on each second ([tick] changes) so the
+ * countdown visibly ticks. Everything is read while drawing.
+ */
+@Composable
+internal fun BootCatCountdown(left: Float, tick: Int, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary) {
+    val head = remember { headPath() }
+    val start = remember {
+        androidx.compose.ui.graphics.PathMeasure().apply { setPath(PathParser().parsePathString(HEAD_TO_TOP).toPath(), false) }.length
+    }
+    // A second's worth of draining takes a second, so the outline shrinks steadily instead of in steps.
+    val shown = androidx.compose.animation.core.animateFloatAsState(
+        left.coerceIn(0f, 1f), tween(1000, easing = LinearEasing), label = "catCountdown"
+    )
+    val blink = remember { Animatable(1f) }
+    LaunchedEffect(tick) { blink.snapTo(0f); blink.animateTo(1f, tween(260, easing = LinearEasing)) }
+    Canvas(modifier) {
+        val s = size.minDimension / 24f
+        withTransform({ scale(s, s, Offset.Zero) }) {
+            drawPath(head, color.copy(alpha = 0.25f), style = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+            val m = androidx.compose.ui.graphics.PathMeasure().apply { setPath(head, false) }
+            val total = m.length
+            val len = shown.value * total
+            if (len > 0.01f) {
+                // From the top middle clockwise, as long as the time left (its end runs back toward the top).
+                val seg = Path()
+                val b = start + len
+                m.getSegment(start, min(b, total), seg, true)
+                if (b > total) m.getSegment(0f, b - total, seg, true)
+                drawPath(seg, color, style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+            }
+            // His normal eyes, shut for a moment on each second.
+            val v = blink.value
+            squash(if (v < 1f) 1f - 0.85f * sin(PI.toFloat() * v) else 1f) { face(Face.Look, color) }
+        }
+    }
+}
+
 /** The head path from its start to the top middle of the forehead (half the forehead curve). */
 private const val HEAD_TO_TOP = "M3.92,10.46 L4.3,3 L8.2,7.1 Q10.1,6.1 12,6.1"
 
