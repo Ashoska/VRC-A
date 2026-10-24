@@ -2,12 +2,9 @@ package com.vrca.app
 
 import android.app.ActivityManager
 import android.app.ApplicationExitInfo
-import android.content.ContentValues
 import android.content.Context
 import android.os.Build
-import android.os.Environment
 import android.os.Process
-import android.provider.MediaStore
 import com.vrca.BuildConfig
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -240,43 +237,9 @@ object CrashReport {
         return if (b.isBlank()) v else "$v · $b"
     }
 
-    /**
-     * The downloadable report: the waiting crash in full, then the other crashes of the past 3 days
-     * (the developer reads these; release builds' code names are renamed, so nothing readable leaks).
-     */
-    fun fullReport(current: String, history: List<Entry>): String = buildString {
-        append(current.trimEnd()).append('\n')
-        history.filter { it.text.trimEnd() != current.trimEnd().take(HISTORY_CHARS).trimEnd() }.forEach {
-            append("\n\n----- EARLIER CRASH -----\n").append(it.text.trimEnd()).append('\n')
-        }
-    }
-
     /** When the crash happened, from the report's "Time:" line ("" if missing). */
     fun time(text: String): String =
         text.lineSequence().firstOrNull { it.startsWith("Time: ") }?.removePrefix("Time: ").orEmpty()
-
-    /**
-     * Saves [text] as a .txt in the device's Downloads folder, returning its name, or null if it
-     * couldn't. Android 10+ only (MediaStore, no permission needed); older phones use the system
-     * file picker instead (CrashScreen).
-     */
-    fun saveToDownloads(ctx: Context, text: String): String? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
-        return runCatching {
-            val name = fileName()
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, name)
-                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
-                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-            }
-            val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
-            ctx.contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) } ?: return null
-            name
-        }.getOrNull()
-    }
-
-    fun fileName(): String =
-        "VRC-A crash " + SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(Date()) + ".txt"
 
     private fun header(pw: PrintWriter, title: String, ctx: Context, at: Long = System.currentTimeMillis()) {
         pw.println("=== $title ===")
