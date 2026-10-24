@@ -89,26 +89,75 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
             Spacer(Modifier.height(18.dp))
             Layer(Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
-                    // Where it crashed and what went wrong, in plain words (never code names).
-                    Text(
-                        "Crashed in $where", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
-                        color = GremlinColors.Negative, maxLines = 2, overflow = TextOverflow.Ellipsis
-                    )
-                    Text(what, style = MaterialTheme.typography.bodyMedium, color = GremlinColors.Text, modifier = Modifier.padding(top = 2.dp))
-                    // Only when it isn't a one-off.
-                    if (earlier.isNotEmpty()) Text(
-                        "Crashed ${earlier.size + 1} times in the last 3 days", style = MaterialTheme.typography.bodySmall,
-                        color = GremlinColors.Caution, modifier = Modifier.padding(top = 6.dp)
-                    )
-                    // Details, always shown (user: no expand/collapse). Plain facts only (user: don't
-                    // expose our code): the full report, stack trace included, only goes to the developer (CrashUpload).
-                    if (details.isNotEmpty()) Column(
-                        Modifier.padding(top = 14.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                            .background(GremlinColors.Card).padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        // Only what isn't already shown above (where, what, version and time are).
-                        details.forEach { (label, value) -> DetailRow(label, value) }
+                    // TRIAL D: the button beside the title block (top right).
+                    if (trial == 4) Row(verticalAlignment = Alignment.Top) {
+                        Column(Modifier.weight(1f).padding(end = 14.dp)) {
+                            // Where it crashed and what went wrong, in plain words (never code names).
+                            Text(
+                                "Crashed in $where", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+                                color = GremlinColors.Negative, maxLines = 2, overflow = TextOverflow.Ellipsis
+                            )
+                            Text(what, style = MaterialTheme.typography.bodyMedium, color = GremlinColors.Text, modifier = Modifier.padding(top = 2.dp))
+                            // Only when it isn't a one-off.
+                            if (earlier.isNotEmpty()) Text(
+                                "Crashed ${earlier.size + 1} times in the last 3 days", style = MaterialTheme.typography.bodySmall,
+                                color = GremlinColors.Caution, modifier = Modifier.padding(top = 6.dp)
+                            )
+                        }
+                        StartButton(Modifier) { leaving = true }
+                    } else {
+                        // Where it crashed and what went wrong, in plain words (never code names).
+                        Text(
+                            "Crashed in $where", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+                            color = GremlinColors.Negative, maxLines = 2, overflow = TextOverflow.Ellipsis
+                        )
+                        Text(what, style = MaterialTheme.typography.bodyMedium, color = GremlinColors.Text, modifier = Modifier.padding(top = 2.dp))
+                        // Only when it isn't a one-off.
+                        if (earlier.isNotEmpty()) Text(
+                            "Crashed ${earlier.size + 1} times in the last 3 days", style = MaterialTheme.typography.bodySmall,
+                            color = GremlinColors.Caution, modifier = Modifier.padding(top = 6.dp)
+                        )
+                    }
+                    // TRIAL E: the button beside the details (stacked under them when too narrow).
+                    if (trial == 5) androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        if (maxWidth >= 480.dp) Row(verticalAlignment = Alignment.Bottom) {
+                            Box(Modifier.weight(1f).padding(end = 14.dp)) {
+                                // Details, always shown (user: no expand/collapse). Plain facts only (user: don't
+                                // expose our code): the full report, stack trace included, only goes to the developer (CrashUpload).
+                                if (details.isNotEmpty()) Column(
+                                    Modifier.padding(top = 14.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                        .background(GremlinColors.Card).padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    // Only what isn't already shown above (where, what, version and time are).
+                                    details.forEach { (label, value) -> DetailRow(label, value) }
+                                }
+                            }
+                            StartButton(Modifier) { leaving = true }
+                        } else Column {
+                            // Details, always shown (user: no expand/collapse). Plain facts only (user: don't
+                            // expose our code): the full report, stack trace included, only goes to the developer (CrashUpload).
+                            if (details.isNotEmpty()) Column(
+                                Modifier.padding(top = 14.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                    .background(GremlinColors.Card).padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                // Only what isn't already shown above (where, what, version and time are).
+                                details.forEach { (label, value) -> DetailRow(label, value) }
+                            }
+                            StartButton(Modifier.fillMaxWidth().padding(top = 14.dp)) { leaving = true }
+                        }
+                    } else {
+                        // Details, always shown (user: no expand/collapse). Plain facts only (user: don't
+                        // expose our code): the full report, stack trace included, only goes to the developer (CrashUpload).
+                        if (details.isNotEmpty()) Column(
+                            Modifier.padding(top = 14.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                .background(GremlinColors.Card).padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            // Only what isn't already shown above (where, what, version and time are).
+                            details.forEach { (label, value) -> DetailRow(label, value) }
+                        }
                     }
                     // TRIAL C: the button inside the card, bottom right.
                     if (trial == 3) Box(Modifier.fillMaxWidth().padding(top = 16.dp), contentAlignment = Alignment.CenterEnd) { StartButton(Modifier) { leaving = true } }
@@ -116,7 +165,7 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
             }
             // One button (user, 2026-10-24: crashes reach the developer by themselves now, so
             // Download report went). TRIAL layouts: 0 full width, 1 right, 2 centred, 3 inside the card.
-            if (trial != 3) {
+            if (trial !in 3..5) {
                 Spacer(Modifier.height(18.dp))
                 Box(Modifier.fillMaxWidth(), contentAlignment = if (trial == 2) Alignment.Center else Alignment.CenterEnd) {
                     StartButton(if (trial == 0) Modifier.fillMaxWidth() else Modifier) { leaving = true }
