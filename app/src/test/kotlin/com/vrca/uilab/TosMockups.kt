@@ -323,7 +323,7 @@ private val SECTIONS2 = listOf(
         "Signing in to VRChat powers your status, friends, instances and avatar tools. Signing in to Discord is optional and shows what you're up to on your Discord profile. Your logins are kept encrypted on this device.",
         image = IMG + "account.png",
         callout = com.vrca.app.Mark.Warn to "VRC-A isn't made by VRChat. Using third-party tools with your account is at your own risk."),
-    Sec2("What we keep", BootIcons.Terms, "Data and privacy",
+    Sec2("Data and privacy", BootIcons.Terms, "What we keep",
         "To sync your settings and keep VRC-A safe, a small amount is stored with us.",
         listOf("A random ID for this device", "Your app version and settings", "Never your VRChat password")),
     Sec2("Bugs and reports", BootIcons.Updates, "How crashes and problems reach us",
