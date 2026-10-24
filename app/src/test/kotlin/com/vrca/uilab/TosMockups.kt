@@ -586,7 +586,7 @@ internal fun TosMockB3() {
                 // Back on every section, the real button (user: not plain text); greyed out on the first.
                 com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Medium, enabled = open > 0)
                 Spacer(Modifier.weight(1f))
-                com.vrca.ui.common.GremlinButton("Next: ${SECTIONS2[open + 1].title}", { go(open + 1) }, size = GremlinButtonSize.Medium)
+                com.vrca.ui.common.GremlinButton("Next", { go(open + 1) }, size = GremlinButtonSize.Medium)
             }
         }
         if (wide) Row(Modifier.fillMaxSize().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
