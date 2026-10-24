@@ -693,7 +693,7 @@ object UiLabScenes {
             // progress runs 0 -> 100% over 5 s (record it), then holds.
             "download" -> DownloadSheet()
             "downloadcat" -> DownloadCatLoop()
-            "tosmock" -> if (rest.trim() == "b") TosMockB() else TosMockA()
+            "tosmock" -> when (rest.trim().substringBefore(' ')) { "b" -> TosMockB(); "b2" -> TosMockB2(rest.trim().substringAfter(' ', "2").toIntOrNull() ?: 2); else -> TosMockA() }
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.

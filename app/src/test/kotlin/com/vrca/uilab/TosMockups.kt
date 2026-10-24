@@ -294,3 +294,174 @@ private fun ListRow(i: Int, s: Sec, selected: Boolean, read: Boolean) {
         if (read) com.vrca.app.BootCat(com.vrca.app.Mark.Done, 0, Modifier.size(22.dp))
     }
 }
+
+
+// ---------------------------------------------------------------- B, round 2 (user: left panel good,
+// fill its blank space, better topic copy; the reader was cramped and badly formatted).
+
+private class Sec2(
+    val title: String, val icon: BootIcon, val short: String,
+    val lead: String, val points: List<String> = emptyList(), val image: String? = null,
+    val after: String? = null, val callout: Pair<com.vrca.app.Mark, String>? = null,
+)
+
+private val SECTIONS2 = listOf(
+    Sec2("Welcome to VRC-A", BootIcons.Tutorial, "What VRC-A is and who it's for",
+        "VRC-A is a free companion app for VRChat. It runs on your phone or Quest and talks to VRChat for you, so your chatbox, status and music can update while you play."),
+    Sec2("Your chatbox, your voice", BootIcons.Vrchat, "Be kind with what you send",
+        "Everything VRC-A sends to your chatbox is seen by the people around you, so the same rules apply as if you typed it yourself.",
+        listOf("No spam in public worlds", "No harassing or impersonating anyone", "Nothing VRChat's own rules don't allow"),
+        image = IMG + "chatbox.png"),
+    Sec2("Signing in to VRChat", BootIcons.VrchatSignIn, "Your login stays on this device",
+        "You sign in to VRChat inside VRC-A. Your login is kept encrypted on this device and is only ever sent to VRChat.",
+        image = IMG + "account.png",
+        callout = com.vrca.app.Mark.Warn to "VRC-A isn't made by VRChat. Using third-party tools with your account is at your own risk."),
+    Sec2("What we keep", BootIcons.Terms, "A little, and never your password",
+        "To sync your settings and keep VRC-A safe, a small amount is stored with us.",
+        listOf("A random ID for this device", "Your app version and settings", "Never your VRChat password")),
+    Sec2("When things crash", BootIcons.Updates, "Reports help get it fixed fast",
+        "If VRC-A crashes, a report is sent to the developer with your device model, the app version and what went wrong. Nothing personal is in it.",
+        image = IMG + "crash.png"),
+    Sec2("Fair play", BootIcons.Account, "What gets an account warned or banned",
+        "Accounts that break these terms can be warned, and repeat or serious cases banned from VRC-A.",
+        callout = com.vrca.app.Mark.Failed to "Trying to get around a ban gets every device and account involved banned."),
+    Sec2("When these terms change", BootIcons.Updates, "You'll be asked to accept again",
+        "If these terms change, VRC-A shows them again the next time you open it, and you can read what's new before accepting."),
+)
+
+@Composable
+private fun ReaderBody(s: Sec2, wide: Boolean) {
+    Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+        val lead = @Composable {
+            Text(s.lead, style = MaterialTheme.typography.bodyLarge, color = G.Text, lineHeight = androidx.compose.ui.unit.TextUnit(24f, androidx.compose.ui.unit.TextUnitType.Sp))
+        }
+        // An image sits beside the paragraph it belongs to (above it on a narrow screen).
+        if (s.image != null && wide) Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) { lead() }
+            SecImage(s.image, Modifier.weight(1f).aspectRatio(4f / 3f))
+        } else {
+            s.image?.let { SecImage(it, Modifier.fillMaxWidth().aspectRatio(16f / 10f)) }
+            lead()
+        }
+        if (s.points.isNotEmpty()) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            s.points.forEach { p ->
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Raised).padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(Modifier.size(8.dp).background(G.Accent, CircleShape))
+                    Spacer(Modifier.width(12.dp))
+                    Text(p, style = MaterialTheme.typography.bodyLarge, color = G.Text)
+                }
+            }
+        }
+        s.callout?.let { (mark, text) ->
+            val tone = if (mark == com.vrca.app.Mark.Failed) G.Negative else G.Caution
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(tone.copy(alpha = 0.10f))
+                    .border(1.dp, tone.copy(alpha = 0.45f), RoundedCornerShape(14.dp)).padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                com.vrca.app.BootCat(mark, 0, Modifier.size(30.dp))
+                Spacer(Modifier.width(12.dp))
+                Text(text, style = MaterialTheme.typography.bodyMedium, color = G.Text)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReaderTitle(i: Int, s: Sec2, total: Int) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("SECTION ${i + 1} OF $total", style = MaterialTheme.typography.labelMedium, color = G.Accent, letterSpacing = androidx.compose.ui.unit.TextUnit(1.2f, androidx.compose.ui.unit.TextUnitType.Sp))
+        Text(s.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, color = G.Text)
+        Text(s.short, style = MaterialTheme.typography.bodyLarge, color = G.TextMuted)
+    }
+}
+
+@Composable
+private fun ListRow2(i: Int, s: Sec2, selected: Boolean, read: Boolean) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(if (selected) G.Raised else G.Card)
+            .border(if (selected) 1.5.dp else 1.dp, if (selected) G.Accent else G.Edge, RoundedCornerShape(14.dp))
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        BootIconView(s.icon, { G.Accent }, { G.Accent }, Modifier.size(22.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(s.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = G.Text, maxLines = 1)
+            Text(s.short, style = MaterialTheme.typography.bodySmall, color = G.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (read) com.vrca.app.BootCat(com.vrca.app.Mark.Done, 0, Modifier.size(20.dp))
+    }
+}
+
+@Composable
+private fun Progress(read: Int, total: Int) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row {
+            Text("Read $read of $total", style = MaterialTheme.typography.labelMedium, color = G.TextMuted, modifier = Modifier.weight(1f))
+            Text("~3 min", style = MaterialTheme.typography.labelMedium, color = G.TextMuted)
+        }
+        Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(G.Raised)) {
+            Box(Modifier.fillMaxWidth(read / total.toFloat()).height(4.dp).background(G.Accent))
+        }
+    }
+}
+
+@Composable
+internal fun TosMockB2(open: Int = 2) {
+    val total = SECTIONS2.size
+    BoxWithConstraints(Modifier.fillMaxSize().background(G.Backdrop)) {
+        val wide = maxWidth >= 700.dp
+        Column(Modifier.fillMaxSize()) {
+            if (wide) Row(Modifier.weight(1f).padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column(Modifier.width(310.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Header(compact = true)
+                    Spacer(Modifier.height(2.dp))
+                    Progress(open, total)
+                    Spacer(Modifier.height(2.dp))
+                    SECTIONS2.forEachIndexed { i, s -> ListRow2(i, s, selected = i == open, read = i < open) }
+                }
+                com.vrca.app.Layer(Modifier.weight(1f).fillMaxHeight()) {
+                    Column(Modifier.fillMaxSize()) {
+                        Column(
+                            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 24.dp),
+                            verticalArrangement = Arrangement.spacedBy(20.dp)
+                        ) {
+                            ReaderTitle(open, SECTIONS2[open], total)
+                            ReaderBody(SECTIONS2[open], wide = true)
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            com.vrca.ui.common.GremlinButton("Back", {}, kind = com.vrca.ui.common.GremlinButtonKind.Quiet, size = GremlinButtonSize.Medium)
+                            Spacer(Modifier.weight(1f))
+                            com.vrca.ui.common.GremlinButton(
+                                "Next: ${SECTIONS2[open + 1].title}", {}, kind = com.vrca.ui.common.GremlinButtonKind.Secondary,
+                                size = GremlinButtonSize.Medium
+                            )
+                        }
+                    }
+                }
+            } else Column(
+                Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(9.dp)
+            ) {
+                Header(compact = false)
+                Progress(open, total)
+                SECTIONS2.forEachIndexed { i, s ->
+                    if (i == open) com.vrca.app.Layer(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                            ReaderTitle(i, s, total)
+                            ReaderBody(s, wide = false)
+                        }
+                    } else ListRow2(i, s, selected = false, read = i < open)
+                }
+            }
+            AcceptBar(compact = !wide)
+        }
+    }
+}
