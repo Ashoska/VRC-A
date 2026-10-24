@@ -591,9 +591,7 @@ internal fun TosMockB3() {
         if (wide) Row(Modifier.fillMaxSize().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Column(Modifier.width(310.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Header(compact = true, mark = if (agreed) com.vrca.app.Mark.Done else com.vrca.app.Mark.Working)
-                Spacer(Modifier.height(2.dp))
                 TermsBar(marks, done = agreed)
-                Spacer(Modifier.height(2.dp))
                 // The list fills the panel: each card takes an equal share of the height.
                 SECTIONS2.forEachIndexed { i, s ->
                     ListRow3(i, s, marks[i], selected = i == open, locked = i > reached, celebrate = agreed, modifier = Modifier.weight(1f)) { go(i) }
