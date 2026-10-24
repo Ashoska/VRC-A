@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -568,6 +569,7 @@ internal fun TosMockB3(accept: Int = 0) {
                 ReaderTitle(open, SECTIONS2[open], total)
                 ReaderBody(SECTIONS2[open], wide = w)
                 if (last && accept == 2) AgreeCard(agreed) { agreed = it }
+                if (last && accept == 4) Text(AGREE_NOTE, style = MaterialTheme.typography.bodyLarge, color = G.TextMuted)
             }
         }
         val footer: @Composable () -> Unit = {
@@ -684,28 +686,22 @@ private fun AcceptIdea(idea: Int, wide: Boolean, agreed: Boolean, onAgree: (Bool
         }
         // 2: the tick lives in the agreement card in the reading; only the buttons stay here.
         2 -> Row { Spacer(Modifier.weight(1f)); BackAccept(onBack, agreed) }
-        // 3: no tick: Accept is the agreement, with one quiet line saying so, kept right beside the buttons
-        // (user: at the far left it looked separate). Accept waits ACCEPT_WAIT s after the last section opens,
-        // its Boot Cat draining like the boot Retry (user: someone speeding through mustn't accept by accident).
+        // 3+: no tick: Accept is the agreement, with one quiet line saying so. Where that line goes:
+        // 3 beside the buttons, 4 at the end of the reading, 5 above the buttons, 6 under them.
         else -> {
-            // Remembered only while the last section is open: Back leaves it, so coming back starts the wait again (user).
-            var left by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(ACCEPT_WAIT) }
-            androidx.compose.runtime.LaunchedEffect(Unit) { while (left > 0) { kotlinx.coroutines.delay(1000); left-- } }
-            val note = @Composable { Text("By tapping Accept you agree to these terms", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted) }
-            val buttons = @Composable {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    com.vrca.ui.common.GremlinButton("Back", onBack, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Large)
-                    Spacer(Modifier.width(10.dp))
-                    if (left > 0) GremlinButton(
-                        "Accept  $left", {}, enabled = false, size = GremlinButtonSize.Large,
-                        leading = { com.vrca.app.BootCatCountdown(left.toFloat() / ACCEPT_WAIT, left, Modifier.size(28.dp), G.Accent.copy(alpha = 0.55f)) }
-                    ) else GremlinButton("Accept", {}, size = GremlinButtonSize.Large, bootIcon = BootIcons.Start)
+            val note = @Composable { Text(AGREE_NOTE, style = MaterialTheme.typography.bodyMedium, color = G.TextMuted) }
+            when {
+                idea == 3 && wide -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(Modifier.weight(1f)); note(); Spacer(Modifier.width(18.dp)); CountdownButtons(onBack)
                 }
-            }
-            if (wide) Row(verticalAlignment = Alignment.CenterVertically) {
-                Spacer(Modifier.weight(1f)); note(); Spacer(Modifier.width(18.dp)); buttons()
-            } else Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
-                note(); buttons()
+                idea == 4 -> Row { Spacer(Modifier.weight(1f)); CountdownButtons(onBack) }
+                idea == 6 -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.End) {
+                    CountdownButtons(onBack)
+                    Text(AGREE_NOTE, style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
+                }
+                else -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.End) {
+                    note(); CountdownButtons(onBack)
+                }
             }
         }
     }
@@ -713,3 +709,39 @@ private fun AcceptIdea(idea: Int, wide: Boolean, agreed: Boolean, onAgree: (Bool
 
 /** Seconds before Accept can be tapped once the last section opens. */
 private const val ACCEPT_WAIT = 5
+
+private const val AGREE_NOTE = "By tapping Accept you agree to these terms"
+
+/**
+ * Back + Accept, Accept waiting [ACCEPT_WAIT] s once the last section opens (user: someone speeding through
+ * mustn't accept by accident): Boot Cat's outline drains like the boot Retry, and only once it has fully
+ * drained (user: he vanished before finishing) does he crossfade into the Start icon and Accept wake up.
+ * Remembered only while the last section is open: Back leaves it, so coming back starts the wait again (user).
+ */
+@Composable
+private fun CountdownButtons(onBack: () -> Unit) {
+    var left by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(ACCEPT_WAIT) }
+    var ready by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        while (left > 0) { kotlinx.coroutines.delay(1000); left-- }
+        kotlinx.coroutines.delay(1000) // the last second's drain
+        ready = true
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        com.vrca.ui.common.GremlinButton("Back", onBack, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Large)
+        Spacer(Modifier.width(10.dp))
+        GremlinButton(
+            // Wide enough for "Accept  5", so the pair doesn't shift as the number goes.
+            if (left > 0) "Accept  $left" else "Accept", {}, Modifier.widthIn(min = 158.dp), enabled = ready, size = GremlinButtonSize.Large,
+            leading = {
+                // One box size for both, so the button doesn't change width at the swap.
+                androidx.compose.animation.Crossfade(ready, Modifier.size(28.dp), label = "acceptReady") { r ->
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        if (r) com.vrca.app.BootIconView(BootIcons.Start, { G.Accent }, { G.Accent }, Modifier.size(22.dp))
+                        else com.vrca.app.BootCatCountdown(left.toFloat() / ACCEPT_WAIT, Modifier.fillMaxSize(), G.Accent.copy(alpha = 0.55f))
+                    }
+                }
+            }
+        )
+    }
+}
