@@ -42,7 +42,7 @@ import com.vrca.ui.theme.GremlinColors
  * developer by itself (CrashUpload). Boot Cat's failed face sets the tone. [history] = the crashes of the past 3 days, newest (this one) first.
  */
 @Composable
-internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onStart: () -> Unit) {
+internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onStart: () -> Unit, onDone: () -> Unit = {}) {
     val ctx = LocalContext.current
     val where = remember(report) { CrashReport.whereOf(report) }
     val what = remember(report) { CrashReport.whatOf(report) }
@@ -59,14 +59,21 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
             "Earlier" to earlier.joinToString("\n") { "${niceTime(CrashReport.time(it.text))}  ·  ${CrashReport.whereOf(it.text)}" },
         ).filter { it.second.isNotBlank() }.map { it.first to sanitizeBackendRefs(it.second) }
     }
-    // Start VRC-A: the screen fades out to the bare backdrop first, then the app starts (the held
-    // start-up work runs there, unseen) and the boot screen's intro fades its logo in on the same backdrop.
+    // Start VRC-A (user idea, 2026-10-24: the button takes the load): the button shows the thinking Boot
+    // Cat, the held start-up work runs while it's up ([onStart]; the cat's loop runs on the RenderThread, so
+    // it keeps moving while the main thread is busy), then the screen fades out to the bare backdrop with
+    // nothing heavy left ([onDone]) and the boot screen's intro fades its logo in on the same backdrop.
+    // Before, the work ran after the fade, on a blank screen.
     var leaving by remember { mutableStateOf(false) }
     val fade = remember { androidx.compose.animation.core.Animatable(1f) }
     androidx.compose.runtime.LaunchedEffect(leaving) {
         if (!leaving) return@LaunchedEffect
-        fade.animateTo(0f, tween(LEAVE_MS, easing = FastOutSlowInEasing))
+        // Let the icon-to-cat swap (GremlinButton's 300 ms crossfade) finish first: a blocked main thread would
+        // freeze it halfway, while the cat's own loop keeps running on the RenderThread.
+        kotlinx.coroutines.delay(START_SWAP_MS)
         onStart()
+        fade.animateTo(0f, tween(LEAVE_MS, easing = FastOutSlowInEasing))
+        onDone()
     }
     Box(Modifier.fillMaxSize().background(GremlinColors.Backdrop), contentAlignment = Alignment.Center) {
         Column(
@@ -107,7 +114,7 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
                                         color = GremlinColors.Caution, modifier = Modifier.padding(top = 6.dp)
                                     )
                                 }
-                                if (wide) StartButton(Modifier) { leaving = true }
+                                if (wide) StartButton(Modifier, leaving) { leaving = true }
                             }
                             // Details, always shown (user: no expand/collapse). Plain facts only (user: don't expose
                             // our code): the full report, stack trace included, only goes to the developer (CrashUpload).
@@ -119,7 +126,7 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
                                 // Only what isn't already shown above (where, what, version and time are).
                                 details.forEach { (label, value) -> DetailRow(label, value) }
                             }
-                            if (!wide) StartButton(Modifier.fillMaxWidth().padding(top = 14.dp)) { leaving = true }
+                            if (!wide) StartButton(Modifier.fillMaxWidth().padding(top = 14.dp), leaving) { leaving = true }
                         }
                     }
                 }
@@ -129,12 +136,17 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
 }
 
 @Composable
-private fun StartButton(modifier: Modifier, onClick: () -> Unit) = com.vrca.ui.common.GremlinButton(
-    "Start VRC-A", onClick, modifier, bootIcon = BootIcons.Start, size = com.vrca.ui.common.GremlinButtonSize.Large
+private fun StartButton(modifier: Modifier, starting: Boolean, onClick: () -> Unit) = com.vrca.ui.common.GremlinButton(
+    // Same label while starting, so the button keeps its width; the cat shows it's working.
+    "Start VRC-A", { if (!starting) onClick() }, modifier,
+    bootIcon = BootIcons.Start, loading = starting, size = com.vrca.ui.common.GremlinButtonSize.Large
 )
 
 /** From this card width the button sits beside the title (narrower: full width at the bottom). */
 private val WIDE_CARD = 440.dp
+
+/** How long Start VRC-A shows the loading cat before the held start-up work runs (the icon swap). */
+private const val START_SWAP_MS = 340L
 
 /** How long the crash screen takes to fade out after Start VRC-A. */
 private const val LEAVE_MS = 260
