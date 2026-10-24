@@ -684,14 +684,32 @@ private fun AcceptIdea(idea: Int, wide: Boolean, agreed: Boolean, onAgree: (Bool
         }
         // 2: the tick lives in the agreement card in the reading; only the buttons stay here.
         2 -> Row { Spacer(Modifier.weight(1f)); BackAccept(onBack, agreed) }
-        // 3: no tick: Accept is the agreement, with one quiet line saying so.
-        else -> if (wide) Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("By tapping Accept you agree to these terms", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
-            Spacer(Modifier.weight(1f))
-            BackAccept(onBack, true)
-        } else Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.End) {
-            Text("By tapping Accept you agree to these terms", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted, modifier = Modifier.fillMaxWidth())
-            BackAccept(onBack, true)
+        // 3: no tick: Accept is the agreement, with one quiet line saying so, kept right beside the buttons
+        // (user: at the far left it looked separate). Accept waits ACCEPT_WAIT s after the last section opens,
+        // its Boot Cat draining like the boot Retry (user: someone speeding through mustn't accept by accident).
+        else -> {
+            // Remembered only while the last section is open: Back leaves it, so coming back starts the wait again (user).
+            var left by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(ACCEPT_WAIT) }
+            androidx.compose.runtime.LaunchedEffect(Unit) { while (left > 0) { kotlinx.coroutines.delay(1000); left-- } }
+            val note = @Composable { Text("By tapping Accept you agree to these terms", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted) }
+            val buttons = @Composable {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    com.vrca.ui.common.GremlinButton("Back", onBack, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Large)
+                    Spacer(Modifier.width(10.dp))
+                    if (left > 0) GremlinButton(
+                        "Accept  $left", {}, enabled = false, size = GremlinButtonSize.Large,
+                        leading = { com.vrca.app.BootCatCountdown(left.toFloat() / ACCEPT_WAIT, left, Modifier.size(28.dp), G.Accent.copy(alpha = 0.55f)) }
+                    ) else GremlinButton("Accept", {}, size = GremlinButtonSize.Large, bootIcon = BootIcons.Start)
+                }
+            }
+            if (wide) Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f)); note(); Spacer(Modifier.width(18.dp)); buttons()
+            } else Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
+                note(); buttons()
+            }
         }
     }
 }
+
+/** Seconds before Accept can be tapped once the last section opens. */
+private const val ACCEPT_WAIT = 5
