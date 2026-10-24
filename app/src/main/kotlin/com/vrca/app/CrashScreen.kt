@@ -134,24 +134,38 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
                 }
             }
             Spacer(Modifier.height(18.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                com.vrca.ui.common.GremlinButton(
-                    "Download report", kind = com.vrca.ui.common.GremlinButtonKind.Secondary,
-                    bootIcon = BootIcons.Updates,
-                    size = com.vrca.ui.common.GremlinButtonSize.Large,
-                    onClick = {
-                        if (leaving) return@GremlinButton
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            val name = CrashReport.saveToDownloads(ctx, file)
-                            saved = if (name != null) "Saved to Downloads: $name" else "Couldn't save the report"
-                        } else picker.launch(CrashReport.fileName())
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                com.vrca.ui.common.GremlinButton(
-                    "Start VRC-A", { leaving = true }, Modifier.weight(1f),
-                    bootIcon = BootIcons.Start, size = com.vrca.ui.common.GremlinButtonSize.Large
-                )
+            // Side by side when both labels fit at half width; stacked otherwise (a phone with a large,
+            // bold font showed "Download" with "report" cut off).
+            val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+            val style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+            androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val density = androidx.compose.ui.platform.LocalDensity.current
+                val widest = remember(style, density) {
+                    listOf("Download report", "Start VRC-A").maxOf { measurer.measure(it, style).size.width }
+                }
+                // Label + icon (22dp) + gap (8dp) + side padding (2 x 22dp), against half the row.
+                val fits = with(density) { widest.toDp() + 22.dp + 8.dp + 44.dp } <= (maxWidth - 12.dp) / 2
+                @Composable fun Buttons(mod: Modifier) {
+                    com.vrca.ui.common.GremlinButton(
+                        "Download report", kind = com.vrca.ui.common.GremlinButtonKind.Secondary,
+                        bootIcon = BootIcons.Updates,
+                        size = com.vrca.ui.common.GremlinButtonSize.Large,
+                        onClick = {
+                            if (leaving) return@GremlinButton
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                val name = CrashReport.saveToDownloads(ctx, file)
+                                saved = if (name != null) "Saved to Downloads: $name" else "Couldn't save the report"
+                            } else picker.launch(CrashReport.fileName())
+                        },
+                        modifier = mod
+                    )
+                    com.vrca.ui.common.GremlinButton(
+                        "Start VRC-A", { leaving = true }, mod,
+                        bootIcon = BootIcons.Start, size = com.vrca.ui.common.GremlinButtonSize.Large
+                    )
+                }
+                if (fits) Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) { Buttons(Modifier.weight(1f)) }
+                else Column(verticalArrangement = Arrangement.spacedBy(10.dp)) { Buttons(Modifier.fillMaxWidth()) }
             }
             AnimatedVisibility(saved != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                 Text(
@@ -179,5 +193,6 @@ private fun DetailRow(label: String, value: String) {
 /** "2026-10-23 22:59:04" → "23 Oct 22:59" (the report's own text if it doesn't parse). */
 private fun niceTime(t: String): String = runCatching {
     val d = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).parse(t)!!
-    java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.getDefault()).format(d)
+    // English like the rest of the app (the device locale showed "24 10月" on a phone set to Chinese).
+    java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.US).format(d)
 }.getOrDefault(t)

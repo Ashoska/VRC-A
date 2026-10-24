@@ -31,7 +31,7 @@ object CrashUpload {
                 val auth = FirebaseAuth.getInstance()
                 var waited = 0L
                 while (auth.currentUser == null && waited < WAIT_MS) { delay(1000); waited += 1000 }
-                val uid = auth.currentUser?.uid ?: return@launch
+                val uid = auth.currentUser?.uid ?: run { android.util.Log.w("CrashUpload", "not signed in after ${WAIT_MS / 1000}s; will retry next open"); return@launch }
                 val hash = app.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE).getString("device_id_hash", "").orEmpty()
                 val db = FirebaseFirestore.getInstance()
                 val sent = mutableSetOf<Long>()
@@ -56,7 +56,7 @@ object CrashUpload {
                     sent += e.at
                 }
                 CrashReport.markSent(app, sent)
-            }
+            }.onFailure { android.util.Log.w("CrashUpload", "crash upload failed", it) }
         }
     }
 }

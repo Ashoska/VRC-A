@@ -134,10 +134,10 @@ object CrashReport {
     }
 
     private val AREAS = mapOf(
-        "admin" to "Admin tools", "app" to "Starting VRC-A", "data" to "Saved settings",
+        "admin" to "Admin tools", "app" to "the main app", "data" to "Saved settings",
         "discord" to "Discord", "discordbot" to "Discord bot", "keepalive" to "Running in the background",
         "nowplaying" to "Now Playing", "osc" to "Chatbox", "overlay" to "Overlay", "richcontent" to "Announcements",
-        "speech" to "Voice to text", "sync" to "Syncing", "ui" to "The app's screens", "update" to "Updates",
+        "speech" to "Voice to text", "sync" to "Syncing", "ui" to "the app's screens", "update" to "Updates",
         "vrchat" to "VRChat connection",
     )
 
