@@ -178,6 +178,32 @@ object BootIcons {
         glyph("StartDetail") { line("M10.2 10.9c-.4-.3-.9 0-.9.5v5.9c0 .5.5.8.9.5l4.7-3c.4-.3.4-.8 0-1z") }
     )
 
+    /** Data and privacy (terms screen): a padlock whose shackle is the cat-ear head, keyhole as the detail. */
+    val Privacy = BootIcon(
+        glyph("Privacy") {
+            line("M7.6 10.6 7.9 4.4l2.8 2.9q1.3-.5 2.6 0l2.8-2.9.3 6.2")
+            line("M7.2 10.6h9.6a2.8 2.8 0 0 1 2.8 2.8v4.4a2.8 2.8 0 0 1 -2.8 2.8h-9.6a2.8 2.8 0 0 1 -2.8 -2.8v-4.4a2.8 2.8 0 0 1 2.8 -2.8z")
+        },
+        glyph("PrivacyDetail") {
+            solid("M10.8 14.6a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0 -2.4 0z")
+            line("M12 15.4v2", width = 1.6f)
+        }
+    )
+
+    /** Bugs and reports (terms screen): a little bug with cat ears; its centre seam is the detail. */
+    val Bug = BootIcon(
+        glyph("Bug") {
+            line("M12 8.6c3.2 0 5.3 2.6 5.3 5.9s-2.1 6.3-5.3 6.3-5.3-3-5.3-6.3 2.1-5.9 5.3-5.9z")
+            line("M8.7 9.9 8.4 5.3l2.8 2.6")
+            line("M15.3 9.9l.3-4.6-2.8 2.6")
+            line("M6.7 13.2H3.9")
+            line("M6.9 17l-2.5 1.5")
+            line("M17.3 13.2h2.8")
+            line("M17.1 17l2.5 1.5")
+        },
+        glyph("BugDetail") { line("M12 11.6v7.4", width = 1.6f) }
+    )
+
     /** First open: the tutorial's pictures (an open book, paw on the page). */
     val Tutorial = BootIcon(
         glyph("Tutorial") {
