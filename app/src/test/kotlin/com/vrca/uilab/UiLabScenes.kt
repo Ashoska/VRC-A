@@ -534,7 +534,8 @@ object UiLabScenes {
         com.vrca.app.BootScreen(
             checks, status,
             error = if (v == "error") "Couldn't reach the server" else null,
-            retryInSec = if (v == "error") 5 else null,
+            // Counts 5 down to 1 and starts again, like the real auto-retry.
+            retryInSec = if (v == "error") androidx.compose.runtime.produceState(5) { while (true) { kotlinx.coroutines.delay(1000); value = if (value <= 1) 5 else value - 1 } }.value else null,
             playIntro = v == "intro",
             backdrop = backdrop, userName = "Ashoska",
             onSignIn = if (v == "signin") ({}) else null

@@ -957,24 +957,13 @@ private fun RetryPill(retryInSec: Int?, onRetry: () -> Unit) {
     val accent = MaterialTheme.colorScheme.primary
     var longest by remember { mutableIntStateOf(1) }
     if ((retryInSec ?: 0) > longest) longest = retryInSec ?: 0
-    val ring by animateFloatAsState(((retryInSec ?: 0).toFloat() / longest).coerceIn(0f, 1f), label = "retryRing")
-    // The app's button (GremlinButton) with the countdown to the automatic retry as its icon: a ring
-    // that drains round the seconds left.
+    // The app's button (GremlinButton) with the countdown to the automatic retry as its icon: Boot Cat
+    // whose outline drains as the seconds pass (BootCatCountdown), the seconds left in the label.
     com.vrca.ui.common.GremlinButton(
-        "Retry", onRetry, size = com.vrca.ui.common.GremlinButtonSize.Large,
+        if (retryInSec != null && retryInSec > 0) "Retry  $retryInSec" else "Retry", onRetry,
+        size = com.vrca.ui.common.GremlinButtonSize.Large,
         leading = {
-            Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
-                // Drawn here (not Material's indicator): a faint track and the seconds left draining from the top.
-                androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-                    val w = 2.5.dp.toPx()
-                    val st = androidx.compose.ui.graphics.drawscope.Stroke(w, cap = androidx.compose.ui.graphics.StrokeCap.Round)
-                    val tl = androidx.compose.ui.geometry.Offset(w / 2, w / 2)
-                    val sz = androidx.compose.ui.geometry.Size(size.width - w, size.height - w)
-                    drawArc(accent.copy(alpha = 0.2f), 0f, 360f, false, tl, sz, style = st)
-                    drawArc(accent, -90f, 360f * ring, false, tl, sz, style = st)
-                }
-                Text("${retryInSec ?: ""}", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = accent)
-            }
+            BootCatCountdown(((retryInSec ?: 0).toFloat() / longest).coerceIn(0f, 1f), retryInSec ?: 0, Modifier.size(28.dp), accent)
         }
     )
 }
