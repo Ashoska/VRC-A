@@ -695,10 +695,9 @@ private fun AcceptIdea(idea: Int, wide: Boolean, agreed: Boolean, onAgree: (Bool
                     Spacer(Modifier.weight(1f)); note(); Spacer(Modifier.width(18.dp)); CountdownButtons(onBack)
                 }
                 idea == 4 -> Row { Spacer(Modifier.weight(1f)); CountdownButtons(onBack) }
-                idea == 6 -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.End) {
-                    CountdownButtons(onBack)
-                    Text(AGREE_NOTE, style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
-                }
+                // Under the buttons, never wider than them (user: it peeked out past Back): the line is
+                // measured at the buttons' width and wraps, centred, if it doesn't fit.
+                idea == 6 -> Row { Spacer(Modifier.weight(1f)); UnderButtons(onBack) }
                 else -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.End) {
                     note(); CountdownButtons(onBack)
                 }
@@ -744,4 +743,17 @@ private fun CountdownButtons(onBack: () -> Unit) {
             }
         )
     }
+}
+
+@Composable
+private fun UnderButtons(onBack: () -> Unit) = androidx.compose.ui.layout.Layout(
+    content = {
+        CountdownButtons(onBack)
+        Text(AGREE_NOTE, style = MaterialTheme.typography.bodySmall, color = G.TextMuted, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+    }
+) { (buttons, note), c ->
+    val b = buttons.measure(c.copy(minWidth = 0))
+    val n = note.measure(c.copy(minWidth = b.width, maxWidth = b.width))
+    val gap = 8.dp.roundToPx()
+    layout(b.width, b.height + gap + n.height) { b.place(0, 0); n.place(0, b.height + gap) }
 }
