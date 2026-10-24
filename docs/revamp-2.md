@@ -23,7 +23,7 @@ revamped with that page. A page is DONE only when everything listed under it is 
 | # | Page | When users see it | Status |
 |---|---|---|---|
 | 1 | Boot screen | every open | DONE 2026-10-23 (returning + first-install Boot Cat welcome) |
-| 2 | Gates | first open, terms change, rare failures | next |
+| 2 | Gates | first open, terms change, rare failures | in progress: CrashScreen DONE 2026-10-23; TosGate + BannedScreen next |
 | 3 | Onboarding + VRChat login | new users, right after the terms | |
 | 4 | Update + What's New | first open after an update, or a forced update | |
 | 5 | Home | where everyone lands | |
@@ -38,7 +38,8 @@ revamped with that page. A page is DONE only when everything listed under it is 
 1. **Boot screen** (`BootScreen`, `BootRevealOverlay`): row icons, cat state marks, version chip,
    timeline, Discord no longer blocks. Two versions, both built: the returning boot and the first-install welcome where Boot Cat guides the checks (details in `docs/systems/onboarding-startup.md`).
 2. **Gates**: `TosGate` (terms + accept), `BannedScreen` (both copies: `VrcaApp` and the one in
-   `VrcaScreen`, merged into one when revamped), `CrashScreen`.
+   `VrcaScreen`, merged into one when revamped), `CrashScreen` (DONE: safe start, plain-words where/what, 3-day history,
+   forced update on top, uploads to the admin Crashes tab, fade into boot; details in `docs/systems/onboarding-startup.md`).
 3. **Onboarding + VRChat login**: `OnboardingFlow` (every step), `VrchatLoginScreen` (login, 2FA),
    Discord login WebView + the Discord risk-consent dialog.
 4. **Update + What's New**: `UpdateDialog` (normal + forced, browser fallback), `WhatsNewDialog`.
