@@ -28,6 +28,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.foundation.clickable
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -134,9 +141,9 @@ private fun NumberedTitle(n: Int, s: Sec, big: Boolean = true) {
 }
 
 @Composable
-private fun Header(compact: Boolean) {
+private fun Header(compact: Boolean, mark: com.vrca.app.Mark = com.vrca.app.Mark.Done) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        com.vrca.app.BootCat(com.vrca.app.Mark.Done, 0, Modifier.size(if (compact) 34.dp else 40.dp))
+        com.vrca.app.BootCat(mark, 0, Modifier.size(if (compact) 34.dp else 40.dp))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text("Terms of Service", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = G.Text)
@@ -462,6 +469,156 @@ internal fun TosMockB2(open: Int = 2) {
                 }
             }
             AcceptBar(compact = !wide)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- B, round 3 (user): no gap under the list,
+// tick + Accept only on the last section, every section must be gone through (later ones locked), no
+// time estimate, the boot's segmented bar with its shine, and boot cats on the cards: thinking on the one
+// being read, asleep on the ones not reached, happy once read; the hop + sweep when everything's agreed.
+
+@Composable
+private fun TermsBar(marks: List<com.vrca.app.Mark>, done: Boolean) {
+    val accent = G.Accent
+    val pulse = androidx.compose.animation.core.rememberInfiniteTransition(label = "tp").animateFloat(
+        0.45f, 1f, androidx.compose.animation.core.infiniteRepeatable(androidx.compose.animation.core.tween(700), androidx.compose.animation.core.RepeatMode.Reverse), label = "tpa"
+    )
+    val sweep = remember { androidx.compose.animation.core.Animatable(-2f) }
+    val chipPop = remember { androidx.compose.animation.core.Animatable(1f) }
+    androidx.compose.runtime.LaunchedEffect(done) {
+        if (!done) { sweep.snapTo(-2f); return@LaunchedEffect }
+        sweep.snapTo(-1f)
+        kotlinx.coroutines.coroutineScope {
+            launch { kotlinx.coroutines.delay(480); chipPop.animateTo(1.18f, androidx.compose.animation.core.tween(140)); chipPop.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.4f)) }
+            sweep.animateTo(marks.size + 1f, androidx.compose.animation.core.tween(650, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        }
+    }
+    val tone by androidx.compose.animation.animateColorAsState(if (done) G.Positive else accent, label = "tt")
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.weight(1f).height(6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            marks.forEachIndexed { i, m ->
+                val seg = androidx.compose.animation.animateColorAsState(
+                    when (m) { com.vrca.app.Mark.Done -> G.Positive; com.vrca.app.Mark.Working -> accent; else -> G.Raised }, label = "seg"
+                )
+                val working = m == com.vrca.app.Mark.Working
+                fun glow() = (1f - kotlin.math.abs(sweep.value - i - 0.5f)).coerceIn(0f, 1f)
+                Box(
+                    Modifier.weight(1f).fillMaxHeight().graphicsLayer { scaleY = 1f + glow() * 0.6f }
+                        .drawBehind {
+                            val base = seg.value
+                            val a = if (working) pulse.value else 1f
+                            drawRoundRect(androidx.compose.ui.graphics.lerp(base.copy(alpha = base.alpha * a), G.Text, glow() * 0.75f),
+                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2, size.height / 2))
+                        }
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            "v4", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = tone,
+            modifier = Modifier.graphicsLayer { scaleX = chipPop.value; scaleY = chipPop.value }
+                .background(tone.copy(alpha = 0.14f), CircleShape).padding(horizontal = 10.dp, vertical = 3.dp)
+        )
+    }
+}
+
+@Composable
+private fun ListRow3(i: Int, s: Sec2, mark: com.vrca.app.Mark, selected: Boolean, locked: Boolean, celebrate: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    Row(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(if (selected) G.Raised else G.Card)
+            .border(if (selected) 1.5.dp else 1.dp, if (selected) G.Accent else G.Edge, RoundedCornerShape(14.dp))
+            .then(if (locked) Modifier else Modifier.clickable(onClick = onClick))
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        BootIconView(s.icon, { if (locked) G.TextMuted else G.Accent }, { if (locked) G.TextMuted else G.Accent }, Modifier.size(22.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(s.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = if (locked) G.TextMuted else G.Text, maxLines = 1)
+            Text(s.short, style = MaterialTheme.typography.bodySmall, color = G.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        com.vrca.app.BootCat(mark, i, Modifier.size(24.dp), celebrate = celebrate, hopDelayMs = 250L + 130L * i)
+    }
+}
+
+
+@Composable
+internal fun TosMockB3() {
+    val total = SECTIONS2.size
+    var open by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    var reached by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    var agreed by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    // Read = passed with Next; the furthest one reached is being read (thinking); later ones are asleep.
+    val marks = List(total) { i ->
+        when {
+            agreed || i < reached -> com.vrca.app.Mark.Done
+            i == reached -> com.vrca.app.Mark.Working
+            else -> com.vrca.app.Mark.Waiting
+        }
+    }
+    fun go(i: Int) { open = i; if (i > reached) reached = i }
+    BoxWithConstraints(Modifier.fillMaxSize().background(G.Backdrop)) {
+        val wide = maxWidth >= 700.dp
+        val last = open == total - 1
+        val reader: @Composable (Boolean) -> Unit = { w ->
+            Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                ReaderTitle(open, SECTIONS2[open], total)
+                ReaderBody(SECTIONS2[open], wide = w)
+            }
+        }
+        val footer: @Composable () -> Unit = {
+            if (last) Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Raised).clickable { agreed = !agreed }
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(agreed, { agreed = it }, colors = CheckboxDefaults.colors(checkedColor = G.Accent, uncheckedColor = G.TextMuted))
+                    Text("I've read and agree to these terms", style = MaterialTheme.typography.bodyLarge, color = G.Text)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Quiet, size = GremlinButtonSize.Medium)
+                    Spacer(Modifier.weight(1f))
+                    GremlinButton("Accept", {}, enabled = agreed, size = GremlinButtonSize.Large, bootIcon = BootIcons.Start)
+                }
+            } else Row(verticalAlignment = Alignment.CenterVertically) {
+                if (open > 0) com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Quiet, size = GremlinButtonSize.Medium)
+                Spacer(Modifier.weight(1f))
+                com.vrca.ui.common.GremlinButton("Next: ${SECTIONS2[open + 1].title}", { go(open + 1) }, size = GremlinButtonSize.Medium)
+            }
+        }
+        if (wide) Row(Modifier.fillMaxSize().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(Modifier.width(310.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Header(compact = true, mark = if (agreed) com.vrca.app.Mark.Done else com.vrca.app.Mark.Working)
+                Spacer(Modifier.height(2.dp))
+                TermsBar(marks, done = agreed)
+                Spacer(Modifier.height(2.dp))
+                // The list fills the panel: each card takes an equal share of the height.
+                SECTIONS2.forEachIndexed { i, s ->
+                    ListRow3(i, s, marks[i], selected = i == open, locked = i > reached, celebrate = agreed, modifier = Modifier.weight(1f)) { go(i) }
+                }
+            }
+            com.vrca.app.Layer(Modifier.weight(1f).fillMaxHeight()) {
+                Column(Modifier.fillMaxSize()) {
+                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 24.dp)) { reader(true) }
+                    Box(Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) { footer() }
+                }
+            }
+        } else Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp)
+        ) {
+            Header(compact = false, mark = if (agreed) com.vrca.app.Mark.Done else com.vrca.app.Mark.Working)
+            TermsBar(marks, done = agreed)
+            SECTIONS2.forEachIndexed { i, s ->
+                if (i == open) com.vrca.app.Layer(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        reader(false)
+                        footer()
+                    }
+                } else ListRow3(i, s, marks[i], selected = false, locked = i > reached, celebrate = agreed, modifier = Modifier.height(58.dp)) { go(i) }
+            }
         }
     }
 }
