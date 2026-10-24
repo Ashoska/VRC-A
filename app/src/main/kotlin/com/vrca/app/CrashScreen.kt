@@ -43,7 +43,7 @@ import com.vrca.ui.theme.GremlinColors
  * developer by itself (CrashUpload). Boot Cat's failed face sets the tone. [history] = the crashes of the past 3 days, newest (this one) first.
  */
 @Composable
-internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onStart: () -> Unit) {
+internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onStart: () -> Unit, trial: Int = 0) {
     val ctx = LocalContext.current
     val where = remember(report) { CrashReport.whereOf(report) }
     val what = remember(report) { CrashReport.whatOf(report) }
@@ -110,18 +110,26 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
                         // Only what isn't already shown above (where, what, version and time are).
                         details.forEach { (label, value) -> DetailRow(label, value) }
                     }
+                    // TRIAL C: the button inside the card, bottom right.
+                    if (trial == 3) Box(Modifier.fillMaxWidth().padding(top = 16.dp), contentAlignment = Alignment.CenterEnd) { StartButton(Modifier) { leaving = true } }
                 }
             }
-            Spacer(Modifier.height(18.dp))
             // One button (user, 2026-10-24: crashes reach the developer by themselves now, so
-            // Download report went).
-            com.vrca.ui.common.GremlinButton(
-                "Start VRC-A", { leaving = true }, Modifier.fillMaxWidth(),
-                bootIcon = BootIcons.Start, size = com.vrca.ui.common.GremlinButtonSize.Large
-            )
+            // Download report went). TRIAL layouts: 0 full width, 1 right, 2 centred, 3 inside the card.
+            if (trial != 3) {
+                Spacer(Modifier.height(18.dp))
+                Box(Modifier.fillMaxWidth(), contentAlignment = if (trial == 2) Alignment.Center else Alignment.CenterEnd) {
+                    StartButton(if (trial == 0) Modifier.fillMaxWidth() else Modifier) { leaving = true }
+                }
+            }
         }
     }
 }
+
+@Composable
+private fun StartButton(modifier: Modifier, onClick: () -> Unit) = com.vrca.ui.common.GremlinButton(
+    "Start VRC-A", onClick, modifier, bootIcon = BootIcons.Start, size = com.vrca.ui.common.GremlinButtonSize.Large
+)
 
 /** How long the crash screen takes to fade out after Start VRC-A. */
 private const val LEAVE_MS = 260
