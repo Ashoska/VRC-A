@@ -270,7 +270,8 @@ fun AnimatedLock(open: Boolean, color: Color, modifier: Modifier) {
     }
     Spacer(modifier.drawBehind {
         val s = size.minDimension / 24f
-        val t = p.value
+        // Never below closed: the spring's overshoot on locking pushed the shackle into the body (user).
+        val t = p.value.coerceAtLeast(0f)
         val lift = 1.9f * t
         val st = androidx.compose.ui.graphics.drawscope.Stroke(1.9f, cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round)
         withTransform({ scale(s, s, androidx.compose.ui.geometry.Offset.Zero) }) {
