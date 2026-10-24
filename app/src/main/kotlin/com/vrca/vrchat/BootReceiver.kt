@@ -42,7 +42,8 @@ class BootReceiver : BroadcastReceiver() {
         val pending = goAsync()
         Thread({
             try {
-                runCatching { startServices(context.applicationContext) }
+                // Not during a safe start after a crash (CrashReport): the crash screen opens first.
+                if (!com.vrca.app.CrashReport.safeStart) runCatching { startServices(context.applicationContext) }
             } finally {
                 pending.finish()
             }

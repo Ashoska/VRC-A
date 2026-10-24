@@ -1,6 +1,14 @@
 package com.vrca.uilab
 
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.ui.Modifier
+import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Badge
@@ -24,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.background
@@ -360,7 +369,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "cats", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "buttons", "download", "downloadcat", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -546,6 +555,114 @@ object UiLabScenes {
         }
     }
 
+    /** `show buttons`: the app's button (GremlinButton) in every kind and state, and its sizes. */
+    @Composable
+    private fun ButtonSheet() {
+        val I = androidx.compose.material.icons.Icons.Filled
+        val K = com.vrca.ui.common.GremlinButtonKind.entries
+        val labels = listOf("Start", "Download", "Stop", "Edit")
+        val icons = listOf(I.PlayArrow, I.Download, I.Stop, null)
+        val states = listOf("Normal", "Pressed", "Disabled", "Loading")
+        androidx.compose.foundation.layout.Column(
+            Modifier.fillMaxSize().background(com.vrca.ui.theme.GremlinColors.Backdrop).padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Spacer(Modifier.width(110.dp))
+                states.forEach { Text(it, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = com.vrca.ui.theme.GremlinColors.TextMuted) }
+            }
+            K.forEachIndexed { k, kind ->
+                androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(kind.name, Modifier.width(110.dp), style = MaterialTheme.typography.titleSmall, color = com.vrca.ui.theme.GremlinColors.Text)
+                    states.forEach { st ->
+                        com.vrca.ui.common.GremlinButton(
+                            labels[k], onClick = {}, modifier = Modifier.weight(1f), kind = kind, icon = icons[k],
+                            enabled = st != "Disabled", loading = st == "Loading", pressedPreview = st == "Pressed"
+                        )
+                    }
+                }
+            }
+            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Sizes", Modifier.width(110.dp), style = MaterialTheme.typography.titleSmall, color = com.vrca.ui.theme.GremlinColors.Text)
+                for (sz in com.vrca.ui.common.GremlinButtonSize.entries) {
+                    com.vrca.ui.common.GremlinButton("Start VRC-A", {}, Modifier.weight(1f), icon = I.PlayArrow, size = sz)
+                }
+            }
+        }
+    }
+
+    /** One big download Boot Cat: 0% for 1.2 s, 0->100% over 10.8 s, then lands into Done 0.3 s later. */
+    @Composable
+    private fun DownloadCatLoop() {
+        val anim = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
+        val done = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            kotlinx.coroutines.delay(1200); anim.animateTo(1f, androidx.compose.animation.core.tween(10800, easing = androidx.compose.animation.core.LinearEasing))
+            kotlinx.coroutines.delay(300); done.value = true
+        }
+        androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().background(com.vrca.ui.theme.GremlinColors.Backdrop), contentAlignment = Alignment.Center) {
+            com.vrca.app.BootCatDownload(anim.value, Modifier.size(200.dp), done = done.value)
+        }
+    }
+
+    @Composable
+    private fun DownloadSheet() {
+        val G = com.vrca.ui.theme.GremlinColors
+        val anim = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
+        LaunchedEffect(Unit) { kotlinx.coroutines.delay(600); anim.animateTo(1f, androidx.compose.animation.core.tween(5000, easing = androidx.compose.animation.core.LinearEasing)) }
+        val live = anim.value
+        @Composable fun label(t: String) = Text(t, style = MaterialTheme.typography.labelMedium, color = G.TextMuted)
+        androidx.compose.foundation.layout.Column(
+            Modifier.fillMaxSize().background(G.Backdrop).padding(horizontal = 20.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // 1. Boot Cat downloading, big: fixed points and the live one.
+            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(26.dp), verticalAlignment = Alignment.Bottom) {
+                for ((t, p) in listOf("Size unknown" to null, "10%" to 0.1f, "45%" to 0.45f, "80%" to 0.8f, "Live" to live)) {
+                    androidx.compose.foundation.layout.Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        com.vrca.app.BootCatDownload(p, Modifier.size(64.dp))
+                        Spacer(Modifier.height(4.dp)); label(if (t == "Live") "Live ${(live * 100).toInt()}%" else t)
+                    }
+                }
+                androidx.compose.foundation.layout.Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    com.vrca.app.BootCat(com.vrca.app.Mark.Done, 0, Modifier.size(64.dp))
+                    Spacer(Modifier.height(4.dp)); label("Done")
+                }
+            }
+            // 2. In the button: before, downloading, done.
+            label("In the button")
+            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                com.vrca.ui.common.GremlinButton("Download update", {}, Modifier.weight(1f), bootIcon = com.vrca.app.BootIcons.Updates)
+                com.vrca.ui.common.GremlinButton("Downloading ${(live * 100).toInt()}%", {}, Modifier.weight(1f), downloading = true, downloadProgress = live)
+                com.vrca.ui.common.GremlinButton("Downloading", {}, Modifier.weight(1f), downloading = true, downloadProgress = null)
+                com.vrca.ui.common.GremlinButton("Signing in", {}, Modifier.weight(1f), loading = true)
+            }
+            // 3. Where it's used.
+            label("Where it goes")
+            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                @Composable fun card(title: String, sub: String, button: @Composable () -> Unit) {
+                    androidx.compose.foundation.layout.Column(
+                        Modifier.weight(1f).background(G.Panel, androidx.compose.foundation.shape.RoundedCornerShape(16.dp)).padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(title, style = MaterialTheme.typography.titleSmall, color = G.Text)
+                        Text(sub, style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
+                        button()
+                    }
+                }
+                card("Update popup", "v1.2.80 is ready") {
+                    com.vrca.ui.common.GremlinButton("Downloading ${(live * 100).toInt()}%", {}, Modifier.fillMaxWidth(), downloading = true, downloadProgress = live)
+                }
+                card("Voice pack (Settings)", "English · Large · 310 MB") {
+                    com.vrca.ui.common.GremlinButton("${(live * 310).toInt()} of 310 MB", {}, Modifier.fillMaxWidth(), kind = com.vrca.ui.common.GremlinButtonKind.Secondary, downloading = true, downloadProgress = live)
+                }
+                card("Crash screen", "Save the report as a .txt") {
+                    com.vrca.ui.common.GremlinButton("Download report", {}, Modifier.fillMaxWidth(), kind = com.vrca.ui.common.GremlinButtonKind.Secondary, bootIcon = com.vrca.app.BootIcons.Updates)
+                }
+            }
+        }
+    }
+
     @Composable
     private fun FullShow(d: UiLabDriver, arg: String) {
         val name = arg.substringBefore(' ')
@@ -569,6 +686,12 @@ object UiLabScenes {
             // The REAL headset boot runner (its checks run against the lab, so it shows what fails offline).
             // `show cats`: every boot cat animation on a loop, labelled (a sheet for testers).
             "cats" -> CatGallery()
+            // `show buttons`: the button sheet (GremlinButton): both looks, every kind and state.
+            "buttons" -> ButtonSheet()
+            // `show download`: the downloading Boot Cat, in buttons and where downloads happen; its
+            // progress runs 0 -> 100% over 5 s (record it), then holds.
+            "download" -> DownloadSheet()
+            "downloadcat" -> DownloadCatLoop()
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat
                 // sign-in row really checks the session instead of leaving it to the tutorial.
@@ -620,10 +743,49 @@ object UiLabScenes {
                     VrcaApp()
                 } else com.vrca.app.AppBoot(onDone = { _ -> })
             }
-            "crash" -> CrashScreen(
-                crashText = "java.lang.IllegalStateException: example crash\n\tat com.vrca.ui.screen.HomePage(HomePage.kt:212)\n\tat androidx.compose.runtime.Composer.invoke(Composer.kt:1)",
-                onClear = {}, onContinue = {}
-            )
+            // `show crash boot`: the real path after a crash: a recorded report puts the app in its safe
+            // start, VrcaApp's gate shows the crash screen, and Start VRC-A goes on into the real boot
+            // (as a returning user, like `headsetboot full`).
+            "crash" -> if (rest.startsWith("boot")) {
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                androidx.compose.runtime.remember {
+                    com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), RuntimeException("Test crash from Settings > Debug"))
+                    com.vrca.app.CrashReport.checkAtLaunch(ctx)
+                    com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx)
+                    com.vrca.app.TosPrefs.accept(ctx, 1_000)
+                    com.vrca.app.VrcaApplication.openedFromSwipe = true
+                    true
+                }
+                VrcaApp()
+            } else {
+                // `show crash [history] [update]`: real reports made by CrashReport.record from errors with
+                // stack frames in VRC-A's packages (so "where" works like a release build); `history` adds two
+                // earlier crashes; `update` puts the update popup over the screen.
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                val words = rest.split(' ')
+                val report = androidx.compose.runtime.remember {
+                    fun err(e: Throwable, cls: String) = e.apply {
+                        stackTrace = arrayOf(StackTraceElement(cls, "a", "SourceFile", 212), StackTraceElement("android.os.Looper", "loop", "Looper.java", 288))
+                    }
+                    // A real device name in the report (Robolectric says "robolectric").
+                    if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+                        org.robolectric.shadows.ShadowBuild.setManufacturer("Oculus"); org.robolectric.shadows.ShadowBuild.setModel("Quest 3")
+                    } else {
+                        org.robolectric.shadows.ShadowBuild.setManufacturer("Google"); org.robolectric.shadows.ShadowBuild.setModel("Pixel 8")
+                    }
+                    if ("history" in words) {
+                        com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), err(OutOfMemoryError(), "com.vrca.speech.b"))
+                        com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), err(IllegalStateException("x"), "com.vrca.discord.c"))
+                    }
+                    com.vrca.app.CrashReport.record(ctx, Thread.currentThread(), err(IllegalStateException("x"), "com.vrca.discord.a"))
+                    com.vrca.app.CrashReport.loadForScreen(ctx)
+                    com.vrca.app.CrashReport.screenReport
+                }
+                CrashScreen(report, com.vrca.app.CrashReport.screenHistory, onStart = {})
+                if ("update" in words) com.vrca.app.UpdatePopup(
+                    ReleaseInfo(480, "v1.4.80", "https://example.com/vrc-a.apk", 0, "", SAMPLE_NOTES), forced = true, visible = true, onDismiss = {}
+                )
+            }
             "banned" -> BannedScreen(reason = rest.ifBlank { "Repeated harassment after warnings." })
             "tos" -> TosGate(3, SAMPLE_TOS, "https://example.com/tos", onOpenUrl = {}, onAccept = {})
             "onboarding" -> OnboardingFlow(
@@ -638,10 +800,24 @@ object UiLabScenes {
     private fun Overlay(d: UiLabDriver, arg: String) {
         val name = arg.substringBefore(' ')
         when (name) {
-            "update", "update-optional" -> UpdateDialog(
-                info = ReleaseInfo(480, "v1.4.80", "https://example.com/vrc-a.apk", 0, "", SAMPLE_NOTES),
-                forced = name == "update", onDismiss = { d.overlay.value = null }, onDownload = {}
-            )
+            "update", "update-optional" -> {
+                // Download runs a pretend download: 0->100% over 6 s, Boot Cat lands into Done, then back to idle
+                // (the app opens the installer there), like VrcaApp's DownloadManager flow.
+                val dl = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
+                var running by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+                var landed by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+                LaunchedEffect(running) {
+                    if (!running) return@LaunchedEffect
+                    dl.snapTo(0f); kotlinx.coroutines.delay(500)
+                    dl.animateTo(1f, androidx.compose.animation.core.tween(6000, easing = androidx.compose.animation.core.LinearEasing))
+                    landed = true; kotlinx.coroutines.delay(1100); landed = false; running = false
+                }
+                UpdateDialog(
+                    info = ReleaseInfo(480, "v1.4.80", "https://example.com/vrc-a.apk", 0, "", SAMPLE_NOTES),
+                    forced = name == "update", downloading = running, progress = if (running && dl.value > 0f) dl.value else null,
+                    landed = landed, onDismiss = { d.overlay.value = null }, onDownload = { running = true }
+                )
+            }
             "whatsnew" -> {
                 LaunchedEffect(Unit) {
                     com.vrca.richcontent.WhatsNewStore.cache(d.app, com.vrca.BuildConfig.VERSION_CODE.toLong(), "v1.4.80", SAMPLE_NOTES, "")

@@ -110,13 +110,13 @@ internal fun VoiceCommandsDialog(
                                     if (list.isNotEmpty() && !usedElsewhere(cmd, list)) {
                                         ActionPill("Save", filled = true, onClick = { onSetWords(cmd, list); typing = null })
                                     }
-                                    TextButton(onClick = { typing = null }) { Text("Cancel") }
+                                    com.vrca.ui.common.GremlinQuietButton(onClick = { typing = null }) { Text("Cancel") }
                                 }
                             }
                             else -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 if (learning == null) ActionPill("Teach my voice", filled = true, onClick = { typing = null; onSayIt(cmd) })
                                 ActionPill("Change word", filled = false, onClick = { typing = cmd; typed = VoiceCommands.shown(ws) })
-                                if (ws != defaults[cmd]) TextButton(onClick = { onSetWords(cmd, null) }) { Text("Use default") }
+                                if (ws != defaults[cmd]) com.vrca.ui.common.GremlinQuietButton(onClick = { onSetWords(cmd, null) }) { Text("Use default") }
                             }
                         }
                     }
@@ -150,7 +150,7 @@ private fun LearnPanel(
             androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
             Text("Getting ready: loading the voice model (a few seconds)…", style = MaterialTheme.typography.bodyMedium)
         }
-        TextButton(onClick = { onDone(false) }) { Text("Cancel") }
+        com.vrca.ui.common.GremlinQuietButton(onClick = { onDone(false) }) { Text("Cancel") }
         return
     }
     if (heard.size < times) {
@@ -159,7 +159,7 @@ private fun LearnPanel(
             style = MaterialTheme.typography.bodyMedium
         )
         if (shown.isNotEmpty()) Text("Heard: ${shown.joinToString(" · ")}", style = MaterialTheme.typography.bodySmall)
-        TextButton(onClick = { onDone(false) }) { Text("Cancel") }
+        com.vrca.ui.common.GremlinQuietButton(onClick = { onDone(false) }) { Text("Cancel") }
         return
     }
     val word = VoiceCommands.shown(words[cmd].orEmpty())
@@ -176,8 +176,8 @@ private fun LearnPanel(
     warnings.forEach { Warning(it) }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         if (!blocked(learned)) ActionPill("Save", filled = true, onClick = { onDone(true) })
-        TextButton(onClick = onRetry) { Text("Try again") }
-        TextButton(onClick = { onDone(false) }) { Text("Cancel") }
+        com.vrca.ui.common.GremlinQuietButton(onClick = onRetry) { Text("Try again") }
+        com.vrca.ui.common.GremlinQuietButton(onClick = { onDone(false) }) { Text("Cancel") }
     }
 }
 

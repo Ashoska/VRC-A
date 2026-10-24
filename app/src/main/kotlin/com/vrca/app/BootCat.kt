@@ -31,6 +31,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.vrca.ui.theme.GremlinColors
 import kotlinx.coroutines.delay
 import kotlin.math.PI
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
@@ -47,13 +48,17 @@ import kotlin.math.sin
  * when this row's all-done hop starts after [celebrate] turns true (one after another down the list).
  */
 @Composable
-internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Boolean = false, hopDelayMs: Long = 0) {
+internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Boolean = false, hopDelayMs: Long = 0, startFrom: Mark? = null) {
     val accent = MaterialTheme.colorScheme.primary
     val v = Math.floorMod(variant, THINK.size)
     // The mark before this one (what a transition starts from) and how far the transition is.
-    var from by remember { mutableStateOf<Mark?>(null) }
+    // [startFrom]: appear already landing from that mark (the download cat hands over to Done this way).
+    var from by remember { mutableStateOf(startFrom) }
     var shown by remember { mutableStateOf(mark) }
-    val t = remember { Animatable(Float.MAX_VALUE) }
+    val t = remember { Animatable(if (startFrom != null) 0f else Float.MAX_VALUE) }
+    LaunchedEffect(Unit) {
+        if (startFrom != null) { val dur = transitionMs(startFrom, mark); t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing)) }
+    }
     var looping by remember { mutableStateOf(mark == Mark.Working || mark == Mark.Background) }
     LaunchedEffect(mark) {
         if (mark == shown) return@LaunchedEffect
@@ -156,6 +161,88 @@ private fun LabLoop(calm: Boolean, v: Int, accent: Color, modifier: Modifier) {
         }
     }
 }
+
+/**
+ * Boot Cat downloading (user, 2026-10-23): his outline is the progress bar, filling clockwise from
+ * the top of his head ([progress] 0..1, eased toward each new value), and his eyes are two little
+ * down-arrows that bob downward, watching it come in. [progress] null = size unknown: the thinking
+ * light runs round instead. Drawn in Compose (the progress changes, so no AVD), every animation read
+ * while drawing.
+ */
+@Composable
+internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary, done: Boolean = false) {
+    // Finished: he lands into the Done face, the same blink-and-pop the boot rows land with.
+    if (done) { BootCat(Mark.Done, 0, modifier, startFrom = Mark.Working); return }
+    val head = remember { headPath() }
+    // Where the fill starts: the top middle of the head (its prefix up to there, measured once).
+    val start = remember {
+        androidx.compose.ui.graphics.PathMeasure().apply {
+            setPath(PathParser().parsePathString(HEAD_TO_TOP).toPath(), false)
+        }.length
+    }
+    val shown = androidx.compose.animation.core.animateFloatAsState(
+        (progress ?: 0f).coerceIn(0f, 1f),
+        // A spring follows a steadily rising value smoothly (a tween restarting every update lagged behind).
+        androidx.compose.animation.core.spring(stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow), label = "catDownload"
+    )
+    val ms = remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) { val t0 = androidx.compose.runtime.withFrameMillis { it }; while (true) androidx.compose.runtime.withFrameMillis { ms.value = it - t0 } }
+    Canvas(modifier) {
+        val t = ms.value.toFloat()
+        val s = size.minDimension / 24f
+        withTransform({ scale(s, s, Offset.Zero) }) {
+            drawPath(head, color.copy(alpha = 0.25f), style = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+            if (progress == null) {
+                drawLight(head, color, (t / 1200f) % 1f, 0.28f)
+            } else if (shown.value > 0.001f) {
+                val m = androidx.compose.ui.graphics.PathMeasure().apply { setPath(head, false) }
+                val total = m.length
+                val a = start; val b = start + shown.value * total
+                val seg = Path()
+                m.getSegment(a, min(b, total), seg, true)
+                if (b > total) m.getSegment(0f, b - total, seg, true)
+                drawPath(seg, color, style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                // A glint runs along the filled part every 1.4 s, so a slow or paused download never looks frozen.
+                val fill = b - a
+                if (fill > total * 0.04f) {
+                    val gl = min(total * 0.1f, fill)
+                    val g0 = a + ((t / 1400f) % 1f) * (fill + gl) - gl
+                    val glint = Path()
+                    val from = max(g0, a); val to = min(g0 + gl, b)
+                    if (to > from) {
+                        if (from < total) m.getSegment(from, min(to, total), glint, true)
+                        if (to > total) m.getSegment(max(from, total) - total, to - total, glint, true)
+                        drawPath(glint, androidx.compose.ui.graphics.lerp(color, GremlinColors.Text, 0.6f), style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    }
+                }
+            }
+            // The eyes: small v's (user's pick over full arrows), in a 4.8 s loop of three 1.6 s beats.
+            // Beats 1-2, the download beat: rest, glide down and fade out, drop back in from above and settle.
+            // Beat 3, the second state (like the thinking cat's "hmm"): the v's squint flat, hold, and open.
+            val st = Stroke(1.3f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            val c = (t % 1600f) / 1600f
+            var dy = 0f; var a = 1f; var open = 1f
+            if ((t / 1600f).toInt() % 3 == 2) {
+                open = when {
+                    c < 0.25f -> 1f - 0.85f * sm(c / 0.25f)
+                    c < 0.7f -> 0.15f
+                    else -> 0.15f + 0.85f * sm((c - 0.7f) / 0.3f)
+                }
+            } else when {
+                c < 0.35f -> {}
+                c < 0.65f -> { val k = sm((c - 0.35f) / 0.3f); dy = 1.6f * k; a = 1f - k }
+                else -> { val k = sm((c - 0.65f) / 0.35f); dy = -1.6f * (1f - k); a = k }
+            }
+            for (x in floatArrayOf(9.3f, 14.7f)) {
+                val y = Y0 - 0.1f + dy
+                drawPath(Path().apply { moveTo(x - 1.25f, y - 0.6f * open); lineTo(x, y + 0.65f * open); lineTo(x + 1.25f, y - 0.6f * open) }, color.copy(alpha = color.alpha * a), style = st)
+            }
+        }
+    }
+}
+
+/** The head path from its start to the top middle of the forehead (half the forehead curve). */
+private const val HEAD_TO_TOP = "M3.92,10.46 L4.3,3 L8.2,7.1 Q10.1,6.1 12,6.1"
 
 /** The running light: a [len] slice of the head outline starting [at] (0..1) along it. */
 private fun DrawScope.drawLight(head: Path, c: Color, at: Float, len: Float) {

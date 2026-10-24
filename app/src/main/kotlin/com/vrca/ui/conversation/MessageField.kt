@@ -41,7 +41,7 @@ fun MessageField(
                 Icon(Icons.Filled.BookmarkAdd, contentDescription = "Quick message")
             }
 
-            Button(onClick = { chatboxViewModel.sendMessage() }) {
+            com.vrca.ui.common.GremlinButton(onClick = { chatboxViewModel.sendMessage() }) {
                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
             }
         }

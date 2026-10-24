@@ -278,9 +278,9 @@ fun IpField(
                         applyActiveSlot(editBuffer)
                     })
                 )
-                Button(
+                com.vrca.ui.common.GremlinButton(
                     onClick = { focusManager.clearFocus(); applyActiveSlot(editBuffer) },
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                    size = com.vrca.ui.common.GremlinButtonSize.Small
                 ) { Text("Apply") }
             }
 
@@ -364,7 +364,7 @@ fun IpField(
                                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                                     )
                                 }
-                                Button(
+                                com.vrca.ui.common.GremlinButton(
                                     onClick = { switchToSlot(slot, addrTrimmed) },
                                     modifier = Modifier.fillMaxWidth(),
                                     enabled = addrTrimmed.isNotBlank() && isValidIpv4(addrTrimmed)

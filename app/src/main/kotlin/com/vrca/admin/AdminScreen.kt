@@ -315,7 +315,7 @@ fun AdminScreen() {
     // ==========================================
     // MAIN UI
     // ==========================================
-    val tabs = remember { listOf("Dashboard", "Users", "Mod", "Announce", "Releases", "Config", "Log", "Bots", "Bot") }
+    val tabs = remember { listOf("Dashboard", "Users", "Mod", "Announce", "Releases", "Config", "Log", "Bots", "Bot", "Crashes") }
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
 
     // ModerationTarget is NOT saveable
@@ -855,6 +855,7 @@ fun AdminScreen() {
                     7 -> BotsTab()
 
                     8 -> DiscordBotTab()
+                    9 -> CrashesTab(db = db, setError = ::setErr)
 
                     else -> ModLogTab(db = db, setError = ::setErr)
                 }

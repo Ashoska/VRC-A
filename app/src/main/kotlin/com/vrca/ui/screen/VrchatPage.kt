@@ -285,7 +285,7 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Button(onClick = { showLogin = true }) { Text("Sign in") }
+                        com.vrca.ui.common.GremlinButton(onClick = { showLogin = true }) { Text("Sign in") }
                     }
                 } else {
                     val statusColor = presenceStatusColor(p)
@@ -944,7 +944,7 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
             }
             val moreToLoad = if (paged) (pageIndex + 1) * pageSize < pageTotal else visible.size > shown
             if (moreToLoad) {
-                androidx.compose.material3.TextButton(
+                com.vrca.ui.common.GremlinQuietButton(
                     onClick = { if (paged) loadMore() else shown += 12 },
                     enabled = !loadingMore,
                     modifier = Modifier.fillMaxWidth()
@@ -1012,7 +1012,7 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                     )
                 )
                 Spacer(Modifier.width(8.dp))
-                androidx.compose.material3.Button(
+                com.vrca.ui.common.GremlinButton(
                     onClick = {
                         heightText.trim().toFloatOrNull()?.let {
                             vm.setAvatarEyeHeight(it); sliderVal = it.coerceIn(0.1f, 10f)
@@ -1029,7 +1029,7 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.weight(1f))
-                androidx.compose.material3.TextButton(
+                com.vrca.ui.common.GremlinQuietButton(
                     onClick = { vm.resetAvatarHeightToDefault()?.let { sliderVal = it.coerceIn(0.1f, 10f) } },
                     enabled = defaultHeight != null
                 ) { Text("Reset to default") }
@@ -2737,16 +2737,12 @@ private fun CompactAlertButton(
     enabled: Boolean,
     onClick: () -> Unit
 ) {
-    FilledTonalButton(
+    com.vrca.ui.common.GremlinButton(
         onClick = onClick,
         enabled = enabled,
-        shape = MaterialTheme.shapes.small,
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
-        colors = if (prominent) ButtonDefaults.filledTonalButtonColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-        ) else ButtonDefaults.filledTonalButtonColors(),
-        modifier = Modifier.fillMaxWidth().height(38.dp)
+        kind = if (prominent) com.vrca.ui.common.GremlinButtonKind.Primary else com.vrca.ui.common.GremlinButtonKind.Secondary,
+        size = com.vrca.ui.common.GremlinButtonSize.Small,
+        modifier = Modifier.fillMaxWidth()
     ) {
         Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp))
         Spacer(Modifier.width(6.dp))

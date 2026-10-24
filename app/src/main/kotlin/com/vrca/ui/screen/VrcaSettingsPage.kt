@@ -282,7 +282,7 @@ internal fun SettingsPage(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        TextButton(onClick = { vm.launchAppInfo(ctx) }) { Text("Open App info") }
+                        com.vrca.ui.common.GremlinQuietButton(onClick = { vm.launchAppInfo(ctx) }) { Text("Open App info") }
                     }
                 }
             }
@@ -415,10 +415,32 @@ internal fun SettingsPage(
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Main-thread stalls (startup)", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-                            androidx.compose.material3.TextButton(onClick = { com.vrca.app.MainThreadWatch.clear(ctx); stallsTick++ }) { Text("Clear") }
+                            com.vrca.ui.common.GremlinQuietButton(onClick = { com.vrca.app.MainThreadWatch.clear(ctx); stallsTick++ }) { Text("Clear") }
                         }
                         SelectionContainer {
                             Text(stalls.ifBlank { "(none)" }.let { com.vrca.app.sanitizeBackendRefs(it) }, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        }
+
+                        // Test crash: checks the crash screen + safe start (CrashReport) on a real device.
+                        var confirmCrash by remember { mutableStateOf(false) }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Crash screen", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                            com.vrca.ui.common.GremlinQuietButton(onClick = { confirmCrash = true }) { Text("Test crash") }
+                        }
+                        if (confirmCrash) {
+                            com.vrca.ui.common.VrcaConfirmDialog(
+                                title = "Test crash",
+                                body = "VRC-A will crash now. Open it again to see the crash screen.",
+                                confirmLabel = "Crash VRC-A",
+                                destructive = true,
+                                onConfirm = {
+                                    // Thrown on the main thread after the dialog closes, like a real crash.
+                                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                        throw RuntimeException("Test crash from Settings > Debug")
+                                    }
+                                },
+                                onDismiss = { confirmCrash = false }
+                            )
                         }
 
                         Text("Sync (last issue)", style = MaterialTheme.typography.labelMedium)
@@ -494,7 +516,7 @@ internal fun SettingsPage(
                                     kotlinx.coroutines.delay(1000)
                                 }
                             }
-                            TextButton(onClick = { com.vrca.osc.VrcaOscQuery.start(ctx) }) {
+                            com.vrca.ui.common.GremlinQuietButton(onClick = { com.vrca.osc.VrcaOscQuery.start(ctx) }) {
                                 Text("Start / rescan OSCQuery")
                             }
                             SelectionContainer {
@@ -600,7 +622,7 @@ internal fun SettingsPage(
                                     .getOrElse { "error: ${it.javaClass.simpleName}" }
                             }
                         }
-                        TextButton(onClick = { dbTrigger++ }) { Text("Test all avatar databases") }
+                        com.vrca.ui.common.GremlinQuietButton(onClick = { dbTrigger++ }) { Text("Test all avatar databases") }
                         SelectionContainer {
                             Text(
                                 dbHealth,
@@ -626,7 +648,7 @@ internal fun SettingsPage(
                                 }
                             }
                         }
-                        TextButton(onClick = { rescanTick++ }) { Text("Re-scan my avatars now") }
+                        com.vrca.ui.common.GremlinQuietButton(onClick = { rescanTick++ }) { Text("Re-scan my avatars now") }
                         SelectionContainer {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(libDiag, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
@@ -774,7 +796,7 @@ internal fun WhatsNewDialog(onDismiss: () -> Unit) {
                 )
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onDismiss) { Text("Close") }
+                com.vrca.ui.common.GremlinQuietButton(onClick = onDismiss) { Text("Close") }
             }
         }
     }
@@ -833,7 +855,7 @@ private fun SettingsRow(
             }
         }
 
-        TextButton(onClick = onPrimary) {
+        com.vrca.ui.common.GremlinQuietButton(onClick = onPrimary) {
             Text(primary)
             Spacer(Modifier.width(4.dp))
             Icon(Icons.Filled.ChevronRight, contentDescription = null)
@@ -902,9 +924,9 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 )
             }
             if (vrcSignedIn) {
-                TextButton(onClick = { confirmVrcSignOut = true }) { Text("Sign out") }
+                com.vrca.ui.common.GremlinQuietButton(onClick = { confirmVrcSignOut = true }) { Text("Sign out") }
             } else {
-                TextButton(onClick = onSignInVrchat) { Text("Sign in") }
+                com.vrca.ui.common.GremlinQuietButton(onClick = onSignInVrchat) { Text("Sign in") }
             }
         }
 
@@ -938,9 +960,9 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 }
             }
             if (discordSeeded) {
-                TextButton(onClick = { confirmDiscordDisconnect = true }) { Text("Sign out") }
+                com.vrca.ui.common.GremlinQuietButton(onClick = { confirmDiscordDisconnect = true }) { Text("Sign out") }
             } else {
-                TextButton(onClick = {
+                com.vrca.ui.common.GremlinQuietButton(onClick = {
                     if (!discordRiskAccepted) showRiskConsent = true else showDiscordLogin = true
                 }) { Text("Sign in") }
             }
@@ -955,7 +977,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 else setDiscordRpcEnabled(enabled)
             }
             if (discordStatus == com.vrca.discord.DiscordRpcStatus.SESSION_EXPIRED) {
-                TextButton(onClick = { showDiscordLogin = true }) { Text("Sign in to Discord again") }
+                com.vrca.ui.common.GremlinQuietButton(onClick = { showDiscordLogin = true }) { Text("Sign in to Discord again") }
             }
         }
 
@@ -982,9 +1004,9 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 )
             }
             if (spotifyConnected) {
-                TextButton(onClick = { com.vrca.spotify.SpotifyAuthManager.logout(ctx) }) { Text("Disconnect") }
+                com.vrca.ui.common.GremlinQuietButton(onClick = { com.vrca.spotify.SpotifyAuthManager.logout(ctx) }) { Text("Disconnect") }
             } else if (com.vrca.spotify.SpotifyAuthManager.isConfigured()) {
-                TextButton(onClick = {
+                com.vrca.ui.common.GremlinQuietButton(onClick = {
                     runCatching {
                         val url = com.vrca.spotify.SpotifyAuthManager.buildAuthUrl(ctx)
                         ctx.startActivity(
@@ -1064,8 +1086,8 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TextButton(onClick = { showRiskConsent = false }) { Text("Cancel") }
-                    androidx.compose.material3.Button(
+                    com.vrca.ui.common.GremlinQuietButton(onClick = { showRiskConsent = false }) { Text("Cancel") }
+                    com.vrca.ui.common.GremlinButton(
                         onClick = {
                             scope.launch {
                                 repo.saveDiscordRiskAccepted(true)
@@ -1095,7 +1117,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f)
                     )
-                    TextButton(onClick = { showDiscordLogin = false }) { Text("Cancel") }
+                    com.vrca.ui.common.GremlinQuietButton(onClick = { showDiscordLogin = false }) { Text("Cancel") }
                 }
                 Box(Modifier.fillMaxWidth().height(500.dp)) {
                     com.vrca.discord.DiscordLoginWebView(
@@ -1276,10 +1298,10 @@ private fun ChatboxWidthCalibrationTool(vm: VrcaViewModel) {
             valueRange = 1f..80f
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            androidx.compose.material3.Button(onClick = {
+            com.vrca.ui.common.GremlinButton(onClick = {
                 vm.sendCalibrationLine(testChar.toString().repeat(count))
             }) { Text("Send × $count") }
-            androidx.compose.material3.OutlinedButton(onClick = { vm.sendCalibrationLine("") }) {
+            com.vrca.ui.common.GremlinSecondaryButton(onClick = { vm.sendCalibrationLine("") }) {
                 Text("Clear chatbox")
             }
         }
@@ -1305,15 +1327,15 @@ private fun ChatboxWidthCalibrationTool(vm: VrcaViewModel) {
         Text("Auto sequence — screenshot each line in VRChat and send the shots to the dev:",
             style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            androidx.compose.material3.Button(onClick = { seqIndex = 0; seqSend(0) }) {
+            com.vrca.ui.common.GremlinButton(onClick = { seqIndex = 0; seqSend(0) }) {
                 Text(if (seqIndex < 0) "Start sequence" else "Restart")
             }
             if (seqIndex >= 0) {
-                androidx.compose.material3.OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { if (seqIndex > 0) { seqIndex--; seqSend(seqIndex) } },
                     enabled = seqIndex > 0
                 ) { Text("Prev") }
-                androidx.compose.material3.Button(onClick = {
+                com.vrca.ui.common.GremlinButton(onClick = {
                     if (seqIndex < com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS.size - 1) {
                         seqIndex++; seqSend(seqIndex)
                     }
@@ -1351,14 +1373,14 @@ private fun ChatboxWidthCalibrationTool(vm: VrcaViewModel) {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            androidx.compose.material3.Button(onClick = {
+            com.vrca.ui.common.GremlinButton(onClick = {
                 val counts = measured.mapNotNull { (c, s) ->
                     s.toIntOrNull()?.takeIf { it > 0 }?.let { c to it }
                 }.toMap()
                 com.vrca.nowplaying.ChatboxCalibration.save(ctx, counts)
                 calibrated = com.vrca.nowplaying.ChatboxCalibration.calibrated
             }) { Text("Save calibration") }
-            androidx.compose.material3.OutlinedButton(onClick = {
+            com.vrca.ui.common.GremlinSecondaryButton(onClick = {
                 com.vrca.nowplaying.ChatboxCalibration.clear(ctx)
                 measured.clear()
                 calibrated = false

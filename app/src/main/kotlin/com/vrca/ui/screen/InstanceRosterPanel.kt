@@ -178,7 +178,7 @@ private fun AccessState(
             )
         }
         if (!filesAccess) {
-            Button(
+            com.vrca.ui.common.GremlinButton(
                 onClick = {
                     runCatching {
                         ctx.startActivity(
@@ -190,7 +190,7 @@ private fun AccessState(
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Grant file access") }
         }
-        OutlinedButton(
+        com.vrca.ui.common.GremlinSecondaryButton(
             onClick = onPickFolder,
             modifier = Modifier.fillMaxWidth()
         ) { Text("Choose log folder") }

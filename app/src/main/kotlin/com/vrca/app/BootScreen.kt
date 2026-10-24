@@ -2,18 +2,15 @@ package com.vrca.app
 
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.verticalScroll
@@ -24,10 +21,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.ui.zIndex
-import androidx.compose.ui.draw.drawWithContent
 import com.vrca.ui.common.animatedOutline
 import com.vrca.ui.common.widenIn
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -36,7 +31,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -51,21 +45,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
-import androidx.compose.material.icons.filled.Build
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
@@ -75,14 +59,7 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.fadeOut
-import androidx.compose.material.icons.filled.PriorityHigh
-import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.RocketLaunch
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -90,13 +67,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -105,16 +77,13 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.neverEqualPolicy
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.AlignmentLine
 import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.layout.VerticalAlignmentLine
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -122,7 +91,6 @@ import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.conflate
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.derivedStateOf
@@ -233,7 +201,7 @@ private val DropLayer = Color.Black.copy(alpha = 0.38f)
  * (the edge facing the light) and a flat [DropLayer] [drop] dp below it.
  */
 @Composable
-private fun Layer(
+internal fun Layer(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(20.dp),
     color: Color = GremlinColors.Panel,
@@ -990,27 +958,26 @@ private fun RetryPill(retryInSec: Int?, onRetry: () -> Unit) {
     var longest by remember { mutableIntStateOf(1) }
     if ((retryInSec ?: 0) > longest) longest = retryInSec ?: 0
     val ring by animateFloatAsState(((retryInSec ?: 0).toFloat() / longest).coerceIn(0f, 1f), label = "retryRing")
-    Layer(Modifier.height(50.dp), shape = CircleShape, color = GremlinColors.Raised, drop = 4.dp) {
-        Row(Modifier.fillMaxHeight().padding(5.dp), verticalAlignment = Alignment.CenterVertically) {
-            Row(
-                Modifier.fillMaxHeight().clip(CircleShape).background(accent).clickable(onClick = onRetry).padding(start = 8.dp, end = 20.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(
-                        progress = ring,
-                        modifier = Modifier.fillMaxSize(), strokeWidth = 2.5.dp,
-                        color = GremlinColors.Backdrop, trackColor = GremlinColors.Backdrop.copy(alpha = 0.18f)
-                    )
-                    Text("${retryInSec ?: ""}", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = GremlinColors.Backdrop)
+    // The app's button (GremlinButton) with the countdown to the automatic retry as its icon: a ring
+    // that drains round the seconds left.
+    com.vrca.ui.common.GremlinButton(
+        "Retry", onRetry, size = com.vrca.ui.common.GremlinButtonSize.Large,
+        leading = {
+            Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+                // Drawn here (not Material's indicator): a faint track and the seconds left draining from the top.
+                androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+                    val w = 2.5.dp.toPx()
+                    val st = androidx.compose.ui.graphics.drawscope.Stroke(w, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                    val tl = androidx.compose.ui.geometry.Offset(w / 2, w / 2)
+                    val sz = androidx.compose.ui.geometry.Size(size.width - w, size.height - w)
+                    drawArc(accent.copy(alpha = 0.2f), 0f, 360f, false, tl, sz, style = st)
+                    drawArc(accent, -90f, 360f * ring, false, tl, sz, style = st)
                 }
-                Spacer(Modifier.width(10.dp))
-                Text("Retry", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Backdrop)
+                Text("${retryInSec ?: ""}", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = accent)
             }
         }
-    }
+    )
 }
-
 
 /** The Internet row: the active connection's type and Android's download-speed estimate (Mbps, 0 = unknown). */
 fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
@@ -1032,19 +999,11 @@ fun internetStatus(context: android.content.Context): Pair<InternetLink, Int> {
 /** "Sign in to VRChat": shown under the panels while the VRChat session needs signing in. */
 @Composable
 private fun SignInPill(onClick: () -> Unit) {
-    val accent = MaterialTheme.colorScheme.primary
-    Layer(
-        Modifier.height(50.dp).clip(CircleShape).clickable(onClick = onClick),
-        shape = CircleShape, color = accent, edge = Color.Transparent, drop = 4.dp
-    ) {
-        Row(Modifier.fillMaxHeight().padding(start = 20.dp, end = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Person, null, tint = GremlinColors.Backdrop, modifier = Modifier.size(19.dp))
-            Spacer(Modifier.width(10.dp))
-            Text("Sign in to VRChat", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = GremlinColors.Backdrop)
-            Spacer(Modifier.width(10.dp))
-            Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = GremlinColors.Backdrop, modifier = Modifier.size(18.dp))
-        }
-    }
+    com.vrca.ui.common.GremlinButton(
+        "Sign in to VRChat", onClick, size = com.vrca.ui.common.GremlinButtonSize.Large,
+        // The same icon as the VRChat sign-in row it fixes (our own icons, not Material's).
+        bootIcon = BootIcons.VrchatSignIn
+    )
 }
 
 /** One check Boot Cat goes through on the first open: what he says while it runs, and its row once done. */

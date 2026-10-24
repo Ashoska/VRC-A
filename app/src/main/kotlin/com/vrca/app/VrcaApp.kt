@@ -140,30 +140,22 @@ private fun VrcaAppContent() {
        Crash gate
        ------------------------- */
 
-    val crashPrefs = remember {
-        ctx.getSharedPreferences(VrcaApplication.CRASH_PREFS_FILE, Context.MODE_PRIVATE)
-    }
-    val lastCrashText = remember {
-        crashPrefs.getString(VrcaApplication.CRASH_KEY_TEXT, "").orEmpty()
-    }
-
-    var allowBoot by remember { mutableStateOf(lastCrashText.isBlank()) }
-
-    if (!allowBoot) {
-        CrashScreen(
-            crashText = lastCrashText,
-            onClear = {
-                crashPrefs.edit()
-                    .remove(VrcaApplication.CRASH_KEY_TEXT)
-                    .commit()
-            },
-            onContinue = {
-                crashPrefs.edit()
-                    .remove(VrcaApplication.CRASH_KEY_TEXT)
-                    .commit()
-                allowBoot = true
+    // A crash report waiting means this is a safe start (CrashReport): nothing optional has
+    // started, so the crash screen always gets to show. "Start VRC-A" ends it and boot goes on.
+    if (CrashReport.safeStart) {
+        // Read at launch, before any UI (CrashReport.checkAtLaunch).
+        CrashScreen(CrashReport.screenReport, CrashReport.screenHistory, onStart = { CrashReport.release(ctx) })
+        // A newer version may already fix it (user, 2026-10-23): the update popup over the crash screen.
+        // One read of the release docs; the app's own check runs again after Start VRC-A.
+        if (!BuildConfig.IS_ADMIN_BUILD) {
+            var update by remember { mutableStateOf<ReleaseCheckResult.UpdateAvailable?>(null) }
+            LaunchedEffect(Unit) {
+                val hash = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE).getString("device_id_hash", "").orEmpty()
+                update = runCatching { checkFirestoreRelease(BuildConfig.VERSION_CODE, hash) }.getOrNull() as? ReleaseCheckResult.UpdateAvailable
             }
-        )
+            // Updates can't be skipped (user): always the forced popup, no Later.
+            update?.let { UpdatePopup(it.info, forced = true, visible = true, onDismiss = {}) }
+        }
         return
     }
 
@@ -367,9 +359,6 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
 
     var releaseCheckResult by remember { mutableStateOf<ReleaseCheckResult?>(null) }
     var updateDismissed    by remember { mutableStateOf(false) }
-    var downloadId         by remember { mutableLongStateOf(-1L) }
-    var downloadDone       by remember { mutableStateOf(false) }
-    var downloadError      by remember { mutableStateOf<String?>(null) }
 
     if (!BuildConfig.IS_ADMIN_BUILD) {
         val prefs = remember { ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE) }
@@ -526,148 +515,10 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
         }
     }
 
-    // Listen for DownloadManager completion
-    if (downloadId >= 0L && !downloadDone) {
-        DisposableEffect(downloadId) {
-            val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(context: android.content.Context, intent: Intent) {
-                    val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
-                    if (id != downloadId) return
-                    val query = DownloadManager.Query().setFilterById(id)
-                    // dm.query() returns null on some OEM/download-provider states — the old
-                    // unconditional cursor.moveToFirst() then NPE-crashed the app while an update
-                    // download was pending. Null-guard + never let this receiver crash the process.
-                    val cursor = try { dm.query(query) } catch (_: Throwable) { null } ?: return
-                    if (cursor.moveToFirst()) {
-                        val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
-                        val status = cursor.getInt(statusCol)
-
-                        if (status == DownloadManager.STATUS_FAILED) {
-                            val reasonCol = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
-                            val reason = cursor.getInt(reasonCol)
-                            downloadError = when (reason) {
-                                DownloadManager.ERROR_HTTP_DATA_ERROR,
-                                DownloadManager.ERROR_UNHANDLED_HTTP_CODE ->
-                                    "Download failed — the download URL may require authentication (is the GitHub repo private?)"
-                                DownloadManager.ERROR_FILE_ERROR ->
-                                    "Download failed — could not write file to storage"
-                                else -> "Download failed (error code $reason)"
-                            }
-                            downloadDone = true
-                            cursor.close()
-                            return
-                        }
-
-                        if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                            val localUriCol = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
-                            val localUri = cursor.getString(localUriCol)
-                            if (localUri != null) {
-                                val file = File(Uri.parse(localUri).path!!)
-                                // GitHub private repos redirect unauthenticated requests
-                                // to the login page — DownloadManager downloads the HTML
-                                // and reports success. Catch it: real APKs are >100 KB.
-                                if (file.length() < 100_000L) {
-                                    downloadError = "Download failed — got a web page instead of an APK. The GitHub repo is likely private. Make the repo public or use a public download URL."
-                                    downloadDone = true
-                                    file.delete()
-                                    cursor.close()
-                                    return
-                                }
-                                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                                    FileProvider.getUriForFile(
-                                        context,
-                                        "${context.packageName}.fileprovider",
-                                        file
-                                    )
-                                } else {
-                                    Uri.fromFile(file)
-                                }
-                                val install = Intent(Intent.ACTION_VIEW).apply {
-                                    setDataAndType(uri, "application/vnd.android.package-archive")
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                // A missing FileProvider authority / no installer activity throws —
-                                // surface it instead of crashing the app mid-update.
-                                runCatching { context.startActivity(install) }
-                                    .onFailure { downloadError = "Couldn't open the installer. Tap the download link to install manually." }
-                                downloadDone = true
-                            }
-                        }
-                    }
-                    cursor.close()
-                }
-            }
-            val registered = runCatching {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    ctx.registerReceiver(
-                        receiver,
-                        IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
-                        android.content.Context.RECEIVER_EXPORTED
-                    )
-                } else {
-                    ctx.registerReceiver(receiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
-                }
-            }.isSuccess
-            // Only unregister what we registered — an unregister of a never-registered
-            // receiver throws IllegalArgumentException and would crash on dispose.
-            onDispose { if (registered) runCatching { ctx.unregisterReceiver(receiver) } }
-        }
-    }
-
     val updateToShow = releaseCheckResult
-    if (!BuildConfig.IS_ADMIN_BUILD &&
-        updateToShow is ReleaseCheckResult.UpdateAvailable &&
-        (!updateDismissed || updateToShow.forced)
-    ) {
-        UpdateDialog(
-            info = updateToShow.info,
-            forced = updateToShow.forced,
-            downloading = downloadId >= 0L && !downloadDone,
-            error = downloadError,
-            onDismiss = { updateDismissed = true },
-            onDownload = { url ->
-                downloadError = null
-                // DownloadManager can be disabled/unavailable on some OEM builds (reported
-                // on Samsung Galaxy) — getSystemService returns null or enqueue() throws
-                // (IllegalArgumentException "Unknown URL"/SecurityException). Catch every
-                // failure and fall back to opening the APK URL in the browser so the user
-                // can always get the update instead of the popup silently doing nothing.
-                val fileName = "vrc-a-update.apk"
-                var enqueued = false
-                try {
-                    val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as? DownloadManager
-                    if (dm != null) {
-                        val dest = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
-                        if (dest.exists()) dest.delete()
-                        val request = DownloadManager.Request(Uri.parse(url)).apply {
-                            setTitle("VRC-A Update")
-                            setDescription("Downloading update...")
-                            setDestinationInExternalFilesDir(ctx, Environment.DIRECTORY_DOWNLOADS, fileName)
-                            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
-                        }
-                        downloadId = dm.enqueue(request)
-                        downloadDone = false
-                        enqueued = true
-                    }
-                } catch (_: Throwable) {
-                    // fall through to the browser fallback below
-                }
-                if (!enqueued) {
-                    try {
-                        ctx.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                        downloadError = "In-app download unavailable on this device — " +
-                            "opened the update in your browser instead."
-                    } catch (_: Throwable) {
-                        downloadError = "Couldn't start the download. Update manually from: $url"
-                    }
-                }
-            }
-        )
+    if (!BuildConfig.IS_ADMIN_BUILD && updateToShow is ReleaseCheckResult.UpdateAvailable) {
+        // Stays composed while hidden ("Later"), so a download already running still opens the installer.
+        UpdatePopup(updateToShow.info, updateToShow.forced, visible = !updateDismissed || updateToShow.forced, onDismiss = { updateDismissed = true })
     }
 
     /* -------------------------
@@ -856,6 +707,10 @@ internal fun UpdateDialog(
     info: ReleaseInfo,
     forced: Boolean,
     downloading: Boolean = false,
+    /** Download progress 0..1 (null = size not known yet), shown by the downloading Boot Cat. */
+    progress: Float? = null,
+    /** The download finished: Boot Cat lands into his Done face just before the installer opens. */
+    landed: Boolean = false,
     error: String? = null,
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
@@ -988,45 +843,25 @@ internal fun UpdateDialog(
                 val dialogCtx = LocalContext.current
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (forced) {
-                        Button(
+                        com.vrca.ui.common.GremlinButton(
+                            if (downloading) "Downloading" + (progress?.let { " ${(it * 100).toInt()}%" } ?: "")
+                            else if (error != null) "Retry Download" else "Download Update",
                             onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                            enabled = !downloading,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            if (downloading) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.height(18.dp).widthIn(max = 18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.onPrimary
-                                )
-                                Spacer(Modifier.widthIn(min = 8.dp))
-                                Text("Downloading")
-                            } else {
-                                Text(if (error != null) "Retry Download" else "Download Update")
-                            }
-                        }
+                            modifier = Modifier.fillMaxWidth(),
+                            bootIcon = BootIcons.Updates, downloading = downloading, downloadProgress = progress, downloaded = landed
+                        )
                     } else {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)
                         ) {
-                            OutlinedButton(onClick = onDismiss) { Text("Later") }
-                            Button(
+                            com.vrca.ui.common.GremlinSecondaryButton(onClick = onDismiss) { Text("Later") }
+                            com.vrca.ui.common.GremlinButton(
+                                if (downloading) "Downloading" + (progress?.let { " ${(it * 100).toInt()}%" } ?: "")
+                                else if (error != null) "Retry" else "Download",
                                 onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                                enabled = !downloading
-                            ) {
-                                if (downloading) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.height(18.dp).widthIn(max = 18.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.onPrimary
-                                    )
-                                    Spacer(Modifier.widthIn(min = 8.dp))
-                                    Text("Downloading")
-                                } else {
-                                    Text(if (error != null) "Retry" else "Download")
-                                }
-                            }
+                                bootIcon = BootIcons.Updates, downloading = downloading, downloadProgress = progress, downloaded = landed
+                            )
                         }
                     }
 
@@ -1344,59 +1179,6 @@ internal fun sanitizeBackendRefs(text: String): String = text
     // PERMISSION_DENIED" -> "server: PERMISSION_DENIED".
     .replace(Regex("""Fire(base|store)\w*""", RegexOption.IGNORE_CASE), "server")
 
-@Composable
-internal fun CrashScreen(
-    crashText: String,
-    onClear: () -> Unit,
-    onContinue: () -> Unit
-) {
-    Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("VRC-A crashed on last launch", style = MaterialTheme.typography.headlineSmall)
-
-            ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        // Sanitized on display only — the stored crash log keeps
-                        // the raw stack trace for real debugging via Logcat/file.
-                        sanitizeBackendRefs(crashText).ifBlank { "(no crash text saved)" },
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-
-            Button(
-                onClick = onContinue,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp)
-            ) {
-                Text("Clear crash + Try boot")
-            }
-
-            OutlinedButton(onClick = onClear, modifier = Modifier.fillMaxWidth()) {
-                Text("Clear crash log only")
-            }
-
-            Text(
-                "If this screen shows \u201Cno crash text saved\u201D, the process may be dying before the handler can write the log.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
 /* =========================================================
    VRChat Phase-2 ban check + pipeline start
    Runs after VRChat login succeeds.
@@ -1673,7 +1455,7 @@ If you do not agree, close the app.
                     }
                 }
                 if (tosUrl.isNotBlank()) {
-                    OutlinedButton(
+                    com.vrca.ui.common.GremlinSecondaryButton(
                         onClick = { onOpenUrl(tosUrl.trim()) },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -1707,7 +1489,7 @@ If you do not agree, close the app.
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
-                    Button(
+                    com.vrca.ui.common.GremlinButton(
                         onClick = onAccept,
                         enabled = checked,
                         modifier = Modifier.fillMaxWidth()
@@ -1719,3 +1501,191 @@ If you do not agree, close the app.
         }
     }
 }
+
+/**
+ * The update popup and its download (DownloadManager, real progress for the downloading Boot Cat,
+ * the installer when it finishes). Shown by the app, and over the crash screen when a newer version
+ * is out (the crash may already be fixed). [visible] false hides the dialog but keeps a running
+ * download going.
+ */
+@Composable
+internal fun UpdatePopup(info: ReleaseInfo, forced: Boolean, visible: Boolean, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    var downloadId         by remember { mutableLongStateOf(-1L) }
+    // The update download's progress (0..1, null = size not known yet), for the downloading Boot Cat.
+    var downloadProgress   by remember { mutableStateOf<Float?>(null) }
+    // Download finished: Boot Cat lands into Done for a moment before the installer opens.
+    var downloadLanded     by remember { mutableStateOf(false) }
+    var downloadDone       by remember { mutableStateOf(false) }
+    var downloadError      by remember { mutableStateOf<String?>(null) }
+
+    // Listen for DownloadManager completion
+    if (downloadId >= 0L && !downloadDone) {
+        DisposableEffect(downloadId) {
+            val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: android.content.Context, intent: Intent) {
+                    val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+                    if (id != downloadId) return
+                    val query = DownloadManager.Query().setFilterById(id)
+                    // dm.query() returns null on some OEM/download-provider states — the old
+                    // unconditional cursor.moveToFirst() then NPE-crashed the app while an update
+                    // download was pending. Null-guard + never let this receiver crash the process.
+                    val cursor = try { dm.query(query) } catch (_: Throwable) { null } ?: return
+                    if (cursor.moveToFirst()) {
+                        val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                        val status = cursor.getInt(statusCol)
+
+                        if (status == DownloadManager.STATUS_FAILED) {
+                            val reasonCol = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
+                            val reason = cursor.getInt(reasonCol)
+                            downloadError = when (reason) {
+                                DownloadManager.ERROR_HTTP_DATA_ERROR,
+                                DownloadManager.ERROR_UNHANDLED_HTTP_CODE ->
+                                    "Download failed — the download URL may require authentication (is the GitHub repo private?)"
+                                DownloadManager.ERROR_FILE_ERROR ->
+                                    "Download failed — could not write file to storage"
+                                else -> "Download failed (error code $reason)"
+                            }
+                            downloadDone = true
+                            cursor.close()
+                            return
+                        }
+
+                        if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                            val localUriCol = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+                            val localUri = cursor.getString(localUriCol)
+                            if (localUri != null) {
+                                val file = File(Uri.parse(localUri).path!!)
+                                // GitHub private repos redirect unauthenticated requests
+                                // to the login page — DownloadManager downloads the HTML
+                                // and reports success. Catch it: real APKs are >100 KB.
+                                if (file.length() < 100_000L) {
+                                    downloadError = "Download failed — got a web page instead of an APK. The GitHub repo is likely private. Make the repo public or use a public download URL."
+                                    downloadDone = true
+                                    file.delete()
+                                    cursor.close()
+                                    return
+                                }
+                                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                    FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.fileprovider",
+                                        file
+                                    )
+                                } else {
+                                    Uri.fromFile(file)
+                                }
+                                val install = Intent(Intent.ACTION_VIEW).apply {
+                                    setDataAndType(uri, "application/vnd.android.package-archive")
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                // A missing FileProvider authority / no installer activity throws —
+                                // surface it instead of crashing the app mid-update.
+                                downloadLanded = true
+                                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                    runCatching { context.startActivity(install) }
+                                        .onFailure { downloadError = "Couldn't open the installer. Tap the download link to install manually." }
+                                    downloadDone = true
+                                }, LANDED_HOLD_MS)
+                            }
+                        }
+                    }
+                    cursor.close()
+                }
+            }
+            val registered = runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    ctx.registerReceiver(
+                        receiver,
+                        IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+                        android.content.Context.RECEIVER_EXPORTED
+                    )
+                } else {
+                    ctx.registerReceiver(receiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
+                }
+            }.isSuccess
+            // Only unregister what we registered — an unregister of a never-registered
+            // receiver throws IllegalArgumentException and would crash on dispose.
+            onDispose { if (registered) runCatching { ctx.unregisterReceiver(receiver) } }
+        }
+    }
+
+    // Read the download's bytes from DownloadManager twice a second while it runs (off the main thread).
+    LaunchedEffect(downloadId, downloadDone) {
+        downloadProgress = null
+        if (downloadId < 0L || downloadDone) return@LaunchedEffect
+        val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager ?: return@LaunchedEffect
+        while (true) {
+            downloadProgress = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    dm.query(DownloadManager.Query().setFilterById(downloadId))?.use { c ->
+                        if (!c.moveToFirst()) null else {
+                            val done = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                            val total = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                            if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else null
+                        }
+                    }
+                }.getOrNull()
+            }
+            kotlinx.coroutines.delay(500)
+        }
+    }
+
+    if (visible) {
+        UpdateDialog(
+            info = info,
+            forced = forced,
+            downloading = downloadId >= 0L && !downloadDone,
+            progress = downloadProgress,
+            landed = downloadLanded,
+            error = downloadError,
+            onDismiss = onDismiss,
+            onDownload = { url ->
+                downloadError = null
+                // DownloadManager can be disabled/unavailable on some OEM builds (reported
+                // on Samsung Galaxy) — getSystemService returns null or enqueue() throws
+                // (IllegalArgumentException "Unknown URL"/SecurityException). Catch every
+                // failure and fall back to opening the APK URL in the browser so the user
+                // can always get the update instead of the popup silently doing nothing.
+                val fileName = "vrc-a-update.apk"
+                var enqueued = false
+                try {
+                    val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as? DownloadManager
+                    if (dm != null) {
+                        val dest = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
+                        if (dest.exists()) dest.delete()
+                        val request = DownloadManager.Request(Uri.parse(url)).apply {
+                            setTitle("VRC-A Update")
+                            setDescription("Downloading update...")
+                            setDestinationInExternalFilesDir(ctx, Environment.DIRECTORY_DOWNLOADS, fileName)
+                            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+                        }
+                        downloadId = dm.enqueue(request)
+                        downloadDone = false
+                        downloadLanded = false
+                        enqueued = true
+                    }
+                } catch (_: Throwable) {
+                    // fall through to the browser fallback below
+                }
+                if (!enqueued) {
+                    try {
+                        ctx.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                        downloadError = "In-app download unavailable on this device — " +
+                            "opened the update in your browser instead."
+                    } catch (_: Throwable) {
+                        downloadError = "Couldn't start the download. Update manually from: $url"
+                    }
+                }
+            }
+        )
+    }
+}
+
+/** How long Boot Cat's Done landing (~1 s) shows before the installer opens. */
+private const val LANDED_HOLD_MS = 1100L
