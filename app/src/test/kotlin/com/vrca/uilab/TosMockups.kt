@@ -578,14 +578,18 @@ internal fun TosMockB3() {
                     Text("I've read and agree to these terms", style = MaterialTheme.typography.bodyLarge, color = G.Text)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Medium)
                     Spacer(Modifier.weight(1f))
+                    // Same height as Accept beside it.
+                    com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Large)
+                    Spacer(Modifier.width(10.dp))
                     GremlinButton("Accept", {}, enabled = agreed, size = GremlinButtonSize.Large, bootIcon = BootIcons.Start)
                 }
             } else Row(verticalAlignment = Alignment.CenterVertically) {
-                // Back on every section, the real button (user: not plain text); greyed out on the first.
-                com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Medium, enabled = open > 0)
+                // Back and Next together on the right (user: split far apart on the wide headset card they
+                // felt disconnected); Back is the real button on every section, greyed out on the first.
                 Spacer(Modifier.weight(1f))
+                com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Medium, enabled = open > 0)
+                Spacer(Modifier.width(10.dp))
                 com.vrca.ui.common.GremlinButton("Next", { go(open + 1) }, size = GremlinButtonSize.Medium)
             }
         }
