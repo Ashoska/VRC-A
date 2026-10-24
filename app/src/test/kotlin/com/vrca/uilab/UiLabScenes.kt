@@ -369,7 +369,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "cats", "buttons", "download", "downloadcat", "tosmock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -693,6 +693,17 @@ object UiLabScenes {
             // progress runs 0 -> 100% over 5 s (record it), then holds.
             "download" -> DownloadSheet()
             "downloadcat" -> DownloadCatLoop()
+            // `show lock`: the animated padlock, toggling locked/unlocked every 1.4 s, big and at overlay size.
+            "lock" -> {
+                val open = androidx.compose.runtime.produceState(false) { while (true) { kotlinx.coroutines.delay(1400); value = !value } }.value
+                androidx.compose.foundation.layout.Row(
+                    Modifier.fillMaxSize().background(com.vrca.ui.theme.GremlinColors.Backdrop),
+                    horizontalArrangement = Arrangement.spacedBy(60.dp, Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically
+                ) {
+                    com.vrca.app.AnimatedLock(open, MaterialTheme.colorScheme.primary, Modifier.size(180.dp))
+                    com.vrca.app.AnimatedLock(open, MaterialTheme.colorScheme.primary, Modifier.size(24.dp))
+                }
+            }
             "tosmock" -> when (rest.trim().substringBefore(' ')) { "b" -> TosMockB(); "b3" -> TosMockB3(); "b2" -> TosMockB2(rest.trim().substringAfter(' ', "2").toIntOrNull() ?: 2); else -> TosMockA() }
             "headsetboot" -> {
                 // `show headsetboot onboarded`: as a returning user (tutorial done), so the VRChat

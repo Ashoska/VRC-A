@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.unit.dp
 import com.vrca.BuildConfig
 
@@ -247,4 +248,45 @@ object BootIcons {
 
     /** Everything except a 4.6-unit band along the No internet slash. */
     private const val SLASH_GAP = "M-11.38 -9.49 L32.03 36.64 L2.90 64.05 L-40.51 17.93ZM-8.03 -12.64 L35.38 33.49 L64.51 6.07 L21.10 -40.05Z"
+}
+
+/**
+ * The padlock that animates between locked and unlocked (user, 2026-10-24: the state change should move,
+ * both ways): unlocking lifts the cat-head shackle and its right leg comes free of the body; locking drops
+ * it back in, both on a slightly bouncy spring. Drawn from the same shapes as `BootIcons.Privacy`;
+ * the animation is read only while drawing.
+ */
+@androidx.compose.runtime.Composable
+fun AnimatedLock(open: Boolean, color: Color, modifier: Modifier) {
+    val p = androidx.compose.animation.core.animateFloatAsState(
+        if (open) 1f else 0f,
+        androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow),
+        label = "lock"
+    )
+    val body = androidx.compose.runtime.remember {
+        androidx.compose.ui.graphics.vector.PathParser().parsePathString(
+            "M7.2 10.6h9.6a2.8 2.8 0 0 1 2.8 2.8v4.4a2.8 2.8 0 0 1 -2.8 2.8h-9.6a2.8 2.8 0 0 1 -2.8 -2.8v-4.4a2.8 2.8 0 0 1 2.8 -2.8z"
+        ).toPath()
+    }
+    Spacer(modifier.drawBehind {
+        val s = size.minDimension / 24f
+        val t = p.value
+        val lift = 1.9f * t
+        val st = androidx.compose.ui.graphics.drawscope.Stroke(1.9f, cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round)
+        withTransform({ scale(s, s, androidx.compose.ui.geometry.Offset.Zero) }) {
+            // The cat-head shackle, lifted by `lift`; its left leg stays in the body, the right one comes free.
+            val shackle = androidx.compose.ui.graphics.Path().apply {
+                moveTo(6.9f, 10.6f)
+                lineTo(7f, 3.4f - lift)
+                lineTo(10.5f, 6.6f - lift)
+                quadraticTo(12f, 6.0f - lift, 13.5f, 6.6f - lift)
+                lineTo(17f, 3.4f - lift)
+                lineTo(17.1f, 10.6f - lift - 3.2f * t)
+            }
+            drawPath(shackle, color, style = st)
+            drawPath(body, color, style = st)
+            drawCircle(color, 1.2f, androidx.compose.ui.geometry.Offset(12f, 14.6f))
+            drawLine(color, androidx.compose.ui.geometry.Offset(12f, 15.4f), androidx.compose.ui.geometry.Offset(12f, 17.4f), 1.6f, androidx.compose.ui.graphics.StrokeCap.Round)
+        }
+    })
 }
