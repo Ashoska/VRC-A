@@ -427,6 +427,15 @@ internal fun SettingsPage(
                             Text("Crash screen", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
                             com.vrca.ui.common.GremlinQuietButton(onClick = { confirmCrash = true }) { Text("Test crash") }
                         }
+                        // Crash reports waiting to be sent and the last upload result (CrashUpload), read once when shown.
+                        var crashUpload by remember { mutableStateOf("") }
+                        androidx.compose.runtime.LaunchedEffect(Unit) {
+                            crashUpload = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                val waiting = com.vrca.app.CrashReport.recent(ctx).count { !it.sent }
+                                "Crash reports: $waiting waiting" + com.vrca.app.CrashUpload.lastStatus(ctx).let { if (it.isBlank()) "" else "\nLast upload: $it" }
+                            }
+                        }
+                        if (crashUpload.isNotBlank()) Text(com.vrca.app.sanitizeBackendRefs(crashUpload), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (confirmCrash) {
                             com.vrca.ui.common.VrcaConfirmDialog(
                                 title = "Test crash",

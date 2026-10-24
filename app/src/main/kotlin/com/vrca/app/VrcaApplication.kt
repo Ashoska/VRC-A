@@ -113,6 +113,9 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
      * safe start ends ("Start VRC-A", [CrashReport.release]).
      */
     private fun startOptional() {
+        // Crashes whose upload never finished (CrashUpload) are retried on every normal start.
+        runCatching { CrashUpload.sendPending(applicationContext) }
+
         // Open the encrypted VRChat store in the background now, so it's ready by the time
         // anything asks (slow right after the headset turns on; VrchatAuthManager.getPrefs).
         com.vrca.vrchat.VrchatAuthManager.warmUp(applicationContext)

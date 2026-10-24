@@ -1,15 +1,8 @@
 package com.vrca.app
 
 import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,9 +19,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,9 +39,8 @@ import com.vrca.ui.theme.GremlinColors
 
 /**
  * Shown on the open after a crash, during the safe start (CrashReport): where it crashed and what went
- * wrong in plain words, a few plain facts (no code), and two buttons (user, 2026-10-23): Start VRC-A,
- * and Download report (a .txt in Downloads with the full report, for sending to the developer). Boot
- * Cat's failed face sets the tone. [history] = the crashes of the past 3 days, newest (this one) first.
+ * wrong in plain words, a few plain facts (no code), and Start VRC-A. The full report goes to the
+ * developer by itself (CrashUpload). Boot Cat's failed face sets the tone. [history] = the crashes of the past 3 days, newest (this one) first.
  */
 @Composable
 internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onStart: () -> Unit) {
@@ -70,8 +60,6 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
             "Earlier" to earlier.joinToString("\n") { "${niceTime(CrashReport.time(it.text))}  ·  ${CrashReport.whereOf(it.text)}" },
         ).filter { it.second.isNotBlank() }.map { it.first to sanitizeBackendRefs(it.second) }
     }
-    // What Download report saves: this crash in full, then the earlier ones.
-    val file = remember(report, history) { CrashReport.fullReport(report, history) }
     // Start VRC-A: the screen fades out to the bare backdrop first, then the app starts (the held
     // start-up work runs there, unseen) and the boot screen's intro fades its logo in on the same backdrop.
     var leaving by remember { mutableStateOf(false) }
@@ -80,15 +68,6 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
         if (!leaving) return@LaunchedEffect
         fade.animateTo(0f, tween(LEAVE_MS, easing = FastOutSlowInEasing))
         onStart()
-    }
-    // "Saved to Downloads: <name>" / "Couldn't save the report" once Download report is pressed.
-    var saved by remember { mutableStateOf<String?>(null) }
-    // Android 9 and older: the system picker chooses where the .txt goes.
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-        if (uri != null) saved = runCatching {
-            ctx.contentResolver.openOutputStream(uri)?.use { it.write(file.toByteArray()) }
-            "Report saved"
-        }.getOrDefault("Couldn't save the report")
     }
     Box(Modifier.fillMaxSize().background(GremlinColors.Backdrop), contentAlignment = Alignment.Center) {
         Column(
@@ -122,7 +101,7 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
                         color = GremlinColors.Caution, modifier = Modifier.padding(top = 6.dp)
                     )
                     // Details, always shown (user: no expand/collapse). Plain facts only (user: don't
-                    // expose our code): the full report, stack trace included, is only in the downloaded file.
+                    // expose our code): the full report, stack trace included, only goes to the developer (CrashUpload).
                     if (details.isNotEmpty()) Column(
                         Modifier.padding(top = 14.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
                             .background(GremlinColors.Card).padding(horizontal = 14.dp, vertical = 12.dp),
@@ -134,32 +113,12 @@ internal fun CrashScreen(report: String, history: List<CrashReport.Entry>, onSta
                 }
             }
             Spacer(Modifier.height(18.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                com.vrca.ui.common.GremlinButton(
-                    "Download report", kind = com.vrca.ui.common.GremlinButtonKind.Secondary,
-                    bootIcon = BootIcons.Updates,
-                    size = com.vrca.ui.common.GremlinButtonSize.Large,
-                    onClick = {
-                        if (leaving) return@GremlinButton
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            val name = CrashReport.saveToDownloads(ctx, file)
-                            saved = if (name != null) "Saved to Downloads: $name" else "Couldn't save the report"
-                        } else picker.launch(CrashReport.fileName())
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                com.vrca.ui.common.GremlinButton(
-                    "Start VRC-A", { leaving = true }, Modifier.weight(1f),
-                    bootIcon = BootIcons.Start, size = com.vrca.ui.common.GremlinButtonSize.Large
-                )
-            }
-            AnimatedVisibility(saved != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                Text(
-                    saved.orEmpty(), style = MaterialTheme.typography.bodySmall,
-                    color = if (saved?.startsWith("Couldn't") == true) GremlinColors.Negative else GremlinColors.TextMuted,
-                    modifier = Modifier.padding(top = 10.dp)
-                )
-            }
+            // One button (user, 2026-10-24: crashes reach the developer by themselves now, so
+            // Download report went).
+            com.vrca.ui.common.GremlinButton(
+                "Start VRC-A", { leaving = true }, Modifier.fillMaxWidth(),
+                bootIcon = BootIcons.Start, size = com.vrca.ui.common.GremlinButtonSize.Large
+            )
         }
     }
 }
@@ -179,5 +138,6 @@ private fun DetailRow(label: String, value: String) {
 /** "2026-10-23 22:59:04" → "23 Oct 22:59" (the report's own text if it doesn't parse). */
 private fun niceTime(t: String): String = runCatching {
     val d = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).parse(t)!!
-    java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.getDefault()).format(d)
+    // English like the rest of the app (the device locale showed "24 10月" on a phone set to Chinese).
+    java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.US).format(d)
 }.getOrDefault(t)
