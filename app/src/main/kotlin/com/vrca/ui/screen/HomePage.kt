@@ -47,7 +47,6 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
@@ -1468,7 +1467,7 @@ private fun QuickTogglesGrid(
         List(5) { "Testing ${it + 1}" }.forEach { label ->
             TogglePill(
                 label = label,
-                icon = Icons.Filled.Lock,
+                icon = com.vrca.app.BootIcons.LockVector,
                 checked = false,
                 enabled = false,
                 modifier = Modifier.fillMaxWidth()
