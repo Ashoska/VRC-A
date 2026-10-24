@@ -781,7 +781,7 @@ object UiLabScenes {
                     com.vrca.app.CrashReport.loadForScreen(ctx)
                     com.vrca.app.CrashReport.screenReport
                 }
-                CrashScreen(report, com.vrca.app.CrashReport.screenHistory, onStart = {}, trial = words.firstOrNull { it.startsWith("trial=") }?.removePrefix("trial=")?.toIntOrNull() ?: 0)
+                CrashScreen(report, com.vrca.app.CrashReport.screenHistory, onStart = {})
                 if ("update" in words) com.vrca.app.UpdatePopup(
                     ReleaseInfo(480, "v1.4.80", "https://example.com/vrc-a.apk", 0, "", SAMPLE_NOTES), forced = true, visible = true, onDismiss = {}
                 )

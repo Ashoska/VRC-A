@@ -15,10 +15,10 @@ import kotlinx.coroutines.tasks.await
 
 /**
  * Sends the crashes of the past 3 days that haven't been sent yet to the developer (`crashes`
- * collection, read in the admin Crashes tab; user, 2026-10-23). Runs after Start VRC-A and on every
- * normal app start (a crash whose upload never finished, e.g. the app closed before it signed in, is
- * retried; the first phone test never arrived), never during the safe start. Waits for the app's
- * sign-in (made by the boot). One small write per crash; the report text is capped at 20,000
+ * collection, read in the admin Crashes tab; user, 2026-10-23). Starts as soon as the crash screen shows
+ * (the sign-in is kept from the last run; before, a crash closed on that screen was never reported),
+ * again after Start VRC-A and on every normal app start (unsent crashes are retried). One run at a
+ * time. Waits for the app's sign-in when there is none yet. One small write per crash; the report text is capped at 20,000
  * characters. No VRChat name, account or tokens are in it. The last result is kept for Settings > Debug.
  */
 object CrashUpload {
