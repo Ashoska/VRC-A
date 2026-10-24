@@ -963,7 +963,7 @@ private fun RetryPill(retryInSec: Int?, onRetry: () -> Unit) {
         if (retryInSec != null && retryInSec > 0) "Retry  $retryInSec" else "Retry", onRetry,
         size = com.vrca.ui.common.GremlinButtonSize.Large,
         leading = {
-            BootCatCountdown(((retryInSec ?: 0).toFloat() / longest).coerceIn(0f, 1f), retryInSec ?: 0, Modifier.size(28.dp), accent)
+            BootCatCountdown(((retryInSec ?: 0).toFloat() / longest).coerceIn(0f, 1f), Modifier.size(28.dp), accent)
         }
     )
 }

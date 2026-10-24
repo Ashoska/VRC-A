@@ -242,13 +242,14 @@ internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color 
 }
 
 /**
- * Boot Cat counting down (the boot's Retry button; user, 2026-10-24: like the download cat, instead of a
- * plain timer circle): his head outline is the time left, draining back to the top middle as the seconds
- * pass ([left], 0..1, eased between whole seconds), and he blinks on each second ([tick] changes) so the
- * countdown visibly ticks. Everything is read while drawing.
+ * Boot Cat counting down (the boot's Retry button, the terms' Accept wait; user, 2026-10-24: like the
+ * download cat, instead of a plain timer circle): his head outline is the time left, draining back to the
+ * top middle as the seconds pass ([left], 0..1, eased between whole seconds). His eyes do what the thinking
+ * cat's do (user: not a blink per second): they look around and now and then squint into the "hmm" line,
+ * on the thinking loop's own timing. Everything is read while drawing.
  */
 @Composable
-internal fun BootCatCountdown(left: Float, tick: Int, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary) {
+internal fun BootCatCountdown(left: Float, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary) {
     val head = remember { headPath() }
     val start = remember {
         androidx.compose.ui.graphics.PathMeasure().apply { setPath(PathParser().parsePathString(HEAD_TO_TOP).toPath(), false) }.length
@@ -257,8 +258,8 @@ internal fun BootCatCountdown(left: Float, tick: Int, modifier: Modifier, color:
     val shown = androidx.compose.animation.core.animateFloatAsState(
         left.coerceIn(0f, 1f), tween(1000, easing = LinearEasing), label = "catCountdown"
     )
-    val blink = remember { Animatable(1f) }
-    LaunchedEffect(tick) { blink.snapTo(0f); blink.animateTo(1f, tween(260, easing = LinearEasing)) }
+    val ms = remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) { val t0 = androidx.compose.runtime.withFrameMillis { it }; while (true) androidx.compose.runtime.withFrameMillis { ms.value = it - t0 } }
     Canvas(modifier) {
         val s = size.minDimension / 24f
         withTransform({ scale(s, s, Offset.Zero) }) {
@@ -274,9 +275,16 @@ internal fun BootCatCountdown(left: Float, tick: Int, modifier: Modifier, color:
                 if (b > total) m.getSegment(0f, b - total, seg, true)
                 drawPath(seg, color, style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
             }
-            // His normal eyes, shut for a moment on each second.
-            val v = blink.value
-            squash(if (v < 1f) 1f - 0.85f * sin(PI.toFloat() * v) else 1f) { face(Face.Look, color) }
+            // The thinking cat's eyes (the first loop variant, as in LabLoop / boot_cat_avd.py): a sway while
+            // looking around, squinting into the line and back once every 2.4 s cycle.
+            val cyc = (ms.value.toFloat() / 2400f) % 1f
+            val p = cyc * 72f
+            val dx = 0.9f * sin(2 * PI.toFloat() * ((2 * cyc) % 1f))
+            if (p in 42f..60f) face(Face.Line, color, dx)
+            else {
+                val sq = if (p in 36f..42f) 1f - 0.7f * sm((p - 36f) / 6f) else if (p in 60f..66f) 0.3f + 0.7f * sm((p - 60f) / 6f) else 1f
+                squash(sq) { face(Face.Look, color, dx) }
+            }
         }
     }
 }
