@@ -315,11 +315,11 @@ private class Sec2(
 private val SECTIONS2 = listOf(
     Sec2("Welcome to VRC-A", BootIcons.Tutorial, "What's possible with VRC-A",
         "VRC-A is a free companion app for VRChat. It runs on your phone or Quest and talks to VRChat for you, so your chatbox, status and music can update while you play."),
-    Sec2("Platform rules", BootIcons.Vrchat, "VRChat and Discord rules still apply",
+    Sec2("Platform rules", BootIcons.Vrchat, "Third-party guidelines",
         "VRC-A works with VRChat and Discord, so their rules apply to everything you do through it, on top of these terms.",
         listOf("Follow VRChat's Terms and Community Guidelines", "Follow Discord's Terms when Discord status is on", "No spam or harassment through the chatbox"),
         image = IMG + "chatbox.png"),
-    Sec2("Accounts and sign-in", BootIcons.VrchatSignIn, "What you sign in to, and why",
+    Sec2("Login Centre", BootIcons.VrchatSignIn, "Your VRChat and Discord logins",
         "Signing in to VRChat powers your status, friends, instances and avatar tools. Signing in to Discord is optional and shows what you're up to on your Discord profile. Your logins are kept encrypted on this device.",
         image = IMG + "account.png",
         callout = com.vrca.app.Mark.Warn to "VRC-A isn't made by VRChat. Using third-party tools with your account is at your own risk."),
