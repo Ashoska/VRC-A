@@ -179,33 +179,40 @@ object BootIcons {
     )
 
     /** Data and privacy (terms screen): a padlock whose shackle is the cat-ear head, keyhole as the detail. */
-    val Privacy = BootIcon(
-        glyph("Privacy") {
-            line("M6.9 10.6 7 3.4l3.5 3.2q1.5-.6 3 0L17 3.4l.1 7.2")
-            line("M7.2 10.6h9.6a2.8 2.8 0 0 1 2.8 2.8v4.4a2.8 2.8 0 0 1 -2.8 2.8h-9.6a2.8 2.8 0 0 1 -2.8 -2.8v-4.4a2.8 2.8 0 0 1 2.8 -2.8z")
-        },
-        glyph("PrivacyDetail") {
-            solid("M10.8 14.6a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0 -2.4 0z")
-            line("M12 15.4v2", width = 1.6f)
-        }
-    )
+    val Privacy = BootIcon(glyph("Privacy") { lockShackle(); lockBody() }, glyph("PrivacyDetail") { keyhole() })
+
+    /** The padlock unlocked: the cat-head shackle lifted open on the right (overlay keep-open toggle). */
+    val Unlocked = BootIcon(glyph("Unlocked") { lockShackle(open = true); lockBody() }, glyph("UnlockedDetail") { keyhole() })
 
     /** Bugs and reports (terms screen): a little bug with cat ears; its centre seam is the detail. */
-    val Bug = BootIcon(
-        glyph("Bug") {
-            line("M12 8.6c3.2 0 5.3 2.6 5.3 5.9s-2.1 6.3-5.3 6.3-5.3-3-5.3-6.3 2.1-5.9 5.3-5.9z")
-            line("M8.2 10.1 7.9 4.4l3.2 3")
-            line("M15.8 10.1l.3-5.7-3.2 3")
-            line("M7.3 11.9h9.4")
-            line("M6.9 13.9l-2.6-1.3")
-            line("M6.7 16.4H3.9")
-            line("M7.3 18.8l-2.3 1.6")
-            line("M17.1 13.9l2.6-1.3")
-            line("M17.3 16.4h2.8")
-            line("M16.7 18.8l2.3 1.6")
-        },
-        glyph("BugDetail") { line("M12 12.6v7.2", width = 1.6f) }
-    )
+    val Bug = BootIcon(glyph("Bug") { bugLines() }, glyph("BugDetail") { bugSeam() })
+
+    /** One-colour versions, for places that take a single ImageVector (Material Icon slots, TogglePill). */
+    val LockVector: ImageVector = glyph("LockAll") { lockShackle(); lockBody(); keyhole() }
+    val UnlockedVector: ImageVector = glyph("UnlockedAll") { lockShackle(open = true); lockBody(); keyhole() }
+    val BugVector: ImageVector = glyph("BugAll") { bugLines(); bugSeam() }
+
+    private fun Glyph.lockShackle(open: Boolean = false) =
+        line(if (open) "M6.9 10.6 7 3.4l3.5 3.2q1.5-.6 3 0L17 3.4l.1 3.4" else "M6.9 10.6 7 3.4l3.5 3.2q1.5-.6 3 0L17 3.4l.1 7.2")
+    private fun Glyph.lockBody() =
+        line("M7.2 10.6h9.6a2.8 2.8 0 0 1 2.8 2.8v4.4a2.8 2.8 0 0 1 -2.8 2.8h-9.6a2.8 2.8 0 0 1 -2.8 -2.8v-4.4a2.8 2.8 0 0 1 2.8 -2.8z")
+    private fun Glyph.keyhole() {
+        solid("M10.8 14.6a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0 -2.4 0z")
+        line("M12 15.4v2", width = 1.6f)
+    }
+    private fun Glyph.bugLines() {
+        line("M12 8.6c3.2 0 5.3 2.6 5.3 5.9s-2.1 6.3-5.3 6.3-5.3-3-5.3-6.3 2.1-5.9 5.3-5.9z")
+        line("M8.2 10.1 7.9 4.4l3.2 3")
+        line("M15.8 10.1l.3-5.7-3.2 3")
+        line("M7.3 11.9h9.4")
+        line("M6.9 13.9l-2.6-1.3")
+        line("M6.7 16.4H3.9")
+        line("M7.3 18.8l-2.3 1.6")
+        line("M17.1 13.9l2.6-1.3")
+        line("M17.3 16.4h2.8")
+        line("M16.7 18.8l2.3 1.6")
+    }
+    private fun Glyph.bugSeam() = line("M12 12.6v7.2", width = 1.6f)
 
     /** First open: the tutorial's pictures (an open book, paw on the page). */
     val Tutorial = BootIcon(

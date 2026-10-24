@@ -20,7 +20,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
@@ -79,7 +78,7 @@ internal fun CrashesTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
 
     LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
-            AdminCardHeader("Crashes", Icons.Filled.BugReport, AdminTone.Error, trailing = {
+            AdminCardHeader("Crashes", com.vrca.app.BootIcons.BugVector, AdminTone.Error, trailing = {
                 if (loading) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                 else IconButton(onClick = { tick++ }) { Icon(Icons.Filled.Refresh, contentDescription = "Refresh") }
             })

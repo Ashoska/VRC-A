@@ -20,8 +20,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -91,7 +89,8 @@ internal fun MessengerMessageField(chatboxViewModel: VrcaViewModel, collapse: ()
                 targetState = keepOpenState.value,
                 animationSpec = tween(500), label = "OverlayLockCrossfade"
             ) { locked ->
-                val icon = if (locked) Icons.Default.Lock else Icons.Default.LockOpen
+                // Our padlock (cat-head shackle), open when unlocked.
+                val icon = if (locked) com.vrca.app.BootIcons.LockVector else com.vrca.app.BootIcons.UnlockedVector
                 val contentDescription =
                     if (locked) stringResource(R.string.overlay_unlock_messenger)
                     else stringResource(R.string.overlay_lock_messenger)
