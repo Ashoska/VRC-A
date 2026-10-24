@@ -313,26 +313,26 @@ private class Sec2(
 )
 
 private val SECTIONS2 = listOf(
-    Sec2("Welcome to VRC-A", BootIcons.Tutorial, "What VRC-A is and who it's for",
+    Sec2("Welcome to VRC-A", BootIcons.Tutorial, "What's possible with VRC-A",
         "VRC-A is a free companion app for VRChat. It runs on your phone or Quest and talks to VRChat for you, so your chatbox, status and music can update while you play."),
-    Sec2("Your chatbox, your voice", BootIcons.Vrchat, "Be kind with what you send",
-        "Everything VRC-A sends to your chatbox is seen by the people around you, so the same rules apply as if you typed it yourself.",
-        listOf("No spam in public worlds", "No harassing or impersonating anyone", "Nothing VRChat's own rules don't allow"),
+    Sec2("Platform rules", BootIcons.Vrchat, "VRChat and Discord rules still apply",
+        "VRC-A works with VRChat and Discord, so their rules apply to everything you do through it, on top of these terms.",
+        listOf("Follow VRChat's Terms and Community Guidelines", "Follow Discord's Terms when Discord status is on", "No spam or harassment through the chatbox"),
         image = IMG + "chatbox.png"),
-    Sec2("Signing in to VRChat", BootIcons.VrchatSignIn, "Your login stays on this device",
-        "You sign in to VRChat inside VRC-A. Your login is kept encrypted on this device and is only ever sent to VRChat.",
+    Sec2("Accounts and sign-in", BootIcons.VrchatSignIn, "What you sign in to, and why",
+        "Signing in to VRChat powers your status, friends, instances and avatar tools. Signing in to Discord is optional and shows what you're up to on your Discord profile. Your logins are kept encrypted on this device.",
         image = IMG + "account.png",
         callout = com.vrca.app.Mark.Warn to "VRC-A isn't made by VRChat. Using third-party tools with your account is at your own risk."),
-    Sec2("What we keep", BootIcons.Terms, "A little, and never your password",
+    Sec2("What we keep", BootIcons.Terms, "What's stored, and what isn't",
         "To sync your settings and keep VRC-A safe, a small amount is stored with us.",
         listOf("A random ID for this device", "Your app version and settings", "Never your VRChat password")),
-    Sec2("When things crash", BootIcons.Updates, "Reports help get it fixed fast",
+    Sec2("Bugs and reports", BootIcons.Updates, "How crashes and problems reach us",
         "If VRC-A crashes, a report is sent to the developer with your device model, the app version and what went wrong. Nothing personal is in it.",
         image = IMG + "crash.png"),
-    Sec2("Fair play", BootIcons.Account, "What gets an account warned or banned",
+    Sec2("Account standing", BootIcons.Account, "Moderation, warnings and bans",
         "Accounts that break these terms can be warned, and repeat or serious cases banned from VRC-A.",
         callout = com.vrca.app.Mark.Failed to "Trying to get around a ban gets every device and account involved banned."),
-    Sec2("When these terms change", BootIcons.Updates, "You'll be asked to accept again",
+    Sec2("Terms and changes", BootIcons.Updates, "How these terms are kept up to date",
         "If these terms change, VRC-A shows them again the next time you open it, and you can read what's new before accepting."),
 )
 
@@ -535,8 +535,8 @@ private fun ListRow3(i: Int, s: Sec2, mark: com.vrca.app.Mark, selected: Boolean
         BootIconView(s.icon, { if (locked) G.TextMuted else G.Accent }, { if (locked) G.TextMuted else G.Accent }, Modifier.size(22.dp))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(s.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = if (locked) G.TextMuted else G.Text, maxLines = 1)
-            Text(s.short, style = MaterialTheme.typography.bodySmall, color = G.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(s.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = if (locked) G.TextMuted else G.Text, maxLines = 1)
+            Text(s.short, style = MaterialTheme.typography.bodyMedium, color = G.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         com.vrca.app.BootCat(mark, i, Modifier.size(24.dp), celebrate = celebrate, hopDelayMs = 250L + 130L * i)
     }
