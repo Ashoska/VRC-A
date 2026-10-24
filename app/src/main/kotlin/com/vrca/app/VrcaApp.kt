@@ -142,9 +142,9 @@ private fun VrcaAppContent() {
 
     // A crash report waiting means this is a safe start (CrashReport): nothing optional has
     // started, so the crash screen always gets to show. "Start VRC-A" ends it and boot goes on.
-    if (CrashReport.safeStart) {
+    if (CrashReport.screenUp) {
         // Read at launch, before any UI (CrashReport.checkAtLaunch).
-        CrashScreen(CrashReport.screenReport, CrashReport.screenHistory, onStart = { CrashReport.release(ctx) })
+        CrashScreen(CrashReport.screenReport, CrashReport.screenHistory, onStart = { CrashReport.release(ctx) }, onDone = { CrashReport.closeScreen() })
         // Send the crash to the developer now, not only after Start VRC-A (a crash was never reported when
         // the app was closed on this screen). The sign-in is kept from the last run, so the boot isn't needed.
         LaunchedEffect(Unit) { CrashUpload.sendPending(ctx) }

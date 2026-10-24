@@ -48,6 +48,13 @@ object CrashReport {
     var safeStart by mutableStateOf(false)
         private set
 
+    /** The crash screen is up. Stays true from [release] until its fade has finished ([closeScreen]), so the
+     *  held start-up work runs while the screen (and its loading Start button) is still showing. */
+    var screenUp by mutableStateOf(false)
+        private set
+
+    fun closeScreen() { screenUp = false }
+
     private val onRelease = mutableListOf<() -> Unit>()
 
     /** Called from the crash handler, on the crashing thread, right before the process dies. */
@@ -168,6 +175,7 @@ object CrashReport {
             fromExitInfo(ctx)?.let { save(ctx, it.second, it.first) }
         }
         safeStart = !prefs.getString(KEY_TEXT, "").isNullOrBlank()
+        screenUp = safeStart
         if (safeStart) loadForScreen(ctx)
     }
 
