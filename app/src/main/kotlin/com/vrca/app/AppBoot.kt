@@ -590,6 +590,9 @@ private suspend fun vrchatHere(set: (BootState, BootNote?) -> Unit) {
  * Terms of Service: one `config/app` read (the terms version the admin last set) against what this
  * headset accepted. New terms don't fail boot; the terms screen after boot asks for them.
  */
+/** How long the Terms row may spend fetching the terms' pictures. */
+private const val TOS_PREFETCH_CAP_MS = 20_000L
+
 private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.CompletableDeferred<Boolean>, set: (BootState, BootNote?) -> Unit) {
     set(BootState.Working, null)
     var failed = false
@@ -603,7 +606,19 @@ private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.Completa
     // The terms' own change time, not the doc's updatedAt (any Config-tab save stamps that; see VrcaApp).
     val updatedAt = snap.getTimestamp("tosUpdatedAt")?.toDate()?.time ?: 0L
     val accepted = TosPrefs.acceptedVersion(ctx) >= version && TosPrefs.acceptedAtMs(ctx) >= updatedAt
-    if (accepted) set(BootState.Done, BootNote.Accepted) else set(BootState.Warn, BootNote.NewTerms)
+    if (accepted) {
+        // Strays from a kill between accepting and the clear.
+        com.vrca.ui.onboarding.TosImageStore.clear(ctx)
+        set(BootState.Done, BootNote.Accepted)
+        return
+    }
+    // The terms are coming up: fetch their pictures while the boot screen is up, like the tutorial's
+    // (user, 2026-10-25). A failure holds boot on Retry like any check; a retry keeps what's fetched.
+    when (withTimeoutOrNull(TOS_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TosImageStore.ensureDownloaded(ctx) }) {
+        true -> set(BootState.Warn, BootNote.NewTerms)
+        null -> set(BootState.Failed, BootNote.TimedOut)
+        false -> set(BootState.Failed, BootNote.CantConnect)
+    }
 }
 
 /** VRChat's public status page as one of the Status row's fixed words, or null if it couldn't be read. */
