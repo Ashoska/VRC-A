@@ -63,6 +63,12 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
     lateinit var userPreferencesRepository: UserPreferencesRepository
         private set
 
+    private fun isOscBridgeProcess(): Boolean {
+        val name = if (android.os.Build.VERSION.SDK_INT >= 28) android.app.Application.getProcessName()
+            else runCatching { java.io.File("/proc/self/cmdline").readText().trimEnd('\u0000') }.getOrDefault("")
+        return name.endsWith(":oscbridge")
+    }
+
     override fun onCreate() {
         // Install crash handler as early as possible
         installCrashHandler()
@@ -70,6 +76,11 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
         super.onCreate()
 
         instance = this
+
+        // Headset `:oscbridge` process (OscBridgeService): it only holds VRChat's OSC
+        // connection, so none of the app's startup (prefs, sync, Discord, OSCQuery…) runs
+        // there. The service starts the bridge itself.
+        if (isOscBridgeProcess()) return
 
         // Records main-thread freezes in the first 2 minutes (Settings → Debug).
         MainThreadWatch.start(applicationContext)

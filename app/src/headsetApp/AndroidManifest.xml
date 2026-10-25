@@ -59,6 +59,17 @@
         android:resizeableActivity="true"
         android:usesCleartextTraffic="true"
         tools:node="merge">
+
+        <!-- VRChat OSC bridge (com.vrca.osc.OscBridge): its own small process so VRChat's
+             push survives the main app being swiped, crashing or OS-killed (VRChat stops
+             sending for its session when our receive socket closes). Not stopped by a
+             swipe; stops itself 10 min after the main app is gone and VRChat is silent. -->
+        <service
+            android:name="com.vrca.osc.OscBridgeService"
+            android:process=":oscbridge"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Fixed panel (user request: the window shouldn't be resizable). Horizon lets users
              resize any Android panel (Meta's docs: "Users can resize panels freely"; no lock
              exists), so: the default size (Meta's <layout>) is also the MINIMUM, so the panel

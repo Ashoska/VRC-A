@@ -587,7 +587,6 @@ internal fun SettingsPage(
                                     kotlinx.coroutines.delay(500)
                                 }
                             }
-                            var multicastOn by remember { mutableStateOf(com.vrca.osc.OscAnnouncer.isMulticast) }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 com.vrca.ui.common.GremlinSmallButton(onClick = {
                                     treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -596,14 +595,6 @@ internal fun SettingsPage(
                                 }) {
                                     Text("Start / pause announcing")
                                 }
-                                // Test: close the receive port 3 s, re-bind the same port.
-                                com.vrca.ui.common.GremlinSmallButton(onClick = {
-                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                        runCatching { com.vrca.osc.OscAnnouncer.blinkPort() }
-                                    }
-                                }) {
-                                    Text("Port blink (3 s)")
-                                }
                                 // Send ourselves a packet: is our receive socket working?
                                 com.vrca.ui.common.GremlinSmallButton(onClick = {
                                     treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -611,15 +602,6 @@ internal fun SettingsPage(
                                     }
                                 }) {
                                     Text("Self-test")
-                                }
-                                // Where VRChat sends: group address (no "port unreachable")
-                                // or straight to us. VRChat reads it on its next start.
-                                com.vrca.ui.common.GremlinSmallButton(onClick = {
-                                    val on = !multicastOn
-                                    multicastOn = on
-                                    com.vrca.osc.OscAnnouncer.setMulticast(ctx, on)
-                                }) {
-                                    Text(if (multicastOn) "Receive: multicast" else "Receive: direct")
                                 }
                             }
                             SelectionContainer {

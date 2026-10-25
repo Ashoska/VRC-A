@@ -1,122 +1,59 @@
 package com.vrca.osc
 
 import android.content.Context
-import android.util.Log
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import org.json.JSONObject
+import java.io.DataInputStream
 import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.Inet4Address
-import java.net.InetSocketAddress
-import java.net.NetworkInterface
-import java.net.ServerSocket
-import java.net.SocketTimeoutException
+import java.net.InetAddress
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Headset: announce VRC-A to VRChat as an OSCQuery app so VRChat SENDS us its
- * output. Device-proven (Quest 3, 2026-10-25): polling `/tracking/vrsystem/.../pose`
- * only ever reads `[null]`, but once VRC-A advertises `_oscjson._tcp` and lists the
- * addresses it wants, VRChat shows "Sending OSC data to VRCA-…" and pushes head +
- * wrist poses (~75/s each) AND every avatar parameter (Gesture*, Velocity*, …) to our
- * UDP port. Pushed params/avatar info feed [VrcaOscState]; poses feed [HandDrag].
+ * Headset, main process: VRChat's OSC push as the rest of the app sees it.
  *
- * Keeping the push across VRC-A restarts (vrc-oscquery-lib `MeaModDiscovery` +
- * device tests 2026-10-25): VRChat finds the FIRST VRC-A per VRChat session whichever
- * opens first, but once an app it knew says goodbye it ignores every returning app
- * (any name, re-announced 5x) until VRChat restarts; it only re-searches on its own
- * start or a network-adapter change. Android's NsdManager says that goodbye whenever
- * our process ends. So [MdnsAnnouncer] announces instead and NEVER says goodbye, under
- * a STABLE name with STABLE ports (saved per install): VRChat keeps its entry and keeps
- * sending to the same port, which a restarted VRC-A (reopen, OS-kill revival, update)
- * re-binds. Started once per process from `VrcaApplication`; the debug button only
- * pauses/resumes.
+ * VRC-A announces itself to VRChat as an OSCQuery app so VRChat SENDS it its output:
+ * head + wrist poses (~75/s each, [HandDrag]) and every avatar parameter + avatar info
+ * (folded into [VrcaOscState], so tokens, the Listen trigger and the size tool update the
+ * instant VRChat changes them; [VrcaOscQuery] polls slower while [pushLive]).
+ *
+ * The connection itself lives in the `:oscbridge` process ([OscBridge] via
+ * [OscBridgeService]) because VRChat stops sending for the rest of its session the
+ * moment our receive socket closes, which a swipe, crash or OS kill of the main
+ * process would cause. This side connects to the bridge over a local socket, reads the
+ * relayed datagrams and parses them here, and reconnects (restarting the bridge if it
+ * died) whenever the link drops. [start] is called once per main process from
+ * `VrcaApplication`; the debug button only pauses/resumes.
  */
 object OscAnnouncer {
 
     private const val TAG = "OscAnnouncer"
-    private const val PREFS = "osc_announce"
 
     @Volatile var running = false
         private set
-    /** Soft stop: still announced and bound, readers just see nothing. */
+    /** Soft stop: the bridge keeps the connection, readers here just see nothing. */
     @Volatile var paused = false
         private set
-    @Volatile private var portNote = ""
+    private var appContext: Context? = null
 
-    // ---- multicast receive (test) ----------------------------------------------
-    // Suspected reason a reopened VRC-A never gets the push back (device-tested: no
-    // goodbye, same name, same port re-bound, still 0 packets): while VRC-A is down,
-    // VRChat keeps sending to a port nothing is bound to, the kernel answers each
-    // datagram with "port unreachable", and VRChat's sender stops for the session.
-    // Linux never sends "port unreachable" for MULTICAST destinations, so in this mode
-    // HOST_INFO gives VRChat the group [MULTICAST_GROUP] (+ our port) as OSC_IP and
-    // we join it: while VRC-A is down the datagrams are just dropped, silently.
-    // Switching modes only reaches VRChat on its next start (it reads HOST_INFO once).
-    private const val MULTICAST_GROUP = "239.255.65.82"
-    @Volatile private var multicastMode = true
-    @Volatile private var blinkNote = ""
-    @Volatile private var selfTestSeenMs = 0L
-    @Volatile private var selfTestNote = ""
-
-    /** Debug: send ourselves one OSC packet to the address VRChat sends to (group or
-     *  our IP + our port) and report whether the receive socket got it within 2 s.
-     *  Separates "our socket isn't receiving" from "VRChat stopped sending".
-     *  Blocking: run off the main thread. */
-    fun selfTest(): String {
-        if (!running) return "not running".also { selfTestNote = it }
-        val sentAt = System.currentTimeMillis()
-        val dest = if (multicastMode) MULTICAST_GROUP else (localIpv4() ?: ownIp)
-        val note = runCatching {
-            // OSC message "/vrca/selftest" with no arguments (address + ",").
-            val msg = "/vrca/selftest".toByteArray().let { a -> a + ByteArray(4 - a.size % 4) } + ",\u0000\u0000\u0000".toByteArray()
-            java.net.MulticastSocket().use { out ->
-                localIpv4()?.let { ip -> runCatching { out.networkInterface = NetworkInterface.getByInetAddress(java.net.InetAddress.getByName(ip)) } }
-                out.send(DatagramPacket(msg, msg.size, java.net.InetAddress.getByName(dest), udpPort))
-            }
-            Thread.sleep(2_000)
-            if (selfTestSeenMs >= sentAt) "self-test to $dest:$udpPort RECEIVED (our socket works)"
-            else "self-test to $dest:$udpPort NOT received (our socket isn't receiving)"
-        }.getOrElse { "self-test failed: ${it.message}" }
-        selfTestNote = note
-        return note
-    }
-
-    /** Debug switch; persisted. VRChat picks the new destination up on its next start. */
-    fun setMulticast(context: Context, on: Boolean) {
-        multicastMode = on
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("multicast", on).apply()
-    }
-    val isMulticast: Boolean get() = multicastMode
-    private var udp: DatagramSocket? = null
-    private var http: ServerSocket? = null
-
-    @Volatile private var udpPort = 0
-    @Volatile private var httpPort = 0
-    @Volatile private var ownIp = ""
-    @Volatile private var serviceName = ""
-    @Volatile private var httpRequests = 0
-    @Volatile private var lastHttpPath = ""
+    @Volatile private var linked = false
+    @Volatile private var linkNote = "connecting to bridge…"
+    @Volatile private var bridgeStatus: JSONObject? = null
+    @Volatile private var bridgeStatusMs = 0L
     @Volatile private var packets = 0L
     @Volatile private var lastAddress = ""
-    @Volatile private var startedMs = 0L
-    @Volatile private var lastHttpMs = 0L
     @Volatile private var lastPacketMs = 0L
     /** VRChat service (by its OSCQuery name) that last sent us a packet. */
     @Volatile private var pushVrchat: String? = null
+    @Volatile private var selfTestSeenMs = 0L
+    @Volatile private var selfTestNote = ""
 
     /** True while the VRChat instance that's running now is pushing to us, so its
      *  avatar params / avatar info arrive the moment they change. VRChat only sends a
      *  param on change, so silence here doesn't mean "dead": the poll stays on (slower). */
     val pushLive: Boolean get() {
         val v = pushVrchat ?: return false
-        return running && !paused && v == VrcaOscQuery.vrchatServiceName()
-    }
-    private const val STUCK_MS = 10_000L
-
-    /** VRChat read our OSCQuery info more than [STUCK_MS] ago but has sent nothing since. */
-    val stuck: Boolean get() {
-        val read = lastHttpMs
-        return read > 0L && lastPacketMs < read && System.currentTimeMillis() - read > STUCK_MS
+        return running && linked && !paused && v == VrcaOscQuery.vrchatServiceName()
     }
     private val counts = ConcurrentHashMap<String, Int>()
     private val poses = ConcurrentHashMap<String, FloatArray>()
@@ -135,7 +72,7 @@ object OscAnnouncer {
     /** Latest pushed avatar parameter as a float (bools 0/1), or null. */
     fun param(name: String): Float? = if (paused) null else params[name]
 
-    /** Debug button: first tap starts; later taps pause/resume (never re-announce). */
+    /** Debug button: first tap starts; later taps pause/resume (the bridge keeps going). */
     fun toggle(context: Context) {
         if (!running) start(context) else paused = !paused
     }
@@ -145,143 +82,73 @@ object OscAnnouncer {
         paused = false
         if (running) return
         running = true
-        startedMs = System.currentTimeMillis()
-        packets = 0; httpRequests = 0; counts.clear(); poses.clear(); poseMs.clear(); params.clear(); others.clear()
-        lastAddress = ""; lastHttpPath = ""
-        ownIp = localIpv4() ?: "127.0.0.1"
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        // Stable identity: the same name + ports every start, so VRChat's entry for us
-        // (never withdrawn, see the class note) stays valid across restarts.
-        serviceName = prefs.getString("name", null) ?: ("VRCA-" + (1000..9999).random())
-        val savedUdp = prefs.getInt("udp", 0); val savedHttp = prefs.getInt("http", 0)
-        multicastMode = prefs.getBoolean("multicast", true)
-        val u = runCatching { bindUdp(savedUdp) }.getOrElse { bindUdp(0) }
-        val h = runCatching { bindHttp(savedHttp) }.getOrElse { bindHttp(0) }
-        udp = u; http = h
-        udpPort = u.localPort; httpPort = h.localPort
-        portNote = "saved udp $savedUdp http $savedHttp → bound udp $udpPort http $httpPort"
-        prefs.edit().putString("name", serviceName).putInt("udp", udpPort).putInt("http", httpPort).apply()
-        Thread({ udpLoop(u) }, "vrca-announce-udp").apply { isDaemon = true; start() }
-        Thread({ httpLoop(h) }, "vrca-announce-http").apply { isDaemon = true; start() }
-        MdnsAnnouncer.start(context, serviceName, httpPort, udpPort) { localIpv4() ?: ownIp.ifEmpty { null } }
+        appContext = context.applicationContext
+        OscBridgeService.start(context.applicationContext)
+        Thread({ linkLoop() }, "vrca-bridge-link").apply { isDaemon = true; start() }
     }
 
-    private fun bindUdp(port: Int): DatagramSocket {
-        if (!multicastMode) {
-            return DatagramSocket(null).apply { reuseAddress = true; soTimeout = 2000; bind(InetSocketAddress(port)) }
-        }
-        val s = java.net.MulticastSocket(null).apply { reuseAddress = true; soTimeout = 2000; bind(InetSocketAddress(port)) }
-        val ni = localIpv4()?.let { runCatching { NetworkInterface.getByInetAddress(java.net.InetAddress.getByName(it)) }.getOrNull() }
-        s.joinGroup(InetSocketAddress(MULTICAST_GROUP, s.localPort), ni)
-        return s
-    }
-
-    /** Debug "port blink": close the receive socket for [ms], then re-bind the SAME port
-     *  (and rejoin the group). Packets coming back afterwards = a dead port alone doesn't
-     *  stop VRChat's sending (in this mode). Blocking: run off the main thread. */
-    fun blinkPort(ms: Long = 3_000L) {
-        if (!running) return
-        val port = udpPort
-        val before = packets
-        runCatching { udp?.close() }
-        blinkNote = "port $port closed for ${ms / 1000}s…"
-        try { Thread.sleep(ms) } catch (_: InterruptedException) {}
-        val u = runCatching { bindUdp(port) }.getOrElse { blinkNote = "re-bind failed: ${it.message}"; return }
-        udp = u
-        Thread({ udpLoop(u) }, "vrca-announce-udp").apply { isDaemon = true; start() }
-        val reopenedAt = System.currentTimeMillis()
-        blinkNote = "re-bound $port after ${ms / 1000}s (packets before: $before); watch the count"
-        Thread({
-            try { Thread.sleep(1_000) } catch (_: InterruptedException) {}
-            selfTest()
-            try { Thread.sleep(7_000) } catch (_: InterruptedException) {}
-            val fresh = lastPacketMs > reopenedAt && packets - before > 1
-            blinkNote = "blink $port: " + (if (fresh) "VRChat packets CAME BACK (${packets - before} since)" else "NO VRChat packets in 10 s after re-bind") +
-                "; " + selfTestNote
-        }, "vrca-blink-check").apply { isDaemon = true; start() }
-    }
-
-    private fun bindHttp(port: Int) = ServerSocket().apply {
-        reuseAddress = true; bind(InetSocketAddress(port))
-    }
-
-    // ---- OSCQuery HTTP (HOST_INFO + root tree) ---------------------------------
-
-    private fun httpLoop(server: ServerSocket) {
+    /** Stay connected to the bridge; (re)start it when it isn't there. */
+    private fun linkLoop() {
+        val ctx = appContext ?: return
+        var failures = 0
         while (running) {
-            val s = try { server.accept() } catch (e: Exception) { break }
-            runCatching {
-                s.soTimeout = 2000
-                s.use { sock ->
-                    val reader = sock.getInputStream().bufferedReader()
-                    val requestLine = reader.readLine() ?: return@use
-                    while (true) { val l = reader.readLine() ?: break; if (l.isEmpty()) break }
-                    val path = requestLine.split(' ').getOrNull(1) ?: "/"
-                    httpRequests++; lastHttpPath = path
-                    lastHttpMs = System.currentTimeMillis()
-                    val body = if (path.contains("HOST_INFO")) hostInfo() else tree()
-                    val bytes = body.toByteArray()
-                    val head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
-                        "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
-                    sock.getOutputStream().apply { write(head.toByteArray()); write(bytes); flush() }
-                }
-            }.onFailure { Log.w(TAG, "http request failed", it) }
-        }
-    }
-
-    private fun hostInfo(): String = JSONObject().apply {
-        put("NAME", serviceName)
-        // Fresh every request: a Wi-Fi change must not hand VRChat a stale address.
-        ownIp = localIpv4() ?: ownIp
-        put("OSC_IP", if (multicastMode) MULTICAST_GROUP else ownIp)
-        put("OSC_PORT", udpPort)
-        put("OSC_TRANSPORT", "UDP")
-        put("EXTENSIONS", JSONObject().apply {
-            put("ACCESS", true); put("CLIPMODE", false); put("RANGE", true); put("TYPE", true); put("VALUE", true)
-        })
-    }.toString()
-
-    private fun node(path: String, type: String? = null, kids: Map<String, JSONObject> = emptyMap()) = JSONObject().apply {
-        put("FULL_PATH", path)
-        put("ACCESS", if (type == null) 0 else 2)
-        if (type != null) put("TYPE", type)
-        if (kids.isNotEmpty()) put("CONTENTS", JSONObject().apply { kids.forEach { (k, v) -> put(k, v) } })
-    }
-
-    private fun tree(): String {
-        fun pose(part: String) = node(
-            "/tracking/vrsystem/$part", kids = mapOf("pose" to node("/tracking/vrsystem/$part/pose", "ffffff"))
-        )
-        return node(
-            "/", kids = mapOf(
-                "avatar" to node("/avatar", kids = mapOf("change" to node("/avatar/change", "s"))),
-                "tracking" to node(
-                    "/tracking", kids = mapOf(
-                        "vrsystem" to node(
-                            "/tracking/vrsystem",
-                            kids = mapOf("head" to pose("head"), "leftwrist" to pose("leftwrist"), "rightwrist" to pose("rightwrist"))
-                        )
-                    )
-                )
-            )
-        ).toString()
-    }
-
-    // ---- OSC UDP receive (messages + bundles) ----------------------------------
-
-    private fun udpLoop(sock: DatagramSocket) {
-        val buf = ByteArray(8192)
-        while (running && !sock.isClosed) {
-            val packet = DatagramPacket(buf, buf.size)
+            val sock = LocalSocket()
             try {
-                sock.receive(packet)
-                packets++
-                lastPacketMs = System.currentTimeMillis()
-                pushVrchat = VrcaOscQuery.vrchatServiceName()
-                runCatching { parse(packet.data, packet.offset, packet.offset + packet.length) }
-            } catch (_: SocketTimeoutException) {
-            } catch (e: Exception) { if (running) Log.w(TAG, "udp receive", e) }
+                sock.connect(LocalSocketAddress(OscBridge.relayName(ctx)))
+                linked = true; failures = 0
+                linkNote = "linked to bridge"
+                readFrames(DataInputStream(sock.inputStream.buffered()))
+            } catch (e: Exception) {
+                failures++
+                linkNote = "bridge not reachable (${e.javaClass.simpleName}), retry $failures"
+                // Bridge process not running (first start, update, Stop button): start it.
+                if (failures % 5 == 1) OscBridgeService.start(ctx)
+            } finally {
+                linked = false
+                runCatching { sock.close() }
+            }
+            try { Thread.sleep(1_000) } catch (_: InterruptedException) { break }
         }
+    }
+
+    private fun readFrames(input: DataInputStream) {
+        var buf = ByteArray(8192)
+        while (running) {
+            val type = input.readUnsignedByte()
+            val len = input.readInt()
+            if (len < 0 || len > 1 shl 20) throw java.io.IOException("bad frame length $len")
+            if (len > buf.size) buf = ByteArray(len)
+            input.readFully(buf, 0, len)
+            when (type) {
+                0 -> {
+                    packets++
+                    lastPacketMs = System.currentTimeMillis()
+                    pushVrchat = VrcaOscQuery.vrchatServiceName()
+                    runCatching { parse(buf, 0, len) }
+                }
+                1 -> runCatching {
+                    bridgeStatus = JSONObject(String(buf, 0, len, Charsets.UTF_8))
+                    bridgeStatusMs = System.currentTimeMillis()
+                }
+            }
+        }
+    }
+
+    /** Debug: send one OSC packet to the bridge's receive port (the address VRChat sends
+     *  to) and report whether it came back through the relay within 2 s. Blocking. */
+    fun selfTest(): String {
+        val st = bridgeStatus ?: return "no bridge status yet".also { selfTestNote = it }
+        val ip = st.optString("ip"); val port = st.optInt("udp")
+        val sentAt = System.currentTimeMillis()
+        selfTestNote = runCatching {
+            // OSC message "/vrca/selftest" with no arguments (address + ",").
+            val msg = "/vrca/selftest".toByteArray().let { a -> a + ByteArray(4 - a.size % 4) } + ",\u0000\u0000\u0000".toByteArray()
+            java.net.DatagramSocket().use { it.send(DatagramPacket(msg, msg.size, InetAddress.getByName(ip), port)) }
+            Thread.sleep(2_000)
+            if (selfTestSeenMs >= sentAt) "self-test to $ip:$port RECEIVED through the bridge"
+            else "self-test to $ip:$port NOT received (bridge or relay not working)"
+        }.getOrElse { "self-test failed: ${it.message}" }
+        return selfTestNote
     }
 
     private fun parse(d: ByteArray, start: Int, end: Int) {
@@ -350,26 +217,25 @@ object OscAnnouncer {
     // ---- diag ------------------------------------------------------------------
 
     fun diag(): String = buildString {
-        if (!running && startedMs == 0L) { append("(not started)"); return@buildString }
-        append(
-            when {
-                !running -> "STOPPED"
-                paused -> "PAUSED (still registered)"
-                else -> "ANNOUNCING"
-            }
-        ).append(" as ").append(serviceName)
-        append("\nVRC-A OSCQuery http://").append(ownIp).append(':').append(httpPort)
-        append("  OSC in ").append(ownIp).append(':').append(udpPort)
-        if (portNote.isNotEmpty()) append("\n").append(portNote)
-        append("\nreceive: ").append(if (multicastMode) "multicast $MULTICAST_GROUP:$udpPort" else "direct $ownIp:$udpPort")
-        if (blinkNote.isNotEmpty()) append("\n").append(blinkNote)
-        if (selfTestNote.isNotEmpty() && !blinkNote.contains(selfTestNote)) append("\n").append(selfTestNote)
-        append("\n").append(MdnsAnnouncer.diag())
-        append("\nVRChat read our tree: ").append(httpRequests).append(" requests")
-        if (lastHttpPath.isNotEmpty()) append(" (last ").append(lastHttpPath).append(')')
-        if (stuck) append("\n!! VRChat found VRC-A but is not sending")
+        if (!running) { append("(not started)"); return@buildString }
+        append(if (paused) "PAUSED (bridge still connected)" else "RUNNING").append("  ").append(linkNote)
+        val st = bridgeStatus
+        if (st != null) {
+            val age = (System.currentTimeMillis() - bridgeStatusMs) / 1000
+            append("\nbridge pid ").append(st.optInt("pid")).append(" up ").append(st.optLong("upSec")).append(" s")
+            if (age > 3) append("  (status ").append(age).append(" s old)")
+            append("\nannouncing as ").append(st.optString("name"))
+            append("  OSCQuery http://").append(st.optString("ip")).append(':').append(st.optInt("http"))
+            append("  OSC in ").append(st.optString("ip")).append(':').append(st.optInt("udp"))
+            append("\n").append(st.optString("portNote"))
+            append("\n").append(st.optString("mdns"))
+            append("\nVRChat read our tree: ").append(st.optInt("httpRequests")).append(" requests")
+            st.optString("lastHttpPath").takeIf { it.isNotEmpty() }?.let { append(" (last ").append(it).append(')') }
+            append("\nbridge received ").append(st.optLong("packets")).append(", relayed ").append(st.optLong("relayed"))
+        }
+        if (selfTestNote.isNotEmpty()) append("\n").append(selfTestNote)
         append("\npush live: ").append(pushLive)
-        append("\npackets received: ").append(packets)
+        append("\npackets here: ").append(packets)
         if (lastAddress.isNotEmpty()) append("  last ").append(lastAddress)
         counts.entries.sortedBy { it.key }.forEach { (k, v) -> append("\n  ").append(k).append(" x").append(v) }
         poses.entries.sortedBy { it.key }.forEach { (k, v) ->
@@ -385,11 +251,4 @@ object OscAnnouncer {
                 .forEach { n -> params[n]?.let { append("\n  ").append(n).append(" = ").append("%.2f".format(it)) } }
         }
     }
-
-    private fun localIpv4(): String? = runCatching {
-        NetworkInterface.getNetworkInterfaces().toList()
-            .filter { it.isUp && !it.isLoopback }
-            .flatMap { it.inetAddresses.toList() }
-            .firstOrNull { it is Inet4Address && !it.isLoopbackAddress }?.hostAddress
-    }.getOrNull()
 }
