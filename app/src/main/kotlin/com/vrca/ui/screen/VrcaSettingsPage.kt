@@ -604,6 +604,35 @@ internal fun SettingsPage(
                             }
 
                             // Hand drag prototype: fist + move hand = move (horizontal).
+                            // Vertical input tests: VRChat's sit/stand toggle (int and
+                            // bool forms) and LookVertical held up/down for 1 s.
+                            Text("Vertical input tests", style = MaterialTheme.typography.labelMedium)
+                            var vertResult by remember { mutableStateOf("") }
+                            fun runVert(test: () -> Unit) {
+                                vertResult = "Sending…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    test()
+                                    vertResult = com.vrca.osc.VerticalTests.lastResult
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.sitStandInt() } }) {
+                                    Text("Sit/stand (int)")
+                                }
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.sitStandBool() } }) {
+                                    Text("Sit/stand (bool)")
+                                }
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.lookVertical(1f) } }) {
+                                    Text("Look up 1s")
+                                }
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.lookVertical(-1f) } }) {
+                                    Text("Look down 1s")
+                                }
+                            }
+                            if (vertResult.isNotEmpty()) {
+                                Text(vertResult, style = MaterialTheme.typography.bodySmall)
+                            }
+
                             Text("Hand drag (prototype)", style = MaterialTheme.typography.labelMedium)
                             var dragOn by remember { mutableStateOf(com.vrca.osc.HandDrag.enabled) }
                             var dragStrength by remember { mutableStateOf(com.vrca.osc.HandDrag.strength) }
