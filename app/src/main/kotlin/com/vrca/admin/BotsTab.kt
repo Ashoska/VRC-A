@@ -149,6 +149,9 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
     val pending = health?.let { "${it.optInt("pendingBatches")} batches · ${it.optInt("reports")} reports" } ?: "—"
     val totals = health?.let { "＋${it.optInt("totalAdded")}  ·  －${it.optInt("totalRemoved")}" } ?: "—"
     val lastFlush = health?.optString("lastFlush", "—") ?: "—"
+    val fillsWaiting = health?.let { "%,d".format(it.optInt("unfilled")) } ?: "—"
+    val fontsWaiting = health?.let { "%,d".format(it.optInt("foldPending")) } ?: "—"
+    val indexQueue = health?.let { "%,d keys · %,d font keys".format(it.optInt("iqDepth"), it.optInt("iqpDepth")) } ?: "—"
     // Recount status — visible so you can watch the periodic reconcile correct a drifted "unfilled"
     // (phantom-backlog) count. "idle" = count is current; "running N/4096" = a recount lap is in progress.
     val recount = health?.let {
@@ -209,6 +212,9 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
             }
             AdminLabeledRow("Totals", totals)
             AdminLabeledRow("Pending", pending)
+            AdminLabeledRow("Fills waiting", fillsWaiting)
+            AdminLabeledRow("Fonts waiting", fontsWaiting)
+            AdminLabeledRow("Index queue", indexQueue)
             AdminLabeledRow("Last flush", lastFlush)
             AdminLabeledRow("Recount", recount)
             AdminLabeledRow("Admin key", adminKeySet)

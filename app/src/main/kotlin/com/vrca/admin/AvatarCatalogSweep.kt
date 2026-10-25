@@ -837,6 +837,59 @@ object AvatarCatalogSweep {
     @Volatile private var worklistFetchedMs = 0L
     @Volatile private var worklistEmpty = false        // read OK but no work → idle (don't blind-walk)
     private const val WORKLIST_TTL_MS = 60_000L
+    // A fill shard isn't re-walked within this window: its fills reach the Worker on the next flush
+    // (~2 min) and only then leave the worklist, so a re-walk sooner would repeat the same checks.
+    private const val FILL_REWALK_MS = 5 * 60_000L
+    private val fillWalkedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    // `checked` is pushed for an unchanged avatar only once it's this old (see walkPass): the
+    // continuous lap re-verifies everything every day or two, and rewriting every shard per lap
+    // just to move a timestamp was most of the Worker's shard writes. Well inside the 30-day
+    // staleness window, so the liveness count stays ~0.
+    private const val CHECKED_PUSH_MIN_AGE_MS = 20L * 24 * 60 * 60 * 1000
+
+    /** Next shard from the Worker's fill worklist not walked in the last [FILL_REWALK_MS], or null.
+     *  The shared queue is refilled at most once per [WORKLIST_TTL_MS] (single-flight), so all bots
+     *  together cost one small CDN read a minute. */
+    private suspend fun nextFillPrefix(context: Context): String? {
+        fun pollDue(): String? {
+            val now = System.currentTimeMillis()
+            while (true) {
+                val p = workQueue.poll() ?: return null
+                val t = fillWalkedAt[p]
+                if (t == null || now - t >= FILL_REWALK_MS) { fillWalkedAt[p] = now; return p }
+            }
+        }
+        pollDue()?.let { return it }
+        refreshWorklist(context)
+        return pollDue()
+    }
+
+    /** Refill the shared fill queue from `_worklist.json` when nothing in it is due, at most once per
+     *  [WORKLIST_TTL_MS] across all bots (single-flight). */
+    private suspend fun refreshWorklist(context: Context) {
+        if (System.currentTimeMillis() - worklistFetchedMs < WORKLIST_TTL_MS) return
+        worklistMutex.withLock {
+            // Refill when nothing in the queue is due (not only when empty): a queue holding only
+            // just-visited shards must not hide newly-listed fills from a walking bot.
+            if (!hasDueFill() && System.currentTimeMillis() - worklistFetchedMs >= WORKLIST_TTL_MS) {
+                worklistFetchedMs = System.currentTimeMillis()
+                val fill = runCatching { AvatarGlobalDb.fetchWorklist(context)?.first }.getOrNull()
+                if (fill != null) {
+                    worklistEmpty = fill.isEmpty()
+                    workQueue.clear()
+                    workQueue.addAll(fill.shuffled())   // shuffled: bots on different devices spread out
+                }
+            }
+        }
+    }
+
+    /** True when a fill shard is waiting that no bot visited in the last [FILL_REWALK_MS]. */
+    private fun hasDueFill(): Boolean {
+        val now = System.currentTimeMillis()
+        return workQueue.any { p -> fillWalkedAt[p]?.let { now - it >= FILL_REWALK_MS } ?: true }
+    }
+    // How often a bot in a full re-verify looks for waiting fills (one cached read/min across bots).
+    private const val FILL_YIELD_CHECK_MS = 15_000L
 
     // ---- per-shard "last swept" ordering (local, persisted) ------------------
     // The Action's work-list drives FILL + known-stale promptly; this drives an even LIVENESS
@@ -999,36 +1052,60 @@ object AvatarCatalogSweep {
     private suspend fun walkPass(context: Context, adminKey: String, slot: Int, role: Role): Boolean {
         if (paused) return false
         val p = progress.getValue(role)
-        val prefix = nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
+        // FILLS FIRST: a shard on the Worker's fill worklist (`_worklist.json`, kept exact by the
+        // flush) is walked for its UNFILLED avatars only, so a new contribution is filled within about
+        // a minute instead of waiting for the oldest-first lap (~a day) to reach its shard. Only when
+        // no fill shard is waiting does the bot take the oldest-swept shard for the full re-verify.
+        val fillPrefix = nextFillPrefix(context)
+        val fillOnly = fillPrefix != null
+        val prefix = fillPrefix ?: nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
         // Failed read → leave the claim to EXPIRE (a ~30s backoff) so the shard stays oldest and is
         // RETRIED, and do NOT stamp sweptAt / advance the coverage bar (M1 — a flaky read must not hide
         // a shard for 30d nor falsely count it as covered).
         if (entries == null) { p.status = "walk $prefix: shard read failed"; return false }
-        stampSwept(context, prefix)   // success: record the sweep (even if clean) so oldest-swept advances
-        releaseShardClaim(prefix)     // done with it — let it be re-selected once genuinely due again
-        if (blitzActive()) blitzWalked.add(prefix)   // count coverage only for shards actually READ
+        // A fill visit is not a full re-verify: it doesn't stamp the shard swept (the lap still comes).
+        val prevSwept = if (fillOnly) null else sweptAt[prefix]
+        if (!fillOnly) {
+            stampSwept(context, prefix)   // success: record the sweep (even if clean) so oldest-swept advances
+            releaseShardClaim(prefix)     // done with it — let it be re-selected once genuinely due again
+            if (blitzActive()) blitzWalked.add(prefix)   // count coverage only for shards actually READ
+        }
         p.shards++                    // shard-walk throughput (one shard = one cheap grouped R2 write)
         val cutoff = livenessCutoff()
         // Check EVERY avatar in the shard (per the user's design) — dead/rename/desc/perf are all
         // caught in the ONE continuous pass, not gated on a 30-day "due" cutoff. The only skip is the
         // short-TTL recent-process guard (another bot / a just-done re-walk). WHOLE shard in one pass →
-        // one grouped push at the end.
-        val work = entries.filterNot { wasRecentlyProcessed(it.fileId) }
+        // one grouped push at the end. A fill visit takes only the unfilled avatars.
+        val work = entries.filterNot { wasRecentlyProcessed(it.fileId) }.let { w -> if (fillOnly) w.filter { needsFill(it) } else w }
         if (work.isEmpty()) { p.status = "walking ($prefix clear)"; return false }
         val batch = claimBatch(work, work.size)
         if (batch.isEmpty()) return false
         // LIVE per-shard progress: this bot is now on `prefix`, checking `batch.size` avatars.
         p.curShard = prefix; p.curShardTotal = batch.size; p.curShardDone = 0
-        p.status = "walk $prefix: ${batch.size}"
+        p.status = if (fillOnly) "fill $prefix: ${batch.size}" else "walk $prefix: ${batch.size}"
         val upserts = mutableListOf<AvatarGlobalDb.Entry>()
         val removes = mutableListOf<String>()
         val okChecked = mutableListOf<String>()
+        var yieldedToReports = false
+        var yieldedToFills = false
+        var lastFillCheck = System.currentTimeMillis()
         try {
             var nulls = 0
             var rateLimited = false
             for (e in batch) {
                 if (!running || paused) break
+                // REPORTS AS SOON AS THEY APPEAR: the Reports bot drops a full re-verify the moment
+                // reports are pending (the 30s /health poll), handles them next cycle, and puts this
+                // shard back at the front (its sweep stamp is restored below).
+                if (role == Role.REPORTS && !fillOnly && lastPendingReports > 0) { yieldedToReports = true; break }
+                // FILLS AS SOON AS THEY APPEAR, same as reports: a full re-verify is dropped the moment
+                // the Worker's fill worklist has a shard waiting; this shard goes back to the front.
+                if (!fillOnly && System.currentTimeMillis() - lastFillCheck >= FILL_YIELD_CHECK_MS) {
+                    lastFillCheck = System.currentTimeMillis()
+                    refreshWorklist(context)
+                    if (hasDueFill()) { yieldedToFills = true; break }
+                }
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++; p.curShardDone++
                 if (chk == null) {
@@ -1071,13 +1148,23 @@ object AvatarCatalogSweep {
                 } else {
                     val upd = liveRefresh(e, chk)
                     if (upd != null) { if (upd.fileId != e.fileId) removes.add(e.fileId); upserts.add(upd); p.refreshed++ }
-                    else okChecked.add(e.fileId)
+                    // Unchanged + verified recently enough → no `checked` push. Each push rewrites the
+                    // shard (an R2 Class A write per shard per lap); the timestamp only matters for the
+                    // 30-day staleness count, so it's refreshed once it's CHECKED_PUSH_MIN_AGE_MS old.
+                    else if (System.currentTimeMillis() - e.checked >= CHECKED_PUSH_MIN_AGE_MS) okChecked.add(e.fileId)
                     recheckedSinceManifest.incrementAndGet()   // a stale entry got re-verified either way
                 }
                 delay(PACE_MS)
             }
             if (upserts.isNotEmpty() || removes.isNotEmpty() || okChecked.isNotEmpty())
                 pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
+            if (yieldedToReports || yieldedToFills) {
+                // Not fully re-verified → back to its old place at the front of the oldest-first walk.
+                // (The avatars already checked are skipped on the re-walk by the recent-process guard.)
+                if (prevSwept != null) sweptAt[prefix] = prevSwept else sweptAt.remove(prefix)
+                p.status = "walk $prefix: paused for ${if (yieldedToReports) "reports" else "fills"}"
+                return true
+            }
             p.status = "walk $prefix: filled=${p.filled} checked=${p.checked} removed=${p.removed}"
             // On a rate-limit break, return false so slotLoop takes the IDLE sleep (not the 1.5s
             // active pause) — otherwise all 4 bots keep firing 3-call bursts every ~5s into an
