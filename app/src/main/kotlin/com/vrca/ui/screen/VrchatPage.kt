@@ -991,48 +991,70 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                 style = MaterialTheme.typography.bodyMedium
             )
 
-            com.vrca.ui.common.GremlinSlider(
-                value = sliderVal.coerceIn(0.1f, 10f),
-                onValueChange = { dragging = true; sliderVal = it },
-                valueRange = 0.1f..10f,
-                onValueChangeFinished = { dragging = false; vm.setAvatarEyeHeight(sliderVal) }
-            )
-
-            // Type ANY value (no app-imposed min/max — VRChat clamps to its own range).
-            var heightText by remember { mutableStateOf("") }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                androidx.compose.material3.OutlinedTextField(
-                    value = heightText,
-                    onValueChange = { heightText = it },
-                    modifier = Modifier.weight(1f),
-                    label = { Text("Height (m)") },
-                    singleLine = true,
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal
-                    )
-                )
-                Spacer(Modifier.width(8.dp))
-                com.vrca.ui.common.GremlinButton(
-                    onClick = {
-                        heightText.trim().toFloatOrNull()?.let {
-                            vm.setAvatarEyeHeight(it); sliderVal = it.coerceIn(0.1f, 10f)
-                        }
-                    },
-                    enabled = heightText.trim().toFloatOrNull() != null
-                ) { Text("Set") }
-            }
-
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            // The world's size info (VRChat OSC /avatar/*). Min/max are only what the
+            // world RECOMMENDS (OSC can still set 0.01-10,000 m unless the world
+            // enforces it), so they're shown, not clamped; a world that turns scaling
+            // off ignores every resize, so the controls hide there.
+            val worldMin by com.vrca.osc.VrcaOscState.worldEyeHeightMinFlow.collectAsState()
+            val worldMax by com.vrca.osc.VrcaOscState.worldEyeHeightMaxFlow.collectAsState()
+            val scalingAllowed by com.vrca.osc.VrcaOscState.scalingAllowedFlow.collectAsState()
+            if (worldMin != null && worldMax != null) {
                 Text(
-                    "Default: " + (defaultHeight?.let { "%.2f m".format(it) } ?: "—"),
+                    "World recommends: %.2f-%.2f m".format(worldMin, worldMax),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(Modifier.weight(1f))
-                com.vrca.ui.common.GremlinSmallButton(
-                    onClick = { vm.resetAvatarHeightToDefault()?.let { sliderVal = it.coerceIn(0.1f, 10f) } },
-                    enabled = defaultHeight != null
-                ) { Text("Reset to default") }
+            }
+            if (scalingAllowed == false) {
+                Text(
+                    "This world doesn't allow avatar resizing.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            } else {
+                com.vrca.ui.common.GremlinSlider(
+                    value = sliderVal.coerceIn(0.1f, 10f),
+                    onValueChange = { dragging = true; sliderVal = it },
+                    valueRange = 0.1f..10f,
+                    onValueChangeFinished = { dragging = false; vm.setAvatarEyeHeight(sliderVal) }
+                )
+
+                // Type ANY value (no app-imposed min/max — VRChat clamps to its own range).
+                var heightText by remember { mutableStateOf("") }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = heightText,
+                        onValueChange = { heightText = it },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("Height (m)") },
+                        singleLine = true,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal
+                        )
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    com.vrca.ui.common.GremlinButton(
+                        onClick = {
+                            heightText.trim().toFloatOrNull()?.let {
+                                vm.setAvatarEyeHeight(it); sliderVal = it.coerceIn(0.1f, 10f)
+                            }
+                        },
+                        enabled = heightText.trim().toFloatOrNull() != null
+                    ) { Text("Set") }
+                }
+
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Default: " + (defaultHeight?.let { "%.2f m".format(it) } ?: "—"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.weight(1f))
+                    com.vrca.ui.common.GremlinSmallButton(
+                        onClick = { vm.resetAvatarHeightToDefault()?.let { sliderVal = it.coerceIn(0.1f, 10f) } },
+                        enabled = defaultHeight != null
+                    ) { Text("Reset to default") }
+                }
             }
         }
     }

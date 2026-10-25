@@ -1402,7 +1402,7 @@ private data class PresetPeek(
 private fun TokensHint() {
     // OSC-in tokens only resolve on the headset (VRChat's OSC output is loopback).
     val osc = if (com.vrca.BuildConfig.IS_HEADSET_BUILD)
-        "  {mute}  {afk}  {movement}  {scale}  {param:Name}" else ""
+        "  {mute}  {afk}  {movement}  {scale}  {avatar}  {param:Name}" else ""
     Text(
         "Currently experimenting, feel free to try by putting these tags into your " +
             "pinned and cycle message:  {time}  {song}  {world}  {players}  {date}  " +

@@ -19,8 +19,10 @@ import java.net.URL
  *
  * So instead of listening for a push that never comes, we:
  *   1. mDNS-discover VRChat's `_oscjson._tcp` service (NsdManager) → host:port.
- *   2. Poll `GET http://host:port/avatar/parameters` (~250ms) — one request returns
- *      the whole avatar-parameter subtree WITH current values.
+ *   2. Poll `GET http://host:port/avatar` (~250ms; 1 s while VRChat pushes to the
+ *      announced app, [OscAnnouncer.pushLive]) — one request returns the parameter
+ *      subtree WITH current values plus the avatar nodes (name, id, eye height, the
+ *      world's recommended size range, scaling allowed).
  *   3. Fold each param's VALUE into [VrcaOscState] so the chatbox tokens
  *      `{mute}` `{afk}` `{movement}` `{scale}` `{param:Name}` resolve.
  *
@@ -42,6 +44,10 @@ object VrcaOscQuery {
     private const val TAG = "VrcaOscQuery"
     private const val SERVICE_TYPE = "_oscjson._tcp."
     private const val POLL_MS = 250L
+    // While VRChat pushes to the announced app ([OscAnnouncer.pushLive]) values arrive
+    // the instant they change, so the poll only keeps "present" params fresh
+    // ([VrcaOscState] trusts a value for 3 s) and catches anything missed.
+    private const val POLL_MS_PUSH_LIVE = 1_000L
     // isServiceUp() stays true this long after the last successful poll — rides out
     // a transient HTTP/network hiccup without flickering "VRChat closed".
     private const val UP_GRACE_MS = 12_000L
@@ -148,7 +154,8 @@ object VrcaOscQuery {
                     }
                 }
                 VrcaOscState.tickLiveness()
-                try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { break }
+                val wait = if (OscAnnouncer.pushLive) POLL_MS_PUSH_LIVE else POLL_MS
+                try { Thread.sleep(wait) } catch (_: InterruptedException) { break }
             }
         }, "vrca-oscquery").apply { isDaemon = true; start() }
     }
@@ -241,12 +248,20 @@ object VrcaOscQuery {
         }
     }
 
-    /** GET the whole avatar-parameter subtree and fold every value. Returns false
-     *  on a network error (VRChat unreachable), true otherwise. */
+    /** GET the whole `/avatar` subtree in ONE request and fold every value: the
+     *  parameters (`CONTENTS.parameters.CONTENTS`) plus the avatar nodes (eye height,
+     *  the world's min/max size, scaling allowed, avatar name + id). Falls back to
+     *  `/avatar/parameters` if the subtree has no parameters node. Returns false on a
+     *  network error (VRChat unreachable), true otherwise. */
     private fun pollParams(h: String, p: Int): Boolean {
-        val body = httpGetBody("http://$h:$p/avatar/parameters") ?: return false
+        val avatarBody = httpGetBody("http://$h:$p/avatar")
+        val avatar = avatarBody?.let { runCatching { JSONObject(it).optJSONObject("CONTENTS") }.getOrNull() }
+        val paramsNode = avatar?.optJSONObject("parameters")?.optJSONObject("CONTENTS")
+        val contents = paramsNode ?: run {
+            val body = httpGetBody("http://$h:$p/avatar/parameters") ?: return false
+            runCatching { JSONObject(body).optJSONObject("CONTENTS") }.getOrNull() ?: return true
+        }
         return try {
-            val contents = JSONObject(body).optJSONObject("CONTENTS") ?: return true
             var count = 0
             var sawEyeHeight = false
             val keys = contents.keys()
@@ -258,11 +273,17 @@ object VrcaOscQuery {
                 if (name == "EyeHeightAsMeters") sawEyeHeight = true
                 count++
             }
-            // Only when EyeHeightAsMeters isn't a param, fall back to the canonical
-            // top-level /avatar/eyeheight node (one extra small GET) so the eye-height
-            // read still works. Fed as EyeHeightAsMeters so {scale} + the size
-            // control's live read both pick it up.
-            if (!sawEyeHeight) {
+            if (avatar != null) {
+                // Avatar nodes beside the parameters. Eye height only feeds the
+                // EyeHeightAsMeters fallback when the avatar has no such param.
+                val nodes = avatar.keys()
+                while (nodes.hasNext()) {
+                    val key = nodes.next()
+                    if (key == "parameters" || (key == "eyeheight" && sawEyeHeight)) continue
+                    val node = avatar.optJSONObject(key) ?: continue
+                    VrcaOscState.onAvatarInfo("/avatar/$key", extractValue(node) ?: continue)
+                }
+            } else if (!sawEyeHeight) {
                 httpGetBody("http://$h:$p/avatar/eyeheight")?.let { ehBody ->
                     runCatching {
                         val v = JSONObject(ehBody).optJSONArray("VALUE")?.takeIf { it.length() > 0 }?.get(0)
@@ -272,12 +293,13 @@ object VrcaOscQuery {
             }
             updateDiag(
                 "polling $serviceName @ $h:$p — $count params" +
+                (if (OscAnnouncer.pushLive) " (push live, 1 s safety poll)" else "") +
                 (if (_oscInPort.value > 0)
                     "\nVRChat OSC-in advertised: ${oscInIp.ifBlank { "?" }}:${_oscInPort.value}" else "")
             )
             true
         } catch (e: Exception) {
-            Log.w(TAG, "parse /avatar/parameters failed", e); false
+            Log.w(TAG, "parse /avatar failed", e); false
         }
     }
 
