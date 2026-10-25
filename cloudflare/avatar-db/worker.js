@@ -816,7 +816,7 @@ export default {
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
           lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
-          version: 40,   // v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 41,   // v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -950,9 +950,11 @@ const RECONCILE_SHARDS_PER_RUN = 120; // previously: one-time pass → ~5h for a
 // its avtr/ presence bucket and re-adds the genuinely missing. Budgeted per run so it never crosses the
 // ceiling, and a failed avtr read means "unknown, skip" (never "missing").
 const HEAL_AVTR_READS_PER_RUN = 300;
-// v40 one-time re-arm: a fresh lap that queues the plain-text (folded) tokens of every fancy entry
-// without a current fold stamp into the PRIORITY lane (iqp:), so they don't wait for the liveness walk.
-const FOLD_STAMP_V = 1;
+// v40 re-arm: a fresh lap that queues the plain-text (folded) tokens of every fancy entry without a
+// current fold stamp into the PRIORITY lane (iqp:), so they don't wait for a 20-day checked push.
+// v41: a FINGERPRINT of the fold rules, so ANY CONFUSABLES/SMALLCAPS change re-arms that lap by
+// itself on deploy (unchanged fancy avatars get the new fold within ~70 min, nothing to remember).
+const FOLD_STAMP_V = "r" + (hashCode(JSON.stringify(CONFUSABLES) + JSON.stringify(SMALLCAPS)) >>> 0).toString(36);
 const RC_MAX_ATTEMPTS = 3;            // retry a tainted (read-failed) count pass this many times, then
                                       // give up and keep the incremental count (never adopt a bad one)
 // PERIODIC RE-ARM: the incremental `unfilled`/`entries` counts DRIFT over time (a fill that doesn't
