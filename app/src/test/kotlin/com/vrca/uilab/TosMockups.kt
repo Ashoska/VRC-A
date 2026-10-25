@@ -4,6 +4,8 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -49,6 +51,7 @@ import com.vrca.app.BootIcon
 import com.vrca.app.BootIconView
 import com.vrca.app.BootIcons
 import com.vrca.ui.common.GremlinButton
+import com.vrca.ui.common.animatedOutline
 import com.vrca.ui.common.GremlinButtonSize
 import com.vrca.ui.theme.GremlinColors as G
 
@@ -96,11 +99,14 @@ private val SECTIONS = listOf(
 
 @Composable
 private fun SecImage(path: String, modifier: Modifier) {
-    val bmp = remember(path) { BitmapFactory.decodeFile(path)?.asImageBitmap() }
-    if (bmp != null) Image(
-        bmp, null, modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, G.Edge, RoundedCornerShape(12.dp)),
-        contentScale = ContentScale.Crop
-    )
+    // Decoded off the main thread (nothing slow while composing); the space is kept while it loads.
+    val bmp by androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, path) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { BitmapFactory.decodeFile(path)?.asImageBitmap() }
+    }
+    val shown = androidx.compose.animation.core.animateFloatAsState(if (bmp != null) 1f else 0f, label = "imgIn")
+    Box(modifier.clip(RoundedCornerShape(12.dp)).background(G.Raised).border(1.dp, G.Edge, RoundedCornerShape(12.dp))) {
+        bmp?.let { Image(it, null, Modifier.fillMaxSize().graphicsLayer { alpha = shown.value }, contentScale = ContentScale.Crop) }
+    }
 }
 
 @Composable
@@ -526,17 +532,23 @@ private fun TermsBar(marks: List<com.vrca.app.Mark>, done: Boolean) {
 
 @Composable
 private fun ListRow3(i: Int, s: Sec2, mark: com.vrca.app.Mark, selected: Boolean, locked: Boolean, celebrate: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    // Selecting a card eases its face and outline over (read while drawing, so it only repaints);
+    // unlocking eases its icon and text from muted to normal (a one-off change on leaves).
+    val sel = androidx.compose.animation.core.animateFloatAsState(if (selected) 1f else 0f, androidx.compose.animation.core.tween(220), label = "rowSel")
+    val ink by androidx.compose.animation.animateColorAsState(if (locked) G.TextMuted else G.Text, label = "rowInk")
+    val icon by androidx.compose.animation.animateColorAsState(if (locked) G.TextMuted else G.Accent, label = "rowIcon")
     Row(
-        modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(if (selected) G.Raised else G.Card)
-            .border(if (selected) 1.5.dp else 1.dp, if (selected) G.Accent else G.Edge, RoundedCornerShape(14.dp))
+        modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+            .drawBehind { drawRect(androidx.compose.ui.graphics.lerp(G.Card, G.Raised, sel.value)) }
+            .then(Modifier.animatedOutline({ androidx.compose.ui.graphics.lerp(G.Edge, G.Accent, sel.value) }, 1.5.dp, 14.dp))
             .then(if (locked) Modifier else Modifier.clickable(onClick = onClick))
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        BootIconView(s.icon, { if (locked) G.TextMuted else G.Accent }, { if (locked) G.TextMuted else G.Accent }, Modifier.size(22.dp))
+        BootIconView(s.icon, { icon }, { icon }, Modifier.size(22.dp))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(s.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = if (locked) G.TextMuted else G.Text, maxLines = 1)
+            Text(s.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = ink, maxLines = 1)
             Text(s.short, style = MaterialTheme.typography.bodyMedium, color = G.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         com.vrca.app.BootCat(mark, i, Modifier.size(24.dp), celebrate = celebrate, hopDelayMs = 250L + 130L * i)
@@ -545,10 +557,9 @@ private fun ListRow3(i: Int, s: Sec2, mark: com.vrca.app.Mark, selected: Boolean
 
 
 @Composable
-internal fun TosMockB3(accept: Int = 0) {
+internal fun TosMockB3(startAtLast: Boolean = false) {
     val total = SECTIONS2.size
-    // accept > 0: an accept-placement idea, opened on the last section (0 = the current layout from the start).
-    val start = if (accept > 0) total - 1 else 0
+    val start = if (startAtLast) total - 1 else 0
     var open by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(start) }
     var reached by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(start) }
     var agreed by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
@@ -560,45 +571,9 @@ internal fun TosMockB3(accept: Int = 0) {
             else -> com.vrca.app.Mark.Waiting
         }
     }
-    fun go(i: Int) { open = i; if (i > reached) reached = i }
+    val go: (Int) -> Unit = { i -> open = i; if (i > reached) reached = i }
     BoxWithConstraints(Modifier.fillMaxSize().background(G.Backdrop)) {
         val wide = maxWidth >= 700.dp
-        val last = open == total - 1
-        val reader: @Composable (Boolean) -> Unit = { w ->
-            Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                ReaderTitle(open, SECTIONS2[open], total)
-                ReaderBody(SECTIONS2[open], wide = w)
-                if (last && accept == 2) AgreeCard(agreed) { agreed = it }
-                if (last && accept == 4) Text(AGREE_NOTE, style = MaterialTheme.typography.bodyLarge, color = G.TextMuted)
-            }
-        }
-        val footer: @Composable () -> Unit = {
-            if (last && accept > 0) AcceptIdea(accept, wide, agreed, { agreed = it }, { go(open - 1) })
-            else if (last) Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Raised).clickable { agreed = !agreed }
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Checkbox(agreed, { agreed = it }, colors = CheckboxDefaults.colors(checkedColor = G.Accent, uncheckedColor = G.TextMuted))
-                    Text("I've read and agree to these terms", style = MaterialTheme.typography.bodyLarge, color = G.Text)
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Spacer(Modifier.weight(1f))
-                    // Same height as Accept beside it.
-                    com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Large)
-                    Spacer(Modifier.width(10.dp))
-                    GremlinButton("Accept", {}, enabled = agreed, size = GremlinButtonSize.Large, bootIcon = BootIcons.Start)
-                }
-            } else Row(verticalAlignment = Alignment.CenterVertically) {
-                // Back and Next together on the right (user: split far apart on the wide headset card they
-                // felt disconnected); Back is the real button on every section, greyed out on the first.
-                Spacer(Modifier.weight(1f))
-                com.vrca.ui.common.GremlinButton("Back", { go(open - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Medium, enabled = open > 0)
-                Spacer(Modifier.width(10.dp))
-                com.vrca.ui.common.GremlinButton("Next", { go(open + 1) }, size = GremlinButtonSize.Medium)
-            }
-        }
         if (wide) Row(Modifier.fillMaxSize().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Column(Modifier.width(310.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Header(compact = true, mark = if (agreed) com.vrca.app.Mark.Done else com.vrca.app.Mark.Working)
@@ -610,104 +585,94 @@ internal fun TosMockB3(accept: Int = 0) {
             }
             com.vrca.app.Layer(Modifier.weight(1f).fillMaxHeight()) {
                 Column(Modifier.fillMaxSize()) {
-                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 24.dp)) { reader(true) }
-                    Box(Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) { footer() }
-                }
-            }
-        } else Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(9.dp)
-        ) {
-            Header(compact = false, mark = if (agreed) com.vrca.app.Mark.Done else com.vrca.app.Mark.Working)
-            TermsBar(marks, done = agreed)
-            SECTIONS2.forEachIndexed { i, s ->
-                if (i == open) com.vrca.app.Layer(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                        reader(false)
-                        footer()
+                    // Changing section: the old one fades out quickly, the new one fades in and rises a little
+                    // (a one-off transition; each section has its own scroll, so a new one starts at the top).
+                    // The buttons stay put outside it, so they don't blink on every Next.
+                    androidx.compose.animation.AnimatedContent(
+                        open, Modifier.weight(1f).fillMaxWidth(), transitionSpec = { sectionSwap() }, label = "tosSection"
+                    ) { o ->
+                        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 24.dp)) {
+                            Reader(o, wide = true)
+                        }
                     }
-                } else ListRow3(i, s, marks[i], selected = false, locked = i > reached, celebrate = agreed, modifier = Modifier.height(58.dp)) { go(i) }
+                    Box(Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) { Footer(open, total, go) { agreed = true } }
+                }
+            }
+        } else {
+            val scroll = rememberScrollState()
+            Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                Header(compact = false, mark = if (agreed) com.vrca.app.Mark.Done else com.vrca.app.Mark.Working)
+                TermsBar(marks, done = agreed)
+                SECTIONS2.forEachIndexed { i, s ->
+                    PhoneSection(i, s, marks[i], open = i == open, locked = i > reached, celebrate = agreed, total, go) { agreed = true }
+                }
             }
         }
     }
 }
 
-
-// ---- Accept placement ideas (show tosmock b3 1|2|3) ----
+private fun androidx.compose.animation.AnimatedContentTransitionScope<Int>.sectionSwap(): androidx.compose.animation.ContentTransform {
+    val down = targetState > initialState
+    return (androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(220, delayMillis = 70)) +
+        androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(260, delayMillis = 70)) { h -> if (down) h / 24 else -h / 24 })
+        .togetherWith(androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(90)))
+}
 
 @Composable
-private fun AgreeTick(agreed: Boolean, label: String, onAgree: (Boolean) -> Unit, modifier: Modifier = Modifier) = Row(
-    modifier.clip(RoundedCornerShape(12.dp)).clickable { onAgree(!agreed) }.padding(end = 10.dp),
-    verticalAlignment = Alignment.CenterVertically
+private fun Reader(o: Int, wide: Boolean) = Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
+    ReaderTitle(o, SECTIONS2[o], SECTIONS2.size)
+    ReaderBody(SECTIONS2[o], wide = wide)
+}
+
+/** Back + Next, or on the last section Back + Accept (countdown) with the agree line under them. */
+@Composable
+private fun Footer(o: Int, total: Int, go: (Int) -> Unit, onAccept: () -> Unit) {
+    if (o == total - 1) Row { Spacer(Modifier.weight(1f)); UnderButtons({ go(o - 1) }, onAccept) }
+    else Row(verticalAlignment = Alignment.CenterVertically) {
+        // Back and Next together on the right (user: split far apart on the wide headset card they
+        // felt disconnected); Back is the real button on every section, greyed out on the first.
+        Spacer(Modifier.weight(1f))
+        com.vrca.ui.common.GremlinButton("Back", { go(o - 1) }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Medium, enabled = o > 0)
+        Spacer(Modifier.width(10.dp))
+        com.vrca.ui.common.GremlinButton("Next", { go(o + 1) }, size = GremlinButtonSize.Medium)
+    }
+}
+
+/**
+ * Phone: every section is one card. Closed it's the list row; opening it, the row folds away and the
+ * reading unfolds under it (size animated, so the cards below slide instead of jumping), and the page
+ * scrolls the opened card into view once it has grown.
+ */
+@Composable
+private fun PhoneSection(
+    i: Int, s: Sec2, mark: com.vrca.app.Mark, open: Boolean, locked: Boolean, celebrate: Boolean, total: Int,
+    go: (Int) -> Unit, onAccept: () -> Unit
 ) {
-    Checkbox(agreed, onAgree, colors = CheckboxDefaults.colors(checkedColor = G.Accent, uncheckedColor = G.TextMuted))
-    Text(label, style = MaterialTheme.typography.bodyLarge, color = G.Text)
-}
-
-@Composable
-private fun BackAccept(onBack: () -> Unit, enabled: Boolean) = Row(verticalAlignment = Alignment.CenterVertically) {
-    com.vrca.ui.common.GremlinButton("Back", onBack, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Large)
-    Spacer(Modifier.width(10.dp))
-    GremlinButton("Accept", {}, enabled = enabled, size = GremlinButtonSize.Large, bootIcon = BootIcons.Start)
-}
-
-/** 2: the agreement is the last thing you read, a card at the end of the section. */
-@Composable
-private fun AgreeCard(agreed: Boolean, onAgree: (Boolean) -> Unit) {
-    val edge by androidx.compose.animation.animateColorAsState(if (agreed) G.Positive else G.Accent.copy(alpha = 0.5f), label = "agreeEdge")
-    Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(G.Raised)
-            .border(1.5.dp, edge, RoundedCornerShape(14.dp)).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            com.vrca.app.BootCat(if (agreed) com.vrca.app.Mark.Done else com.vrca.app.Mark.Waiting, 0, Modifier.size(34.dp))
-            Spacer(Modifier.width(12.dp))
-            Column {
-                Text("Your agreement", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = G.Text)
-                Text("You've read all ${SECTIONS2.size} sections of version 4", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
-            }
-        }
-        AgreeTick(agreed, "I agree to these terms", onAgree)
-    }
-}
-
-@Composable
-private fun AcceptIdea(idea: Int, wide: Boolean, agreed: Boolean, onAgree: (Boolean) -> Unit, onBack: () -> Unit) {
-    when (idea) {
-        // 1: the tick on the same line as the buttons (stacked above them on a narrow phone).
-        1 -> if (wide) Row(verticalAlignment = Alignment.CenterVertically) {
-            AgreeTick(agreed, "I agree to these terms", onAgree)
-            Spacer(Modifier.weight(1f))
-            BackAccept(onBack, agreed)
-        } else Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            AgreeTick(agreed, "I agree to these terms", onAgree)
-            Row { Spacer(Modifier.weight(1f)); BackAccept(onBack, agreed) }
-        }
-        // 2: the tick lives in the agreement card in the reading; only the buttons stay here.
-        2 -> Row { Spacer(Modifier.weight(1f)); BackAccept(onBack, agreed) }
-        // 3+: no tick: Accept is the agreement, with one quiet line saying so. Where that line goes:
-        // 3 beside the buttons, 4 at the end of the reading, 5 above the buttons, 6 under them.
-        else -> {
-            val note = @Composable { Text(AGREE_NOTE, style = MaterialTheme.typography.bodyMedium, color = G.TextMuted) }
-            when {
-                idea == 3 && wide -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    Spacer(Modifier.weight(1f)); note(); Spacer(Modifier.width(18.dp)); CountdownButtons(onBack)
-                }
-                idea == 4 -> Row { Spacer(Modifier.weight(1f)); CountdownButtons(onBack) }
-                // Under the buttons, never wider than them (user: it peeked out past Back): the line is
-                // measured at the buttons' width and wraps, centred, if it doesn't fit.
-                idea == 6 -> Row { Spacer(Modifier.weight(1f)); UnderButtons(onBack) }
-                else -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.End) {
-                    note(); CountdownButtons(onBack)
+    val bring = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    androidx.compose.runtime.LaunchedEffect(open) { if (open) { kotlinx.coroutines.delay(UNFOLD_MS.toLong()); bring.bringIntoView() } }
+    Column(Modifier.fillMaxWidth().bringIntoViewRequester(bring)) {
+        androidx.compose.animation.AnimatedVisibility(
+            !open,
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(UNFOLD_MS)) + androidx.compose.animation.expandVertically(androidx.compose.animation.core.tween(UNFOLD_MS), expandFrom = Alignment.Top),
+            exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(UNFOLD_MS / 2)) + androidx.compose.animation.shrinkVertically(androidx.compose.animation.core.tween(UNFOLD_MS), shrinkTowards = Alignment.Top)
+        ) { ListRow3(i, s, mark, selected = false, locked = locked, celebrate = celebrate, modifier = Modifier.height(58.dp)) { go(i) } }
+        androidx.compose.animation.AnimatedVisibility(
+            open,
+            // The reading fades in as it unfolds (a delayed fade left a blank gap mid-unfold).
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(UNFOLD_MS)) + androidx.compose.animation.expandVertically(androidx.compose.animation.core.tween(UNFOLD_MS), expandFrom = Alignment.Top),
+            exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(UNFOLD_MS / 2)) + androidx.compose.animation.shrinkVertically(androidx.compose.animation.core.tween(UNFOLD_MS), shrinkTowards = Alignment.Top)
+        ) {
+            com.vrca.app.Layer(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Reader(i, wide = false)
+                    Footer(i, total, go, onAccept)
                 }
             }
         }
     }
 }
 
-/** Seconds before Accept can be tapped once the last section opens. */
-private const val ACCEPT_WAIT = 5
+private const val UNFOLD_MS = 300
 
 private const val AGREE_NOTE = "By tapping Accept you agree to these terms"
 
@@ -718,7 +683,7 @@ private const val AGREE_NOTE = "By tapping Accept you agree to these terms"
  * Remembered only while the last section is open: Back leaves it, so coming back starts the wait again (user).
  */
 @Composable
-private fun CountdownButtons(onBack: () -> Unit) {
+private fun CountdownButtons(onBack: () -> Unit, onAccept: () -> Unit) {
     var left by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(ACCEPT_WAIT) }
     var ready by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
@@ -731,7 +696,7 @@ private fun CountdownButtons(onBack: () -> Unit) {
         Spacer(Modifier.width(10.dp))
         GremlinButton(
             // Wide enough for "Accept  5", so the pair doesn't shift as the number goes.
-            if (left > 0) "Accept  $left" else "Accept", {}, Modifier.widthIn(min = 158.dp), enabled = ready, size = GremlinButtonSize.Large,
+            if (left > 0) "Accept  $left" else "Accept", onAccept, Modifier.widthIn(min = 158.dp), enabled = ready, size = GremlinButtonSize.Large,
             leading = {
                 // One box size for both, so the button doesn't change width at the swap.
                 androidx.compose.animation.Crossfade(ready, Modifier.size(28.dp), label = "acceptReady") { r ->
@@ -746,9 +711,9 @@ private fun CountdownButtons(onBack: () -> Unit) {
 }
 
 @Composable
-private fun UnderButtons(onBack: () -> Unit) = androidx.compose.ui.layout.Layout(
+private fun UnderButtons(onBack: () -> Unit, onAccept: () -> Unit) = androidx.compose.ui.layout.Layout(
     content = {
-        CountdownButtons(onBack)
+        CountdownButtons(onBack, onAccept)
         Text(AGREE_NOTE, style = MaterialTheme.typography.bodySmall, color = G.TextMuted, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
     }
 ) { (buttons, note), c ->
@@ -757,3 +722,6 @@ private fun UnderButtons(onBack: () -> Unit) = androidx.compose.ui.layout.Layout
     val gap = 8.dp.roundToPx()
     layout(b.width, b.height + gap + n.height) { b.place(0, 0); n.place(0, b.height + gap) }
 }
+
+/** Seconds before Accept can be tapped once the last section opens. */
+private const val ACCEPT_WAIT = 5
