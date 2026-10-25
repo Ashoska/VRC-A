@@ -88,6 +88,40 @@ object OscAnnouncer {
         if (!running) start(context) else paused = !paused
     }
 
+    // ---- graceful stop (test) ------------------------------------------------
+    // Suspected cause of "re-announce gets 0 packets until VRChat restarts": the old
+    // stop unregistered AND closed the UDP socket at once, so VRChat kept sending
+    // (~300/s) to a closed port and its sender may break on the "port unreachable"
+    // replies. Graceful stop withdraws first, keeps receiving for [DRAIN_MS] while
+    // counting what still arrives, and only then closes. If a start afterwards gets
+    // packets again, closing late is the fix (also for app shutdown).
+    private const val DRAIN_MS = 5_000L
+    @Volatile private var drainNote = ""
+
+    /** Blocking (sleeps [DRAIN_MS]): run off the main thread. */
+    fun stopGracefully() {
+        if (!running) return
+        val m = nsd
+        synchronized(registrations) {
+            registrations.forEach { l -> runCatching { m?.unregisterService(l) } }
+            registrations.clear()
+        }
+        val withdrawnAt = System.currentTimeMillis()
+        val before = packets
+        drainNote = "withdrawn, draining ${DRAIN_MS / 1000}s…"
+        try { Thread.sleep(DRAIN_MS) } catch (_: InterruptedException) {}
+        val after = packets - before
+        val lastAfter = lastPacketMs - withdrawnAt
+        drainNote = "after withdraw: $after packets" +
+            (if (after > 0) ", last ${lastAfter}ms after withdraw" else ", none") + "; socket closed"
+        running = false
+        paused = false
+        runCatching { udp?.close() }; runCatching { http?.close() }
+        udp = null; http = null
+        lastHttpMs = 0L
+        registerStatus = "stopped (graceful)"
+    }
+
     @Synchronized
     fun start(context: Context) {
         paused = false
@@ -281,14 +315,21 @@ object OscAnnouncer {
 
     fun diag(): String = buildString {
         if (!running && startedMs == 0L) { append("(not started)"); return@buildString }
-        append(if (paused) "PAUSED (still registered)" else "ANNOUNCING").append(" as ").append(serviceName)
+        append(
+            when {
+                !running -> "STOPPED"
+                paused -> "PAUSED (still registered)"
+                else -> "ANNOUNCING"
+            }
+        ).append(" as ").append(serviceName)
         append("\nVRC-A OSCQuery http://").append(ownIp).append(':').append(httpPort)
         append("  OSC in ").append(ownIp).append(':').append(udpPort)
         if (portNote.isNotEmpty()) append("\n").append(portNote)
         append(registerStatus.prependIndent("  ").let { "\n" + it.trimStart('\n') })
         append("\nVRChat read our tree: ").append(httpRequests).append(" requests")
         if (lastHttpPath.isNotEmpty()) append(" (last ").append(lastHttpPath).append(')')
-        if (stuck) append("\n!! VRChat found VRC-A but is not sending. Restart VRChat to reconnect.")
+        if (drainNote.isNotEmpty()) append("\nlast graceful stop: ").append(drainNote)
+        if (stuck) append("\n!! VRChat found VRC-A but is not sending")
         append("\npackets received: ").append(packets)
         if (lastAddress.isNotEmpty()) append("  last ").append(lastAddress)
         counts.entries.sortedBy { it.key }.forEach { (k, v) -> append("\n  ").append(k).append(" x").append(v) }
