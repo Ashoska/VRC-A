@@ -561,6 +561,46 @@ internal fun SettingsPage(
                                 }
                             }
 
+                            // Announce VRC-A as an OSCQuery app so VRChat SENDS its
+                            // output (head/wrist tracking, avatar params) to us.
+                            Text("Announce to VRChat (receive test)", style = MaterialTheme.typography.labelMedium)
+                            var announceDiag by remember { mutableStateOf(com.vrca.osc.OscAnnouncer.diag()) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    announceDiag = com.vrca.osc.OscAnnouncer.diag()
+                                    kotlinx.coroutines.delay(500)
+                                }
+                            }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    if (com.vrca.osc.OscAnnouncer.running) com.vrca.osc.OscAnnouncer.stop()
+                                    else runCatching { com.vrca.osc.OscAnnouncer.start(ctx) }
+                                }
+                            }) {
+                                Text("Start / stop announcing")
+                            }
+                            SelectionContainer {
+                                Text(
+                                    announceDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            // Press VRChat's undocumented Sitting/Standing toggle.
+                            var sitResult by remember { mutableStateOf("") }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    com.vrca.osc.OscAnnouncer.pressButton("/input/ToggleSitStand")
+                                    sitResult = com.vrca.osc.OscAnnouncer.lastSendResult
+                                }
+                            }) {
+                                Text("Send ToggleSitStand")
+                            }
+                            if (sitResult.isNotEmpty()) {
+                                Text(sitResult, style = MaterialTheme.typography.bodySmall)
+                            }
+
                             // Floor probe (read-only): system settings + properties
                             // naming floor/boundary/tracking, to find where Quest keeps
                             // the floor height VRChat follows live.
