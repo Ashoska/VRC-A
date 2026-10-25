@@ -55,6 +55,31 @@ object OscAnnouncer {
     private const val MULTICAST_GROUP = "239.255.65.82"
     @Volatile private var multicastMode = true
     @Volatile private var blinkNote = ""
+    @Volatile private var selfTestSeenMs = 0L
+    @Volatile private var selfTestNote = ""
+
+    /** Debug: send ourselves one OSC packet to the address VRChat sends to (group or
+     *  our IP + our port) and report whether the receive socket got it within 2 s.
+     *  Separates "our socket isn't receiving" from "VRChat stopped sending".
+     *  Blocking: run off the main thread. */
+    fun selfTest(): String {
+        if (!running) return "not running".also { selfTestNote = it }
+        val sentAt = System.currentTimeMillis()
+        val dest = if (multicastMode) MULTICAST_GROUP else (localIpv4() ?: ownIp)
+        val note = runCatching {
+            // OSC message "/vrca/selftest" with no arguments (address + ",").
+            val msg = "/vrca/selftest".toByteArray().let { a -> a + ByteArray(4 - a.size % 4) } + ",\u0000\u0000\u0000".toByteArray()
+            java.net.MulticastSocket().use { out ->
+                localIpv4()?.let { ip -> runCatching { out.networkInterface = NetworkInterface.getByInetAddress(java.net.InetAddress.getByName(ip)) } }
+                out.send(DatagramPacket(msg, msg.size, java.net.InetAddress.getByName(dest), udpPort))
+            }
+            Thread.sleep(2_000)
+            if (selfTestSeenMs >= sentAt) "self-test to $dest:$udpPort RECEIVED (our socket works)"
+            else "self-test to $dest:$udpPort NOT received (our socket isn't receiving)"
+        }.getOrElse { "self-test failed: ${it.message}" }
+        selfTestNote = note
+        return note
+    }
 
     /** Debug switch; persisted. VRChat picks the new destination up on its next start. */
     fun setMulticast(context: Context, on: Boolean) {
@@ -167,10 +192,12 @@ object OscAnnouncer {
         val reopenedAt = System.currentTimeMillis()
         blinkNote = "re-bound $port after ${ms / 1000}s (packets before: $before); watch the count"
         Thread({
-            try { Thread.sleep(10_000) } catch (_: InterruptedException) {}
-            val after = packets - before
-            val fresh = lastPacketMs > reopenedAt
-            blinkNote = "blink $port: " + if (fresh) "packets CAME BACK ($after since)" else "NO packets in 10 s after re-bind"
+            try { Thread.sleep(1_000) } catch (_: InterruptedException) {}
+            selfTest()
+            try { Thread.sleep(7_000) } catch (_: InterruptedException) {}
+            val fresh = lastPacketMs > reopenedAt && packets - before > 1
+            blinkNote = "blink $port: " + (if (fresh) "VRChat packets CAME BACK (${packets - before} since)" else "NO VRChat packets in 10 s after re-bind") +
+                "; " + selfTestNote
         }, "vrca-blink-check").apply { isDaemon = true; start() }
     }
 
@@ -286,6 +313,7 @@ object OscAnnouncer {
             }
             return
         }
+        if (address == "/vrca/selftest") { selfTestSeenMs = System.currentTimeMillis(); return }
         lastAddress = address
         val isParam = address.startsWith("/avatar/parameters/")
         counts.merge(if (isParam) "/avatar/parameters/*" else address, 1, Int::plus)
@@ -335,6 +363,7 @@ object OscAnnouncer {
         if (portNote.isNotEmpty()) append("\n").append(portNote)
         append("\nreceive: ").append(if (multicastMode) "multicast $MULTICAST_GROUP:$udpPort" else "direct $ownIp:$udpPort")
         if (blinkNote.isNotEmpty()) append("\n").append(blinkNote)
+        if (selfTestNote.isNotEmpty() && !blinkNote.contains(selfTestNote)) append("\n").append(selfTestNote)
         append("\n").append(MdnsAnnouncer.diag())
         append("\nVRChat read our tree: ").append(httpRequests).append(" requests")
         if (lastHttpPath.isNotEmpty()) append(" (last ").append(lastHttpPath).append(')')

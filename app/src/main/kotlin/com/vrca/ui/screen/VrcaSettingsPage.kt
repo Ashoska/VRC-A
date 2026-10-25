@@ -604,6 +604,14 @@ internal fun SettingsPage(
                                 }) {
                                     Text("Port blink (3 s)")
                                 }
+                                // Send ourselves a packet: is our receive socket working?
+                                com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        runCatching { com.vrca.osc.OscAnnouncer.selfTest() }
+                                    }
+                                }) {
+                                    Text("Self-test")
+                                }
                                 // Where VRChat sends: group address (no "port unreachable")
                                 // or straight to us. VRChat reads it on its next start.
                                 com.vrca.ui.common.GremlinSmallButton(onClick = {
