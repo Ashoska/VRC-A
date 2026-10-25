@@ -277,6 +277,44 @@ object VrcaOscQuery {
         }
     }
 
+    /** Debug: list EVERY endpoint VRChat's OSCQuery server advertises (not just the
+     *  documented ones), one line each: path, TYPE, access (r/w/rw), current VALUE.
+     *  `/avatar/parameters` children are only counted (the param probe shows those).
+     *  Blocking network call: run off the main thread. Used to hunt for undocumented
+     *  endpoints (tracking output, play space / floor) on Quest VRChat. */
+    fun dumpTree(): String {
+        val h = host; val p = port
+        if (h == null || p <= 0) return "VRChat OSCQuery not found yet (open VRChat, tap Start / rescan)"
+        val sb = StringBuilder()
+        httpGetBody("http://$h:$p/?HOST_INFO")?.let { sb.append("HOST_INFO ").append(it).append("\n\n") }
+        val body = httpGetBody("http://$h:$p/") ?: return sb.append("GET / failed").toString()
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return sb.append("GET / not JSON").toString()
+        var total = 0
+        fun walk(node: JSONObject, path: String) {
+            val full = node.optString("FULL_PATH", path)
+            val kids = node.optJSONObject("CONTENTS")
+            if (full == "/avatar/parameters" && kids != null) {
+                sb.append(full).append("/*  (").append(kids.length()).append(" params)\n")
+                total += kids.length()
+                return
+            }
+            if (node.has("TYPE") || node.has("ACCESS")) {
+                val access = when (node.optInt("ACCESS", 0)) { 1 -> "r"; 2 -> "w"; 3 -> "rw"; else -> "-" }
+                sb.append(full).append("  ").append(node.optString("TYPE", "?")).append("  ").append(access)
+                node.optJSONArray("VALUE")?.let { sb.append("  ").append(it.toString()) }
+                node.optString("DESCRIPTION", "").takeIf { it.isNotBlank() }?.let { sb.append("  // ").append(it) }
+                sb.append("\n")
+                total++
+            }
+            if (kids != null) {
+                val names = kids.keys().asSequence().sorted().toList()
+                for (name in names) kids.optJSONObject(name)?.let { walk(it, "$full/$name".replace("//", "/")) }
+            }
+        }
+        walk(root, "/")
+        return sb.append("\n").append(total).append(" endpoints").toString()
+    }
+
     /** VALUE is a 1-element array; TYPE T/F = bool, i = int, f = float. */
     private fun extractValue(node: JSONObject): Any? {
         val arr = node.optJSONArray("VALUE") ?: return null
