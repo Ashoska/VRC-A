@@ -666,6 +666,17 @@ export default {
         return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length, authorRenames: authorRenames.length });
       }
 
+      if (req.method === "GET" && url.pathname === "/admin/backupstep") {
+        // v45: one step of the daily db.json backup (fired by the cron as its OWN invocation, so it has
+        // its own subrequest budget and never holds the flush lock). Token-gated like the chain.
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+          return json({ ok: false, error: "unauthorized" }, 401);
+        }
+        let r = null;
+        try { r = await backupStep(env); } catch (e) { r = { error: String(e && e.message || e).slice(0, 200) }; }
+        return json({ ok: true, backup: r });
+      }
+
       if (req.method === "GET" && url.pathname === "/admin/reconcile") {
         // Re-arm the ONE-TIME search-index reconciler (resets its cursor + done flag) so it walks all
         // 4096 clone shards again — only needed if a future audit suspects the search index drifted
@@ -767,6 +778,7 @@ export default {
         // ONE cheap KV read (no list ops — those have a tight free-tier limit and this is
         // polled every 15s). Counts come from meta (set at flush).
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        let backupSt = null; try { backupSt = JSON.parse((await env.AVATAR_KV.get("backup")) || "null"); } catch (_) {}
         // Prefer the manifest's authoritative entryCount (Action-maintained); fall back to the
         // KV counter. max() so a fresh contribution that bumped KV past the last rebuild still shows.
         const manCount = await manifestEntryCount(env);
@@ -779,6 +791,7 @@ export default {
           iqDepth: meta.iqDepth || 0,   // search-index op queue depth (keys, ~150 ops each); drains to 0 as fold/rebuild ops apply
           iqpDepth: meta.iqpDepth || 0, // v40 priority lane (fold ops), drained before iqDepth
           foldPending: meta.foldPending || 0, // v40 fancy-font avatars whose plain-text tokens are still queued
+          backup: backupLine(backupSt),       // v45 daily db.json backup status
           lastDrain: meta.lastDrain || "",    // v43 last index-drain report (applied/ops/buckets/keys/err)
           iqDropped: meta.iqDropped || 0, // v40 pre-v40 every-check re-asserts dropped from the backlog
           lastFlush: meta.lastFlush || null,
@@ -829,7 +842,7 @@ export default {
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
           lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
-          version: 44,   // v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 45,   // v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -920,6 +933,8 @@ export default {
       // this whole cycle — running reconcile/flush now would overlap the chain's flush and race the
       // shared `meta` record (the pendingBatches/lastFlush flicker). The chain finishes fast; the cron
       // just waits one cycle. (A crashed chain self-heals in ≤90s when the lock ages out.)
+      // v45 daily db.json backup: one step per cron as its OWN invocation (own budget, no lock).
+      try { await maybeFireBackupStep(env, ctx); } catch (_) {}
       if (await chainBusy(env)) return;
       await cronTasks(env);
       // Claim the single-flight lock, run one flush, and if pend work remains hand off to a
@@ -1456,6 +1471,103 @@ async function cronTasks(env) {
   try { await pruneFillWorklist(env); } catch (e) { console.log("prune err", e); }
   try { await propagateAuthorRenames(env); } catch (e) { console.log("arn err", e); }
 }
+// ---- v45 daily db.json backup, built inside R2 (replaces the removed GitHub catalog-rebuild) ----
+// The catalog is too big for one Worker invocation's memory/subrequests, so the backup is a MULTIPART
+// upload built across ~20 cron steps: each step reads BACKUP_SHARDS_PER_STEP shards, appends their
+// entries in the master's line format ("file_…":{…} one per line, which reshardFromMaster parses),
+// uploads every full BACKUP_PART_BYTES chunk, and carries the remainder in KV. The last step adds
+// the footer and completes the upload, which swaps the new db.json in atomically; until then the
+// previous backup stays intact. Cost/day: ~4,100 Class B shard reads + ~35 Class A (parts + create/
+// complete) + ~45 KV writes, i.e. effectively free; it never touches the index, meta or flush lock.
+const BACKUP_EVERY_MS = 24 * 60 * 60 * 1000;
+const BACKUP_SHARDS_PER_STEP = 200;
+const BACKUP_PART_BYTES = 5 * 1024 * 1024;        // R2: every part but the last must be this size
+const BACKUP_STALE_MS = 6 * 60 * 60 * 1000;       // an upload stuck this long is aborted + restarted
+async function maybeFireBackupStep(env, ctx) {
+  if (!env.ADMIN_KEY || !env.CATALOG) return;
+  const st = JSON.parse((await env.AVATAR_KV.get("backup")) || "{}");
+  const due = st.uploadId || !st.doneAt || Date.now() - st.doneAt >= BACKUP_EVERY_MS;
+  if (!due) return;
+  const path = `/admin/backupstep?key=${encodeURIComponent(env.ADMIN_KEY)}`;
+  if (env.SELF && typeof env.SELF.fetch === "function") ctx.waitUntil(env.SELF.fetch("https://self" + path).catch(() => {}));
+  else ctx.waitUntil(fetch(selfBase(env) + path).catch(() => {}));
+}
+async function backupStep(env) {
+  const KV = env.AVATAR_KV;
+  let st = JSON.parse((await KV.get("backup")) || "{}");
+  const now = Date.now();
+  if (st.uploadId && now - (st.startedAt || 0) > BACKUP_STALE_MS) {
+    try { await env.CATALOG.resumeMultipartUpload("db.json", st.uploadId).abort(); } catch (_) {}
+    st = { doneAt: st.doneAt, lastCount: st.lastCount, lastBytes: st.lastBytes, lastErr: "stale upload restarted" };
+  }
+  const enc = new TextEncoder();
+  let carry;
+  if (!st.uploadId) {
+    if (st.doneAt && now - st.doneAt < BACKUP_EVERY_MS) return { skipped: "not due" };
+    const up = await env.CATALOG.createMultipartUpload("db.json", {
+      httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=3600" },
+    });
+    st = { ...st, uploadId: up.uploadId, next: 0, parts: [], count: 0, bytes: 0, startedAt: now };
+    carry = enc.encode('{"name":"VRC-A Avatar Store","version":1,"avatars":{\n');
+  } else {
+    const b = await KV.get("backup:buf", "arrayBuffer");
+    carry = b ? new Uint8Array(b) : new Uint8Array(0);
+  }
+  const upload = env.CATALOG.resumeMultipartUpload("db.json", st.uploadId);
+  // Read this step's shards (a failed read aborts the step WITHOUT saving, so it's retried).
+  const chunks = [];
+  let count = st.count;
+  const end = Math.min(4096, st.next + BACKUP_SHARDS_PER_STEP);
+  for (let n = st.next; n < end; n++) {
+    const prefix = n.toString(16).padStart(3, "0");
+    const o = await env.CATALOG.get(`shard/${prefix}.json`);   // throws on a real failure → step retried
+    if (!o) continue;
+    const shard = await o.json();
+    for (const [fid, e] of Object.entries((shard && shard.e) || {})) {
+      chunks.push((count > 0 ? ",\n" : "") + JSON.stringify(fid) + ":" + JSON.stringify(e));
+      count++;
+    }
+  }
+  const last = end >= 4096;
+  const startBytes = st.next === 0 ? carry.length : 0;   // the header is counted once
+  if (last) chunks.push(`\n},"count":${count}}`);
+  const add = enc.encode(chunks.join(""));
+  let buf = new Uint8Array(carry.length + add.length);
+  buf.set(carry, 0); buf.set(add, carry.length);
+  const parts = st.parts.slice();
+  let off = 0;
+  while (buf.length - off >= BACKUP_PART_BYTES) {
+    const part = await upload.uploadPart(parts.length + 1, buf.slice(off, off + BACKUP_PART_BYTES));
+    parts.push({ partNumber: part.partNumber, etag: part.etag });
+    off += BACKUP_PART_BYTES;
+  }
+  buf = buf.slice(off);
+  if (last) {
+    if (buf.length || !parts.length) {
+      const part = await upload.uploadPart(parts.length + 1, buf);
+      parts.push({ partNumber: part.partNumber, etag: part.etag });
+    }
+    await upload.complete(parts);
+    const bytes = (st.bytes || 0) + startBytes + add.length;
+    const done = { doneAt: Date.now(), lastCount: count, lastBytes: bytes, lastMs: Date.now() - st.startedAt };
+    await KV.put("backup", JSON.stringify(done));
+    try { await KV.delete("backup:buf"); } catch (_) {}
+    return { done: true, count, parts: parts.length, bytes };
+  }
+  await KV.put("backup:buf", buf);
+  await KV.put("backup", JSON.stringify({ ...st, next: end, parts, count,
+    bytes: (st.bytes || 0) + startBytes + add.length }));
+  return { next: end, count, parts: parts.length };
+}
+/** One-line backup status for /health ("Backup" row in the admin Bots tab). */
+function backupLine(st) {
+  if (!st) return "";
+  if (st.uploadId) return `running ${st.next || 0}/4096 shards, ${st.count || 0} avatars`;
+  if (st.doneAt) return `${new Date(st.doneAt).toISOString().slice(0, 16).replace("T", " ")} UTC, ${st.lastCount} avatars, ` +
+    `${((st.lastBytes || 0) / 1e6).toFixed(0)} MB` + (st.lastErr ? ` (${st.lastErr})` : "");
+  return "";
+}
+
 async function cronTasksIfDue(env) {
   let last = 0;
   try { last = parseInt((await env.AVATAR_KV.get("crontasks")) || "0", 10) || 0; } catch (_) {}
