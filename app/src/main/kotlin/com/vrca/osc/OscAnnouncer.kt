@@ -1,8 +1,6 @@
 package com.vrca.osc
 
 import android.content.Context
-import android.net.nsd.NsdManager
-import android.net.nsd.NsdServiceInfo
 import android.util.Log
 import org.json.JSONObject
 import java.net.DatagramPacket
@@ -20,22 +18,18 @@ import java.util.concurrent.ConcurrentHashMap
  * only ever reads `[null]`, but once VRC-A advertises `_oscjson._tcp` and lists the
  * addresses it wants, VRChat shows "Sending OSC data to VRCA-…" and pushes head +
  * wrist poses (~75/s each) AND every avatar parameter (Gesture*, Velocity*, …) to our
- * UDP port. Feeds [HandDrag]; avatar params are kept here only (not folded into
- * [VrcaOscState], which still polls).
+ * UDP port. Pushed params/avatar info feed [VrcaOscState]; poses feed [HandDrag].
  *
- * How VRChat finds us (vrc-oscquery-lib `MeaModDiscovery`, read 2026-10-25): it keeps
- * discovered services in a set keyed by NAME and ignores any announcement whose name it
- * already holds; an entry only leaves on an mDNS goodbye. A VRC-A that died or was
- * killed sends no goodbye, so re-announcing under the same name is silently ignored
- * (device-seen: "VRChat read our tree: 0 requests"). So:
- *  - every registration uses a FRESH name (`VRCA-NNNN`), never a saved one;
- *  - the UDP/HTTP ports ARE saved and re-bound, so a stale VRChat entry still lands
- *    in our socket (no "port unreachable" storm at VRChat);
- *  - sockets are never closed while VRChat may be sending (old stop closed them the
- *    instant it unregistered → 0 packets until VRChat restarted);
- *  - a watchdog re-registers under a new name when VRChat is up (seen via
- *    [VrcaOscQuery]) but hasn't read us within 10 s, or read us but sends nothing.
- * The debug button only pauses/resumes; "stop" never tears anything down.
+ * Keeping the push across VRC-A restarts (vrc-oscquery-lib `MeaModDiscovery` +
+ * device tests 2026-10-25): VRChat finds the FIRST VRC-A per VRChat session whichever
+ * opens first, but once an app it knew says goodbye it ignores every returning app
+ * (any name, re-announced 5x) until VRChat restarts; it only re-searches on its own
+ * start or a network-adapter change. Android's NsdManager says that goodbye whenever
+ * our process ends. So [MdnsAnnouncer] announces instead and NEVER says goodbye, under
+ * a STABLE name with STABLE ports (saved per install): VRChat keeps its entry and keeps
+ * sending to the same port, which a restarted VRC-A (reopen, OS-kill revival, update)
+ * re-binds. Started once per process from `VrcaApplication`; the debug button only
+ * pauses/resumes.
  */
 object OscAnnouncer {
 
@@ -44,25 +38,17 @@ object OscAnnouncer {
 
     @Volatile var running = false
         private set
-    /** Soft stop: the service stays registered and bound, readers just see nothing. */
+    /** Soft stop: still announced and bound, readers just see nothing. */
     @Volatile var paused = false
         private set
     @Volatile private var portNote = ""
     private var udp: DatagramSocket? = null
     private var http: ServerSocket? = null
-    private var nsd: NsdManager? = null
-    private val registrations = mutableListOf<NsdManager.RegistrationListener>()
-    private var appContext: Context? = null
-    @Volatile private var reRegisters = 0
-    @Volatile private var lastReRegisterNote = ""
-    private const val WATCH_MS = 10_000L
-    private const val MAX_REREGISTERS_PER_VRCHAT = 5
 
     @Volatile private var udpPort = 0
     @Volatile private var httpPort = 0
     @Volatile private var ownIp = ""
     @Volatile private var serviceName = ""
-    @Volatile private var registerStatus = ""
     @Volatile private var httpRequests = 0
     @Volatile private var lastHttpPath = ""
     @Volatile private var packets = 0L
@@ -82,8 +68,7 @@ object OscAnnouncer {
     }
     private const val STUCK_MS = 10_000L
 
-    /** VRChat read our OSCQuery info more than [STUCK_MS] ago but has sent nothing
-     *  since. The watchdog answers it by re-announcing under a new name. */
+    /** VRChat read our OSCQuery info more than [STUCK_MS] ago but has sent nothing since. */
     val stuck: Boolean get() {
         val read = lastHttpMs
         return read > 0L && lastPacketMs < read && System.currentTimeMillis() - read > STUCK_MS
@@ -105,43 +90,9 @@ object OscAnnouncer {
     /** Latest pushed avatar parameter as a float (bools 0/1), or null. */
     fun param(name: String): Float? = if (paused) null else params[name]
 
-    /** Debug button: first tap registers; later taps pause/resume (never re-register). */
+    /** Debug button: first tap starts; later taps pause/resume (never re-announce). */
     fun toggle(context: Context) {
         if (!running) start(context) else paused = !paused
-    }
-
-    // ---- graceful stop (test) ------------------------------------------------
-    // Suspected cause of "re-announce gets 0 packets until VRChat restarts": the old
-    // stop unregistered AND closed the UDP socket at once, so VRChat kept sending
-    // (~300/s) to a closed port and its sender may break on the "port unreachable"
-    // replies. Graceful stop withdraws first, keeps receiving for [DRAIN_MS] while
-    // counting what still arrives, and only then closes. If a start afterwards gets
-    // packets again, closing late is the fix (also for app shutdown).
-    private const val DRAIN_MS = 5_000L
-    @Volatile private var drainNote = ""
-
-    /** Blocking (sleeps [DRAIN_MS]): run off the main thread. */
-    fun stopGracefully() {
-        if (!running) return
-        val m = nsd
-        synchronized(registrations) {
-            registrations.forEach { l -> runCatching { m?.unregisterService(l) } }
-            registrations.clear()
-        }
-        val withdrawnAt = System.currentTimeMillis()
-        val before = packets
-        drainNote = "withdrawn, draining ${DRAIN_MS / 1000}s…"
-        try { Thread.sleep(DRAIN_MS) } catch (_: InterruptedException) {}
-        val after = packets - before
-        val lastAfter = lastPacketMs - withdrawnAt
-        drainNote = "after withdraw: $after packets" +
-            (if (after > 0) ", last ${lastAfter}ms after withdraw" else ", none") + "; socket closed"
-        running = false
-        paused = false
-        runCatching { udp?.close() }; runCatching { http?.close() }
-        udp = null; http = null
-        lastHttpMs = 0L
-        registerStatus = "stopped (graceful)"
     }
 
     @Synchronized
@@ -151,71 +102,22 @@ object OscAnnouncer {
         running = true
         startedMs = System.currentTimeMillis()
         packets = 0; httpRequests = 0; counts.clear(); poses.clear(); poseMs.clear(); params.clear(); others.clear()
-        lastAddress = ""; lastHttpPath = ""; registerStatus = "registering…"
+        lastAddress = ""; lastHttpPath = ""
         ownIp = localIpv4() ?: "127.0.0.1"
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        appContext = context.applicationContext
-        serviceName = freshName()
+        // Stable identity: the same name + ports every start, so VRChat's entry for us
+        // (never withdrawn, see the class note) stays valid across restarts.
+        serviceName = prefs.getString("name", null) ?: ("VRCA-" + (1000..9999).random())
         val savedUdp = prefs.getInt("udp", 0); val savedHttp = prefs.getInt("http", 0)
         val u = runCatching { bindUdp(savedUdp) }.getOrElse { bindUdp(0) }
         val h = runCatching { bindHttp(savedHttp) }.getOrElse { bindHttp(0) }
         udp = u; http = h
         udpPort = u.localPort; httpPort = h.localPort
         portNote = "saved udp $savedUdp http $savedHttp → bound udp $udpPort http $httpPort"
-        prefs.edit().putInt("udp", udpPort).putInt("http", httpPort).apply()
+        prefs.edit().putString("name", serviceName).putInt("udp", udpPort).putInt("http", httpPort).apply()
         Thread({ udpLoop(u) }, "vrca-announce-udp").apply { isDaemon = true; start() }
         Thread({ httpLoop(h) }, "vrca-announce-http").apply { isDaemon = true; start() }
-        register(context, "_oscjson._tcp.", httpPort)
-        register(context, "_osc._udp.", udpPort)
-        Thread({ watchLoop() }, "vrca-announce-watch").apply { isDaemon = true; start() }
-    }
-
-    private fun freshName() = "VRCA-" + (1000..9999).random()
-
-    /** Withdraw the current name and announce under a new one. Sockets stay open. */
-    @Synchronized
-    private fun reRegister(reason: String) {
-        val ctx = appContext ?: return
-        if (!running) return
-        val m = nsd
-        synchronized(registrations) {
-            registrations.forEach { l -> runCatching { m?.unregisterService(l) } }
-            registrations.clear()
-        }
-        val old = serviceName
-        serviceName = freshName()
-        reRegisters++
-        lastReRegisterNote = "re-announced $old → $serviceName ($reason)"
-        registerStatus = "registering…"
-        register(ctx, "_oscjson._tcp.", httpPort)
-        register(ctx, "_osc._udp.", udpPort)
-    }
-
-    /** Self-heal: VRChat is up (its own OSCQuery service is visible) but hasn't read us
-     *  within [WATCH_MS], or read us and sends nothing → announce under a new name. */
-    private fun watchLoop() {
-        var vrcSeen: String? = null
-        var since = 0L
-        var httpBase = 0
-        var packetBase = 0L
-        var attempts = 0
-        while (running) {
-            try { Thread.sleep(2_000) } catch (_: InterruptedException) { break }
-            val vrc = VrcaOscQuery.vrchatServiceName()
-            val now = System.currentTimeMillis()
-            if (vrc != vrcSeen) {
-                vrcSeen = vrc; attempts = 0
-                since = now; httpBase = httpRequests; packetBase = packets
-            }
-            if (vrc == null || attempts >= MAX_REREGISTERS_PER_VRCHAT) continue
-            val neverRead = httpRequests == httpBase && packets == packetBase && now - since > WATCH_MS
-            if (neverRead || stuck) {
-                attempts++
-                reRegister(if (stuck) "VRChat read us but sent nothing" else "VRChat didn't find us")
-                lastHttpMs = 0L
-                since = now; httpBase = httpRequests; packetBase = packets
-            }
-        }
+        MdnsAnnouncer.start(context, serviceName, httpPort, udpPort) { localIpv4() ?: ownIp.ifEmpty { null } }
     }
 
     private fun bindUdp(port: Int) = DatagramSocket(null).apply {
@@ -224,23 +126,6 @@ object OscAnnouncer {
 
     private fun bindHttp(port: Int) = ServerSocket().apply {
         reuseAddress = true; bind(InetSocketAddress(port))
-    }
-
-    private fun register(context: Context, type: String, port: Int) {
-        val manager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager ?: run {
-            registerStatus = "NsdManager unavailable"; return
-        }
-        nsd = manager
-        val info = NsdServiceInfo().apply { serviceName = this@OscAnnouncer.serviceName; serviceType = type; setPort(port) }
-        val listener = object : NsdManager.RegistrationListener {
-            override fun onServiceRegistered(i: NsdServiceInfo) { registerStatus += "\nregistered $type as ${i.serviceName}" }
-            override fun onRegistrationFailed(i: NsdServiceInfo, e: Int) { registerStatus += "\n$type register failed err=$e" }
-            override fun onServiceUnregistered(i: NsdServiceInfo) {}
-            override fun onUnregistrationFailed(i: NsdServiceInfo, e: Int) {}
-        }
-        synchronized(registrations) { registrations += listener }
-        runCatching { manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener) }
-            .onFailure { registerStatus += "\n$type register error: ${it.message}" }
     }
 
     // ---- OSCQuery HTTP (HOST_INFO + root tree) ---------------------------------
@@ -398,11 +283,9 @@ object OscAnnouncer {
         append("\nVRC-A OSCQuery http://").append(ownIp).append(':').append(httpPort)
         append("  OSC in ").append(ownIp).append(':').append(udpPort)
         if (portNote.isNotEmpty()) append("\n").append(portNote)
-        append(registerStatus.prependIndent("  ").let { "\n" + it.trimStart('\n') })
+        append("\n").append(MdnsAnnouncer.diag())
         append("\nVRChat read our tree: ").append(httpRequests).append(" requests")
         if (lastHttpPath.isNotEmpty()) append(" (last ").append(lastHttpPath).append(')')
-        if (reRegisters > 0) append("\nre-announces: ").append(reRegisters).append("  last: ").append(lastReRegisterNote)
-        if (drainNote.isNotEmpty()) append("\nlast graceful stop: ").append(drainNote)
         if (stuck) append("\n!! VRChat found VRC-A but is not sending")
         append("\npush live: ").append(pushLive)
         append("\npackets received: ").append(packets)
