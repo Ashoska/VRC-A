@@ -2400,7 +2400,7 @@ object VrchatAuthManager {
     }
 
     /** Author-locked pick by name closeness: the closest candidate wins when it is close to the
-     *  full name ([NAME_CLOSE_MIN]) and clearly ahead of the next one ([NAME_CLOSE_LEAD]), so
+     *  full name ([NAME_CLOSE_MIN], 1.0 = same name after folding or a mid-word truncation) and clearly ahead of the next one ([NAME_CLOSE_LEAD]), so
      *  same-author avatars that only share a word are ignored instead of making it ambiguous.
      *  Empty = nothing close enough (no button: a wrong clone is worse); 2+ = still a tie. */
     private fun <T> closestByName(logName: String, cands: List<T>, name: (T) -> String): List<T> {
@@ -2411,7 +2411,7 @@ object VrchatAuthManager {
         else scored.filter { scored[0].second - it.second < NAME_CLOSE_LEAD }.map { it.first }
     }
 
-    private const val NAME_CLOSE_MIN = 0.8f
+    private const val NAME_CLOSE_MIN = 1.0f
     private const val NAME_CLOSE_LEAD = 0.1f
 
     private fun normalizeAvatarName(s: String): String =
