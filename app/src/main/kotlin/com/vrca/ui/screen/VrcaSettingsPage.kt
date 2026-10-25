@@ -561,6 +561,22 @@ internal fun SettingsPage(
                                 }
                             }
 
+                            // Save every research readout to one file in Downloads
+                            // (too long to screenshot on the panel).
+                            var saveResult by remember { mutableStateOf("") }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                saveResult = "Saving…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    saveResult = runCatching { com.vrca.osc.FindingsExport.saveAll(ctx) }
+                                        .getOrElse { "save failed: ${it.message}" }
+                                }
+                            }) {
+                                Text("Save all findings to Downloads")
+                            }
+                            if (saveResult.isNotEmpty()) {
+                                Text(saveResult, style = MaterialTheme.typography.bodySmall)
+                            }
+
                             // Announce VRC-A as an OSCQuery app so VRChat SENDS its
                             // output (head/wrist tracking, avatar params) to us.
                             Text("Announce to VRChat (receive test)", style = MaterialTheme.typography.labelMedium)
