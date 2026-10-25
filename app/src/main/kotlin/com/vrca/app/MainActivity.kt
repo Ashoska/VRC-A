@@ -52,10 +52,12 @@ class MainActivity : ComponentActivity() {
         VrcaApplication.openedFromSwipe =
             runCatching { AppShutdown.isSwipedAway(applicationContext) }.getOrDefault(false)
 
-        // A launch from the BootReceiver (device turned on) is a genuine cold start —
-        // show the boot screen (and let the feature-session restore run visibly).
-        VrcaApplication.openedFromBoot =
-            runCatching { intent?.getBooleanExtra("vrca_from_boot", false) == true }.getOrDefault(false)
+        // The first open since the device restarted (BootReceiver left a note) is a genuine
+        // cold start: show the boot screen and its checks (and let the feature-session restore
+        // run visibly). Read once per process, then cleared.
+        if (!VrcaApplication.openedFromBoot) {
+            VrcaApplication.openedFromBoot = runCatching { takeRebooted(applicationContext) }.getOrDefault(false)
+        }
 
         //Ensure device hash exists early (before any screen reads it).
         runCatching { ensureDeviceHash(applicationContext) }
@@ -72,10 +74,13 @@ class MainActivity : ComponentActivity() {
         // The onboarding tutorial's Permissions step and Settings → Permissions
         // own that prompt; the foreground service starts fine without it (its
         // notification just stays hidden until the permission is granted).
-        KeepAliveService.start(applicationContext)
+        // (Both wait for "Start VRC-A" during a safe start after a crash, CrashReport.)
+        CrashReport.whenStarted {
+            KeepAliveService.start(applicationContext)
 
-        // Periodic watchdog: re-arms the pipeline/keep-alive if an OEM kills the process.
-        PipelineWatchdogWorker.ensureScheduled(applicationContext)
+            // Periodic watchdog: re-arms the pipeline/keep-alive if an OEM kills the process.
+            PipelineWatchdogWorker.ensureScheduled(applicationContext)
+        }
 
         setContent {
             GremlinTheme(themeMode = com.vrca.ui.theme.ThemeMode.Dark) {
@@ -83,8 +88,27 @@ class MainActivity : ComponentActivity() {
                 VrcaApp()
 
                 //Overlay MUST stay inside Compose because OverlayDaemon is @Composable
-                OverlayDaemon(this@MainActivity)
+                // (Not during a safe start after a crash: CrashReport.)
+                if (!CrashReport.safeStart) OverlayDaemon(this@MainActivity)
             }
+        }
+    }
+
+    companion object {
+        private const val PREFS = "vrca_remote"
+        private const val KEY_REBOOTED = "rebooted_since_open"
+
+        /** BootReceiver: the device restarted; the next open is a cold start. */
+        fun markRebooted(ctx: Context) {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_REBOOTED, true).apply()
+        }
+
+        /** True (once) if the device restarted since the app was last opened. */
+        fun takeRebooted(ctx: Context): Boolean {
+            val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (!prefs.getBoolean(KEY_REBOOTED, false)) return false
+            prefs.edit().remove(KEY_REBOOTED).apply()
+            return true
         }
     }
 }
@@ -173,7 +197,7 @@ private fun signingCertSha256Hex(ctx: Context): String {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
             val signingInfo = info.signingInfo
-            val sigs = signingInfo.apkContentsSigners
+            val sigs = signingInfo?.apkContentsSigners ?: emptyArray()
             sigs.firstOrNull()?.toByteArray() ?: byteArrayOf()
         } else {
             @Suppress("DEPRECATION")

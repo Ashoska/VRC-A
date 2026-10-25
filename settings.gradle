@@ -2,9 +2,10 @@ pluginManagement {
     repositories {
         // Google's Maven Central mirror first: Maven Central rate-limits (HTTP 429) the shared
         // cloud-session egress, which failed every fresh lab/compile run. mavenCentral() stays as fallback.
+        // google() before the plugin portal: the portal hands AGP's own dependencies to Maven Central (429s).
+        google()
         maven { url "https://maven-central.storage-download.googleapis.com/maven2/" }
         gradlePluginPortal()
-        google()
         mavenCentral()
     }
 }
@@ -17,10 +18,15 @@ dependencyResolutionManagement {
         // cloud-session egress, which failed every fresh lab/compile run. mavenCentral() stays as fallback.
         maven { url "https://maven-central.storage-download.googleapis.com/maven2/" }
         mavenCentral()
-        // Only for the official sherpa-onnx Android AAR (headset speech engine).
+        // Only for the official sherpa-onnx Android AAR (headset speech engine) and
+        // libadb-android + its SPAKE2 pairing library (headset ADB shell tests).
         exclusiveContent {
             forRepository { maven { url "https://jitpack.io" } }
-            filter { includeGroup "com.github.k2-fsa.sherpa-onnx" }
+            filter {
+                includeGroup "com.github.k2-fsa.sherpa-onnx"
+                includeGroup "com.github.MuntashirAkon"
+                includeGroup "com.github.MuntashirAkon.spake2-java"
+            }
         }
     }
 }

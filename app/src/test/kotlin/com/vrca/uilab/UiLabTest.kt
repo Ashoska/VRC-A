@@ -18,6 +18,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.ConscryptMode
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
 import java.io.File
@@ -35,6 +36,8 @@ class UiLabApp : VrcaApplication() {
         org.robolectric.shadows.ShadowEnvironment.addExternalDir("sdcard")
         // EncryptedSharedPreferences (VRChat session store) needs an AndroidKeyStore.
         com.vrca.discordbot.lab.FakeAndroidKeyStore.install()
+        // The JVM doesn't play AnimatedVectorDrawables: draw the boot cat's thinking loop in Compose.
+        com.vrca.app.BootCatLab.drawLoops = true
         val root = System.getProperty("ui.lab.root") ?: "."
         val realFirestore = System.getProperty("uilab.ui.firestore") == "real"
         if (realFirestore) {
@@ -84,8 +87,11 @@ class UiLabApp : VrcaApplication() {
 /**
  * **UI Lab** — renders the REAL app screens on the JVM (Robolectric native graphics) and writes
  * PNGs to ui-shots/. Gated: only runs with `-PuiLab` (see tools/ui-lab/ui.sh).
+ * Conscrypt mode OFF: the headset classpath carries conscrypt-android (ADB shell tests), and
+ * Robolectric's default mode would install it as the JVM provider, whose native lib is Android-only.
  */
 @RunWith(RobolectricTestRunner::class)
+@ConscryptMode(ConscryptMode.Mode.OFF)
 @Config(sdk = [34], application = UiLabApp::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)

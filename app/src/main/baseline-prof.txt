@@ -1,0 +1,9 @@
+# Startup/baseline profile: tells Android to precompile VRC-A's own code instead of running it
+# interpreted at first. Packaged by AGP into the release APK (assets/dexopt/baseline.prof) and
+# applied by androidx.profileinstaller (already in the app through Compose). On a sideloaded
+# install Android compiles it during idle maintenance (typically while charging), so the first
+# launch or two after an update still run the slow way. Why: on the Quest, with VRChat holding
+# most of the CPU, the boot screen and the first Home build stalled on un-precompiled app code.
+# Wildcards cover every class and method in the app's own packages.
+HSPLcom/vrca/**;->**(**)**
+Lcom/vrca/**;

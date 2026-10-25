@@ -37,6 +37,36 @@ object VrchatAuthManager {
     private val _loggedInSignal = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val loggedInSignal: kotlinx.coroutines.flow.SharedFlow<Unit> = _loggedInSignal
 
+    /** What the encrypted store holds about the VRChat sign-in, as watched state. */
+    data class StoredSession(
+        val signedIn: Boolean = false,
+        val userId: String = "",
+        val displayName: String = "",
+        /** False until the encrypted store has opened: "not known yet", NOT "signed out". */
+        val loaded: Boolean = false
+    )
+
+    // The UI shows the signed-in name (and whether there is a session) from THIS, never by reading
+    // the store in a composable body: a store read only looked current because something else
+    // redrew the screen (docs/systems/ui-kit.md "Everything shown is watched state"). Published
+    // when the store opens and after every write of the cookie / user id / name, and on logout.
+    // Empty until the store has opened (warmUp starts that at process start).
+    private val _session = kotlinx.coroutines.flow.MutableStateFlow(StoredSession())
+    val session: kotlinx.coroutines.flow.StateFlow<StoredSession> = _session
+
+    private fun publishSession(prefs: android.content.SharedPreferences?) {
+        prefs ?: return
+        val userId = prefs.getString(KEY_USER_ID, null).orEmpty()
+        _session.value = StoredSession(
+            signedIn = prefs.getString(KEY_AUTH_COOKIE, null)?.isNotBlank() == true && userId.isNotBlank(),
+            userId = userId,
+            displayName = prefs.getString(KEY_DISPLAY_NAME, null).orEmpty(),
+            loaded = true
+        )
+    }
+
+    private fun publishSession(context: Context) = publishSession(openedPrefs ?: getPrefs(context))
+
     private const val TAG = "VrchatAuth"
     private const val BASE = "https://api.vrchat.cloud/api/1"
     private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
@@ -106,7 +136,63 @@ object VrchatAuthManager {
      * destructive delete+recreate only runs after several consecutive failed
      * launches (genuine MasterKey corruption). A success resets the counter.
      */
+    // The opened store, kept once it opens. Opening it is a Keystore round trip plus Tink keyset
+    // setup (tens of ms or more on the Quest, on whatever thread asked), and every isLoggedIn /
+    // getStored* / REST helper call used to open it afresh: the boot screen alone did that on
+    // every redraw. Only a SUCCESSFUL open is kept; a failed one (Keystore not ready after a
+    // reboot) returns null as before and the next call tries again. EncryptedSharedPreferences
+    // is a SharedPreferences, so one instance is safe to share across threads.
+    @Volatile private var openedPrefs: android.content.SharedPreferences? = null
+
+    //
+    // The MAIN thread never waits on the Keystore for long: right after the headset turns on the
+    // Keystore can take seconds to answer (or fail), and every main-thread caller (boot launch,
+    // view-model start, login re-checks) used to retry the open itself, so the first window
+    // couldn't draw and Horizon showed "VRC-A isn't responding" until Wait (user reports, only
+    // on the auto-open at power-on). Now one background thread opens it ([warmUp] starts it at
+    // process start); the main thread waits at most [MAIN_THREAD_WAIT_MS] and otherwise gets
+    // null, the same "not ready yet" answer as a transient Keystore failure, which every caller
+    // already re-checks for.
+    private const val MAIN_THREAD_WAIT_MS = 400L
+    private val openThread = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "vrca-auth-store").apply { isDaemon = true }
+    }
+    private val pendingLock = Any()
+    @Volatile private var pendingOpen: java.util.concurrent.Future<android.content.SharedPreferences?>? = null
+
     private fun getPrefs(context: Context): android.content.SharedPreferences? {
+        openedPrefs?.let { return it }
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) return openNow(context)
+        return try {
+            startOpen(context).get(MAIN_THREAD_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun openNow(context: Context): android.content.SharedPreferences? {
+        openedPrefs?.let { return it }
+        synchronized(this) {
+            openedPrefs?.let { return it }
+            return openPrefs(context)?.also { openedPrefs = it; publishSession(it) }
+        }
+    }
+
+    /** One open in flight at a time, on the background thread. */
+    private fun startOpen(context: Context): java.util.concurrent.Future<android.content.SharedPreferences?> {
+        val app = context.applicationContext
+        synchronized(pendingLock) {
+            pendingOpen?.takeIf { !it.isDone }?.let { return it }
+            return openThread.submit<android.content.SharedPreferences?> { openNow(app) }.also { pendingOpen = it }
+        }
+    }
+
+    /** Starts opening the store in the background (process start), so it's ready when asked. */
+    fun warmUp(context: Context) {
+        if (openedPrefs == null) runCatching { startOpen(context) }
+    }
+
+    private fun openPrefs(context: Context): android.content.SharedPreferences? {
         try {
             val p = createEncryptedPrefs(context)
             // Success → clear the persisted failure count.
@@ -580,6 +666,7 @@ object VrchatAuthManager {
 
     fun logout(context: Context) {
         getPrefs(context)?.edit()?.clear()?.apply()
+        publishSession(context)
         // Close out the current instance's "left" time now. A VRChat logout doesn't
         // fire a user-location:offline pipeline event (the socket just disconnects),
         // so without this the last instance stayed marked "Still here" and kept
@@ -681,6 +768,7 @@ object VrchatAuthManager {
                                 getPrefs(context)?.edit()
                                     ?.putString(KEY_AUTH_COOKIE, authCookieValue)
                                     ?.apply()
+                                publishSession(context)
                             }
                             val types = (0 until requires2FA.length())
                                 .map { requires2FA.getString(it) }
@@ -723,6 +811,7 @@ object VrchatAuthManager {
                                     ?.putLong(KEY_2FA_COOKIE_STORED_AT, now)
                             }
                             editor?.apply()
+                            publishSession(context)
                             _loggedInSignal.tryEmit(Unit)
                             AuthResult.Success(userId, displayName)
                         } else {
@@ -2089,7 +2178,10 @@ object VrchatAuthManager {
         'α' to 'a','Α' to 'a','β' to 'b','Β' to 'b','ε' to 'e','Ε' to 'e','ι' to 'i','Ι' to 'i','κ' to 'k','Κ' to 'k','ν' to 'v','Ν' to 'n','ο' to 'o','Ο' to 'o',
         'ρ' to 'p','Ρ' to 'p','τ' to 't','Τ' to 't','υ' to 'u','Υ' to 'y','χ' to 'x','Χ' to 'x','η' to 'n','Η' to 'h','Ζ' to 'z','Μ' to 'm',
         'ɾ' to 'r','ɳ' to 'n','ɫ' to 'l','ɡ' to 'g','ɐ' to 'a','ɘ' to 'e','ɔ' to 'o','ǝ' to 'e','ɓ' to 'b','ø' to 'o','Ø' to 'o','đ' to 'd','Đ' to 'd','ħ' to 'h','ı' to 'i',
-        'ǃ' to '.','ʚ' to '.','ɞ' to '.','ǀ' to '.','ǁ' to '.','ǂ' to '.','ˎ' to '.','ˊ' to '.','ˋ' to '.','˗' to '.')
+        'ǃ' to '.','ʚ' to '.','ɞ' to '.','ǀ' to '.','ǁ' to '.','ǂ' to '.','ˎ' to '.','ˊ' to '.','ˋ' to '.','˗' to '.',
+        // v40 (Worker): top of the "unconverted" registry + upside-down text.
+        'я' to 'r','Я' to 'r','σ' to 'o','Σ' to 'e','Λ' to 'a','Δ' to 'a','ł' to 'l','Ł' to 'l','Ɇ' to 'e','ɇ' to 'e','Ð' to 'd','ð' to 'd','ɛ' to 'e','ƈ' to 'c','ɨ' to 'i','Ҝ' to 'k','ҝ' to 'k',
+        'ʍ' to 'w','ɥ' to 'h','ʇ' to 't','ƃ' to 'g','ɹ' to 'r','ʎ' to 'y','ɯ' to 'm','ʞ' to 'k','ɟ' to 'f','ʌ' to 'v')
     private fun fancyFold(s: String): String {
         val n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC)
         val folded = buildString(n.length) {
@@ -2190,7 +2282,12 @@ object VrchatAuthManager {
                 // (don't guess); NO exact match → don't guess (a looser unique-token guess with no author
                 // is too risky — the user's explicit call). So a fancy-font name resolves iff its plain
                 // exact name is unique in the catalog.
-                val m = if (authorNorm.isNotBlank()) (if (exact.isNotEmpty()) exact else cand) else exact
+                // Author-locked fallback (no exact name): pick by how close each candidate's FULL
+                // name is to the log name ([closestByName]); a clearly closest one wins over
+                // token-siblings, a merely word-sharing one never counts: "Ashoska's Kipfel" (private) by Ashoska matched the
+                // same author's public "Kipfel | Gremlin.Inc" as a "unique" hit and cloned the wrong
+                // avatar (user-reported 2026-10-26).
+                val m = if (authorNorm.isNotBlank()) (if (exact.isNotEmpty()) exact else closestByName(avatarName, cand) { it.name }) else exact
                 if (m.size == 1) {
                     val e = m[0]
                     // CONFIRM live+public before offering (no worn image to match here — loading player —
@@ -2249,10 +2346,10 @@ object VrchatAuthManager {
             // growth, not just the one we return.
             if (merged.isNotEmpty())
                 com.vrca.vrchat.AvatarGlobalDb.harvestCandidates(context, merged.values.toList())
-            val matches = merged.values.filter {
+            val matches = closestByName(avatarName, merged.values.filter {
                 fancyFold(it.author) == authorNorm &&
                     !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.id, null)
-            }.distinctBy { it.id }
+            }.distinctBy { it.id }) { it.name }
             if (matches.size != 1) {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason =
                     if (matches.isEmpty()) "name+author: 0 avtrdb matches by author" else "name+author: ambiguous in avtrdb (${matches.size}) — won't guess"
@@ -2277,6 +2374,48 @@ object VrchatAuthManager {
                 com.vrca.vrchat.AvatarGlobalDb.contribute(context, c.imageFileId!!, c.id, avatarName, author, c.authorId, plats)
             WornAvatarResult(c.id, plats)
         }
+
+    /** How close a candidate's full name is to the log name, 0..1, after folding away fonts,
+     *  case, spacing and punctuation: 1 = same name, or the log name (4+ chars) is a mid-word
+     *  cut-off start of the candidate's (VRChat truncates long names in the log); 0 when their
+     *  numbers differ; otherwise 1 - edit distance / longer length. */
+    private fun nameCloseness(logName: String, candName: String): Float {
+        fun bare(s: String) = fancyFold(s).replace(Regex("[^\\p{L}\\p{N}]"), "")
+        val a = bare(logName); val b = bare(candName)
+        if (a.isEmpty() || b.isEmpty()) return 0f
+        if (a == b) return 1f
+        // Truncation only when the log name stops MID-WORD ("Meow M" of "Meow Meow Kitty"); a
+        // log name ending on a whole word is the full name, so "X" never takes "X 2".
+        val fa = fancyFold(logName); val fb = fancyFold(candName)
+        if (a.length >= 4 && fb.length > fa.length && fb.startsWith(fa) &&
+            fa.last().isLetterOrDigit() && fb[fa.length].isLetterOrDigit()) return 1f
+        // Different numbers = a different version/variant (v2 vs v3, "Kipfel 2"): never close.
+        if (a.filter { it.isDigit() } != b.filter { it.isDigit() }) return 0f
+        var prev = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            val cur = IntArray(b.length + 1); cur[0] = i
+            for (j in 1..b.length) {
+                cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1)
+            }
+            prev = cur
+        }
+        return 1f - prev[b.length].toFloat() / maxOf(a.length, b.length)
+    }
+
+    /** Author-locked pick by name closeness: the closest candidate wins when it is close to the
+     *  full name ([NAME_CLOSE_MIN], 1.0 = same name after folding or a mid-word truncation) and clearly ahead of the next one ([NAME_CLOSE_LEAD]), so
+     *  same-author avatars that only share a word are ignored instead of making it ambiguous.
+     *  Empty = nothing close enough (no button: a wrong clone is worse); 2+ = still a tie. */
+    private fun <T> closestByName(logName: String, cands: List<T>, name: (T) -> String): List<T> {
+        val scored = cands.map { it to nameCloseness(logName, name(it)) }
+            .filter { it.second >= NAME_CLOSE_MIN }.sortedByDescending { it.second }
+        if (scored.size <= 1) return scored.map { it.first }
+        return if (scored[0].second - scored[1].second >= NAME_CLOSE_LEAD) listOf(scored[0].first)
+        else scored.filter { scored[0].second - it.second < NAME_CLOSE_LEAD }.map { it.first }
+    }
+
+    private const val NAME_CLOSE_MIN = 1.0f
+    private const val NAME_CLOSE_LEAD = 0.1f
 
     private fun normalizeAvatarName(s: String): String =
         s.lowercase().replace(Regex("[^a-z0-9]"), "")
@@ -2841,6 +2980,7 @@ object VrchatAuthManager {
             editor.putLong(KEY_2FA_COOKIE_STORED_AT, now)
         }
         editor.apply()
+        publishSession(context)
     }
 
     // ------------------------------------------------------------------
@@ -2886,6 +3026,7 @@ object VrchatAuthManager {
             val uid = o.optString("uid", ""); if (uid.isNotBlank()) putString(KEY_USER_ID, uid)
             val dn = o.optString("dn", ""); if (dn.isNotBlank()) putString(KEY_DISPLAY_NAME, dn)
         }.commit()
+        publishSession(prefs)
         when (login(context, username, password)) {
             is AuthResult.Success -> true
             else -> false

@@ -108,3 +108,13 @@ jobs:
           name: headset-release
           path: app/build/outputs/apk/headsetApp/release/*.apk
           retention-days: 3
+
+      # R8 translation table for this exact headset build: turns the shrunk class names in
+      # Settings → Debug → "Main-thread stalls" back into real ones (docs/systems/onboarding-startup.md).
+      - name: Upload Headset R8 mapping
+        uses: actions/upload-artifact@v4
+        with:
+          name: headset-mapping
+          path: app/build/outputs/mapping/headsetAppRelease/mapping.txt
+          retention-days: 30
+          if-no-files-found: ignore

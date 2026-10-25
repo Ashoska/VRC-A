@@ -1,6 +1,5 @@
 package com.vrca.overlay.ui
 
-import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -14,14 +13,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -87,21 +86,14 @@ internal fun MessengerMessageField(chatboxViewModel: VrcaViewModel, collapse: ()
                     keepOpenState.value = !keepOpenState.value
                 },
         ) {
-            Crossfade(
-                targetState = keepOpenState.value,
-                animationSpec = tween(500), label = "OverlayLockCrossfade"
-            ) { locked ->
-                val icon = if (locked) Icons.Default.Lock else Icons.Default.LockOpen
-                val contentDescription =
-                    if (locked) stringResource(R.string.overlay_unlock_messenger)
-                    else stringResource(R.string.overlay_lock_messenger)
-                Icon(
-                    imageVector = icon,
-                    contentDescription = contentDescription,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(4.dp)
-                )
-            }
+            // Our padlock, animated between locked and unlocked (the shackle lifts / drops back in).
+            val locked = keepOpenState.value
+            val lockLabel = if (locked) stringResource(R.string.overlay_unlock_messenger) else stringResource(R.string.overlay_lock_messenger)
+            com.vrca.app.AnimatedLock(
+                open = !locked, color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(4.dp).size(24.dp)
+                    .semantics { contentDescription = lockLabel }
+            )
         }
 
         TextField(
@@ -132,14 +124,12 @@ internal fun MessengerMessageField(chatboxViewModel: VrcaViewModel, collapse: ()
 
         val interactionSource = remember { MutableInteractionSource() }
 
-        Button(
+        com.vrca.ui.common.GremlinButton(
             onClick = {},
             modifier = Modifier
                 .fillMaxHeight()
                 .scale(0.9f),
-            contentPadding = PaddingValues(0.dp),
-            shape = RoundedCornerShape(16.dp),
-            interactionSource = interactionSource
+            size = com.vrca.ui.common.GremlinButtonSize.Small
         ) {
             Icon(
                 imageVector = Icons.AutoMirrored.Default.Send,

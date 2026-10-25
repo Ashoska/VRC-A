@@ -225,20 +225,13 @@ fun VrchatLoginScreen(
                     }
                 }
 
-                Button(
+                com.vrca.ui.common.GremlinButton(
                     onClick = { focusManager.clearFocus(); doLogin() },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !isLoading && username.isNotBlank() && password.isNotBlank()
+                    enabled = username.isNotBlank() && password.isNotBlank(),
+                    loading = isLoading
                 ) {
-                    if (isLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                    } else {
-                        Text("Sign In")
-                    }
+                    Text("Sign In")
                 }
 
             } else {
@@ -314,24 +307,17 @@ fun VrchatLoginScreen(
                     }) else null
                 )
 
-                Button(
+                com.vrca.ui.common.GremlinButton(
                     onClick = { focusManager.clearFocus(); doVerify() },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !codeLoading && codeInput.length == 6
+                    enabled = codeInput.length == 6,
+                    loading = codeLoading
                 ) {
-                    if (codeLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                    } else {
-                        Text("Verify")
-                    }
+                    Text("Verify")
                 }
 
                 // Back - let them re-enter credentials if code expired
-                TextButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = {
                         awaitingCode = false
                         codeInput = ""
@@ -350,7 +336,7 @@ fun VrchatLoginScreen(
             // which clashed with the app bar). Hidden during onboarding, where
             // the login step is a hard gate (onCancel = null).
             if (onCancel != null) {
-                TextButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
                     Text("Cancel")
                 }
             }

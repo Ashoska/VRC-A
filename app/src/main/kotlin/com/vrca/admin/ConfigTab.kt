@@ -10,10 +10,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -60,7 +58,12 @@ internal fun ConfigTab(
     var tosUrl by rememberSaveable { mutableStateOf("") }
     var ownerUid by rememberSaveable { mutableStateOf("") }
     var discordInvite by rememberSaveable { mutableStateOf("") }
+    // Shows "Maintenance" on everyone's boot screen VRC-A servers row (read with the terms, no extra read).
+    var serversMaintenance by rememberSaveable { mutableStateOf(false) }
     var loadedAt by remember { mutableStateOf<Timestamp?>(null) }
+    // The terms as last loaded: a save stamps `tosUpdatedAt` (which asks users to accept again) only
+    // when one of these actually changed, never for the other settings on this tab.
+    var savedTos by remember { mutableStateOf(Triple(1, "", "")) }
 
     suspend fun load() {
         setGlobalLoading(true)
@@ -73,7 +76,9 @@ internal fun ConfigTab(
             tosUrl = snap.getString("tosUrl") ?: ""
             ownerUid = snap.getString("ownerUid") ?: ""
             discordInvite = snap.getString("discordInvite") ?: ""
+            serversMaintenance = snap.getBoolean("serversMaintenance") ?: false
             loadedAt = snap.getTimestamp("updatedAt")
+            savedTos = Triple(tosVersion, tosText, tosUrl)
             setGlobalLoading(false)
         }.onFailure { e ->
             setGlobalLoading(false)
@@ -86,14 +91,20 @@ internal fun ConfigTab(
         setError(null)
 
         runCatching {
-            val data = hashMapOf(
+            val data = hashMapOf<String, Any>(
                 "ownerUid" to ownerUid.trim(),
                 "tosVersion" to tosVersion,
                 "tosText" to tosText,
                 "tosUrl" to tosUrl,
                 "discordInvite" to discordInvite.trim(),
-                "updatedAt" to FieldValue.serverTimestamp()
+                "serversMaintenance" to serversMaintenance
             )
+            // Only a real terms change is stamped: `tosUpdatedAt` for this version's apps, and the doc's
+            // `updatedAt` too, because apps from before this fix still re-ask the terms when THAT moves.
+            if (Triple(tosVersion, tosText, tosUrl) != savedTos) {
+                data["tosUpdatedAt"] = FieldValue.serverTimestamp()
+                data["updatedAt"] = FieldValue.serverTimestamp()
+            }
             db.collection("config").document("app")
                 .set(data, SetOptions.merge())
                 .await()
@@ -145,13 +156,25 @@ internal fun ConfigTab(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                Text("VRC-A servers maintenance", style = MaterialTheme.typography.labelLarge)
+                androidx.compose.material3.Switch(
+                    checked = serversMaintenance,
+                    onCheckedChange = { serversMaintenance = it; scope.launch { saveConfig() } }
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text("ToS version", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1); scope.launch { saveConfig() } }) { Text("-") }
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1); scope.launch { saveConfig() } }) { Text("-") }
                     Text(tosVersion.toString(), fontFamily = FontFamily.Monospace)
-                    OutlinedButton(onClick = { tosVersion += 1; scope.launch { saveConfig() } }) { Text("+") }
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { tosVersion += 1; scope.launch { saveConfig() } }) { Text("+") }
                 }
             }
 
@@ -173,18 +196,18 @@ internal fun ConfigTab(
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { if (tosText.trim().isEmpty()) tosText = DEFAULT_TOS_TEXT },
                     modifier = Modifier.weight(1f)
                 ) { Text("Use template") }
 
-                OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { scope.launch { load() } },
                     modifier = Modifier.weight(1f)
                 ) { Text("Reload") }
             }
 
-            Button(
+            com.vrca.ui.common.GremlinButton(
                 onClick = { scope.launch { saveConfig() } },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Save") }

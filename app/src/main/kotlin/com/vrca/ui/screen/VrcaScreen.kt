@@ -95,6 +95,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -350,7 +351,7 @@ private fun ConnectionButton(vm: com.vrca.ui.viewmodel.VrcaViewModel) {
                     chatboxViewModel = vm,
                     modifier = Modifier.fillMaxWidth()
                 )
-                TextButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { editOpen = false },
                     modifier = Modifier.align(Alignment.End)
                 ) { Text("Done") }
@@ -661,9 +662,8 @@ fun VrcaScreen(
     // mid-session sign-out (Settings → Accounts) flips this reactively. Feeds
     // the Home health checklist and the red dot on the Home nav icon — the
     // old every-tab "Setup incomplete" banner is gone (Home-only checklist).
-    val vrcLinked = !chatboxViewModel.vrchatLoggedOut &&
-        VrchatAuthManager.isLoggedIn(ctx) &&
-        VrchatAuthManager.getStoredUserId(ctx)?.isNotBlank() == true
+    val storedSession by VrchatAuthManager.session.collectAsState()
+    val vrcLinked = !chatboxViewModel.vrchatLoggedOut && storedSession.signedIn
     val ipSet = remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
         // Headset forces the OSC target to 127.0.0.1 (loopback to VRChat on the
@@ -703,10 +703,13 @@ fun VrcaScreen(
                             Image(
                                 // The vector logo (vrca_logo_vector): sharp at any panel zoom, and the
                                 // same drawing the boot screen flies up into this spot.
-                                painter = androidx.compose.ui.res.painterResource(R.drawable.vrca_logo_vector),
+                                painter = com.vrca.ui.common.appLogoPainter(),
                                 contentDescription = "VRC-A",
-                                // 56dp of the 64dp bar is all logo.
-                                modifier = Modifier.height(56.dp)
+                                // 56dp of the 64dp bar is all logo. Hidden while the boot screen's
+                                // logo flies into this spot (read while drawing: no rebuild).
+                                modifier = Modifier.height(56.dp).graphicsLayer {
+                                    alpha = if (com.vrca.app.BootReveal.hideTopBarLogo.value) 0f else 1f
+                                }
                             )
                         } else {
                             Text(if (BuildConfig.IS_ADMIN_BUILD) "VRC-A (ADMIN)" else "VRC-A")
@@ -765,6 +768,11 @@ fun VrcaScreen(
             // Bottom navigation bar -- always visible, labelled
             bottomBar = {
                 if (!isBannedEffective) {
+                    // Selected label stays on-surface (white): Material 3 1.3+ turned it the
+                    // secondary colour by default.
+                    val navColors = androidx.compose.material3.NavigationBarItemDefaults.colors(
+                        selectedTextColor = MaterialTheme.colorScheme.onSurface
+                    )
                     NavigationBar {
                         NavigationBarItem(
                             selected = page == AppPage.Home,
@@ -782,25 +790,29 @@ fun VrcaScreen(
                                     Icon(Icons.Filled.Home, contentDescription = null)
                                 }
                             },
-                            label = { Text("Home") }
+                            label = { Text("Home") },
+                            colors = navColors
                         )
                         NavigationBarItem(
                             selected = page == AppPage.Automations,
                             onClick = { page = AppPage.Automations },
                             icon = { Icon(Icons.Filled.Sync, contentDescription = null) },
-                            label = { Text("Chatbox") }
+                            label = { Text("Chatbox") },
+                            colors = navColors
                         )
                         NavigationBarItem(
                             selected = page == AppPage.Music,
                             onClick = { page = AppPage.Music },
                             icon = { Icon(Icons.Filled.MusicNote, contentDescription = null) },
-                            label = { Text("Media") }
+                            label = { Text("Media") },
+                            colors = navColors
                         )
                         NavigationBarItem(
                             selected = page == AppPage.VrchatStatus,
                             onClick = { page = AppPage.VrchatStatus },
                             icon = { Icon(Icons.Filled.AccountCircle, contentDescription = null) },
-                            label = { Text("VRChat") }
+                            label = { Text("VRChat") },
+                            colors = navColors
                         )
                     }
                 }
@@ -831,7 +843,16 @@ fun VrcaScreen(
                     Modifier.fillMaxSize()
                 }
                 Box(contentModifier) {
+                // Pages build over a few frames (StagedBuild) only on a TAB SWITCH, where the
+                // crossfade starts them at alpha 0 and hides the steps. The page shown when the
+                // screen first appears (cold start, tabbing back into a recreated app) builds at
+                // once: staged there, Home's blocks visibly popped in one at a time (user report).
+                val initialPage = remember { page }
+                val everSwitched = remember { mutableStateOf(false) }
+                val staging = page != initialPage || everSwitched.value
+                androidx.compose.runtime.SideEffect { if (page != initialPage) everSwitched.value = true }
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
+                  androidx.compose.runtime.CompositionLocalProvider(com.vrca.ui.common.LocalStagedBuild provides staging) {
                     when (p) {
                         AppPage.Home -> {
                             if (isBannedEffective) {
@@ -890,6 +911,7 @@ fun VrcaScreen(
                             }
                         }
                     }
+                  }
                 }
                 } // Box(contentModifier)
               } // BoxWithConstraints
@@ -984,8 +1006,8 @@ private fun BannedScreen(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(onClick = onOpenSettings, modifier = Modifier.weight(1f)) { Text("Settings") }
-                OutlinedButton(onClick = onOpenInfo, modifier = Modifier.weight(1f)) { Text("Info") }
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onOpenSettings, modifier = Modifier.weight(1f)) { Text("Settings") }
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onOpenInfo, modifier = Modifier.weight(1f)) { Text("Info") }
             }
         }
     }

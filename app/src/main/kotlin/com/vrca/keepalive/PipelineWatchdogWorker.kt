@@ -36,6 +36,8 @@ class PipelineWatchdogWorker(
 
     override fun doWork(): Result {
         val ctx = applicationContext
+        // A safe start after a crash (CrashReport): don't revive anything until "Start VRC-A".
+        if (com.vrca.app.CrashReport.safeStart) return Result.success()
         try {
             // Don't resurrect a process the user deliberately swiped away. The 15s
             // freshness window is for immediate sticky restarts; this worker fires

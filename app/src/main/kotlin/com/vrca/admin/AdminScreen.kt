@@ -34,8 +34,6 @@ import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -44,7 +42,6 @@ import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.TabRow
@@ -52,7 +49,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -297,13 +293,13 @@ fun AdminScreen() {
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = {
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = {
                         myUid = readCachedUid(ctx).ifBlank { myUid }
                         scope.launch { refreshOwnerGate() }
                         setErr(null)
                     }) { Text("Re-check") }
 
-                    if (error != null) OutlinedButton(onClick = { setErr(null) }) { Text("Clear error") }
+                    if (error != null) com.vrca.ui.common.GremlinSecondaryButton(onClick = { setErr(null) }) { Text("Clear error") }
                 }
 
                 if (error != null) ErrorCard(error!!)
@@ -315,7 +311,7 @@ fun AdminScreen() {
     // ==========================================
     // MAIN UI
     // ==========================================
-    val tabs = remember { listOf("Dashboard", "Users", "Mod", "Announce", "Releases", "Config", "Log", "Bots", "Bot") }
+    val tabs = remember { listOf("Dashboard", "Users", "Mod", "Announce", "Releases", "Config", "Log", "Bots", "Bot", "Crashes") }
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
 
     // ModerationTarget is NOT saveable
@@ -720,7 +716,7 @@ fun AdminScreen() {
             if (error != null) {
                 ErrorCard(error!!)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = { setErr(null) }) { Text("Clear error") }
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { setErr(null) }) { Text("Clear error") }
                 }
             }
 
@@ -855,6 +851,7 @@ fun AdminScreen() {
                     7 -> BotsTab()
 
                     8 -> DiscordBotTab()
+                    9 -> CrashesTab(db = db, setError = ::setErr)
 
                     else -> ModLogTab(db = db, setError = ::setErr)
                 }

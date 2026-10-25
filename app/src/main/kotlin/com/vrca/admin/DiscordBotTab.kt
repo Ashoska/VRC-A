@@ -30,12 +30,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,7 +40,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -135,8 +130,8 @@ private fun StatusStrip() {
                 Text(botName.ifBlank { "Cardinal" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 StatusPill(status.name.lowercase().replaceFirstChar { it.uppercase() }, tone)
-                if (running) IconButton(onClick = { DiscordBotService.stop(ctx) }) { Icon(Icons.Filled.Stop, "Stop", tint = MaterialTheme.colorScheme.error) }
-                else IconButton(onClick = { DiscordBotStore.setEnabled(ctx, true); DiscordBotService.start(ctx) }) { Icon(Icons.Filled.PlayArrow, "Start", tint = MaterialTheme.colorScheme.primary) }
+                if (running) IconButton(onClick = { DiscordBotService.stop(ctx) }) { Icon(com.vrca.app.BootIcons.StopVector, "Stop", tint = MaterialTheme.colorScheme.error) }
+                else IconButton(onClick = { DiscordBotStore.setEnabled(ctx, true); DiscordBotService.start(ctx) }) { Icon(com.vrca.app.BootIcons.StartVector, "Start", tint = MaterialTheme.colorScheme.primary) }
             }
             if (detail.isNotBlank() && status != DiscordBotState.Status.CONNECTED) Small(detail)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -243,9 +238,9 @@ private fun PersonDetail(card: UserMemoryStore.Card, changed: () -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(card.id, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-            TextButton(onClick = { UserMemoryStore.setPinned(ctx, card.id, !card.pinned); changed() }) { Text(if (card.pinned) "Unpin" else "Pin") }
-            if (confirmDelete) TextButton(onClick = { UserMemoryStore.delete(ctx, card.id); changed() }) { Text("Confirm", color = MaterialTheme.colorScheme.error) }
-            else TextButton(onClick = { confirmDelete = true }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            com.vrca.ui.common.GremlinButton(kind = com.vrca.ui.common.GremlinButtonKind.Danger, onClick = { UserMemoryStore.setPinned(ctx, card.id, !card.pinned); changed() }) { Text(if (card.pinned) "Unpin" else "Pin") }
+            if (confirmDelete) com.vrca.ui.common.GremlinButton(kind = com.vrca.ui.common.GremlinButtonKind.Danger, onClick = { UserMemoryStore.delete(ctx, card.id); changed() }) { Text("Confirm", color = MaterialTheme.colorScheme.error) }
+            else com.vrca.ui.common.GremlinButton(kind = com.vrca.ui.common.GremlinButtonKind.Danger, onClick = { confirmDelete = true }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
         }
     }
 }
@@ -372,10 +367,9 @@ private fun CardinalSection() {
             if (teach.isNotBlank()) { PersonalityStore.teachTrait(ctx, teach); teach = ""; tick++ }
         }
         if (confirmReset) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { PersonalityStore.reset(ctx); confirmReset = false; tick++ },
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Reset all") }
-            TextButton(onClick = { confirmReset = false }) { Text("Cancel") }
-        } else TextButton(onClick = { confirmReset = true }) { Text("Reset personality", color = MaterialTheme.colorScheme.error) }
+            com.vrca.ui.common.GremlinButton(onClick = { PersonalityStore.reset(ctx); confirmReset = false; tick++ }, kind = com.vrca.ui.common.GremlinButtonKind.Danger) { Text("Reset all") }
+            com.vrca.ui.common.GremlinButton(kind = com.vrca.ui.common.GremlinButtonKind.Danger, onClick = { confirmReset = false }) { Text("Cancel") }
+        } else com.vrca.ui.common.GremlinButton(kind = com.vrca.ui.common.GremlinButtonKind.Danger, onClick = { confirmReset = true }) { Text("Reset personality", color = MaterialTheme.colorScheme.error) }
         Header("Sent with replies")
         Mono(PersonalityStore.snapshot(ctx).ifBlank { "—" })
     }
@@ -409,7 +403,7 @@ private fun ServerSection() {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(value = teach, onValueChange = { teach = it }, label = { Text("Add") }, singleLine = true, modifier = Modifier.weight(1f))
-            Button(onClick = { if (teach.isNotBlank()) { ServerMemoryStore.teach(ctx, teach); teach = ""; tick++ } }) { Text("Add") }
+            com.vrca.ui.common.GremlinButton(onClick = { if (teach.isNotBlank()) { ServerMemoryStore.teach(ctx, teach); teach = ""; tick++ } }) { Text("Add") }
         }
         Header("Channel bits (${chBits.values.sumOf { it.size }})")
         if (chBits.isEmpty()) Small("—")
@@ -474,10 +468,9 @@ private fun DaysSection() {
         }
         if (days.isNotEmpty()) {
             if (confirmClear) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { DayLogStore.clear(ctx); confirmClear = false; tick++ },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Clear all") }
-                TextButton(onClick = { confirmClear = false }) { Text("Cancel") }
-            } else TextButton(onClick = { confirmClear = true }) { Text("Clear day log", color = MaterialTheme.colorScheme.error) }
+                com.vrca.ui.common.GremlinButton(onClick = { DayLogStore.clear(ctx); confirmClear = false; tick++ }, kind = com.vrca.ui.common.GremlinButtonKind.Danger) { Text("Clear all") }
+                com.vrca.ui.common.GremlinButton(kind = com.vrca.ui.common.GremlinButtonKind.Danger, onClick = { confirmClear = false }) { Text("Cancel") }
+            } else com.vrca.ui.common.GremlinButton(kind = com.vrca.ui.common.GremlinButtonKind.Danger, onClick = { confirmClear = true }) { Text("Clear day log", color = MaterialTheme.colorScheme.error) }
         }
     }
 }
@@ -578,7 +571,7 @@ private fun SettingsSection() {
             OutlinedTextField(cooldown, { cooldown = it.filter(Char::isDigit).take(5) }, label = { Text("Cooldown s") }, keyboardOptions = num, singleLine = true, modifier = Modifier.weight(1f))
             OutlinedTextField(turns, { turns = it.filter(Char::isDigit).take(2) }, label = { Text("Context") }, keyboardOptions = num, singleLine = true, modifier = Modifier.weight(1f))
         }
-        Button(onClick = { saveAll("behaviour") }, modifier = Modifier.fillMaxWidth()) { Text(if (savedAt == "behaviour") "Saved" else "Save") }
+        com.vrca.ui.common.GremlinButton(onClick = { saveAll("behaviour") }, modifier = Modifier.fillMaxWidth()) { Text(if (savedAt == "behaviour") "Saved" else "Save") }
 
         Header("Budget")
         OutlinedTextField(budget, { budget = it.filter(Char::isDigit).take(8) }, label = { Text("Daily neurons") }, keyboardOptions = num, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -586,7 +579,7 @@ private fun SettingsSection() {
         ToggleRow("8B replies at 92%", cheapOn) { cheapOn = it; pushLadder() }
         ToggleRow("React only at 99%", reactOn) { reactOn = it; pushLadder() }
         ToggleRow("Stop at 100%", stopOn) { stopOn = it; pushLadder() }
-        Button(onClick = { pushLadder(); savedAt = "budget" }, modifier = Modifier.fillMaxWidth()) { Text(if (savedAt == "budget") "Saved" else "Save budget") }
+        com.vrca.ui.common.GremlinButton(onClick = { pushLadder(); savedAt = "budget" }, modifier = Modifier.fillMaxWidth()) { Text(if (savedAt == "budget") "Saved" else "Save budget") }
 
         Header("Muted channels")
         muted.forEach { id ->
@@ -597,7 +590,7 @@ private fun SettingsSection() {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(muteId, { muteId = it }, label = { Text("Channel id") }, singleLine = true, modifier = Modifier.weight(1f))
-            Button(onClick = { if (muteId.isNotBlank()) { muted = DiscordBotStore.toggleMutedChannel(ctx, muteId); muteId = ""; restartIfRunning(ctx, scope) } }) { Text("Mute") }
+            com.vrca.ui.common.GremlinButton(onClick = { if (muteId.isNotBlank()) { muted = DiscordBotStore.toggleMutedChannel(ctx, muteId); muteId = ""; restartIfRunning(ctx, scope) } }) { Text("Mute") }
         }
 
         Header("Connection")
@@ -607,7 +600,7 @@ private fun SettingsSection() {
         OutlinedTextField(cfGateway, { cfGateway = it }, label = { Text("AI Gateway id") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Secret("Analytics token", analytics) { analytics = it }
         OutlinedTextField(model, { model = it }, label = { Text("Reply model") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Button(onClick = { saveAll("connection") }, modifier = Modifier.fillMaxWidth()) { Text(if (savedAt == "connection") "Saved" else "Save connection") }
+        com.vrca.ui.common.GremlinButton(onClick = { saveAll("connection") }, modifier = Modifier.fillMaxWidth()) { Text(if (savedAt == "connection") "Saved" else "Save connection") }
     }
 }
 

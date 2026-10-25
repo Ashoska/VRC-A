@@ -337,16 +337,16 @@ fun OnboardingFlow(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (step > 0) {
-                            TextButton(onClick = { back() }) { Text("Back") }
+                            com.vrca.ui.common.GremlinSecondaryButton(onClick = { back() }) { Text("Back") }
                         } else Spacer(Modifier.width(8.dp))
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (replay) {
-                                TextButton(onClick = { finishNow() }) { Text("Exit tutorial") }
+                                com.vrca.ui.common.GremlinSecondaryButton(onClick = { finishNow() }) { Text("Exit tutorial") }
                                 Spacer(Modifier.width(4.dp))
                             }
                             if (!hardGateBlocked) {
-                                Button(onClick = { advance() }) {
+                                com.vrca.ui.common.GremlinButton(onClick = { advance() }) {
                                     Text(if (step == stepCount - 1) "Finish" else "Next")
                                 }
                             }
@@ -678,7 +678,7 @@ private fun PermissionRow(
                 Icon(Icons.Filled.Check, contentDescription = "Granted",
                     tint = com.vrca.ui.theme.GremlinColors.Success)
             } else {
-                OutlinedButton(onClick = onRequest) { Text("Grant") }
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onRequest) { Text("Grant") }
             }
         }
     }
@@ -808,7 +808,7 @@ private fun StepIpEntry() {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             // Optional: just tests whether the address answers a ping. The IP is
             // already saved automatically above, so this is not required.
-            OutlinedButton(onClick = { saveAndCheck() }, enabled = ip.isNotBlank() && !checking) {
+            com.vrca.ui.common.GremlinSecondaryButton(onClick = { saveAndCheck() }, enabled = ip.isNotBlank() && !checking) {
                 Text("Check reachability")
             }
             when {
@@ -950,7 +950,7 @@ private fun StepDiscord() {
                     Checkbox(checked = consentChecked, onCheckedChange = { consentChecked = it })
                     Text("I understand the risks", style = MaterialTheme.typography.bodyMedium)
                 }
-                Button(
+                com.vrca.ui.common.GremlinButton(
                     onClick = { showLogin = true },
                     enabled = consentChecked,
                     modifier = Modifier.fillMaxWidth()
@@ -1051,7 +1051,7 @@ private fun StepTestMessage(
 
         if (targetIp.isBlank()) {
             TrustNote("No IP saved yet. The test needs the address from the earlier step.")
-            OutlinedButton(onClick = onGoToIpStep, modifier = Modifier.fillMaxWidth()) {
+            com.vrca.ui.common.GremlinSecondaryButton(onClick = onGoToIpStep, modifier = Modifier.fillMaxWidth()) {
                 Text("Go to the address step")
             }
         } else {
@@ -1064,7 +1064,7 @@ private fun StepTestMessage(
         }
 
         if (!passed) {
-            Button(
+            com.vrca.ui.common.GremlinButton(
                 onClick = { running = !running },
                 enabled = targetIp.isNotBlank(),
                 modifier = Modifier.fillMaxWidth()
@@ -1097,7 +1097,7 @@ private fun StepTestMessage(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    OutlinedButton(onClick = onGoToIpStep, modifier = Modifier.fillMaxWidth()) {
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = onGoToIpStep, modifier = Modifier.fillMaxWidth()) {
                         Text("Fix the address")
                     }
                 }

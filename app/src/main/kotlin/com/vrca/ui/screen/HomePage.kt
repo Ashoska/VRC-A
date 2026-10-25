@@ -44,13 +44,10 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
@@ -375,6 +372,9 @@ internal fun HomePage(
         )
     }
 
+    // Built over 3 frames (StagedBuild): a tab switch back to Home built every card in one frame.
+    val build = com.vrca.ui.common.rememberStagedBuild(2)
+
     if (BuildConfig.IS_HEADSET_BUILD) {
         // Headset: FILL the panel (bottom nav stays pinned) and never scroll the whole
         // page. Wide → two columns (Preview + alerts LEFT, Quick Toggles + Manual Send
@@ -401,21 +401,23 @@ internal fun HomePage(
                             Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            QuickTogglesSection(
-                                vm = vm,
-                                isBanned = isBanned,
-                                cardReorderMode = cardReorderMode,
-                                onToggleReorderMode = { cardReorderMode = it },
-                                onResetOrder = { vm.resetCardOrder() },
-                                onNavigate = onNavigate
-                            )
-                            ManualSendCard(vm = vm, isBanned = isBanned)
+                            build.Step(1) {
+                                QuickTogglesSection(
+                                    vm = vm,
+                                    isBanned = isBanned,
+                                    cardReorderMode = cardReorderMode,
+                                    onToggleReorderMode = { cardReorderMode = it },
+                                    onResetOrder = { vm.resetCardOrder() },
+                                    onNavigate = onNavigate
+                                )
+                                ManualSendCard(vm = vm, isBanned = isBanned)
+                            }
                         }
                         Column(
                             Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            InstanceRosterPanel()
+                            build.Step(2) { InstanceRosterPanel() }
                         }
                     }
                 }
@@ -467,7 +469,7 @@ internal fun HomePage(
         PageContainer {
             alertCards()
             preview(true)
-            ManualSendCard(vm = vm, isBanned = isBanned)
+            build.Step(1) { ManualSendCard(vm = vm, isBanned = isBanned) }
         }
     }
 }
@@ -579,13 +581,13 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (!vm.manualLiveMode) {
-                Button(
+                com.vrca.ui.common.GremlinButton(
                     onClick = { vm.sendMessage() },
                     modifier = Modifier.weight(1f),
                     enabled = !isBanned && msgLen > 0 && !over
                 ) { Text("Send") }
             }
-            OutlinedButton(
+            com.vrca.ui.common.GremlinSecondaryButton(
                 onClick = { vm.clearManual() },
                 modifier = Modifier.weight(1f),
                 enabled = !isBanned
@@ -738,8 +740,8 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                     }
                 }
                 when {
-                    vm.speechDownloading -> OutlinedButton(onClick = { vm.cancelSpeechDownload() }) { Text("Cancel") }
-                    !vm.speechModelReady -> Button(onClick = { showPicker = true }, enabled = !isBanned) { Text("Install") }
+                    vm.speechDownloading -> com.vrca.ui.common.GremlinSecondaryButton(onClick = { vm.cancelSpeechDownload() }) { Text("Cancel") }
+                    !vm.speechModelReady -> com.vrca.ui.common.GremlinButton(onClick = { showPicker = true }, enabled = !isBanned) { Text("Install") }
                     else -> {
                         val listening = vm.speechListening
                         IconButton(
@@ -758,7 +760,7 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                                 )
                             } else {
                                 Icon(
-                                    imageVector = if (listening) Icons.Filled.Stop else Icons.Filled.Mic,
+                                    imageVector = if (listening) com.vrca.app.BootIcons.StopVector else Icons.Filled.Mic,
                                     contentDescription = if (listening) "Stop dictation" else "Start dictation",
                                     tint = if (listening) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                                 )
@@ -1271,42 +1273,30 @@ private fun PreviewAndTogglesCard(
         // toggled on; Stop halts sending and clears the VRChat chatbox WITHOUT
         // untoggling anything (so Start resumes exactly what was set up).
         if (vm.oscSending) {
-            Button(
+            com.vrca.ui.common.GremlinButton(
                 onClick = { vm.stopSending() },
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.error
-                )
+                kind = com.vrca.ui.common.GremlinButtonKind.Danger
             ) {
                 Icon(
-                    Icons.Filled.Stop,
+                    com.vrca.app.BootIcons.StopVector,
                     contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onError
+                    // The same size as Start sending's icon, so the swap doesn't jump.
+                    modifier = Modifier.size(22.dp)
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
                     // Uptime = time IN VRChat (presence-driven, matches the Discord
                     // RPC counter), not how long the chatbox has been sending.
                     "Stop sending" + if (vm.vrchatOnlineSinceMs > 0L)
-                        " · ${formatUptime(nowTickMs - vm.vrchatOnlineSinceMs)}" else "",
-                    color = MaterialTheme.colorScheme.onError
+                        " · ${formatUptime(nowTickMs - vm.vrchatOnlineSinceMs)}" else ""
                 )
             }
         } else {
-            Button(
-                onClick = { vm.startSending() },
-                enabled = !isBanned,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(
-                    Icons.Filled.PlayArrow,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("Start sending")
-            }
+            com.vrca.ui.common.GremlinButton(
+                "Start sending", { vm.startSending() }, Modifier.fillMaxWidth(),
+                enabled = !isBanned, bootIcon = com.vrca.app.BootIcons.Start
+            )
         }
 
         // Warning chips under the preview
@@ -1368,14 +1358,12 @@ private fun QuickTogglesSection(
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (cardReorderMode) {
-                        TextButton(
-                            onClick = onResetOrder,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        com.vrca.ui.common.GremlinSmallButton(
+                            onClick = onResetOrder
                         ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
                     }
-                    TextButton(
-                        onClick = { onToggleReorderMode(!cardReorderMode) },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    com.vrca.ui.common.GremlinSmallButton(
+                        onClick = { onToggleReorderMode(!cardReorderMode) }
                     ) {
                         Text(
                             if (cardReorderMode) "Done" else "Edit",
@@ -1469,7 +1457,7 @@ private fun QuickTogglesGrid(
         List(5) { "Testing ${it + 1}" }.forEach { label ->
             TogglePill(
                 label = label,
-                icon = Icons.Filled.Lock,
+                icon = com.vrca.app.BootIcons.LockVector,
                 checked = false,
                 enabled = false,
                 modifier = Modifier.fillMaxWidth()

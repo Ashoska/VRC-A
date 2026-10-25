@@ -788,7 +788,10 @@ object AvatarGlobalDb {
         'α' to 'a','Α' to 'a','β' to 'b','Β' to 'b','ε' to 'e','Ε' to 'e','ι' to 'i','Ι' to 'i','κ' to 'k','Κ' to 'k','ν' to 'v','Ν' to 'n','ο' to 'o','Ο' to 'o',
         'ρ' to 'p','Ρ' to 'p','τ' to 't','Τ' to 't','υ' to 'u','Υ' to 'y','χ' to 'x','Χ' to 'x','η' to 'n','Η' to 'h','Ζ' to 'z','Μ' to 'm',
         'ɾ' to 'r','ɳ' to 'n','ɫ' to 'l','ɡ' to 'g','ɐ' to 'a','ɘ' to 'e','ɔ' to 'o','ǝ' to 'e','ɓ' to 'b','ø' to 'o','Ø' to 'o','đ' to 'd','Đ' to 'd','ħ' to 'h','ı' to 'i',
-        'ǃ' to '.','ʚ' to '.','ɞ' to '.','ǀ' to '.','ǁ' to '.','ǂ' to '.','ˎ' to '.','ˊ' to '.','ˋ' to '.','˗' to '.')
+        'ǃ' to '.','ʚ' to '.','ɞ' to '.','ǀ' to '.','ǁ' to '.','ǂ' to '.','ˎ' to '.','ˊ' to '.','ˋ' to '.','˗' to '.',
+        // v40 (Worker): top of the "unconverted" registry + upside-down text.
+        'я' to 'r','Я' to 'r','σ' to 'o','Σ' to 'e','Λ' to 'a','Δ' to 'a','ł' to 'l','Ł' to 'l','Ɇ' to 'e','ɇ' to 'e','Ð' to 'd','ð' to 'd','ɛ' to 'e','ƈ' to 'c','ɨ' to 'i','Ҝ' to 'k','ҝ' to 'k',
+        'ʍ' to 'w','ɥ' to 'h','ʇ' to 't','ƃ' to 'g','ɹ' to 'r','ʎ' to 'y','ɯ' to 'm','ʞ' to 'k','ɟ' to 'f','ʌ' to 'v')
     // Fold "fancy" Unicode display text (ᵂᴴᴵᵀᴱ/𝗪𝗛𝗜𝗧𝗘/ＷＨＩＴＥ/ᴡʜɪᴛᴇ/νεκο/café → white/neko/cafe) so a query
     // matches the plain-ASCII tokens the Worker indexes. Mirrors the Worker's foldFancy byte-for-byte.
     private fun nfkcFold(s: String): String {

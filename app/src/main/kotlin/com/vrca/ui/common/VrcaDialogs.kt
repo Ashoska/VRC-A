@@ -68,7 +68,10 @@ fun VrcaCardDialog(
         ElevatedCard(
             shape = MaterialTheme.shapes.large,
             colors = CardDefaults.elevatedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
+                // Material 3 1.1 tinted a `surface` card by its elevation (6 dp = the lighter
+                // blue-indigo these dialogs have); 1.4 dropped that tint, so name the role that
+                // holds that exact tone (Theme.kt withGremlinSurfaceContainers: High = 6 dp).
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
             ),
             elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
             modifier = Modifier
@@ -167,14 +170,11 @@ fun VrcaConfirmDialog(
                 horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = onDismiss) { Text(dismissLabel) }
-                Button(
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onDismiss) { Text(dismissLabel) }
+                com.vrca.ui.common.GremlinButton(
                     onClick = onConfirm,
                     enabled = confirmEnabled,
-                    colors = if (destructive) ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError
-                    ) else ButtonDefaults.buttonColors()
+                    kind = if (destructive) com.vrca.ui.common.GremlinButtonKind.Danger else com.vrca.ui.common.GremlinButtonKind.Primary
                 ) { Text(confirmLabel) }
             }
         }

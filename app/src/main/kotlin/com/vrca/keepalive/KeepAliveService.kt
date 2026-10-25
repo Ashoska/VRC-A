@@ -87,6 +87,8 @@ class KeepAliveService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "onCreate")
+        // A safe start after a crash (CrashReport): stay down until "Start VRC-A".
+        if (com.vrca.app.CrashReport.holdService(this)) return
 
         startAsForeground()
 
@@ -130,6 +132,7 @@ class KeepAliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (com.vrca.app.CrashReport.holdService(this)) return START_NOT_STICKY
         // A null intent is a START_STICKY restart. If the user swiped the app away,
         // abort instead of resurrecting — this wakelock-holding service was the main
         // reason the process never died on swipe. We check BOTH the 15s freshness

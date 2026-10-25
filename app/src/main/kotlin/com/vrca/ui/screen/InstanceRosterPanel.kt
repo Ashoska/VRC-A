@@ -147,6 +147,18 @@ private fun AccessState(
     showChecklist: Boolean = false,
     onPickFolder: () -> Unit
 ) {
+    // Watched, re-checked on every resume (returning from the All-files access screen): read
+    // straight in the body it went stale once strong skipping let this skip (same ctx + lambda).
+    var resumeTick by remember { mutableStateOf(0) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) resumeTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+    val filesAccess = remember(resumeTick) { InstanceRosterManager.hasStoragePermission() }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             lead,
@@ -165,8 +177,8 @@ private fun AccessState(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        if (!InstanceRosterManager.hasStoragePermission()) {
-            Button(
+        if (!filesAccess) {
+            com.vrca.ui.common.GremlinButton(
                 onClick = {
                     runCatching {
                         ctx.startActivity(
@@ -178,7 +190,7 @@ private fun AccessState(
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Grant file access") }
         }
-        OutlinedButton(
+        com.vrca.ui.common.GremlinSecondaryButton(
             onClick = onPickFolder,
             modifier = Modifier.fillMaxWidth()
         ) { Text("Choose log folder") }

@@ -2,9 +2,13 @@
 
 plugins {
     // Versions are REQUIRED here, but we do NOT apply them at root
-    id 'com.android.application' version '8.2.2' apply false
-    id 'com.android.library' version '8.2.2' apply false
-    id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+    id 'com.android.application' version '9.4.1' apply false
+    id 'com.android.library' version '9.4.1' apply false
+    // AGP 9 compiles Kotlin itself (built-in Kotlin, no kotlin-android plugin in app/); this line
+    // only picks the Kotlin version it uses.
+    id 'org.jetbrains.kotlin.android' version '2.4.21' apply false
+    // Kotlin 2's Compose compiler (replaces composeOptions.kotlinCompilerExtensionVersion).
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.4.21' apply false
 
     // AboutLibraries
     id 'com.mikepenz.aboutlibraries.plugin' version '11.3.0' apply false
@@ -14,5 +18,5 @@ plugins {
 }
 
 tasks.register('clean', Delete) {
-    delete rootProject.buildDir
+    delete rootProject.layout.buildDirectory
 }

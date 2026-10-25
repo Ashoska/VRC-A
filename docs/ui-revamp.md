@@ -1,8 +1,8 @@
 # VRC-A — UI Revamp + Onboarding Design Doc
 
-Status: **APPROVED SPEC — not yet implemented.** This captures the full brainstorm
-(June 2026 session) so implementation can start from here without re-deriving
-decisions. No app code has been changed for this doc.
+Status: **DONE (first revamp, all 7 steps shipped; archived 2026-10-23).** Kept for the
+decisions it records (what was rejected and why). The next, full revamp is planned in
+`docs/revamp-2.md`.
 
 ---
 
@@ -272,6 +272,7 @@ Mechanics:
 
 ## Cross-cutting rules
 
+- Every screen built here also follows the build checklist in `docs/systems/ui-kit.md` ("Building UI: the checklist": Gremlin look, components, watched state, no in-place mutation, performance, lab checks).
 - Strip repeated teaching copy ("Toggle it on Home. Stop clears instantly.")
   once onboarding exists — it moves into the replayable tutorial.
 - Kill duplicated affordances (the "is this reachable somewhere more natural?"

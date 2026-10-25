@@ -331,6 +331,28 @@ service cloud.firestore {
     }
 
     /* =========================
+       CRASHES — crash reports the app sends after a crash (CrashUpload), read in the admin Crashes tab
+       ========================= */
+
+    match /crashes/{id} {
+      allow get, list, delete: if isOwner();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+          "uid", "deviceHash", "crashedAt", "createdAt", "version", "versionCode",
+          "build", "device", "sdk", "where", "what", "text"
+        ])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.text is string
+        && request.resource.data.text.size() <= 20000
+        && request.resource.data.where is string && request.resource.data.where.size() <= 100
+        && request.resource.data.what is string && request.resource.data.what.size() <= 200
+        && request.resource.data.crashedAt is int;
+
+      allow update: if false;
+    }
+
+    /* =========================
        ACTIONS — admin audit trail
        ========================= */
 

@@ -100,12 +100,124 @@ class UiLabDriver(
      *  - The sleep keeps app time from running ahead of real time, so network replies still
      *    land within a `wait`.
      */
+    /** A lag check in progress: (app ms, main-thread work in µs) per frame. */
+    private class Perf(val name: String, val heavyCalls: Int) {
+        val frames = mutableListOf<Pair<Long, Long>>()
+        /** VRC-A's own composable calls per frame (app ms → count), and which ones in the heavy frames. */
+        val appCalls = mutableListOf<Pair<Long, Int>>()
+        var calls = 0
+        var allCalls = 0
+        /** Every composable call per frame (library ones too). */
+        val totalCalls = mutableListOf<Int>()
+        val names = HashMap<String, Int>()
+        val worst = mutableListOf<Triple<Long, Int, List<Pair<String, Int>>>>()
+        /** VRC-A composables run per frame, kept for naming the every-frame streaks. */
+        val appNames = mutableListOf<Map<String, Int>>()
+    }
+    private var perf: Perf? = null
+
+    // Counts every composable call while a lag check runs (Compose's tracing hook, which the
+    // compiler puts in every composable). Calls into VRC-A's own code are the work that matters:
+    // on a sideloaded Quest that code isn't precompiled, so a frame that runs a lot of it stalls
+    // there even when the warmed-up lab does it in no time (the hand-off recomposing all of Home
+    // was 0.78 s on the headset and ~70 ms here).
+    @OptIn(androidx.compose.runtime.InternalComposeTracingApi::class)
+    private val tracer = object : androidx.compose.runtime.CompositionTracer {
+        override fun isTraceInProgress() = perf != null
+        override fun traceEventStart(key: Int, dirty1: Int, dirty2: Int, info: String) {
+            val p = perf ?: return
+            p.allCalls++
+            val n = info.substringBefore(" (")
+            p.names[n] = (p.names[n] ?: 0) + 1
+            if (info.startsWith("com.vrca.")) p.calls++
+        }
+        override fun traceEventEnd() {}
+    }
+
+    /**
+     * `perf start <name>` / `perf stop`: times every frame's main-thread work and reports the ones
+     * that would drop frames on the Quest. Lab ms are scaled by [QUEST_FACTOR] (calibrated against a
+     * stall measured on a real Quest with VRChat running, see labs.md) and compared with the Quest's
+     * 72 Hz frame (13.9 ms). An early warning, not a measurement: the Quest and this JVM are slow in
+     * different ways, and draw isn't timed (Robolectric only draws for shots). Run the scene once
+     * before `perf start` so the lab's own one-time warm-up isn't counted.
+     */
+    private fun perf(arg: String): String {
+        val words = arg.trim().split(' ').filter { it.isNotBlank() }
+        return when (words.firstOrNull()) {
+            "start" -> {
+                @OptIn(androidx.compose.runtime.InternalComposeTracingApi::class)
+                androidx.compose.runtime.Composer.setTracer(tracer)
+                val heavy = words.firstOrNull { it.startsWith("heavy=") }?.substringAfter('=')?.toIntOrNull() ?: HEAVY_FRAME_CALLS
+                perf = Perf(words.getOrElse(1) { "perf" }.takeIf { !it.contains('=') } ?: "perf", heavy); "perf started"
+            }
+            "stop" -> {
+                val p = perf ?: return "perf: not started"
+                perf = null
+                perfReport(p)
+            }
+            else -> throw IllegalArgumentException("perf start <name> | perf stop")
+        }
+    }
+
+    private fun perfReport(p: Perf): String {
+        if (p.frames.isEmpty()) return "perf: no frames"
+        val questMs = p.frames.map { (at, us) -> at to us * QUEST_FACTOR / 1000.0 }
+        val sorted = questMs.map { it.second }.sorted()
+        fun pct(q: Double) = sorted[((sorted.size - 1) * q).toInt()]
+        // A frame over 2x the budget visibly drops at least one frame on the headset.
+        val bad = questMs.filter { it.second > QUEST_FRAME_MS * 2 }
+        val heavy = p.totalCalls.filter { it >= p.heavyCalls }
+        // Frames in a row that each rebuild app composables: an animation read in composition.
+        var streak = 0; var longest = 0; var longestEnd = 0L; var longestEndIdx = 0
+        p.appCalls.forEachIndexed { i, (at, n) -> if (n >= STREAK_FRAME_CALLS) { streak++; if (streak > longest) { longest = streak; longestEnd = at; longestEndIdx = i } } else streak = 0 }
+        val streakNames = HashMap<String, Int>()
+        if (longest > 0) for (i in (longestEndIdx - longest + 1)..longestEndIdx) p.appNames[i].forEach { (k, v) -> streakNames[k] = (streakNames[k] ?: 0) + v }
+        val report = buildString {
+            append("perf ${p.name}: composable calls per frame: max ${p.totalCalls.maxOrNull() ?: 0} (VRC-A's own max ${p.appCalls.maxOf { it.second }}); ")
+            append("${heavy.size} heavy frame(s) (>= ${p.heavyCalls} calls: check these on the headset)")
+            p.worst.sortedByDescending { it.second }.take(8).forEach { (at, n, top) ->
+                append("\n  HEAVY at ${at} ms app time: $n calls: ").append(top.joinToString(", ") { "${it.first.removePrefix("com.vrca.")}x${it.second}" })
+            }
+            append("\n  longest run of frames each rebuilding >= $STREAK_FRAME_CALLS app composables: $longest frames")
+            if (longest > 0) {
+                append(" (ending at ${longestEnd} ms), re-running: ")
+                append(streakNames.entries.sortedByDescending { it.value }.take(8).joinToString(", ") { "${it.key.removePrefix("com.vrca.")}x${it.value}" })
+            }
+            append("\n")
+            append("  time: ${p.frames.size} frames, Quest estimate (x$QUEST_FACTOR) p50 ")
+            append("%.1f".format(pct(0.5))).append(" ms, p95 ").append("%.1f".format(pct(0.95)))
+            append(" ms, max ").append("%.0f".format(sorted.last())).append(" ms; ")
+            append("${bad.size} frame(s) would visibly drop (> ${(QUEST_FRAME_MS * 2).toInt()} ms)")
+            bad.sortedByDescending { it.second }.take(12).forEach { (at, ms) ->
+                append("\n  at ${at} ms app time: ~").append("%.0f".format(ms)).append(" ms on Quest")
+            }
+        }
+        File(outDir, "${p.name}-perf.txt").writeText(
+            report + "\n\napp_ms quest_ms app_calls all_calls\n" + questMs.indices.joinToString("\n") { i -> "${questMs[i].first} ${"%.1f".format(questMs[i].second)} ${p.appCalls[i].second} ${p.totalCalls[i]}" }
+        )
+        return report
+    }
+
     fun settle(ms: Long) {
         var left = ms
         while (left > 0) {
             val frameStart = System.nanoTime()
             looper.idleFor(Duration.ofMillis(FRAME_MS))
             layoutRoots()
+            // Lag check: this frame's main-thread work (everything the looper ran + layout), timed
+            // before any recording capture so `record` can't inflate it.
+            perf?.let { p ->
+                p.frames.add(clockMs to (System.nanoTime() - frameStart) / 1_000)
+                p.appCalls.add(clockMs to p.calls)
+                p.appNames.add(p.names.filterKeys { it.startsWith("com.vrca.") })
+                if (p.allCalls >= p.heavyCalls) p.worst.add(Triple(clockMs, p.allCalls,
+                    // VRC-A's own first (that's what to fix), then the busiest library calls.
+                    (p.names.entries.filter { it.key.startsWith("com.vrca.") }.sortedByDescending { it.value }.take(8) +
+                        p.names.entries.filter { !it.key.startsWith("com.vrca.") }.sortedByDescending { it.value }.take(3)).map { it.key to it.value }))
+                p.totalCalls.add(p.allCalls)
+                p.calls = 0; p.allCalls = 0; p.names.clear()
+            }
             clockMs += FRAME_MS
             trackWindows()
             trackToasts()
@@ -159,6 +271,9 @@ class UiLabDriver(
             "show" -> UiLabScenes.show(this, arg)
             "hide" -> { overlay.value = null; if (base.value.startsWith("show:")) base.value = "screen"; "hidden" }
             "record" -> record(arg)
+            // The app's debug log (Settings > Debug: main-thread stalls + notes such as the boot timeline).
+            "debuglog" -> "debug log:\n" + com.vrca.app.MainThreadWatch.read(app).ifBlank { "(empty)" }
+            "perf" -> perf(arg)
             "touch" -> touch(arg, TAP_HOLD_MS, "touch")
             "press" -> touch(arg, PRESS_HOLD_MS, "press")
             "drag" -> drag(arg)
@@ -305,7 +420,9 @@ class UiLabDriver(
     // -------------------------------------------------------------- recording
 
     /** Frames being captured (`record start`): app time since start, and when the last frame was. */
-    private class Recording(val name: String, val everyMs: Long) {
+    /** [fullDir] non-null = `full`: every frame is written there at full resolution as it's taken
+     *  (only a small copy is kept, for the filmstrip), so a long recording fits in memory. */
+    private class Recording(val name: String, val everyMs: Long, val fullDir: File? = null) {
         val frames = mutableListOf<Bitmap>()
         val times = mutableListOf<Long>()
         var appMs = 0L
@@ -327,10 +444,12 @@ class UiLabDriver(
         val parts = arg.split(Regex("\\s+")).filter { it.isNotEmpty() }
         return when (parts.firstOrNull()) {
             "start" -> {
-                val name = parts.getOrNull(1) ?: error("record start <name> [everyMs]")
+                val name = parts.getOrNull(1) ?: error("record start <name> [everyMs] [full]")
                 val every = (parts.getOrNull(2)?.toLongOrNull() ?: 32L).coerceAtLeast(FRAME_MS)
-                rec = Recording(name, every).also { capture(it) } // the "before" frame
-                "recording $name every $every ms"
+                val full = "full" in parts.drop(2)
+                val dir = if (full) File(outDir, "$name-frames").apply { deleteRecursively(); mkdirs() } else null
+                rec = Recording(name, every, dir).also { capture(it) } // the "before" frame
+                "recording $name every $every ms${if (full) " at full resolution" else ""}"
             }
             "stop" -> {
                 val r = rec ?: error("not recording")
@@ -348,9 +467,13 @@ class UiLabDriver(
      *  resolution is tens of MB). Stops adding past [MAX_FRAMES]. */
     private fun capture(r: Recording) {
         r.lastAt = r.appMs
-        if (r.frames.size >= MAX_FRAMES) return
+        if (r.frames.size >= (if (r.fullDir != null) MAX_FULL_FRAMES else MAX_FRAMES)) return
         val (full, _) = render()
-        val k = minOf(1f, MAX_FRAME_SIDE.toFloat() / maxOf(full.width, full.height))
+        r.fullDir?.let { d ->
+            File(d, "%04d.png".format(r.times.size)).outputStream().use { full.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        val side = if (r.fullDir != null) FULL_KEEP_SIDE else MAX_FRAME_SIDE
+        val k = minOf(1f, side.toFloat() / maxOf(full.width, full.height))
         val frame = if (k < 1f) Bitmap.createScaledBitmap(full, (full.width * k).toInt(), (full.height * k).toInt(), true)
             .also { full.recycle() } else full
         r.frames += frame
@@ -361,9 +484,14 @@ class UiLabDriver(
      *  ui.sh / uictl.sh afterwards) makes the GIF from them. The unit-test classpath is the
      *  Android SDK's, which has no javax.imageio/java.awt to write a GIF here. */
     private fun writeFrames(dir: File, r: Recording) {
-        dir.deleteRecursively(); dir.mkdirs()
-        r.frames.forEachIndexed { i, bmp ->
-            File(dir, "%04d.png".format(i)).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        if (r.fullDir == null) {
+            dir.deleteRecursively(); dir.mkdirs()
+            r.frames.forEachIndexed { i, bmp ->
+                File(dir, "%04d.png".format(i)).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            }
+        } else {
+            // Already written at full size; drop any past the last kept frame (a removed "before" frame).
+            dir.listFiles { f -> f.name.endsWith(".png") && (f.nameWithoutExtension.toIntOrNull() ?: 0) >= r.times.size }?.forEach { it.delete() }
         }
         File(dir, "times.txt").writeText(r.times.joinToString("\n", postfix = "\n"))
     }
@@ -1059,6 +1187,14 @@ class UiLabDriver(
     companion object {
         const val SETTLE_AFTER_ACTION_MS = 400L
         private const val FRAME_MS = 16L
+        /** Lab main-thread ms → Quest ms. 1.0: no reliable factor exists (labs.md "Lag check"). */
+        const val QUEST_FACTOR = 1.0
+        /** One frame at the Quest panel's 72 Hz. */
+        const val QUEST_FRAME_MS = 13.9
+        /** Composable calls (library ones too) in one frame that flag it as heavy (`perf start x heavy=N`). */
+        const val HEAVY_FRAME_CALLS = 1000
+        /** Calls per frame that count toward a "rebuilds every frame" streak. */
+        const val STREAK_FRAME_CALLS = 20
         // Real input: how long a finger rests for a tap / a long press (Android's long-press
         // timeout is 400-500 ms), a drag's default move time and its rest before lifting, a
         // swipe's flick time, the frames a hover glides over, and the touch-target minimum.
@@ -1079,6 +1215,9 @@ class UiLabDriver(
         private const val LONG_AGO = Long.MIN_VALUE / 4
         // Recording: frame size, how many are kept, and the filmstrip's grid.
         private const val MAX_FRAME_SIDE = 1024
+        /** `record … full`: frames go straight to disk, so many more fit; the kept copy is small. */
+        private const val MAX_FULL_FRAMES = 1500
+        private const val FULL_KEEP_SIDE = 480
         private const val MAX_FRAMES = 240
         private const val SHEET_FRAMES = 24
         private const val SHEET_COLS = 4

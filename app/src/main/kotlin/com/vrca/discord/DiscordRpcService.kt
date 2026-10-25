@@ -21,6 +21,7 @@ import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import java.io.File
@@ -62,6 +63,22 @@ object DiscordRpcState {
         get() = _failureMessage.value
         set(value) { _failureMessage.value = value }
 
+    // True once the hidden page has drawn its first picture (WebView.postVisualStateCallback).
+    // That first draw costs ~0.4 s on VRC-A's main thread on the Quest (MainThreadWatch); the
+    // boot screen's Discord row waits for it (capped) so it happens there, not during the
+    // hand-off to Home. Reset for every new page.
+    private val _pageDrawn = MutableStateFlow(false)
+    val pageDrawnFlow: StateFlow<Boolean> = _pageDrawn.asStateFlow()
+    var pageDrawn: Boolean
+        get() = _pageDrawn.value
+        set(value) { _pageDrawn.value = value }
+
+    // When this run's page started/finished loading and the gateway was found (SystemClock
+    // uptime ms, first time each, cleared per new page): the boot timeline shows them, to see where
+    // Discord's connect time goes on a real headset.
+    val phases = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    fun phase(name: String) { phases.putIfAbsent(name, android.os.SystemClock.uptimeMillis()) }
+
     fun reset() {
         status = DiscordRpcStatus.IDLE
         failureMessage = null
@@ -73,11 +90,14 @@ class DiscordRpcService : Service() {
     companion object {
         private const val TAG = "DiscordRPC"
         private const val VRCHAT_APP_ID = "438274841678872576"
+        /** Fonts and media the hidden page never needs (see shouldInterceptRequest). */
+        private val STRIPPED_MEDIA = listOf(".woff2", ".woff", ".ttf", ".otf", ".mp3", ".ogg", ".wav", ".mp4", ".webm")
         private const val NOTIF_CHANNEL = "vrca_pipeline"
         private const val NOTIF_ID = 1001
 
-        private const val DEFAULT_VRCHAT_IMAGE_URL =
-            "https://raw.githubusercontent.com/Ashoska/VRC-A-Image-store/main/vrchat-1102x620.jpg"
+        /** The default image's key in the image-store repo (`images/discord/default`). */
+        private const val DEFAULT_IMAGE_KEY = "discord/default"
+        private const val DEFAULT_VRCHAT_IMAGE_FALLBACK = "${com.vrca.ui.onboarding.ImageManifest.BASE}/images/discord/default.jpg"
 
         const val ACTION_START = "com.vrca.DISCORD_RPC_START"
         const val ACTION_STOP = "com.vrca.DISCORD_RPC_STOP"
@@ -104,6 +124,8 @@ class DiscordRpcService : Service() {
         private const val MAX_SHIM_RETRIES = 5
         private const val MAX_SESSION_RECOVERIES = 3
         private const val SHIM_RETRY_BASE_DELAY_MS = 3000L
+        private const val SHIM_POLL_MS = 300L
+        private const val SHIM_POLL_WINDOW_MS = 20_000L
         private const val PUSH_MIN_INTERVAL_MS = 1500L
         private const val PUSH_TIMER_INTERVAL_MS = 10_000L
         // If VRChat presence drops (crash, world-hop hiccup) or the whole app process
@@ -263,6 +285,8 @@ class DiscordRpcService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A safe start after a crash (CrashReport): stay down until "Start VRC-A".
+        if (com.vrca.app.CrashReport.holdService(this)) return START_NOT_STICKY
         when (intent?.action) {
             ACTION_STOP -> {
                 teardown()
@@ -402,6 +426,9 @@ class DiscordRpcService : Service() {
             shimReady = false
             shimRetryCount = 0
             consecutivePushFailures = 0
+            DiscordRpcState.pageDrawn = false
+            DiscordRpcState.phases.clear()
+            DiscordRpcState.phase("page load requested")
 
             val wv = object : WebView(applicationContext) {
                 // Chromium background-throttles (and eventually freezes) JS timers when
@@ -419,6 +446,11 @@ class DiscordRpcService : Service() {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.databaseEnabled = true
+                // Nobody ever sees this page: don't download the avatars/images/emoji the
+                // Discord client renders (the bulk of its load on a cold start, plus data and
+                // the WebView cache). The gateway and our OP 3 don't need them; the RPC's art
+                // lookup is a fetch() to external-assets, which this setting doesn't touch.
+                settings.blockNetworkImage = true
                 settings.userAgentString =
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
                 CookieManager.getInstance().setAcceptCookie(true)
@@ -430,16 +462,47 @@ class DiscordRpcService : Service() {
                         if (u.contains("discord.com")) {
                             view?.evaluateJavascript(WS_HOOK_JS, null)
                         }
+                        // Look for the gateway from the moment the app page starts, not only once
+                        // it has finished loading: Discord's JS can open its gateway before every
+                        // sub-resource is in, and the finder does nothing until it's open.
+                        if (u.contains("discord.com/channels") || u.contains("discord.com/app")) {
+                            DiscordRpcState.phase("page started")
+                            if (!shimReady) injectShimDelayed()
+                        }
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         val u = url ?: ""
                         if (u.contains("discord.com/channels") || u.contains("discord.com/app")) {
+                            DiscordRpcState.phase("page finished")
                             view?.evaluateJavascript(WS_HOOK_JS, null)
-                            injectShimDelayed()
+                            // Already polling since the page started; only restart it if that found nothing.
+                            if (!shimReady) injectShimDelayed()
+                            runCatching {
+                                view?.postVisualStateCallback(1L, object : WebView.VisualStateCallback() {
+                                    override fun onComplete(requestId: Long) { DiscordRpcState.phase("first picture"); DiscordRpcState.pageDrawn = true }
+                                })
+                            }
                         } else if (u.contains("discord.com/login")) {
                             Log.w(TAG, "Discord session expired — landed on login page")
                             onSessionExpired()
+                        }
+                    }
+
+                    // Nobody sees this page, so it gets EMPTY stylesheets and no fonts or media: far
+                    // less style/layout/paint work and ~3 MB less per start. Measured on discord.com
+                    // in Chromium, 4x CPU throttle: style work 219 -> 39 ms, requests 1047 -> 693.
+                    // Stylesheets must be answered (empty), not refused: refused, Discord's app
+                    // never finished starting (its code loader waits for them). Runs off the main
+                    // thread. The login WebView (shown to the user) is separate and untouched.
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                        val path = request?.url?.path?.lowercase() ?: return null
+                        return when {
+                            path.endsWith(".css") ->
+                                WebResourceResponse("text/css", "utf-8", java.io.ByteArrayInputStream(ByteArray(0)))
+                            STRIPPED_MEDIA.any { path.endsWith(it) } ->
+                                WebResourceResponse("application/octet-stream", null, 404, "Not Found", emptyMap(), java.io.ByteArrayInputStream(ByteArray(0)))
+                            else -> null
                         }
                     }
 
@@ -627,10 +690,36 @@ class DiscordRpcService : Service() {
         }
     }
 
+    // Was a fixed 5 s wait after the page loaded before the first shim attempt, which made every cold
+    // start take page load + 5 s (the boot screen's Discord row timed out on the headset). Now the
+    // module finder is polled every SHIM_POLL_MS from page-finished: until Discord's own JS has opened
+    // the gateway it only answers no_gateway / gateway_not_open (no side effects), so the first "ok"
+    // lands as soon as Discord is ready. Those early "not yet" answers don't use up shim retries;
+    // anything else, or still not ready after SHIM_POLL_WINDOW_MS, goes to the normal injectShim()
+    // retry path (which re-runs the finder and handles ok/failure as before). [shimPollGen] drops a
+    // stale poll chain when the page reloads.
+    private var shimPollGen = 0
+
     private fun injectShimDelayed() {
-        mainHandler.postDelayed({
-            injectShim()
-        }, 5000)
+        val gen = ++shimPollGen
+        val deadline = System.currentTimeMillis() + SHIM_POLL_WINDOW_MS
+        mainHandler.postDelayed({ pollShimEarly(gen, deadline) }, SHIM_POLL_MS)
+    }
+
+    private fun pollShimEarly(gen: Int, deadline: Long) {
+        if (gen != shimPollGen) return
+        val wv = webView ?: return
+        wv.evaluateJavascript(MODULE_FINDER_JS) { result ->
+            if (gen != shimPollGen) return@evaluateJavascript
+            lastJsResponseMs = System.currentTimeMillis()
+            val cleaned = result?.trim()?.replace("\"", "") ?: "null"
+            val notYet = cleaned.startsWith("no_gateway") || cleaned.startsWith("gateway_not_open")
+            if (notYet && System.currentTimeMillis() < deadline) {
+                mainHandler.postDelayed({ pollShimEarly(gen, deadline) }, SHIM_POLL_MS)
+            } else {
+                injectShim()
+            }
+        }
     }
 
     private fun injectShim() {
@@ -671,6 +760,7 @@ class DiscordRpcService : Service() {
                 parkOffline()
             } else if (cleaned == "ok") {
                 Log.i(TAG, "JS shim injected — module finder succeeded")
+                DiscordRpcState.phase("gateway found, connected")
                 shimReady = true
                 shimRetryCount = 0
                 consecutivePushFailures = 0
@@ -1036,8 +1126,18 @@ class DiscordRpcService : Service() {
         }
     }
 
+    /**
+     * The default image from the image-store repo, with its checksum in the URL so Discord's media proxy
+     * (which caches by URL) shows a replaced picture instead of the old one. Read from the saved
+     * manifest; refreshed in the background at most once a minute.
+     */
+    private fun defaultImageUrl(): String {
+        scope.launch { runCatching { com.vrca.ui.onboarding.ImageManifest.get(applicationContext) } }
+        return com.vrca.ui.onboarding.ImageManifest.versionedUrl(applicationContext, DEFAULT_IMAGE_KEY) ?: DEFAULT_VRCHAT_IMAGE_FALLBACK
+    }
+
     private fun squashToSquareUrl(url: String): String {
-        if (url.isBlank() || url == DEFAULT_VRCHAT_IMAGE_URL) return url
+        if (url.isBlank() || url == defaultImageUrl()) return url
         val encoded = java.net.URLEncoder.encode(url, "UTF-8")
         return "https://images.weserv.nl/?url=$encoded&w=512&h=512&fit=fill"
     }
@@ -1147,7 +1247,7 @@ class DiscordRpcService : Service() {
                     if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
                         put("large_image", squashToSquareUrl(vrcPresence.worldImageUrl))
                     } else {
-                        put("large_image", DEFAULT_VRCHAT_IMAGE_URL)
+                        put("large_image", defaultImageUrl())
                     }
                     put("large_text", if (showWorldDetails) vrcPresence.worldName else "VRChat")
                 })
@@ -1160,7 +1260,7 @@ class DiscordRpcService : Service() {
                     })
                 }
                 put("assets", JSONObject().apply {
-                    put("large_image", DEFAULT_VRCHAT_IMAGE_URL)
+                    put("large_image", defaultImageUrl())
                     put("large_text", "VRChat")
                 })
             }

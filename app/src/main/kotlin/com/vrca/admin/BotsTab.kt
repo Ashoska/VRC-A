@@ -17,7 +17,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
@@ -25,10 +24,8 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -152,6 +149,9 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
     val pending = health?.let { "${it.optInt("pendingBatches")} batches · ${it.optInt("reports")} reports" } ?: "—"
     val totals = health?.let { "＋${it.optInt("totalAdded")}  ·  －${it.optInt("totalRemoved")}" } ?: "—"
     val lastFlush = health?.optString("lastFlush", "—") ?: "—"
+    val fillsWaiting = health?.let { "%,d".format(it.optInt("unfilled")) } ?: "—"
+    val fontsWaiting = health?.let { "%,d".format(it.optInt("foldPending")) } ?: "—"
+    val indexQueue = health?.let { "%,d keys · %,d font keys".format(it.optInt("iqDepth"), it.optInt("iqpDepth")) } ?: "—"
     // Recount status — visible so you can watch the periodic reconcile correct a drifted "unfilled"
     // (phantom-backlog) count. "idle" = count is current; "running N/4096" = a recount lap is in progress.
     val recount = health?.let {
@@ -212,6 +212,9 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
             }
             AdminLabeledRow("Totals", totals)
             AdminLabeledRow("Pending", pending)
+            AdminLabeledRow("Fills waiting", fillsWaiting)
+            AdminLabeledRow("Fonts waiting", fontsWaiting)
+            AdminLabeledRow("Index queue", indexQueue)
             AdminLabeledRow("Last flush", lastFlush)
             AdminLabeledRow("Recount", recount)
             AdminLabeledRow("Admin key", adminKeySet)
@@ -271,14 +274,10 @@ private fun MaintenanceCard(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             // Master pause: stop ALL bots so you can log every account in first, then
             // resume them together. Sessions stay authed while paused.
-            Button(
+            com.vrca.ui.common.GremlinButton(
                 onClick = onTogglePause,
                 modifier = Modifier.fillMaxWidth(),
-                colors = if (paused) androidx.compose.material3.ButtonDefaults.buttonColors()
-                         else androidx.compose.material3.ButtonDefaults.buttonColors(
-                             containerColor = MaterialTheme.colorScheme.errorContainer,
-                             contentColor = MaterialTheme.colorScheme.onErrorContainer
-                         )
+                kind = com.vrca.ui.common.GremlinButtonKind.Danger
             ) { Text(if (paused) "Resume all bots" else "Pause all bots") }
             if (paused) {
                 Text("Paused — no bot is doing anything.", style = MaterialTheme.typography.bodySmall,
@@ -294,7 +293,7 @@ private fun MaintenanceCard(
                 label = { Text("Admin key") },
                 singleLine = true, modifier = Modifier.fillMaxWidth(),
                 trailingIcon = {
-                    TextButton(onClick = {
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = {
                         val chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
                         onKeyChange("vrca-" + (1..24).map { chars.random() }.joinToString(""))
                     }) { Text("Generate") }
@@ -369,13 +368,10 @@ private fun MaintenanceCard(
             // avtrdb digestion crawl — OFF by default. Uses a BOT session to resolve + absorb
             // avtrdb into the catalog. Keep OFF until the sharding migration lands (it's a
             // volume firehose into the Worker flush).
-            Button(
+            com.vrca.ui.common.GremlinButton(
                 onClick = onToggleCrawl,
                 modifier = Modifier.fillMaxWidth(),
-                colors = if (avtrdbCrawl) androidx.compose.material3.ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer
-                ) else androidx.compose.material3.ButtonDefaults.buttonColors()
+                kind = com.vrca.ui.common.GremlinButtonKind.Danger
             ) { Text(if (avtrdbCrawl) "Absorbing avtrdb — ON (tap to stop)" else "Absorb avtrdb (crawl) — OFF") }
             Text(
                 "Crawl: $crawlStatus",
@@ -413,7 +409,7 @@ private fun RoleAssignRow(
     ) {
         Text(role.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
         Box {
-            OutlinedButton(onClick = { open = true }) { Text(if (slot < 0) "Auto" else label(slot)) }
+            com.vrca.ui.common.GremlinSecondaryButton(onClick = { open = true }) { Text(if (slot < 0) "Auto" else label(slot)) }
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                 DropdownMenuItem(text = { Text("Auto") }, onClick = { onPick(-1); open = false })
                 (0 until BotVrchatSession.SLOTS).forEach { s ->
@@ -484,7 +480,7 @@ private fun BotSection(
                 }
                 roleViews.forEach { RoleRow(it) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(onClick = {
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = {
                         BotVrchatSession.logout(ctx, slot); BotController.refreshSlot(ctx, slot)
                         needs2fa = false; msg = ""
                     }) { Text("Log out") }
@@ -496,7 +492,7 @@ private fun BotSection(
                     value = code, onValueChange = { code = it },
                     label = { Text("2FA code") }, singleLine = true, modifier = Modifier.fillMaxWidth()
                 )
-                Button(
+                com.vrca.ui.common.GremlinButton(
                     enabled = !busy && code.isNotBlank(),
                     onClick = {
                         busy = true
@@ -524,7 +520,7 @@ private fun BotSection(
                     label = { Text("Bot password") }, singleLine = true,
                     visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
                 )
-                Button(
+                com.vrca.ui.common.GremlinButton(
                     enabled = !busy && user.isNotBlank() && pass.isNotBlank(),
                     onClick = {
                         busy = true; msg = "Signing in…"

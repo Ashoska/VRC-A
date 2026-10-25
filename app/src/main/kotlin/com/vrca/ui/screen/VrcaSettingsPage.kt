@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import com.vrca.BuildConfig
 import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -76,8 +77,11 @@ internal fun SettingsPage(
     // permission control with its live status, not in Android's raw settings list.
     val settingsScroll = rememberScrollState()
     val permsBring = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    // Built over 6 frames during the tab crossfade (StagedBuild; all at once was a ~4,100-call frame).
+    val build = com.vrca.ui.common.rememberStagedBuild(5)
     androidx.compose.runtime.LaunchedEffect(SettingsFocus.scrollToPermissions.value) {
         if (SettingsFocus.scrollToPermissions.value) {
+            androidx.compose.runtime.snapshotFlow { build.done }.first { it }
             kotlinx.coroutines.delay(300)   // let the page lay out after the tab switch
             runCatching { permsBring.bringIntoView() }
             SettingsFocus.scrollToPermissions.value = false
@@ -167,6 +171,7 @@ internal fun SettingsPage(
             ) { vm.setTime24hFlag(it) }
         }
 
+        build.Step(1) {
         // -- App --
         SectionCard(title = "App") {
             Text(
@@ -193,12 +198,18 @@ internal fun SettingsPage(
             if (showWhatsNew) WhatsNewDialog(onDismiss = { showWhatsNew = false })
         }
 
+        } // Step(1)
+
+        build.Step(2) {
         // -- Notifications (moved here from the VRChat tab — configuration,
         //    not daily use; docs/ui-revamp.md Settings) --
         SectionCard(title = "Notifications") {
             com.vrca.ui.settings.NotificationToggleSection(vm = vm)
         }
 
+        } // Step(2)
+
+        build.Step(3) {
         // -- Permissions (every permission the app uses lives here, each with
         //    its live granted status) --
         Box(Modifier.fillMaxWidth().bringIntoViewRequester(permsBring)) {
@@ -271,7 +282,7 @@ internal fun SettingsPage(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        TextButton(onClick = { vm.launchAppInfo(ctx) }) { Text("Open App info") }
+                        com.vrca.ui.common.GremlinSmallButton(onClick = { vm.launchAppInfo(ctx) }) { Text("Open App info") }
                     }
                 }
             }
@@ -324,7 +335,9 @@ internal fun SettingsPage(
             }
         }
         } // Box(bringIntoViewRequester = permsBring)
+        } // Step(3)
 
+        build.Step(4) {
         // -- About --
         SectionCard(title = "About") {
             Text(
@@ -372,6 +385,9 @@ internal fun SettingsPage(
             )
         }
 
+        } // Step(4)
+
+        build.Step(5) {
         // -- Debug (collapsible) --
         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(12.dp)) {
@@ -391,6 +407,51 @@ internal fun SettingsPage(
                         Modifier.padding(top = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        // Freezes recorded at startup (MainThreadWatch). Read into state off the main thread.
+                        var stalls by remember { mutableStateOf("") }
+                        var stallsTick by remember { mutableStateOf(0) }
+                        androidx.compose.runtime.LaunchedEffect(stallsTick) {
+                            stalls = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.vrca.app.MainThreadWatch.read(ctx) }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Main-thread stalls (startup)", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                            com.vrca.ui.common.GremlinSmallButton(onClick = { com.vrca.app.MainThreadWatch.clear(ctx); stallsTick++ }) { Text("Clear") }
+                        }
+                        SelectionContainer {
+                            Text(stalls.ifBlank { "(none)" }.let { com.vrca.app.sanitizeBackendRefs(it) }, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        }
+
+                        // Test crash: checks the crash screen + safe start (CrashReport) on a real device.
+                        var confirmCrash by remember { mutableStateOf(false) }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Crash screen", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                            com.vrca.ui.common.GremlinSmallButton(onClick = { confirmCrash = true }) { Text("Test crash") }
+                        }
+                        // Crash reports waiting to be sent and the last upload result (CrashUpload), read once when shown.
+                        var crashUpload by remember { mutableStateOf("") }
+                        androidx.compose.runtime.LaunchedEffect(Unit) {
+                            crashUpload = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                val waiting = com.vrca.app.CrashReport.recent(ctx).count { !it.sent }
+                                "Crash reports: $waiting waiting" + com.vrca.app.CrashUpload.lastStatus(ctx).let { if (it.isBlank()) "" else "\nLast upload: $it" }
+                            }
+                        }
+                        if (crashUpload.isNotBlank()) Text(com.vrca.app.sanitizeBackendRefs(crashUpload), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (confirmCrash) {
+                            com.vrca.ui.common.VrcaConfirmDialog(
+                                title = "Test crash",
+                                body = "VRC-A will crash now. Open it again to see the crash screen.",
+                                confirmLabel = "Crash VRC-A",
+                                destructive = true,
+                                onConfirm = {
+                                    // Thrown on the main thread after the dialog closes, like a real crash.
+                                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                        throw RuntimeException("Test crash from Settings > Debug")
+                                    }
+                                },
+                                onDismiss = { confirmCrash = false }
+                            )
+                        }
+
                         Text("Sync (last issue)", style = MaterialTheme.typography.labelMedium)
                         Text(
                             text = lastFirebaseIssue?.let { com.vrca.app.sanitizeBackendRefs(it) }
@@ -464,7 +525,7 @@ internal fun SettingsPage(
                                     kotlinx.coroutines.delay(1000)
                                 }
                             }
-                            TextButton(onClick = { com.vrca.osc.VrcaOscQuery.start(ctx) }) {
+                            com.vrca.ui.common.GremlinSmallButton(onClick = { com.vrca.osc.VrcaOscQuery.start(ctx) }) {
                                 Text("Start / rescan OSCQuery")
                             }
                             SelectionContainer {
@@ -473,6 +534,275 @@ internal fun SettingsPage(
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall
                                 )
+                            }
+
+                            // Full OSCQuery tree: every endpoint VRChat advertises,
+                            // documented or not (hunting tracking output / play space).
+                            Text("OSCQuery full endpoint list", style = MaterialTheme.typography.labelMedium)
+                            var treeDump by remember { mutableStateOf("") }
+                            val treeScope = androidx.compose.runtime.rememberCoroutineScope()
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                treeDump = "Reading…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    val dump = runCatching { com.vrca.osc.VrcaOscQuery.dumpTree() }
+                                        .getOrElse { "error: ${it.message}" }
+                                    treeDump = dump
+                                }
+                            }) {
+                                Text("Dump all endpoints")
+                            }
+                            if (treeDump.isNotEmpty()) {
+                                SelectionContainer {
+                                    Text(
+                                        treeDump,
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+
+                            // Save every research readout to one file in Downloads
+                            // (too long to screenshot on the panel).
+                            var saveResult by remember { mutableStateOf("") }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                saveResult = "Saving…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    saveResult = runCatching { com.vrca.osc.FindingsExport.saveAll(ctx) }
+                                        .getOrElse { "save failed: ${it.message}" }
+                                }
+                            }) {
+                                Text("Save all findings to Downloads")
+                            }
+                            if (saveResult.isNotEmpty()) {
+                                Text(saveResult, style = MaterialTheme.typography.bodySmall)
+                            }
+
+                            // Announce VRC-A as an OSCQuery app so VRChat SENDS its
+                            // output (head/wrist tracking, avatar params) to us.
+                            Text("Announce to VRChat (receive test)", style = MaterialTheme.typography.labelMedium)
+                            var announceDiag by remember { mutableStateOf(com.vrca.osc.OscAnnouncer.diag()) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    announceDiag = com.vrca.osc.OscAnnouncer.diag()
+                                    kotlinx.coroutines.delay(500)
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        runCatching { com.vrca.osc.OscAnnouncer.toggle(ctx) }
+                                    }
+                                }) {
+                                    Text("Start / pause announcing")
+                                }
+                                // Send ourselves a packet: is our receive socket working?
+                                com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        runCatching { com.vrca.osc.OscAnnouncer.selfTest() }
+                                    }
+                                }) {
+                                    Text("Self-test")
+                                }
+                            }
+                            SelectionContainer {
+                                Text(
+                                    announceDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            // Hand drag prototype: fist + move hand = move (horizontal).
+                            // Vertical input tests: VRChat's sit/stand toggle (int and
+                            // bool forms) and LookVertical held up/down for 1 s.
+                            Text("Vertical input tests", style = MaterialTheme.typography.labelMedium)
+                            var vertResult by remember { mutableStateOf("") }
+                            fun runVert(test: () -> Unit) {
+                                vertResult = "Sending…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    test()
+                                    vertResult = com.vrca.osc.VerticalTests.lastResult
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.sitStandInt() } }) {
+                                    Text("Sit/stand (int)")
+                                }
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.sitStandBool() } }) {
+                                    Text("Sit/stand (bool)")
+                                }
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.lookVertical(1f) } }) {
+                                    Text("Look up 1s")
+                                }
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.lookVertical(-1f) } }) {
+                                    Text("Look down 1s")
+                                }
+                            }
+                            if (vertResult.isNotEmpty()) {
+                                Text(vertResult, style = MaterialTheme.typography.bodySmall)
+                            }
+
+                            Text("Hand drag (prototype)", style = MaterialTheme.typography.labelMedium)
+                            var dragOn by remember { mutableStateOf(com.vrca.osc.HandDrag.enabled) }
+                            var dragStrength by remember { mutableStateOf(com.vrca.osc.HandDrag.strength) }
+                            var dragDiag by remember { mutableStateOf(com.vrca.osc.HandDrag.diag()) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    dragDiag = com.vrca.osc.HandDrag.diag()
+                                    kotlinx.coroutines.delay(200)
+                                }
+                            }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                val on = !dragOn
+                                dragOn = on
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    runCatching { com.vrca.osc.HandDrag.setEnabled(ctx, on) }
+                                }
+                            }) {
+                                Text(if (dragOn) "Turn drag off" else "Turn drag on")
+                            }
+                            Text("Strength ${"%.2f".format(dragStrength)}", style = MaterialTheme.typography.bodySmall)
+                            com.vrca.ui.common.GremlinSlider(
+                                value = dragStrength,
+                                onValueChange = { dragStrength = it; com.vrca.osc.HandDrag.strength = it },
+                                valueRange = 0.25f..4f
+                            )
+                            SelectionContainer {
+                                Text(
+                                    dragDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            // Floor probe (read-only): system settings + properties
+                            // naming floor/boundary/tracking, to find where Quest keeps
+                            // the floor height VRChat follows live.
+                            Text("Floor / boundary values", style = MaterialTheme.typography.labelMedium)
+                            var floorDump by remember { mutableStateOf("") }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                floorDump = "Reading…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    val dump = runCatching { com.vrca.osc.FloorProbe.dump(ctx) }
+                                        .getOrElse { "error: ${it.message}" }
+                                    floorDump = dump
+                                }
+                            }) {
+                                Text("Read floor values")
+                            }
+                            if (floorDump.isNotEmpty()) {
+                                SelectionContainer {
+                                    Text(
+                                        floorDump,
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+
+                            // ADB shell tests (read-only): pair with the Quest's own
+                            // Wireless debugging, then run the floor/boundary hunt with
+                            // shell rights. Before/After brackets a floor change.
+                            if (com.vrca.osc.AdbShell.SUPPORTED) {
+                                Text("ADB shell tests", style = MaterialTheme.typography.labelMedium)
+                                var adbStatus by remember { mutableStateOf(com.vrca.osc.AdbShell.status) }
+                                var adbOut by remember { mutableStateOf("") }
+                                var adbBusy by remember { mutableStateOf(false) }
+                                var pairCode by remember { mutableStateOf("") }
+                                var adbPort by remember { mutableStateOf("") }
+                                var adbCommand by remember { mutableStateOf("") }
+                                androidx.compose.runtime.LaunchedEffect(Unit) {
+                                    while (true) {
+                                        adbStatus = com.vrca.osc.AdbShell.status
+                                        kotlinx.coroutines.delay(500)
+                                    }
+                                }
+                                fun runAdb(work: () -> String) {
+                                    if (adbBusy) return
+                                    adbBusy = true
+                                    adbOut = "Running…"
+                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        val text = runCatching(work).getOrElse { "error: ${it.message}" }
+                                        adbOut = if (text.length > 6000) text.take(6000) + "\n… (full text: Save all findings)" else text
+                                        adbBusy = false
+                                    }
+                                }
+                                Text(adbStatus, style = MaterialTheme.typography.bodySmall)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    androidx.compose.material3.OutlinedTextField(
+                                        value = pairCode,
+                                        onValueChange = { pairCode = it.filter { ch -> ch.isDigit() }.take(6) },
+                                        modifier = Modifier.width(120.dp),
+                                        label = { Text("Pair code") },
+                                        singleLine = true,
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                        )
+                                    )
+                                    androidx.compose.material3.OutlinedTextField(
+                                        value = adbPort,
+                                        onValueChange = { adbPort = it.filter { ch -> ch.isDigit() }.take(5) },
+                                        modifier = Modifier.width(120.dp),
+                                        label = { Text("Port (auto)") },
+                                        singleLine = true,
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                        )
+                                    )
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        val code = pairCode
+                                        val port = adbPort.toIntOrNull()
+                                        runAdb { com.vrca.osc.AdbShell.pair(ctx, code, port) }
+                                    }) {
+                                        Text("Pair")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        val port = adbPort.toIntOrNull()
+                                        runAdb { com.vrca.osc.AdbShell.connect(ctx, port) }
+                                    }) {
+                                        Text("Connect")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        runAdb { com.vrca.osc.AdbShell.disconnect(); "Disconnected" }
+                                    }) {
+                                        Text("Disconnect")
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = { runAdb { com.vrca.osc.AdbProbes.runAll(ctx) } }) {
+                                        Text("Run all probes")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = { runAdb { com.vrca.osc.AdbProbes.snapshotBefore(ctx) } }) {
+                                        Text("Floor test: Before")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = { runAdb { com.vrca.osc.AdbProbes.snapshotAfter(ctx) } }) {
+                                        Text("Floor test: After")
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    androidx.compose.material3.OutlinedTextField(
+                                        value = adbCommand,
+                                        onValueChange = { adbCommand = it },
+                                        modifier = Modifier.width(360.dp),
+                                        label = { Text("Shell command") },
+                                        singleLine = true
+                                    )
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        val cmd = adbCommand.trim()
+                                        if (cmd.isNotEmpty()) runAdb { com.vrca.osc.AdbProbes.runCommand(ctx, cmd) }
+                                    }) {
+                                        Text("Run")
+                                    }
+                                }
+                                if (adbOut.isNotEmpty()) {
+                                    SelectionContainer {
+                                        Text(
+                                            adbOut,
+                                            fontFamily = FontFamily.Monospace,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
                             }
 
                             // Instance roster: shows the log file + parsed
@@ -570,7 +900,7 @@ internal fun SettingsPage(
                                     .getOrElse { "error: ${it.javaClass.simpleName}" }
                             }
                         }
-                        TextButton(onClick = { dbTrigger++ }) { Text("Test all avatar databases") }
+                        com.vrca.ui.common.GremlinSmallButton(onClick = { dbTrigger++ }) { Text("Test all avatar databases") }
                         SelectionContainer {
                             Text(
                                 dbHealth,
@@ -596,7 +926,7 @@ internal fun SettingsPage(
                                 }
                             }
                         }
-                        TextButton(onClick = { rescanTick++ }) { Text("Re-scan my avatars now") }
+                        com.vrca.ui.common.GremlinSmallButton(onClick = { rescanTick++ }) { Text("Re-scan my avatars now") }
                         SelectionContainer {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(libDiag, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
@@ -624,6 +954,7 @@ internal fun SettingsPage(
                 }
             }
         }
+        } // Step(5)
     }
 }
 
@@ -743,7 +1074,7 @@ internal fun WhatsNewDialog(onDismiss: () -> Unit) {
                 )
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onDismiss) { Text("Close") }
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onDismiss) { Text("Close") }
             }
         }
     }
@@ -802,7 +1133,7 @@ private fun SettingsRow(
             }
         }
 
-        TextButton(onClick = onPrimary) {
+        com.vrca.ui.common.GremlinSmallButton(onClick = onPrimary) {
             Text(primary)
             Spacer(Modifier.width(4.dp))
             Icon(Icons.Filled.ChevronRight, contentDescription = null)
@@ -822,10 +1153,10 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
     val repo = (ctx.applicationContext as com.vrca.app.VrcaApplication).userPreferencesRepository
     val scope = androidx.compose.runtime.rememberCoroutineScope()
 
-    // VRChat state: vm.vrchatLoggedOut flips reactively on the auth signals;
-    // also consult isLoggedIn for cold truth (covers process restarts).
-    val vrcSignedIn = !vm.vrchatLoggedOut &&
-        com.vrca.vrchat.VrchatAuthManager.isLoggedIn(ctx)
+    // VRChat state: vm.vrchatLoggedOut flips reactively on the auth signals; the stored session
+    // (watched) is the cold truth across process restarts.
+    val storedSession by com.vrca.vrchat.VrchatAuthManager.session.collectAsState()
+    val vrcSignedIn = !vm.vrchatLoggedOut && storedSession.signedIn
 
     val discordSeeded by repo.discordSessionSeeded.collectAsStateInitially(false)
     val discordEnabled by repo.discordRpcEnabled.collectAsStateInitially(false)
@@ -871,9 +1202,9 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 )
             }
             if (vrcSignedIn) {
-                TextButton(onClick = { confirmVrcSignOut = true }) { Text("Sign out") }
+                com.vrca.ui.common.GremlinSmallButton(onClick = { confirmVrcSignOut = true }) { Text("Sign out") }
             } else {
-                TextButton(onClick = onSignInVrchat) { Text("Sign in") }
+                com.vrca.ui.common.GremlinSmallButton(onClick = onSignInVrchat) { Text("Sign in") }
             }
         }
 
@@ -907,9 +1238,9 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 }
             }
             if (discordSeeded) {
-                TextButton(onClick = { confirmDiscordDisconnect = true }) { Text("Sign out") }
+                com.vrca.ui.common.GremlinSmallButton(onClick = { confirmDiscordDisconnect = true }) { Text("Sign out") }
             } else {
-                TextButton(onClick = {
+                com.vrca.ui.common.GremlinSmallButton(onClick = {
                     if (!discordRiskAccepted) showRiskConsent = true else showDiscordLogin = true
                 }) { Text("Sign in") }
             }
@@ -924,7 +1255,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 else setDiscordRpcEnabled(enabled)
             }
             if (discordStatus == com.vrca.discord.DiscordRpcStatus.SESSION_EXPIRED) {
-                TextButton(onClick = { showDiscordLogin = true }) { Text("Sign in to Discord again") }
+                com.vrca.ui.common.GremlinSmallButton(onClick = { showDiscordLogin = true }) { Text("Sign in to Discord again") }
             }
         }
 
@@ -932,7 +1263,10 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
         // listener). Connect once via OAuth; we then poll currently-playing.
         val spotifyConnected by com.vrca.spotify.SpotifyAuthManager.connectedFlow.collectAsState()
         androidx.compose.runtime.LaunchedEffect(Unit) {
-            com.vrca.spotify.SpotifyAuthManager.refreshConnectedState(ctx)
+            // Off the main thread: it opens an encrypted store (Keystore) the first time.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.vrca.spotify.SpotifyAuthManager.refreshConnectedState(ctx)
+            }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -948,9 +1282,9 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 )
             }
             if (spotifyConnected) {
-                TextButton(onClick = { com.vrca.spotify.SpotifyAuthManager.logout(ctx) }) { Text("Disconnect") }
+                com.vrca.ui.common.GremlinSmallButton(onClick = { com.vrca.spotify.SpotifyAuthManager.logout(ctx) }) { Text("Disconnect") }
             } else if (com.vrca.spotify.SpotifyAuthManager.isConfigured()) {
-                TextButton(onClick = {
+                com.vrca.ui.common.GremlinSmallButton(onClick = {
                     runCatching {
                         val url = com.vrca.spotify.SpotifyAuthManager.buildAuthUrl(ctx)
                         ctx.startActivity(
@@ -1030,8 +1364,8 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TextButton(onClick = { showRiskConsent = false }) { Text("Cancel") }
-                    androidx.compose.material3.Button(
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { showRiskConsent = false }) { Text("Cancel") }
+                    com.vrca.ui.common.GremlinButton(
                         onClick = {
                             scope.launch {
                                 repo.saveDiscordRiskAccepted(true)
@@ -1061,7 +1395,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f)
                     )
-                    TextButton(onClick = { showDiscordLogin = false }) { Text("Cancel") }
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { showDiscordLogin = false }) { Text("Cancel") }
                 }
                 Box(Modifier.fillMaxWidth().height(500.dp)) {
                     com.vrca.discord.DiscordLoginWebView(
@@ -1236,16 +1570,16 @@ private fun ChatboxWidthCalibrationTool(vm: VrcaViewModel) {
                 )
             }
         }
-        androidx.compose.material3.Slider(
+        com.vrca.ui.common.GremlinSlider(
             value = count.toFloat(),
             onValueChange = { count = it.toInt().coerceIn(1, 80) },
             valueRange = 1f..80f
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            androidx.compose.material3.Button(onClick = {
+            com.vrca.ui.common.GremlinButton(onClick = {
                 vm.sendCalibrationLine(testChar.toString().repeat(count))
             }) { Text("Send × $count") }
-            androidx.compose.material3.OutlinedButton(onClick = { vm.sendCalibrationLine("") }) {
+            com.vrca.ui.common.GremlinSecondaryButton(onClick = { vm.sendCalibrationLine("") }) {
                 Text("Clear chatbox")
             }
         }
@@ -1271,15 +1605,15 @@ private fun ChatboxWidthCalibrationTool(vm: VrcaViewModel) {
         Text("Auto sequence — screenshot each line in VRChat and send the shots to the dev:",
             style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            androidx.compose.material3.Button(onClick = { seqIndex = 0; seqSend(0) }) {
+            com.vrca.ui.common.GremlinButton(onClick = { seqIndex = 0; seqSend(0) }) {
                 Text(if (seqIndex < 0) "Start sequence" else "Restart")
             }
             if (seqIndex >= 0) {
-                androidx.compose.material3.OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { if (seqIndex > 0) { seqIndex--; seqSend(seqIndex) } },
                     enabled = seqIndex > 0
                 ) { Text("Prev") }
-                androidx.compose.material3.Button(onClick = {
+                com.vrca.ui.common.GremlinButton(onClick = {
                     if (seqIndex < com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS.size - 1) {
                         seqIndex++; seqSend(seqIndex)
                     }
@@ -1317,14 +1651,14 @@ private fun ChatboxWidthCalibrationTool(vm: VrcaViewModel) {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            androidx.compose.material3.Button(onClick = {
+            com.vrca.ui.common.GremlinButton(onClick = {
                 val counts = measured.mapNotNull { (c, s) ->
                     s.toIntOrNull()?.takeIf { it > 0 }?.let { c to it }
                 }.toMap()
                 com.vrca.nowplaying.ChatboxCalibration.save(ctx, counts)
                 calibrated = com.vrca.nowplaying.ChatboxCalibration.calibrated
             }) { Text("Save calibration") }
-            androidx.compose.material3.OutlinedButton(onClick = {
+            com.vrca.ui.common.GremlinSecondaryButton(onClick = {
                 com.vrca.nowplaying.ChatboxCalibration.clear(ctx)
                 measured.clear()
                 calibrated = false
