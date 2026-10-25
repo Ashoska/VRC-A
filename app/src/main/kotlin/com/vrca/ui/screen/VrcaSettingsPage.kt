@@ -700,6 +700,111 @@ internal fun SettingsPage(
                                 }
                             }
 
+                            // ADB shell tests (read-only): pair with the Quest's own
+                            // Wireless debugging, then run the floor/boundary hunt with
+                            // shell rights. Before/After brackets a floor change.
+                            if (com.vrca.osc.AdbShell.SUPPORTED) {
+                                Text("ADB shell tests", style = MaterialTheme.typography.labelMedium)
+                                var adbStatus by remember { mutableStateOf(com.vrca.osc.AdbShell.status) }
+                                var adbOut by remember { mutableStateOf("") }
+                                var adbBusy by remember { mutableStateOf(false) }
+                                var pairCode by remember { mutableStateOf("") }
+                                var adbPort by remember { mutableStateOf("") }
+                                var adbCommand by remember { mutableStateOf("") }
+                                androidx.compose.runtime.LaunchedEffect(Unit) {
+                                    while (true) {
+                                        adbStatus = com.vrca.osc.AdbShell.status
+                                        kotlinx.coroutines.delay(500)
+                                    }
+                                }
+                                fun runAdb(work: () -> String) {
+                                    if (adbBusy) return
+                                    adbBusy = true
+                                    adbOut = "Running…"
+                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        val text = runCatching(work).getOrElse { "error: ${it.message}" }
+                                        adbOut = if (text.length > 6000) text.take(6000) + "\n… (full text: Save all findings)" else text
+                                        adbBusy = false
+                                    }
+                                }
+                                Text(adbStatus, style = MaterialTheme.typography.bodySmall)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    androidx.compose.material3.OutlinedTextField(
+                                        value = pairCode,
+                                        onValueChange = { pairCode = it.filter { ch -> ch.isDigit() }.take(6) },
+                                        modifier = Modifier.width(120.dp),
+                                        label = { Text("Pair code") },
+                                        singleLine = true,
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                        )
+                                    )
+                                    androidx.compose.material3.OutlinedTextField(
+                                        value = adbPort,
+                                        onValueChange = { adbPort = it.filter { ch -> ch.isDigit() }.take(5) },
+                                        modifier = Modifier.width(120.dp),
+                                        label = { Text("Port (auto)") },
+                                        singleLine = true,
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                        )
+                                    )
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        val code = pairCode
+                                        val port = adbPort.toIntOrNull()
+                                        runAdb { com.vrca.osc.AdbShell.pair(ctx, code, port) }
+                                    }) {
+                                        Text("Pair")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        val port = adbPort.toIntOrNull()
+                                        runAdb { com.vrca.osc.AdbShell.connect(ctx, port) }
+                                    }) {
+                                        Text("Connect")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        runAdb { com.vrca.osc.AdbShell.disconnect(); "Disconnected" }
+                                    }) {
+                                        Text("Disconnect")
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = { runAdb { com.vrca.osc.AdbProbes.runAll(ctx) } }) {
+                                        Text("Run all probes")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = { runAdb { com.vrca.osc.AdbProbes.snapshotBefore(ctx) } }) {
+                                        Text("Floor test: Before")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = { runAdb { com.vrca.osc.AdbProbes.snapshotAfter(ctx) } }) {
+                                        Text("Floor test: After")
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    androidx.compose.material3.OutlinedTextField(
+                                        value = adbCommand,
+                                        onValueChange = { adbCommand = it },
+                                        modifier = Modifier.width(360.dp),
+                                        label = { Text("Shell command") },
+                                        singleLine = true
+                                    )
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        val cmd = adbCommand.trim()
+                                        if (cmd.isNotEmpty()) runAdb { com.vrca.osc.AdbProbes.runCommand(ctx, cmd) }
+                                    }) {
+                                        Text("Run")
+                                    }
+                                }
+                                if (adbOut.isNotEmpty()) {
+                                    SelectionContainer {
+                                        Text(
+                                            adbOut,
+                                            fontFamily = FontFamily.Monospace,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            }
+
                             // Instance roster: shows the log file + parsed
                             // location/world/roster + the last log lines with what the
                             // parser made of each — so a "not in a world" with a
