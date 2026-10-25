@@ -536,6 +536,31 @@ internal fun SettingsPage(
                                 )
                             }
 
+                            // Full OSCQuery tree: every endpoint VRChat advertises,
+                            // documented or not (hunting tracking output / play space).
+                            Text("OSCQuery full endpoint list", style = MaterialTheme.typography.labelMedium)
+                            var treeDump by remember { mutableStateOf("") }
+                            val treeScope = androidx.compose.runtime.rememberCoroutineScope()
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                treeDump = "Reading…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    val dump = runCatching { com.vrca.osc.VrcaOscQuery.dumpTree() }
+                                        .getOrElse { "error: ${it.message}" }
+                                    treeDump = dump
+                                }
+                            }) {
+                                Text("Dump all endpoints")
+                            }
+                            if (treeDump.isNotEmpty()) {
+                                SelectionContainer {
+                                    Text(
+                                        treeDump,
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+
                             // Instance roster: shows the log file + parsed
                             // location/world/roster + the last log lines with what the
                             // parser made of each — so a "not in a world" with a
