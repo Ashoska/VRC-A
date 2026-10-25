@@ -100,6 +100,9 @@ object VrcaOscQuery {
     private var nsd: NsdManager? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
 
+    /** Debug: `_oscjson._tcp` service names Android's mDNS discovery has reported. */
+    val seenServices: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     /** VRChat's own OSCQuery service name while it's resolved (changes when VRChat
      *  restarts), else null. Used by [OscAnnouncer]'s re-announce watchdog. */
     fun vrchatServiceName(): String? = if (host != null) serviceName.ifEmpty { null } else null
@@ -207,6 +210,10 @@ object VrcaOscQuery {
             }
             override fun onDiscoveryStopped(t: String?) { discoveryActive = false }
             override fun onServiceFound(info: NsdServiceInfo) {
+                // Debug: every _oscjson service Android's mDNS client sees, ours
+                // (VRCA-…, from MdnsAnnouncer) included: proves our announcements are
+                // valid and reach other listeners on the headset.
+                seenServices.add(info.serviceName)
                 // Only VRChat's own OSCQuery service (others may exist on the LAN).
                 if (!info.serviceName.startsWith("VRChat", ignoreCase = true)) return
                 runCatching { nsd?.resolveService(info, resolveListener) }

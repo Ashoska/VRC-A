@@ -40,6 +40,10 @@ object MdnsAnnouncer {
     @Volatile private var answered = 0
     @Volatile private var bound5353 = false
     @Volatile private var lastError = ""
+    @Volatile private var heardResponses = 0
+    @Volatile private var lastResponseFrom = ""
+    @Volatile private var lastResponseNames = ""
+    @Volatile private var lastQueryFrom = ""
     private var socket: MulticastSocket? = null
     private var lock: WifiManager.MulticastLock? = null
 
@@ -96,14 +100,30 @@ object MdnsAnnouncer {
             val p = DatagramPacket(buf, buf.size)
             try {
                 s.receive(p)
-                // A query (QR bit clear) that mentions an _osc service → answer now.
-                if (p.length > 12 && (buf[p.offset + 2].toInt() and 0x80) == 0 && containsOsc(buf, p.offset, p.length)) {
-                    announce(s); answered++
+                if (p.length > 12 && containsOsc(buf, p.offset, p.length)) {
+                    val from = "${p.address?.hostAddress}:${p.port}"
+                    if ((buf[p.offset + 2].toInt() and 0x80) == 0) {
+                        // A query (QR bit clear) for an _osc service → answer now.
+                        lastQueryFrom = from
+                        announce(s); answered++
+                    } else {
+                        // Someone else's _osc announcement (VRChat's own service, or
+                        // ours looping back): proves app-to-app multicast works.
+                        heardResponses++
+                        lastResponseFrom = from
+                        lastResponseNames = instanceNames(buf, p.offset, p.length)
+                    }
                 }
             } catch (e: Exception) {
                 if (running) { lastError = "receive: ${e.message}"; Thread.sleep(1_000) }
             }
         }
+    }
+
+    /** Debug: printable runs that look like instance labels (e.g. VRChat-Client-…, VRCA-…). */
+    private fun instanceNames(d: ByteArray, off: Int, len: Int): String {
+        val text = String(d, off, len, Charsets.ISO_8859_1)
+        return Regex("(VRChat[-A-Za-z0-9]*|VRCA-[0-9]+)").findAll(text).map { it.value }.toSet().joinToString(",")
     }
 
     private fun containsOsc(d: ByteArray, off: Int, len: Int): Boolean {
@@ -185,6 +205,10 @@ object MdnsAnnouncer {
         append("mDNS: ").append(if (running) "announcing" else "off")
         append(" (port 5353 ").append(if (bound5353) "bound" else "not bound").append(")")
         append("  sent ").append(sent).append("  answered queries ").append(answered)
+        append("\nmDNS heard: ").append(heardResponses).append(" _osc announcements")
+        if (lastResponseFrom.isNotEmpty()) append(" (last from ").append(lastResponseFrom).append(": ").append(lastResponseNames).append(")")
+        if (lastQueryFrom.isNotEmpty()) append("\nmDNS last query from ").append(lastQueryFrom)
+        append("\nAndroid mDNS sees: ").append(VrcaOscQuery.seenServices.sorted().joinToString(", ").ifEmpty { "(nothing yet)" })
         if (lastError.isNotEmpty()) append("\nmDNS note: ").append(lastError)
     }
 }
