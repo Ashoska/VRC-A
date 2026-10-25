@@ -589,11 +589,10 @@ internal fun SettingsPage(
                             }
                             com.vrca.ui.common.GremlinSmallButton(onClick = {
                                 treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                    if (com.vrca.osc.OscAnnouncer.running) com.vrca.osc.OscAnnouncer.stop()
-                                    else runCatching { com.vrca.osc.OscAnnouncer.start(ctx) }
+                                    runCatching { com.vrca.osc.OscAnnouncer.toggle(ctx) }
                                 }
                             }) {
-                                Text("Start / stop announcing")
+                                Text("Start / pause announcing")
                             }
                             SelectionContainer {
                                 Text(
