@@ -36,6 +36,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -78,7 +80,11 @@ private val TERMS_SECTIONS = listOf(
 @Composable
 private fun Header(compact: Boolean, mark: Mark, subtitle: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        BootCat(mark, 0, Modifier.size(if (compact) 34.dp else 40.dp))
+        // The boot logo lands on him (BootScreen exitToRect): his spot is reported once it's placed, and he
+        // fades in as the logo fades onto him (read in the layer, so it only repaints).
+        BootCat(mark, 0, Modifier.size(if (compact) 34.dp else 40.dp)
+            .onGloballyPositioned { c -> c.boundsInRoot().let { if (BootReveal.termsCat.value != it) BootReveal.termsCat.value = it } }
+            .graphicsLayer { alpha = BootReveal.termsCatIn.floatValue })
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text("Terms of Service", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = G.Text)
