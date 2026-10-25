@@ -2279,7 +2279,12 @@ object VrchatAuthManager {
                 // (don't guess); NO exact match → don't guess (a looser unique-token guess with no author
                 // is too risky — the user's explicit call). So a fancy-font name resolves iff its plain
                 // exact name is unique in the catalog.
-                val m = if (authorNorm.isNotBlank()) (if (exact.isNotEmpty()) exact else cand) else exact
+                // Author-locked fallback (no exact name): the candidate's NAME must still agree with
+                // the log name (same base name, or the log name is VRChat's truncation of it). A bare
+                // shared token is not enough: "Ashoska's Kipfel" (private) by Ashoska matched the
+                // same author's public "Kipfel | Gremlin.Inc" as a "unique" hit and cloned the wrong
+                // avatar (user-reported 2026-10-26).
+                val m = if (authorNorm.isNotBlank()) (if (exact.isNotEmpty()) exact else cand.filter { namesAgree(avatarName, it.name) }) else exact
                 if (m.size == 1) {
                     val e = m[0]
                     // CONFIRM live+public before offering (no worn image to match here — loading player —
@@ -2339,7 +2344,7 @@ object VrchatAuthManager {
             if (merged.isNotEmpty())
                 com.vrca.vrchat.AvatarGlobalDb.harvestCandidates(context, merged.values.toList())
             val matches = merged.values.filter {
-                fancyFold(it.author) == authorNorm &&
+                fancyFold(it.author) == authorNorm && namesAgree(avatarName, it.name) &&
                     !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.id, null)
             }.distinctBy { it.id }
             if (matches.size != 1) {
@@ -2366,6 +2371,17 @@ object VrchatAuthManager {
                 com.vrca.vrchat.AvatarGlobalDb.contribute(context, c.imageFileId!!, c.id, avatarName, author, c.authorId, plats)
             WornAvatarResult(c.id, plats)
         }
+
+    /** True when a candidate's name can be the avatar the log named: equal once fonts, case,
+     *  spacing and punctuation are folded away, or the log name is a cut-off start of the
+     *  candidate's (VRChat truncates long names in the log). Used with an author lock; a
+     *  shared word alone never agrees. Strict on purpose: no button beats a wrong clone. */
+    private fun namesAgree(logName: String, candName: String): Boolean {
+        fun bare(s: String) = fancyFold(s).replace(Regex("[^\\p{L}\\p{N}]"), "")
+        val log = bare(logName); val cand = bare(candName)
+        if (log.isEmpty()) return false
+        return log == cand || (log.length >= 4 && cand.startsWith(log))
+    }
 
     private fun normalizeAvatarName(s: String): String =
         s.lowercase().replace(Regex("[^a-z0-9]"), "")
