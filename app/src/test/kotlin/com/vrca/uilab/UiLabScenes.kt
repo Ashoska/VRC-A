@@ -56,7 +56,6 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Cloud
 import com.vrca.app.CrashScreen
-import com.vrca.app.TosGate
 import com.vrca.app.UpdateDialog
 import com.vrca.app.VrcaApp
 import com.vrca.nowplaying.NowPlayingSnapshot
@@ -807,10 +806,9 @@ object UiLabScenes {
                 )
             }
             "banned" -> BannedScreen(reason = rest.ifBlank { "Repeated harassment after warnings." })
-            "tos" -> TosGate(3, SAMPLE_TOS, "https://example.com/tos", onOpenUrl = {}, onAccept = {})
+            "tos" -> com.vrca.app.TermsScreen(version = 4, updatedAtMs = 1_792_800_000_000L, onAccept = {})
             "onboarding" -> OnboardingFlow(
-                vm = d.vm, tosVersion = 3, tosText = SAMPLE_TOS, tosUrl = "https://example.com/tos",
-                tosAlreadyAccepted = true, phase1BanId = null, replay = false, onTosAccepted = {}, onFinish = {}
+                vm = d.vm, phase1BanId = null, replay = false, onFinish = {}
             )
             "login" -> VrchatLoginScreen(pendingBanId = null, onCancel = if (rest == "nocancel") null else ({})) { _, _ -> }
         }

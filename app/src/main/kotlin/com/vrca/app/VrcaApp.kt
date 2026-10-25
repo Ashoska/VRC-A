@@ -280,10 +280,12 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
     val remotePrefs = remember { ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE) }
     val deviceHash = remember { remotePrefs.getString("device_id_hash", "") ?: "" }
 
-    var remoteTosVersion by remember { mutableStateOf(1) }
+    // Seeded from boot's own read of the terms (BootResults), so the first frame after boot already
+    // knows whether the terms come next instead of assuming version 1 until the listener answers.
+    var remoteTosVersion by remember { mutableStateOf(BootResults.tosVersion ?: 1) }
     var remoteTosText by remember { mutableStateOf("") }
     var remoteTosUrl by remember { mutableStateOf("") }
-    var remoteTosUpdatedAtMs by remember { mutableStateOf(0L) }
+    var remoteTosUpdatedAtMs by remember { mutableStateOf(BootResults.tosUpdatedAtMs ?: 0L) }
     // Discord community invite rides the SAME config/app listener (it's the same doc)
     // instead of a second one-shot get() in VrcaScreen — one read, and now live: an
     // admin editing the link updates the button without a relaunch.
@@ -525,6 +527,39 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
     }
 
     /* -------------------------
+       Terms of Service (TermsScreen): straight after boot on both paths, before the tutorial for a
+       new user and before the app for a returning user whose terms changed (user, 2026-10-25: the
+       terms are their own screen, no longer the tutorial's first step).
+       ------------------------- */
+    if (!tosAccepted) {
+        TermsScreen(version = requiredTosVersion, updatedAtMs = remoteTosUpdatedAtMs, onAccept = {
+            TosPrefs.accept(ctx, requiredTosVersion)
+            // A new user who accepts and is closed before the tutorial starts must still get the tutorial
+            // (the existing-user pre-seed below treats "accepted, tutorial never started" as an upgrade).
+            if (!com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)) com.vrca.ui.onboarding.OnboardingPrefs.markStarted(ctx)
+            tosAccepted = true
+            // Accepted: free the terms' on-demand pictures, like the tutorial's on finishing.
+            com.vrca.ui.onboarding.TosImageStore.clear(ctx)
+            scope.launch {
+                runCatching {
+                    val data = hashMapOf(
+                        "tosAcceptedVersion" to requiredTosVersion,
+                        "tosAcceptedAt" to Timestamp.now(),
+                        "updatedAt" to Timestamp.now()
+                    )
+                    if (deviceHash.isNotBlank()) {
+                        FirebaseFirestore.getInstance()
+                            .collection("users").document(deviceHash)
+                            .set(data, SetOptions.merge())
+                            .await()
+                    }
+                }
+            }
+        })
+        return
+    }
+
+    /* -------------------------
        First-open onboarding tutorial (docs/ui-revamp.md).
        Pre-seeded complete for existing installs (any prior ToS acceptance)
        so current users never see it. Replayable from Settings.
@@ -553,33 +588,8 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
     if (!onboardingDone || onboardingReplay) {
         com.vrca.ui.onboarding.OnboardingFlow(
             vm = vm,
-            tosVersion = requiredTosVersion,
-            tosText = remoteTosText,
-            tosUrl = remoteTosUrl,
-            tosAlreadyAccepted = tosAccepted,
             phase1BanId = phase1BanId,
             replay = onboardingReplay,
-            onTosAccepted = {
-                TosPrefs.accept(ctx, requiredTosVersion)
-                tosAccepted = true
-                // Accepted: free the terms' on-demand pictures, like the tutorial's on finishing.
-                com.vrca.ui.onboarding.TosImageStore.clear(ctx)
-                scope.launch {
-                    runCatching {
-                        val data = hashMapOf(
-                            "tosAcceptedVersion" to requiredTosVersion,
-                            "tosAcceptedAt" to Timestamp.now(),
-                            "updatedAt" to Timestamp.now()
-                        )
-                        if (deviceHash.isNotBlank()) {
-                            FirebaseFirestore.getInstance()
-                                .collection("users").document(deviceHash)
-                                .set(data, SetOptions.merge())
-                                .await()
-                        }
-                    }
-                }
-            },
             onFinish = {
                 onboardingDone = true
                 com.vrca.ui.onboarding.OnboardingState.replayRequested.value = false
@@ -587,40 +597,6 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
                 // here) — free the on-demand images. A new user mid-tutorial never
                 // reaches this, so their images survive a close/kill and resume works.
                 com.vrca.ui.onboarding.TutorialImageStore.clear(ctx)
-            }
-        )
-        return
-    }
-
-    if (!tosAccepted) {
-        TosGate(
-            tosVersion = requiredTosVersion,
-            tosText = remoteTosText,
-            tosUrl = remoteTosUrl,
-            onOpenUrl = { url ->
-                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-            },
-            onAccept = {
-                TosPrefs.accept(ctx, requiredTosVersion)
-                tosAccepted = true
-                // Accepted: free the terms' on-demand pictures, like the tutorial's on finishing.
-                com.vrca.ui.onboarding.TosImageStore.clear(ctx)
-
-                scope.launch {
-                    runCatching {
-                        val data = hashMapOf(
-                            "tosAcceptedVersion" to requiredTosVersion,
-                            "tosAcceptedAt" to Timestamp.now(),
-                            "updatedAt" to Timestamp.now()
-                        )
-                        if (deviceHash.isNotBlank()) {
-                            FirebaseFirestore.getInstance()
-                                .collection("users").document(deviceHash)
-                                .set(data, SetOptions.merge())
-                                .await()
-                        }
-                    }
-                }
             }
         )
         return
@@ -1304,210 +1280,6 @@ internal object TosPrefs {
             .putInt(KEY_ACCEPTED_VERSION, version.coerceAtLeast(1))
             .putLong(KEY_ACCEPTED_AT_MS, System.currentTimeMillis())
             .apply()
-    }
-}
-
-/* =========================================================================
-   ToS rendering (redesigned — docs/ui-revamp.md "ToS screen").
-
-   The admin-configurable tosText is plain text with markdown-ish habits:
-   numbered section headers ("3. Data & Privacy"), `*`/`-` bullets, and the
-   occasional literal markdown link ("[url](url)") that used to render raw.
-   parseTosBlocks() turns that into styled blocks; nothing about the stored
-   text format changes, so existing Firestore content renders correctly.
-   ========================================================================= */
-
-private sealed class TosBlock {
-    data class Header(val text: String) : TosBlock()
-    data class Bullet(val text: String) : TosBlock()
-    data class Paragraph(val text: String) : TosBlock()
-}
-
-/** Collapses literal markdown links "[x](y)" down to just the URL once. */
-private fun sanitizeTosLine(line: String): String =
-    Regex("""\[([^\]]*)]\(([^)]*)\)""").replace(line) { m ->
-        m.groupValues[2].ifBlank { m.groupValues[1] }
-    }
-
-private fun parseTosBlocks(text: String): List<TosBlock> {
-    val blocks = mutableListOf<TosBlock>()
-    val para = StringBuilder()
-    fun flushPara() {
-        val p = para.toString().trim()
-        if (p.isNotBlank()) blocks += TosBlock.Paragraph(p)
-        para.clear()
-    }
-    text.lines().forEach { raw ->
-        val line = sanitizeTosLine(raw.trim())
-        when {
-            line.isBlank() -> flushPara()
-            // "1. Agreement" / "10. Contact" — numbered section headers
-            Regex("""^\d+\.\s+\S""").containsMatchIn(line) -> {
-                flushPara(); blocks += TosBlock.Header(line)
-            }
-            line.startsWith("* ") || line.startsWith("- ") -> {
-                flushPara(); blocks += TosBlock.Bullet(line.drop(2).trim())
-            }
-            else -> {
-                if (para.isNotEmpty()) para.append(' ')
-                para.append(line)
-            }
-        }
-    }
-    flushPara()
-    return blocks
-}
-
-/** Shared styled-text body for ToS sections and update-dialog patch notes. */
-@Composable
-private fun StyledBlocks(blocks: List<TosBlock>, warnHeaderKeywords: List<String> = emptyList()) {
-    var inWarnSection = false
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        blocks.forEach { block ->
-            when (block) {
-                is TosBlock.Header -> {
-                    inWarnSection = warnHeaderKeywords.any { block.text.contains(it, ignoreCase = true) }
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        block.text,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = if (inWarnSection) MaterialTheme.colorScheme.error
-                                else MaterialTheme.colorScheme.primary
-                    )
-                }
-                is TosBlock.Bullet -> Row {
-                    Text(
-                        "•  ",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        block.text,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                is TosBlock.Paragraph -> Text(
-                    block.text,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-        }
-    }
-}
-
-@Composable
-internal fun TosGate(
-    tosVersion: Int,
-    tosText: String,
-    tosUrl: String,
-    onOpenUrl: (String) -> Unit,
-    onAccept: () -> Unit
-) {
-    var checked by rememberSaveable { mutableStateOf(false) }
-
-    val fallbackText = remember {
-        """
-TERMS OF SERVICE (SUMMARY)
-
-By using this app, you agree to:
-- Use it responsibly and legally
-- Not use it to harass, spam, or impersonate others
-- Understand VRChat chatbox limits apply and messages may be trimmed
-- Accept that settings/history are stored locally on your device
-- You may be moderated (warned/banned) for abuse
-
-If you do not agree, close the app.
-        """.trimIndent()
-    }
-
-    val blocks = remember(tosText) { parseTosBlocks(tosText.ifBlank { fallbackText }) }
-
-    Surface {
-        Column(Modifier.fillMaxSize()) {
-            // Sticky header: title + version pill (never scrolls away)
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("Terms of Service", style = MaterialTheme.typography.headlineSmall)
-                Surface(
-                    shape = MaterialTheme.shapes.large,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
-                ) {
-                    Text(
-                        "v$tosVersion",
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-
-            // Scrollable body
-            Column(
-                Modifier
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                ElevatedCard {
-                    Column(Modifier.padding(14.dp)) {
-                        StyledBlocks(
-                            blocks,
-                            warnHeaderKeywords = listOf("Risk", "Moderation", "Acceptable Use")
-                        )
-                    }
-                }
-                if (tosUrl.isNotBlank()) {
-                    com.vrca.ui.common.GremlinSecondaryButton(
-                        onClick = { onOpenUrl(tosUrl.trim()) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Open full ToS link")
-                    }
-                }
-                Spacer(Modifier.height(4.dp))
-            }
-
-            // Pinned accept bar (checkbox, not a settings-style switch)
-            Surface(tonalElevation = 3.dp) {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(MaterialTheme.shapes.medium)
-                            .clickable { checked = !checked },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        androidx.compose.material3.Checkbox(
-                            checked = checked,
-                            onCheckedChange = { checked = it }
-                        )
-                        Text(
-                            "I agree to the Terms of Service",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                    com.vrca.ui.common.GremlinButton(
-                        onClick = onAccept,
-                        enabled = checked,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Accept & Continue")
-                    }
-                }
-            }
-        }
     }
 }
 

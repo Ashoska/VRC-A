@@ -200,7 +200,7 @@ internal suspend fun fetchVrchatStatusWarning(): VrchatStatusWarning? = withCont
 
 // Logical steps in order. The IP-entry step is absent on the headset build
 // (Quest forces the OSC target to 127.0.0.1, so there's nothing to enter).
-private enum class OnbStep { WELCOME_TOS, VRCHAT_LOGIN, PERMISSIONS, IP_ENTRY, ENABLE_OSC, NOTIF_TYPES, DISCORD, TEST }
+private enum class OnbStep { VRCHAT_LOGIN, PERMISSIONS, IP_ENTRY, ENABLE_OSC, NOTIF_TYPES, DISCORD, TEST }
 
 private val ONBOARDING_STEPS: List<OnbStep> =
     OnbStep.values().toList().let { all ->
@@ -210,13 +210,8 @@ private val ONBOARDING_STEPS: List<OnbStep> =
 @Composable
 fun OnboardingFlow(
     vm: com.vrca.ui.viewmodel.VrcaViewModel,
-    tosVersion: Int,
-    tosText: String,
-    tosUrl: String,
-    tosAlreadyAccepted: Boolean,
     phase1BanId: String?,
     replay: Boolean,
-    onTosAccepted: () -> Unit,
     onFinish: () -> Unit
 ) {
     val ctx = LocalContext.current
@@ -246,7 +241,6 @@ fun OnboardingFlow(
     fun goToIpStep() { steps.indexOf(OnbStep.IP_ENTRY).let { if (it >= 0) step = it } }
 
     // Hard gates completed state (replay shows them as checkmarks)
-    val tosDone = tosAlreadyAccepted
     val loginDone = remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
     // Final hard gate: a test message must be confirmed against the saved IP
     // before Finish unlocks (replay is exempt — it has Exit tutorial anyway).
@@ -270,9 +264,6 @@ fun OnboardingFlow(
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
               Box(Modifier.fillMaxHeight().widthIn(max = 640.dp)) {
                 when (steps[step]) {
-                    OnbStep.WELCOME_TOS -> StepWelcomeTos(tosVersion, tosText, tosUrl, tosDone, onAccept = {
-                        onTosAccepted(); advance()
-                    }, onNext = { advance() })
                     OnbStep.VRCHAT_LOGIN -> StepVrchatLogin(loginDone.value, phase1BanId, onLoggedIn = {
                         loginDone.value = true; advance()
                     }, onNext = { advance() })
@@ -292,8 +283,7 @@ fun OnboardingFlow(
 
             // Footer: step label + progress pills + nav. Hard gates hide
             // "Next"/"Finish" until done.
-            val hardGateBlocked = (steps[step] == OnbStep.WELCOME_TOS && !tosDone) ||
-                (steps[step] == OnbStep.VRCHAT_LOGIN && !loginDone.value) ||
+            val hardGateBlocked = (steps[step] == OnbStep.VRCHAT_LOGIN && !loginDone.value) ||
                 (steps[step] == OnbStep.TEST && !testDone.value && !replay)
             Surface(tonalElevation = 3.dp) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
@@ -424,42 +414,6 @@ private fun NumberedInstruction(number: Int, text: String) {
         Spacer(Modifier.width(10.dp))
         Text(text, style = MaterialTheme.typography.bodyMedium)
     }
-}
-
-/* -------------------------------------------------------------------------
-   Step 1 — Welcome + ToS
-   ------------------------------------------------------------------------- */
-
-@Composable
-private fun StepWelcomeTos(
-    tosVersion: Int,
-    tosText: String,
-    tosUrl: String,
-    alreadyAccepted: Boolean,
-    onAccept: () -> Unit,
-    onNext: () -> Unit
-) {
-    val ctx = LocalContext.current
-    if (alreadyAccepted) {
-        StepContainer(
-            title = "Welcome to VRC-A",
-            subtitle = "Your VRChat chatbox companion. This quick setup gets everything working."
-        ) {
-            CompletedGateCard("Terms of Service v$tosVersion already accepted.")
-        }
-        return
-    }
-    // Not yet accepted: render the full redesigned ToS gate as the step body.
-    // Its own Accept button advances the flow; the pager footer hides Next.
-    com.vrca.app.TosGate(
-        tosVersion = tosVersion,
-        tosText = tosText,
-        tosUrl = tosUrl,
-        onOpenUrl = { url ->
-            runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-        },
-        onAccept = onAccept
-    )
 }
 
 /* -------------------------------------------------------------------------

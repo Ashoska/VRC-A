@@ -53,6 +53,9 @@ internal object BootResults {
     @Volatile var banId: String? = null
     /** The Updates row's release check, or null if it didn't finish. */
     @Volatile var release: ReleaseCheckResult? = null
+    /** The terms' version and change time as the Terms row read them (null = not read this run). */
+    @Volatile var tosVersion: Int? = null
+    @Volatile var tosUpdatedAtMs: Long? = null
     /** The release check, handed over once (then cleared so it can't go stale). */
     fun takeRelease(): ReleaseCheckResult? = release.also { release = null }
 }
@@ -610,6 +613,7 @@ private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.Completa
     val version = (snap.getLong("tosVersion") ?: 1L).toInt().coerceAtLeast(1)
     // The terms' own change time, not the doc's updatedAt (any Config-tab save stamps that; see VrcaApp).
     val updatedAt = snap.getTimestamp("tosUpdatedAt")?.toDate()?.time ?: 0L
+    BootResults.tosVersion = version; BootResults.tosUpdatedAtMs = updatedAt
     val accepted = TosPrefs.acceptedVersion(ctx) >= version && TosPrefs.acceptedAtMs(ctx) >= updatedAt
     if (accepted) {
         // Strays from a kill between accepting and the clear.
