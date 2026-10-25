@@ -519,7 +519,7 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
     }
 
     val updateToShow = releaseCheckResult
-    if (!BuildConfig.IS_ADMIN_BUILD && updateToShow is ReleaseCheckResult.UpdateAvailable) {
+    if (!BuildConfig.IS_ADMIN_BUILD && !AppLab.noUpdatePopup && updateToShow is ReleaseCheckResult.UpdateAvailable) {
         // Stays composed while hidden ("Later"), so a download already running still opens the installer.
         UpdatePopup(updateToShow.info, updateToShow.forced, visible = !updateDismissed || updateToShow.forced, onDismiss = { updateDismissed = true })
     }
@@ -1698,3 +1698,9 @@ internal fun UpdatePopup(info: ReleaseInfo, forced: Boolean, visible: Boolean, o
 
 /** How long Boot Cat's Done landing (~1 s) shows before the installer opens. */
 private const val LANDED_HOLD_MS = 1100L
+
+/**
+ * UI Lab only (never set by the app): the lab runs an old version number, so the forced update popup
+ * covered every screen after boot; this hides it so the lab can show the boot's hand-offs.
+ */
+object AppLab { @JvmField var noUpdatePopup = false }

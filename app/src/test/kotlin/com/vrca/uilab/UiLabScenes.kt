@@ -752,7 +752,7 @@ object UiLabScenes {
                 // Both need the real backend (`--firestore`) to get past the device session.
                 if (mode == "onboarded" || mode == "full" || mode == "tos") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
                 if (mode == "tos" || mode == "new") {
-                    androidx.compose.runtime.remember { com.vrca.app.VrcaApplication.openedFromSwipe = true; true }
+                    androidx.compose.runtime.remember { com.vrca.app.VrcaApplication.openedFromSwipe = true; com.vrca.app.AppLab.noUpdatePopup = true; true }
                     VrcaApp()
                 } else if (mode == "full") {
                     androidx.compose.runtime.remember {
