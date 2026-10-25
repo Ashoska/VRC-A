@@ -587,18 +587,38 @@ internal fun SettingsPage(
                                 )
                             }
 
-                            // Press VRChat's undocumented Sitting/Standing toggle.
-                            var sitResult by remember { mutableStateOf("") }
+                            // Hand drag prototype: fist + move hand = move (horizontal).
+                            Text("Hand drag (prototype)", style = MaterialTheme.typography.labelMedium)
+                            var dragOn by remember { mutableStateOf(com.vrca.osc.HandDrag.enabled) }
+                            var dragStrength by remember { mutableStateOf(com.vrca.osc.HandDrag.strength) }
+                            var dragDiag by remember { mutableStateOf(com.vrca.osc.HandDrag.diag()) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    dragDiag = com.vrca.osc.HandDrag.diag()
+                                    kotlinx.coroutines.delay(200)
+                                }
+                            }
                             com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                val on = !dragOn
+                                dragOn = on
                                 treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                    com.vrca.osc.OscAnnouncer.pressButton("/input/ToggleSitStand")
-                                    sitResult = com.vrca.osc.OscAnnouncer.lastSendResult
+                                    runCatching { com.vrca.osc.HandDrag.setEnabled(ctx, on) }
                                 }
                             }) {
-                                Text("Send ToggleSitStand")
+                                Text(if (dragOn) "Turn drag off" else "Turn drag on")
                             }
-                            if (sitResult.isNotEmpty()) {
-                                Text(sitResult, style = MaterialTheme.typography.bodySmall)
+                            Text("Strength ${"%.2f".format(dragStrength)}", style = MaterialTheme.typography.bodySmall)
+                            com.vrca.ui.common.GremlinSlider(
+                                value = dragStrength,
+                                onValueChange = { dragStrength = it; com.vrca.osc.HandDrag.strength = it },
+                                valueRange = 0.25f..4f
+                            )
+                            SelectionContainer {
+                                Text(
+                                    dragDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
                             }
 
                             // Floor probe (read-only): system settings + properties

@@ -4,31 +4,34 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.util.Log
-import com.illposed.osc.OSCMessage
-import com.illposed.osc.transport.udp.OSCPortOut
 import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
-import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Headset debug test: announce VRC-A to VRChat as an OSCQuery app so VRChat SENDS
- * us its output. VRChat on Quest lists `/tracking/vrsystem/{head,leftwrist,rightwrist}/pose`
- * but serves them as `[null]` when polled: its output goes to apps that advertise
- * themselves over mDNS (`_oscjson._tcp` + `_osc._udp`) and list the addresses they
- * want. Polling-only VRC-A never did, which may also be why avatar params never
- * arrived over UDP on Quest. This serves a tiny OSCQuery tree (HOST_INFO + root)
- * listing `/avatar/change` and the three tracking poses, opens a UDP port and counts
- * what arrives. Diagnostics only: nothing else reads the received values yet.
+ * Headset: announce VRC-A to VRChat as an OSCQuery app so VRChat SENDS us its
+ * output. Device-proven (Quest 3, 2026-10-25): polling `/tracking/vrsystem/.../pose`
+ * only ever reads `[null]`, but once VRC-A advertises `_oscjson._tcp` and lists the
+ * addresses it wants, VRChat shows "Sending OSC data to VRCA-…" and pushes head +
+ * wrist poses (~75/s each) AND every avatar parameter (Gesture*, Velocity*, …) to our
+ * UDP port. Feeds [HandDrag]; avatar params are kept here only (not folded into
+ * [VrcaOscState], which still polls).
+ *
+ * Stable identity (device-proven fix): stopping then starting with a NEW name/ports
+ * left VRChat "sending" to the old address (0 packets until VRChat restarted). The
+ * service name and both ports are saved per install and re-bound on every start, so
+ * VRChat's remembered address stays valid.
  */
 object OscAnnouncer {
 
     private const val TAG = "OscAnnouncer"
+    private const val PREFS = "osc_announce"
 
     @Volatile var running = false
         private set
@@ -49,25 +52,45 @@ object OscAnnouncer {
     @Volatile private var startedMs = 0L
     private val counts = ConcurrentHashMap<String, Int>()
     private val poses = ConcurrentHashMap<String, FloatArray>()
-    @Volatile var lastSendResult = ""
-        private set
+    private val poseMs = ConcurrentHashMap<String, Long>()
+    private val params = ConcurrentHashMap<String, Float>()
+
+    /** Latest pushed pose for `head` / `leftwrist` / `rightwrist` (x y z pitch yaw roll,
+     *  meters + degrees), or null if none arrived within [maxAgeMs]. */
+    fun pose(part: String, maxAgeMs: Long = 500): FloatArray? {
+        val at = poseMs[part] ?: return null
+        return if (System.currentTimeMillis() - at <= maxAgeMs) poses[part] else null
+    }
+
+    /** Latest pushed avatar parameter as a float (bools 0/1), or null. */
+    fun param(name: String): Float? = params[name]
 
     fun start(context: Context) {
         if (running) return
         running = true
         startedMs = System.currentTimeMillis()
-        packets = 0; httpRequests = 0; counts.clear(); poses.clear()
+        packets = 0; httpRequests = 0; counts.clear(); poses.clear(); poseMs.clear(); params.clear()
         lastAddress = ""; lastHttpPath = ""; registerStatus = "registering…"
         ownIp = localIpv4() ?: "127.0.0.1"
-        serviceName = "VRCA-" + (1000..9999).random()
-        val u = DatagramSocket(0).apply { soTimeout = 2000 }
-        val h = ServerSocket(0)
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        serviceName = prefs.getString("name", null) ?: ("VRCA-" + (1000..9999).random())
+        val u = runCatching { bindUdp(prefs.getInt("udp", 0)) }.getOrElse { bindUdp(0) }
+        val h = runCatching { bindHttp(prefs.getInt("http", 0)) }.getOrElse { bindHttp(0) }
         udp = u; http = h
         udpPort = u.localPort; httpPort = h.localPort
+        prefs.edit().putString("name", serviceName).putInt("udp", udpPort).putInt("http", httpPort).apply()
         Thread({ udpLoop(u) }, "vrca-announce-udp").apply { isDaemon = true; start() }
         Thread({ httpLoop(h) }, "vrca-announce-http").apply { isDaemon = true; start() }
         register(context, "_oscjson._tcp.", httpPort)
         register(context, "_osc._udp.", udpPort)
+    }
+
+    private fun bindUdp(port: Int) = DatagramSocket(null).apply {
+        reuseAddress = true; soTimeout = 2000; bind(InetSocketAddress(port))
+    }
+
+    private fun bindHttp(port: Int) = ServerSocket().apply {
+        reuseAddress = true; bind(InetSocketAddress(port))
     }
 
     fun stop() {
@@ -203,19 +226,27 @@ object OscAnnouncer {
             return
         }
         lastAddress = address
-        val key = when {
-            address.startsWith("/avatar/parameters/") -> "/avatar/parameters/*"
-            else -> address
-        }
-        counts.merge(key, 1, Int::plus)
+        val isParam = address.startsWith("/avatar/parameters/")
+        counts.merge(if (isParam) "/avatar/parameters/*" else address, 1, Int::plus)
         val tags = str() ?: return
         if (address.startsWith("/tracking/vrsystem/")) {
             val floats = tags.drop(1).filter { it == 'f' }.map { Float.fromBits(int()) }
-            poses[address.removePrefix("/tracking/vrsystem/")] = floats.toFloatArray()
+            val part = address.removePrefix("/tracking/vrsystem/").removeSuffix("/pose")
+            poses[part] = floats.toFloatArray()
+            poseMs[part] = System.currentTimeMillis()
+        } else if (isParam) {
+            val v = when (tags.getOrNull(1)) {
+                'f' -> Float.fromBits(int())
+                'i' -> int().toFloat()
+                'T' -> 1f
+                'F' -> 0f
+                else -> null
+            }
+            if (v != null) params[address.removePrefix("/avatar/parameters/")] = v
         }
     }
 
-    // ---- diag + test send ------------------------------------------------------
+    // ---- diag ------------------------------------------------------------------
 
     fun diag(): String = buildString {
         if (!running && startedMs == 0L) { append("(not started)"); return@buildString }
@@ -231,22 +262,6 @@ object OscAnnouncer {
         poses.entries.sortedBy { it.key }.forEach { (k, v) ->
             append("\n").append(k).append(": ").append(v.joinToString(" ") { "%.3f".format(it) })
         }
-    }
-
-    /** Debug: press-and-release an OSC button input (e.g. /input/ToggleSitStand). Blocking. */
-    fun pressButton(address: String) {
-        val target = VrcaOscQuery.oscSendTargetFlow.value ?: ("127.0.0.1" to 9000)
-        lastSendResult = runCatching {
-            val out = OSCPortOut(InetAddress.getByName(target.first), target.second)
-            try {
-                out.send(OSCMessage(address, listOf(false)))
-                Thread.sleep(100)
-                out.send(OSCMessage(address, listOf(true)))
-                Thread.sleep(200)
-                out.send(OSCMessage(address, listOf(false)))
-            } finally { runCatching { out.close() } }
-            "sent $address to ${target.first}:${target.second}"
-        }.getOrElse { "send failed: ${it.message}" }
     }
 
     private fun localIpv4(): String? = runCatching {
