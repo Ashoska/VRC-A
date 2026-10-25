@@ -888,8 +888,6 @@ object AvatarCatalogSweep {
         val now = System.currentTimeMillis()
         return workQueue.any { p -> fillWalkedAt[p]?.let { now - it >= FILL_REWALK_MS } ?: true }
     }
-    // How often a bot in a full re-verify looks for waiting fills (one cached read/min across bots).
-    private const val FILL_YIELD_CHECK_MS = 15_000L
 
     // ---- per-shard "last swept" ordering (local, persisted) ------------------
     // The Action's work-list drives FILL + known-stale promptly; this drives an even LIVENESS
@@ -1053,9 +1051,10 @@ object AvatarCatalogSweep {
         if (paused) return false
         val p = progress.getValue(role)
         // FILLS FIRST: a shard on the Worker's fill worklist (`_worklist.json`, kept exact by the
-        // flush) is walked for its UNFILLED avatars only, so a new contribution is filled within about
-        // a minute instead of waiting for the oldest-first lap (~a day) to reach its shard. Only when
-        // no fill shard is waiting does the bot take the oldest-swept shard for the full re-verify.
+        // flush) is walked for its UNFILLED avatars only, so a new contribution is filled as the next
+        // job instead of waiting for the oldest-first lap (~a day) to reach its shard. A re-verify in
+        // progress is FINISHED first (the user's call: no dropped shards for fills, they queue after);
+        // only when no fill shard is waiting does the bot take the oldest-swept shard.
         val fillPrefix = nextFillPrefix(context)
         val fillOnly = fillPrefix != null
         val prefix = fillPrefix ?: nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
@@ -1088,8 +1087,6 @@ object AvatarCatalogSweep {
         val removes = mutableListOf<String>()
         val okChecked = mutableListOf<String>()
         var yieldedToReports = false
-        var yieldedToFills = false
-        var lastFillCheck = System.currentTimeMillis()
         try {
             var nulls = 0
             var rateLimited = false
@@ -1099,13 +1096,6 @@ object AvatarCatalogSweep {
                 // reports are pending (the 30s /health poll), handles them next cycle, and puts this
                 // shard back at the front (its sweep stamp is restored below).
                 if (role == Role.REPORTS && !fillOnly && lastPendingReports > 0) { yieldedToReports = true; break }
-                // FILLS AS SOON AS THEY APPEAR, same as reports: a full re-verify is dropped the moment
-                // the Worker's fill worklist has a shard waiting; this shard goes back to the front.
-                if (!fillOnly && System.currentTimeMillis() - lastFillCheck >= FILL_YIELD_CHECK_MS) {
-                    lastFillCheck = System.currentTimeMillis()
-                    refreshWorklist(context)
-                    if (hasDueFill()) { yieldedToFills = true; break }
-                }
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++; p.curShardDone++
                 if (chk == null) {
@@ -1158,11 +1148,11 @@ object AvatarCatalogSweep {
             }
             if (upserts.isNotEmpty() || removes.isNotEmpty() || okChecked.isNotEmpty())
                 pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
-            if (yieldedToReports || yieldedToFills) {
+            if (yieldedToReports) {
                 // Not fully re-verified → back to its old place at the front of the oldest-first walk.
                 // (The avatars already checked are skipped on the re-walk by the recent-process guard.)
                 if (prevSwept != null) sweptAt[prefix] = prevSwept else sweptAt.remove(prefix)
-                p.status = "walk $prefix: paused for ${if (yieldedToReports) "reports" else "fills"}"
+                p.status = "walk $prefix: paused for reports"
                 return true
             }
             p.status = "walk $prefix: filled=${p.filled} checked=${p.checked} removed=${p.removed}"
