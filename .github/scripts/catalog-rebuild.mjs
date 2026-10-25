@@ -1,14 +1,7 @@
-// VRC-A catalog rebuild — the heavy job the Worker can't do (128 MB / subrequest caps).
-// Runs on a GitHub Actions runner (7 GB RAM), reads every R2 lookup shard over the public
-// domain, and rebuilds — WRITING EVERYTHING TO R2 (no GitHub commit, no extra token):
-//   - fragments/<3hex>.json  (avatarId -> search summary)
-//   - index/<3hex>.json      (token -> [avatarId,...])
-//   - db.json                (full master, backup + the admin bots' whole-catalog source)
-//   - _manifest.json         (marks search ready + rebuild time)
-//
-// The Worker's flushR2 keeps the lookup shards fresh (clone path); this keeps SEARCH
-// (index/fragments) + the master fresh from those shards. Schedule every ~15-30 min.
-// Nothing here is on a user hot path.
+// VRC-A catalog BACKUP — once a day, reads every R2 lookup shard over the public domain and
+// writes the full master `db.json` (backup) to R2. That is ALL it writes. The search index
+// (fragments/, index/, avtr/), _manifest.json and _worklist.json are owned by the Worker
+// (cloudflare/avatar-db/worker.js) and must not be written here (see main(), step 2).
 //
 // Bucket math MUST match the app (AvatarGlobalDb):
 //   index token bucket = (token.hashCode() & 0xfff) as 3 hex   (Java String.hashCode)
@@ -166,89 +159,17 @@ async function main() {
     process.exit(1);
   }
 
-  // 2. Build fragments (id -> summary) and the token index (token -> ids), bucketed.
-  const fragBuckets = {};   // "<3hex>" -> { id -> {f,n,au,ai,p,pf} }
-  const idxBuckets = {};    // "<3hex>" -> { token -> Set(id) }
-  const avtrBuckets = {};   // "<3hex>" -> Set(avatarId)  — presence index for the crawler dedup
-  let unfilled = 0;         // entries the fill bot still needs to enrich (Fill backlog)
-  let staleCount = 0;       // entries due a liveness recheck (Liveness backlog)
-  for (const fid of fileIds) {
-    const a = avatars[fid];
-    const id = a.id; if (!id || !id.startsWith("avtr_")) continue;
-    if (a.filled !== true) unfilled++;
-    if (typeof a.checked === "number" && a.checked < STALE_CUTOFF) staleCount++;
-    const fb = fragBucket(id);
-    (avtrBuckets[fb] ||= new Set()).add(id);   // avatar-id presence (same prefix as fragments)
-    (fragBuckets[fb] ||= {})[id] = {
-      f: fid, n: a.name || "", au: a.author || "", ai: a.authorId || "",
-      p: platMask(a.platforms),
-      pf: { pc: a.perfPc ?? 5, q: a.perfQuest ?? 5, i: a.perfIos ?? 5 },
-    };
-    const tokens = tokenize(a.name, a.author, a.desc);
-    if (a.authorId) tokens.add(a.authorId.toLowerCase());
-    for (const t of tokens) {
-      const ib = indexBucket(t);
-      // No prototype: on a plain {} the token "constructor" is Object's inherited function
-      // ("bucket[t].add is not a function"), which crashed every run.
-      const bucket = (idxBuckets[ib] ||= Object.create(null));
-      (bucket[t] ||= new Set()).add(id);
-    }
-  }
-
-  // 3. Serialize all buckets (fragments + token index + avatar-id presence) + the master.
-  const fragEntries = Object.entries(fragBuckets).map(([b, e]) => [`fragments/${b}.json`, JSON.stringify({ v: 1, e })]);
-  const idxEntries = Object.entries(idxBuckets).map(([b, toks]) => {
-    const t = {};
-    for (const [tok, idset] of Object.entries(toks)) {
-      let ids = Array.from(idset);
-      if (ids.length > HOT_TOKEN_CAP) ids = ids.slice(0, HOT_TOKEN_CAP);
-      t[tok] = ids;
-    }
-    return [`index/${b}.json`, JSON.stringify({ v: 1, t })];
-  });
-  const avtrEntries = Object.entries(avtrBuckets).map(([b, s]) => [`avtr/${b}.json`, JSON.stringify({ v: 1, ids: Array.from(s) })]);
+  // 2. BACKUP ONLY (2026-10-26). This job used to rebuild the WHOLE search index (fragments/,
+  //    index/, avtr/) plus _manifest/_worklist every 20 min. The Worker has owned all of those
+  //    incrementally since the R2 cutover, so the rebuild was pure cost (~144k R2 writes + ~290k
+  //    reads a day, most of the bill) and actively harmful: its tokenizer has no fancy-font fold,
+  //    so every index bucket it rewrote ERASED the Worker's plain-text font tokens (why plain
+  //    "white tiger" never found ᵂᴴᴵᵀᴱ ᵀᴵᴳᴱᴿ). It now only writes the db.json master backup,
+  //    once a day, and never touches anything the Worker owns.
   const lines = fileIds.map((k) => JSON.stringify(k) + ":" + JSON.stringify(avatars[k]));
   const master = `{"name":"VRC-A Avatar Store","version":1,"count":${fileIds.length},"avatars":{\n${lines.join(",\n")}\n}}`;
-  const allObjects = [...fragEntries, ...idxEntries, ...avtrEntries, ["db.json", master]];
-
-  // 4. Hash-DIFF write: only PUT objects whose content changed since the last run, tracked in
-  //    `_hashes.json`. This is what keeps R2 writes cheap — a steady catalog writes a handful
-  //    of buckets per run instead of all ~16k every time. Delete buckets that vanished.
-  let prevHashes = {};
-  try { const h = await r2Get("_hashes.json"); if (h) prevHashes = JSON.parse(h); } catch (_) {}
-  const newHashes = {};
-  const toWrite = [];
-  for (const [key, body] of allObjects) {
-    const h = hashStr(body);
-    newHashes[key] = h;
-    if (prevHashes[key] !== h) toWrite.push([key, body]);
-  }
-  const staleKeys = Object.keys(prevHashes).filter((k) => !(k in newHashes));
-  console.log(`Changed: ${toWrite.length}/${allObjects.length} objects; stale to delete: ${staleKeys.length}.`);
-  let wrote = 0;
-  await mapLimit(toWrite, WRITE_CONCURRENCY, async ([key, body]) => {
-    await r2Put(key, body);
-    if (++wrote % 256 === 0) console.log(`  wrote ${wrote}/${toWrite.length}`);
-  });
-  await mapLimit(staleKeys, WRITE_CONCURRENCY, async (key) => { await r2Delete(key); });
-
-  // 5. Manifest + hash-manifest (always written — tiny). Manifest carries the counts; hashes
-  //    feed the next run's diff.
-  await r2Put("_manifest.json", JSON.stringify({
-    v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3", entryCount: fileIds.length,
-    unfilled, staleCount, searchReady: true, lastFullRebuild: new Date().toISOString(),
-  }), 60);   // tiny TTL: the Bots-tab backlog count reads this and should track the rebuild closely
-  await r2Put("_hashes.json", JSON.stringify(newHashes), 60);
-  // Work-list: the exact shard prefixes the bots should walk (fill first, then stale). Bots
-  // read this and walk ONLY these instead of all 4096 blindly, so the sparse backlog gets
-  // processed in minutes and the counters visibly move. Tiny TTL so it tracks the rebuild.
-  const fillList = Array.from(fillShards).sort();
-  const staleList = Array.from(staleShards).filter((p) => !fillShards.has(p)).sort();
-  await r2Put("_worklist.json", JSON.stringify({
-    v: 1, ts: new Date().toISOString(), fill: fillList, stale: staleList,
-  }), 60);
-  console.log(`Work-list: ${fillList.length} fill shards, ${staleList.length} stale shards.`);
-  console.log(`Done. ${fileIds.length} avatars (${unfilled} unfilled); wrote ${toWrite.length} changed, deleted ${staleKeys.length}.`);
+  await r2Put("db.json", master, 3600);
+  console.log(`Done. Backed up ${fileIds.length} avatars to db.json (${(master.length / 1e6).toFixed(1)} MB). Search index untouched (Worker-owned).`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

@@ -1,6 +1,6 @@
-# Rebuilds the avatar SEARCH index (index/ + fragments/) and the master db.json from the
-# R2 lookup shards, writing everything back to R2. Runs on a GitHub runner (real RAM), so
-# there's no Worker memory/subrequest limit. Nothing here is on a user hot path.
+# Daily db.json BACKUP of the avatar catalog: reads the R2 lookup shards and writes only the
+# master db.json. The search index, manifest and worklist are Worker-owned (this job used to
+# rebuild them every 20 min: most of the R2 bill, and it erased the Worker's font tokens).
 #
 # Scheduled runs only fire once this workflow is on the DEFAULT branch (main), so merge the
 # branch first; then it runs every 20 min and the "Run workflow" button appears.
@@ -12,7 +12,7 @@
 name: catalog-rebuild
 on:
   schedule:
-    - cron: "*/20 * * * *"   # every 20 min; = search freshness (clone freshness is separate)
+    - cron: "17 4 * * *"     # once a day (backup only; was every 20 min)
   workflow_dispatch: {}       # manual "Run workflow" button (only on the default branch)
 
 concurrency:
