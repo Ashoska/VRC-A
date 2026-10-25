@@ -86,7 +86,8 @@ private fun Header(compact: Boolean, subtitle: String) {
         val logo = com.vrca.ui.common.appLogoPainter()
         androidx.compose.foundation.Image(
             logo, "VRC-A",
-            Modifier.height(if (compact) 38.dp else 44.dp)
+            // About the app's top-bar logo size: smaller, the hollow "VRC-A" letters got too thin to read (user).
+            Modifier.height(52.dp)
                 .aspectRatio(logo.intrinsicSize.width / logo.intrinsicSize.height)
                 .onGloballyPositioned { c -> c.boundsInWindow().let { if (BootReveal.termsCat.value != it) BootReveal.termsCat.value = it } }
                 .graphicsLayer { alpha = BootReveal.termsCatIn.floatValue }

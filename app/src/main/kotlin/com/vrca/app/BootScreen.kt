@@ -355,7 +355,9 @@ fun BootScreen(
         // Reverse of the opening: right panel first, then the left, folding back to their lines.
         launch { panelR.animateTo(0f, tween(EXIT_FOLD_MS, easing = FastOutSlowInEasing)) }
         launch { delay(90); panelL.animateTo(0f, tween(EXIT_FOLD_MS, easing = FastOutSlowInEasing)) }
-        delay(260)
+        // Onto the terms, the glide (and the terms showing through) starts with the fold: waiting for the
+        // panels to go first left the screen dipping darker for a few frames (user).
+        delay(if (exitToRect != null) 0L else 260L)
         val progress = launch { snapshotFlow { exitP.value }.collect { exitProgressCallback(it) } }
         exitP.animateTo(1f, tween(EXIT_LOGO_MS, easing = FastOutSlowInEasing))
         progress.cancel()
@@ -387,7 +389,13 @@ fun BootScreen(
                 // that's already appearing instead of on an empty panel (user's recordings showed a
                 // ~0.3 s plain dark beat between the landing and the old reveal fade).
                 .drawBehind {
-                    val a = if (glides) 1f - ((exitP.value - REVEAL_FROM) / (1f - REVEAL_FROM)).coerceIn(0f, 1f) else 1f
+                    // Onto the terms: the backdrop fades with the rest of the screen from the glide's start (holding
+                    // it to REVEAL_FROM left a few plain dark frames: the wall and panels had already faded, user).
+                    val a = when {
+                        exitToRect != null -> 1f - exitP.value
+                        glides -> 1f - ((exitP.value - REVEAL_FROM) / (1f - REVEAL_FROM)).coerceIn(0f, 1f)
+                        else -> 1f
+                    }
                     if (a > 0f) drawRect(GremlinColors.Backdrop.copy(alpha = a))
                 }
                 .onGloballyPositioned { coords[0] = it; notePlaced() }
