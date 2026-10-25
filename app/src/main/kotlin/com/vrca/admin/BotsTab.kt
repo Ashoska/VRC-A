@@ -151,6 +151,7 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
     val lastFlush = health?.optString("lastFlush", "—") ?: "—"
     val fillsWaiting = health?.let { "%,d".format(it.optInt("unfilled")) } ?: "—"
     val fontsWaiting = health?.let { "%,d".format(it.optInt("foldPending")) } ?: "—"
+    val backup = health?.optString("backup", "")?.ifBlank { "—" } ?: "—"
     val indexQueue = health?.let { "%,d keys · %,d font keys".format(it.optInt("iqDepth"), it.optInt("iqpDepth")) } ?: "—"
     // Recount status — visible so you can watch the periodic reconcile correct a drifted "unfilled"
     // (phantom-backlog) count. "idle" = count is current; "running N/4096" = a recount lap is in progress.
@@ -215,6 +216,7 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
             AdminLabeledRow("Fills waiting", fillsWaiting)
             AdminLabeledRow("Fonts waiting", fontsWaiting)
             AdminLabeledRow("Index queue", indexQueue)
+            AdminLabeledRow("Backup", backup)
             AdminLabeledRow("Last flush", lastFlush)
             AdminLabeledRow("Recount", recount)
             AdminLabeledRow("Admin key", adminKeySet)
