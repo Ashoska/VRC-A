@@ -20,8 +20,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -30,10 +28,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -404,12 +400,10 @@ private fun LiveReleasePanel(
                 }
 
                 var showRetractConfirm by remember { mutableStateOf(false) }
-                OutlinedButton(
+                com.vrca.ui.common.GremlinButton(
                     onClick = { showRetractConfirm = true },
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error
-                    ),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    kind = com.vrca.ui.common.GremlinButtonKind.Danger
                 ) {
                     Icon(Icons.Filled.Delete, null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
@@ -673,7 +667,7 @@ internal fun ReleasesTab(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-                OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { filePicker.launch("*/*") },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !uploading && !credsMissing
@@ -765,7 +759,7 @@ internal fun ReleasesTab(
                         }
                     }
 
-                    Button(
+                    com.vrca.ui.common.GremlinButton(
                         onClick = { startUpload() },
                         modifier = Modifier.fillMaxWidth(),
                         enabled = !uploading && parsedCode > 0L && cachedApkPath.isNotBlank() && !credsMissing

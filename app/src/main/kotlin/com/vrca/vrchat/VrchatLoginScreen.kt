@@ -317,7 +317,7 @@ fun VrchatLoginScreen(
                 }
 
                 // Back - let them re-enter credentials if code expired
-                com.vrca.ui.common.GremlinQuietButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = {
                         awaitingCode = false
                         codeInput = ""
@@ -336,7 +336,7 @@ fun VrchatLoginScreen(
             // which clashed with the app bar). Hidden during onboarding, where
             // the login step is a hard gate (onCancel = null).
             if (onCancel != null) {
-                com.vrca.ui.common.GremlinQuietButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
                     Text("Cancel")
                 }
             }

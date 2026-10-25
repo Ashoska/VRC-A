@@ -944,7 +944,7 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
             }
             val moreToLoad = if (paged) (pageIndex + 1) * pageSize < pageTotal else visible.size > shown
             if (moreToLoad) {
-                com.vrca.ui.common.GremlinQuietButton(
+                com.vrca.ui.common.GremlinSmallButton(
                     onClick = { if (paged) loadMore() else shown += 12 },
                     enabled = !loadingMore,
                     modifier = Modifier.fillMaxWidth()
@@ -1029,7 +1029,7 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.weight(1f))
-                com.vrca.ui.common.GremlinQuietButton(
+                com.vrca.ui.common.GremlinSmallButton(
                     onClick = { vm.resetAvatarHeightToDefault()?.let { sliderVal = it.coerceIn(0.1f, 10f) } },
                     enabled = defaultHeight != null
                 ) { Text("Reset to default") }

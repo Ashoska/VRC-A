@@ -15,12 +15,10 @@ import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -326,7 +324,7 @@ internal fun ModerationTab(
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
+                    com.vrca.ui.common.GremlinButton(
                         onClick = {
                             scope.launch {
                                 setGlobalLoading(true)
@@ -341,7 +339,7 @@ internal fun ModerationTab(
                         modifier = Modifier.weight(1f)
                     ) { Text("Load") }
 
-                    OutlinedButton(
+                    com.vrca.ui.common.GremlinSecondaryButton(
                         onClick = { clearLoaded() },
                         modifier = Modifier.weight(1f)
                     ) { Text("Clear") }
@@ -382,7 +380,7 @@ internal fun ModerationTab(
                 if (deviceBanned && deviceBanReason.isNotBlank())
                     AdminLabeledRow("dev. reason", deviceBanReason, labelWidth = 72)
 
-                OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { scope.launch { loadTarget(t) } },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Reload (history + live)") }
@@ -409,7 +407,7 @@ internal fun ModerationTab(
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
+                    com.vrca.ui.common.GremlinButton(
                         onClick = {
                             scope.launch {
                                 setGlobalLoading(true)
@@ -440,7 +438,7 @@ internal fun ModerationTab(
                         modifier = Modifier.weight(1f)
                     ) { Text("Apply warn") }
 
-                    OutlinedButton(
+                    com.vrca.ui.common.GremlinSecondaryButton(
                         onClick = {
                             scope.launch {
                                 setGlobalLoading(true)
@@ -476,7 +474,7 @@ internal fun ModerationTab(
 
                 // quick "use live" in case you're mid-edit and want to discard
                 if (editingWarn) {
-                    OutlinedButton(
+                    com.vrca.ui.common.GremlinSecondaryButton(
                         onClick = {
                             editWarnReason = liveWarnReason
                             editingWarn = false
@@ -525,7 +523,7 @@ internal fun ModerationTab(
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
+                    com.vrca.ui.common.GremlinButton(
                         onClick = {
                             scope.launch {
                                 val reason = editBanReason.trim()
@@ -580,7 +578,7 @@ internal fun ModerationTab(
                         enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
                     ) { Text("Ban") }
 
-                    OutlinedButton(
+                    com.vrca.ui.common.GremlinSecondaryButton(
                         onClick = {
                             scope.launch {
                                 setGlobalLoading(true)
@@ -637,7 +635,7 @@ internal fun ModerationTab(
                 }
 
                 if (editingBan) {
-                    OutlinedButton(
+                    com.vrca.ui.common.GremlinSecondaryButton(
                         onClick = {
                             editBanReason = liveBanReason
                             editingBan = false
@@ -656,7 +654,7 @@ internal fun ModerationTab(
             ) {
                 AdminCardHeader("History", Icons.Filled.History, AdminTone.Neutral,
                     trailing = {
-                        OutlinedButton(onClick = { scope.launch { loadHistoryNoIndex(t) } }) { Text("Reload") }
+                        com.vrca.ui.common.GremlinSecondaryButton(onClick = { scope.launch { loadHistoryNoIndex(t) } }) { Text("Reload") }
                     })
 
                 if (history.isEmpty()) {

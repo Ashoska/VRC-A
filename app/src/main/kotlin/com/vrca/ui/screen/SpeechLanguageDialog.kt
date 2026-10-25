@@ -132,7 +132,7 @@ internal fun SpeechLanguageDialog(
                     }
                 } else if (narrowShowsDetails) {
                     Column(Modifier.fillMaxWidth().height(paneHeight)) {
-                        com.vrca.ui.common.GremlinQuietButton(onClick = { narrowShowsDetails = false }) {
+                        com.vrca.ui.common.GremlinSmallButton(onClick = { narrowShowsDetails = false }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, modifier = Modifier.size(18.dp))
                             Text("  All languages")
                         }
@@ -252,7 +252,7 @@ private fun ListenTriggerDialog(
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                com.vrca.ui.common.GremlinQuietButton(onClick = onDismiss) { Text("Cancel") }
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onDismiss) { Text("Cancel") }
                 ActionPill("Done", filled = true, onClick = { onDone(picked, on) })
             }
         }
@@ -404,7 +404,7 @@ private fun LanguageDetails(
         }
         Text("Quality is measured on test recordings (casual talk does a bit worse). Compare sizes within a language: each language has its own test sentences.",
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        com.vrca.ui.common.GremlinQuietButton(onClick = { showCredits = !showCredits }) {
+        com.vrca.ui.common.GremlinSmallButton(onClick = { showCredits = !showCredits }) {
             Text(if (showCredits) "Hide model credits" else "Model credits", style = MaterialTheme.typography.labelMedium)
         }
         if (showCredits) {
@@ -448,7 +448,7 @@ private fun TierCard(
             }
             // Downloaded sizes can be removed right here (Settings also lists them).
             if (installed) {
-                com.vrca.ui.common.GremlinQuietButton(onClick = onRemove) {
+                com.vrca.ui.common.GremlinSmallButton(onClick = onRemove) {
                     Text("Remove", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error)
                 }
             }

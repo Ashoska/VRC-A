@@ -42,8 +42,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SportsEsports
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -54,10 +52,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -747,7 +743,7 @@ internal fun UsersTab(
 
                     // Actions side-by-side for a tidy footer.
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
+                        com.vrca.ui.common.GremlinButton(
                             onClick = {
                                 onSendToModeration(ModerationTarget(
                                     docId = row.docId, authUid = row.authUid,
@@ -766,12 +762,10 @@ internal fun UsersTab(
                             Text("Moderate")
                         }
 
-                        OutlinedButton(
+                        com.vrca.ui.common.GremlinButton(
                             onClick = { showKillConfirm = true },
                             modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                contentColor = MaterialTheme.colorScheme.error
-                            )
+                            kind = com.vrca.ui.common.GremlinButtonKind.Danger
                         ) {
                             Icon(Icons.Filled.Power, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
@@ -828,12 +822,12 @@ internal fun UsersTab(
                     var transferTarget by remember(selectedDocId) { mutableStateOf<UserRow?>(null) }
                     val targetName = row.vrchatDisplayName.ifBlank { row.displayName }.ifBlank { "this user" }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(
+                        com.vrca.ui.common.GremlinSecondaryButton(
                             onClick = { showLogoutVrcConfirm = true },
                             modifier = Modifier.weight(1f)
                         ) { Text("Log out VRChat") }
 
-                        OutlinedButton(
+                        com.vrca.ui.common.GremlinSecondaryButton(
                             onClick = { showLogoutDiscordConfirm = true },
                             modifier = Modifier.weight(1f)
                         ) { Text("Log out Discord") }
@@ -843,7 +837,7 @@ internal fun UsersTab(
                     // user who's still authed here but can't sign in elsewhere (forgot password).
                     // Only offered when THIS device actually has a VRChat session to move.
                     if (row.vrchatUserId.isNotBlank()) {
-                        OutlinedButton(
+                        com.vrca.ui.common.GremlinSecondaryButton(
                             onClick = { showTransferPicker = true },
                             modifier = Modifier.fillMaxWidth()
                         ) { Text("Move VRChat login to another device") }
@@ -868,7 +862,7 @@ internal fun UsersTab(
                                 }
                                 Text(st.message, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
                                 if (st.done || st.error) {
-                                    TextButton(onClick = { com.vrca.admin.AuthTransferCoordinator.clear() }) { Text("Dismiss") }
+                                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { com.vrca.admin.AuthTransferCoordinator.clear() }) { Text("Dismiss") }
                                 }
                             }
                         }
@@ -974,7 +968,7 @@ internal fun UsersTab(
                         var inviteResult by remember(selectedDocId) { mutableStateOf<String?>(null) }
                         Spacer(Modifier.height(8.dp))
                         val targetVrcId = d?.vrchatUserId.orEmpty()
-                        OutlinedButton(
+                        com.vrca.ui.common.GremlinSecondaryButton(
                             onClick = {
                                 scope.launch {
                                     inviting = true; inviteResult = null
@@ -1086,9 +1080,9 @@ internal fun UsersTab(
                                     )
                                 }
                             }
-                            OutlinedButton(
+                            com.vrca.ui.common.GremlinSecondaryButton(
                                 onClick = onIncreaseLiveLimit,
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                size = com.vrca.ui.common.GremlinButtonSize.Small
                             ) { Text("+500", style = MaterialTheme.typography.labelSmall) }
                         }
                     }
@@ -1295,7 +1289,7 @@ private fun TransferTargetPicker(
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onDismiss) { Text("Cancel") }
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onDismiss) { Text("Cancel") }
             }
         }
     }
@@ -1475,16 +1469,14 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
             }
             // Single Start/Stop toggle (like Home): flips optimistically on press,
             // then the synced state reconciles it. Red while sending.
-            Button(
+            com.vrca.ui.common.GremlinButton(
                 onClick = {
                     val target = !shownSending
                     optimisticSending = target
                     sendOscCommand(if (target) "start" else "stop")
                 },
                 modifier = Modifier.fillMaxWidth(),
-                colors = if (shownSending)
-                    ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                else ButtonDefaults.buttonColors()
+                kind = com.vrca.ui.common.GremlinButtonKind.Danger
             ) {
                 Text(
                     if (shownSending) "Stop sending" else "Start sending",
@@ -1592,8 +1584,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                         IconButton(onClick = { writeField("afkPreset${i+1}", SubLineCodec.fromAdminText(pe)) }) {
                             Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
                         }
-                    OutlinedButton(onClick = { writeField("afkMessage", SubLineCodec.fromAdminText(pe)) },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { writeField("afkMessage", SubLineCodec.fromAdminText(pe)) }, size = com.vrca.ui.common.GremlinButtonSize.Small) {
                         Text("Load", style = MaterialTheme.typography.labelSmall)
                     }
                 }
@@ -1660,12 +1651,10 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                                 minLines = 2, maxLines = 8)
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 if (pe != presetReadable)
-                                    Button(onClick = { writeField("cyclePreset${i+1}", SubLineCodec.fromAdminCycleText(pe)) },
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+                                    com.vrca.ui.common.GremlinButton(onClick = { writeField("cyclePreset${i+1}", SubLineCodec.fromAdminCycleText(pe)) }, size = com.vrca.ui.common.GremlinButtonSize.Small) {
                                         Text("Save", style = MaterialTheme.typography.labelSmall)
                                     }
-                                OutlinedButton(onClick = { writeField("cycleLinesText", SubLineCodec.fromAdminCycleText(pe)) },
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+                                com.vrca.ui.common.GremlinSecondaryButton(onClick = { writeField("cycleLinesText", SubLineCodec.fromAdminCycleText(pe)) }, size = com.vrca.ui.common.GremlinButtonSize.Small) {
                                     Text("Load to active", style = MaterialTheme.typography.labelSmall)
                                 }
                             }
@@ -1869,7 +1858,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                                 color = MaterialTheme.colorScheme.onTertiaryContainer)
                     }
                 }
-                OutlinedButton(onClick = {
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = {
                     scope.launch {
                         runCatching {
                             FirebaseFirestore.getInstance()
@@ -1890,7 +1879,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
 
                 // Option 1: Upload APK file directly
-                OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { tFilePicker.launch("*/*") },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !tUploading && !tCredsMissing
@@ -1963,7 +1952,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
 
                 // Upload & push button (APK file)
                 if (tParsedCode > 0L && tCachedApkPath.isNotBlank()) {
-                    Button(
+                    com.vrca.ui.common.GremlinButton(
                         onClick = { startTargetedUpload() },
                         modifier = Modifier.fillMaxWidth(),
                         enabled = !tUploading && !tCredsMissing
@@ -1998,7 +1987,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     label = { Text("APK download URL") },
                     placeholder = { Text("https://github.com/...release.apk") }
                 )
-                OutlinedButton(onClick = {
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = {
                     scope.launch {
                         runCatching {
                             val snap = db.collection("releases").document("latest").get().await()
@@ -2011,7 +2000,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                 }, modifier = Modifier.fillMaxWidth()) {
                     Text("Fill from latest release", style = MaterialTheme.typography.labelMedium)
                 }
-                Button(onClick = {
+                com.vrca.ui.common.GremlinButton(onClick = {
                     if (targetUrl.trim().isNotBlank()) {
                         scope.launch {
                             runCatching {

@@ -351,7 +351,7 @@ private fun ConnectionButton(vm: com.vrca.ui.viewmodel.VrcaViewModel) {
                     chatboxViewModel = vm,
                     modifier = Modifier.fillMaxWidth()
                 )
-                com.vrca.ui.common.GremlinQuietButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { editOpen = false },
                     modifier = Modifier.align(Alignment.End)
                 ) { Text("Done") }

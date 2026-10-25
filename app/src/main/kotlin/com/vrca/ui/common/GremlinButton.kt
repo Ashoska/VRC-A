@@ -43,7 +43,7 @@ import com.vrca.app.Mark
 import com.vrca.ui.theme.GremlinColors
 
 /** What a button does: the main action, a side action, a stop / destructive one, or a quiet link. */
-enum class GremlinButtonKind { Primary, Secondary, Danger, Quiet }
+enum class GremlinButtonKind { Primary, Secondary, Danger }
 
 /** Button heights: big actions (Start sending, Retry), normal, and small inline ones. */
 enum class GremlinButtonSize(val height: Dp, val padX: Dp) { Large(52.dp, 22.dp), Medium(44.dp, 18.dp), Small(34.dp, 14.dp) }
@@ -53,7 +53,7 @@ enum class GremlinButtonSize(val height: Dp, val padX: Dp) { Large(52.dp, 22.dp)
  * layered, tinted, cat-ear, underline, notched, icon-block, speech-bubble, boot-line, bracket, echo,
  * doodle and subtler variants): a dark face with an outline and label in its colour (accent for the
  * main action, red to stop, the edge colour for side actions); pressing fills it with its colour and
- * thickens the outline. A Quiet button is just coloured text that tints when pressed.
+ * thickens the outline. (There is no text-only kind any more: user, 2026-10-25, every action is a real button.)
  *
  * [loading]: Boot Cat thinking takes the icon's place and taps are ignored (pass a label like
  * "Starting..." meanwhile). [leading] replaces the icon with any small content (the Retry
@@ -139,15 +139,15 @@ fun GremlinSecondaryButton(
     content: @Composable RowScope.() -> Unit
 ) = GremlinButton(onClick, modifier, enabled, GremlinButtonKind.Secondary, size, content = content)
 
-/** A quiet text action (the old TextButton). */
+/** A small side action (inline actions like "Add row", "Edit"; it replaced the old text-only Quiet buttons). */
 @Composable
-fun GremlinQuietButton(
+fun GremlinSmallButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     size: GremlinButtonSize = GremlinButtonSize.Small,
     content: @Composable RowScope.() -> Unit
-) = GremlinButton(onClick, modifier, enabled, GremlinButtonKind.Quiet, size, content = content)
+) = GremlinButton(onClick, modifier, enabled, GremlinButtonKind.Secondary, size, content = content)
 
 @Composable
 private fun GremlinButtonFrame(
@@ -164,14 +164,13 @@ private fun GremlinButtonFrame(
     val tone = when (kind) {
         GremlinButtonKind.Primary -> accent
         GremlinButtonKind.Danger -> GremlinColors.Negative
-        GremlinButtonKind.Secondary, GremlinButtonKind.Quiet -> GremlinColors.TextMuted
+        GremlinButtonKind.Secondary -> GremlinColors.TextMuted
     }
     val source = remember { MutableInteractionSource() }
     val pressedNow by source.collectIsPressedAsState()
     val press by animateFloatAsState(if (pressedNow || pressedPreview) 1f else 0f, tween(90), label = "press")
     val dim by animateFloatAsState(if (enabled) 1f else 0.4f, tween(200), label = "dim")
     val toneA by animateColorAsState(tone, tween(250), label = "tone")
-    val quiet = kind == GremlinButtonKind.Quiet
     val secondary = kind == GremlinButtonKind.Secondary
     val labelColor = if (secondary) GremlinColors.Text else toneA
     Box(
@@ -180,10 +179,6 @@ private fun GremlinButtonFrame(
             .graphicsLayer { alpha = dim }
             .clickable(source, indication = null, enabled = enabled && !loading, role = Role.Button, onClick = onClick)
             .drawBehind {
-                if (quiet) {
-                    if (press > 0f) drawRoundRect(toneA.copy(alpha = 0.14f * press), cornerRadius = CornerRadius(12.dp.toPx()))
-                    return@drawBehind
-                }
                 val r = CornerRadius(14.dp.toPx())
                 drawRoundRect(lerp(GremlinColors.Card, toneA, 0.22f * press), cornerRadius = r)
                 val edge = if (secondary) GremlinColors.Edge else toneA
@@ -197,7 +192,7 @@ private fun GremlinButtonFrame(
                 .copy(fontWeight = FontWeight.SemiBold)
         ) {
             Row(
-                Modifier.defaultMinSize(minHeight = size.height).padding(horizontal = if (quiet) 10.dp else size.padX),
+                Modifier.defaultMinSize(minHeight = size.height).padding(horizontal = size.padX),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center
             ) { content(labelColor) }

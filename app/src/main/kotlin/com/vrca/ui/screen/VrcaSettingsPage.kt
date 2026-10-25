@@ -282,7 +282,7 @@ internal fun SettingsPage(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        com.vrca.ui.common.GremlinQuietButton(onClick = { vm.launchAppInfo(ctx) }) { Text("Open App info") }
+                        com.vrca.ui.common.GremlinSmallButton(onClick = { vm.launchAppInfo(ctx) }) { Text("Open App info") }
                     }
                 }
             }
@@ -415,7 +415,7 @@ internal fun SettingsPage(
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Main-thread stalls (startup)", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-                            com.vrca.ui.common.GremlinQuietButton(onClick = { com.vrca.app.MainThreadWatch.clear(ctx); stallsTick++ }) { Text("Clear") }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = { com.vrca.app.MainThreadWatch.clear(ctx); stallsTick++ }) { Text("Clear") }
                         }
                         SelectionContainer {
                             Text(stalls.ifBlank { "(none)" }.let { com.vrca.app.sanitizeBackendRefs(it) }, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
@@ -425,7 +425,7 @@ internal fun SettingsPage(
                         var confirmCrash by remember { mutableStateOf(false) }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Crash screen", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-                            com.vrca.ui.common.GremlinQuietButton(onClick = { confirmCrash = true }) { Text("Test crash") }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = { confirmCrash = true }) { Text("Test crash") }
                         }
                         // Crash reports waiting to be sent and the last upload result (CrashUpload), read once when shown.
                         var crashUpload by remember { mutableStateOf("") }
@@ -525,7 +525,7 @@ internal fun SettingsPage(
                                     kotlinx.coroutines.delay(1000)
                                 }
                             }
-                            com.vrca.ui.common.GremlinQuietButton(onClick = { com.vrca.osc.VrcaOscQuery.start(ctx) }) {
+                            com.vrca.ui.common.GremlinSmallButton(onClick = { com.vrca.osc.VrcaOscQuery.start(ctx) }) {
                                 Text("Start / rescan OSCQuery")
                             }
                             SelectionContainer {
@@ -631,7 +631,7 @@ internal fun SettingsPage(
                                     .getOrElse { "error: ${it.javaClass.simpleName}" }
                             }
                         }
-                        com.vrca.ui.common.GremlinQuietButton(onClick = { dbTrigger++ }) { Text("Test all avatar databases") }
+                        com.vrca.ui.common.GremlinSmallButton(onClick = { dbTrigger++ }) { Text("Test all avatar databases") }
                         SelectionContainer {
                             Text(
                                 dbHealth,
@@ -657,7 +657,7 @@ internal fun SettingsPage(
                                 }
                             }
                         }
-                        com.vrca.ui.common.GremlinQuietButton(onClick = { rescanTick++ }) { Text("Re-scan my avatars now") }
+                        com.vrca.ui.common.GremlinSmallButton(onClick = { rescanTick++ }) { Text("Re-scan my avatars now") }
                         SelectionContainer {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(libDiag, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
@@ -805,7 +805,7 @@ internal fun WhatsNewDialog(onDismiss: () -> Unit) {
                 )
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                com.vrca.ui.common.GremlinQuietButton(onClick = onDismiss) { Text("Close") }
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onDismiss) { Text("Close") }
             }
         }
     }
@@ -864,7 +864,7 @@ private fun SettingsRow(
             }
         }
 
-        com.vrca.ui.common.GremlinQuietButton(onClick = onPrimary) {
+        com.vrca.ui.common.GremlinSmallButton(onClick = onPrimary) {
             Text(primary)
             Spacer(Modifier.width(4.dp))
             Icon(Icons.Filled.ChevronRight, contentDescription = null)
@@ -933,9 +933,9 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 )
             }
             if (vrcSignedIn) {
-                com.vrca.ui.common.GremlinQuietButton(onClick = { confirmVrcSignOut = true }) { Text("Sign out") }
+                com.vrca.ui.common.GremlinSmallButton(onClick = { confirmVrcSignOut = true }) { Text("Sign out") }
             } else {
-                com.vrca.ui.common.GremlinQuietButton(onClick = onSignInVrchat) { Text("Sign in") }
+                com.vrca.ui.common.GremlinSmallButton(onClick = onSignInVrchat) { Text("Sign in") }
             }
         }
 
@@ -969,9 +969,9 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 }
             }
             if (discordSeeded) {
-                com.vrca.ui.common.GremlinQuietButton(onClick = { confirmDiscordDisconnect = true }) { Text("Sign out") }
+                com.vrca.ui.common.GremlinSmallButton(onClick = { confirmDiscordDisconnect = true }) { Text("Sign out") }
             } else {
-                com.vrca.ui.common.GremlinQuietButton(onClick = {
+                com.vrca.ui.common.GremlinSmallButton(onClick = {
                     if (!discordRiskAccepted) showRiskConsent = true else showDiscordLogin = true
                 }) { Text("Sign in") }
             }
@@ -986,7 +986,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 else setDiscordRpcEnabled(enabled)
             }
             if (discordStatus == com.vrca.discord.DiscordRpcStatus.SESSION_EXPIRED) {
-                com.vrca.ui.common.GremlinQuietButton(onClick = { showDiscordLogin = true }) { Text("Sign in to Discord again") }
+                com.vrca.ui.common.GremlinSmallButton(onClick = { showDiscordLogin = true }) { Text("Sign in to Discord again") }
             }
         }
 
@@ -1013,9 +1013,9 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 )
             }
             if (spotifyConnected) {
-                com.vrca.ui.common.GremlinQuietButton(onClick = { com.vrca.spotify.SpotifyAuthManager.logout(ctx) }) { Text("Disconnect") }
+                com.vrca.ui.common.GremlinSmallButton(onClick = { com.vrca.spotify.SpotifyAuthManager.logout(ctx) }) { Text("Disconnect") }
             } else if (com.vrca.spotify.SpotifyAuthManager.isConfigured()) {
-                com.vrca.ui.common.GremlinQuietButton(onClick = {
+                com.vrca.ui.common.GremlinSmallButton(onClick = {
                     runCatching {
                         val url = com.vrca.spotify.SpotifyAuthManager.buildAuthUrl(ctx)
                         ctx.startActivity(
@@ -1095,7 +1095,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    com.vrca.ui.common.GremlinQuietButton(onClick = { showRiskConsent = false }) { Text("Cancel") }
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { showRiskConsent = false }) { Text("Cancel") }
                     com.vrca.ui.common.GremlinButton(
                         onClick = {
                             scope.launch {
@@ -1126,7 +1126,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f)
                     )
-                    com.vrca.ui.common.GremlinQuietButton(onClick = { showDiscordLogin = false }) { Text("Cancel") }
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { showDiscordLogin = false }) { Text("Cancel") }
                 }
                 Box(Modifier.fillMaxWidth().height(500.dp)) {
                     com.vrca.discord.DiscordLoginWebView(

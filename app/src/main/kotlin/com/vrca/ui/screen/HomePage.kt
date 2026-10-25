@@ -48,7 +48,6 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
@@ -761,7 +760,7 @@ private fun SpeechDictationRow(vm: VrcaViewModel, isBanned: Boolean) {
                                 )
                             } else {
                                 Icon(
-                                    imageVector = if (listening) Icons.Filled.Stop else Icons.Filled.Mic,
+                                    imageVector = if (listening) com.vrca.app.BootIcons.StopVector else Icons.Filled.Mic,
                                     contentDescription = if (listening) "Stop dictation" else "Start dictation",
                                     tint = if (listening) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                                 )
@@ -1280,9 +1279,10 @@ private fun PreviewAndTogglesCard(
                 kind = com.vrca.ui.common.GremlinButtonKind.Danger
             ) {
                 Icon(
-                    Icons.Filled.Stop,
+                    com.vrca.app.BootIcons.StopVector,
                     contentDescription = null,
-                    modifier = Modifier.size(18.dp)
+                    // The same size as Start sending's icon, so the swap doesn't jump.
+                    modifier = Modifier.size(22.dp)
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -1358,11 +1358,11 @@ private fun QuickTogglesSection(
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (cardReorderMode) {
-                        com.vrca.ui.common.GremlinQuietButton(
+                        com.vrca.ui.common.GremlinSmallButton(
                             onClick = onResetOrder
                         ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
                     }
-                    com.vrca.ui.common.GremlinQuietButton(
+                    com.vrca.ui.common.GremlinSmallButton(
                         onClick = { onToggleReorderMode(!cardReorderMode) }
                     ) {
                         Text(
