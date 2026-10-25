@@ -421,7 +421,8 @@ async function applyIndexOps(env, ops) {
   // v40: a read that THROWS (vs an absent object) must never be treated as empty — writing back
   // "empty + this batch" would wipe the bucket's other entries. Skip that bucket and throw at the end,
   // so the caller requeues the whole batch (idempotent).
-  let readFailed = false;
+  let readFailed = false, firstErr = "";
+  const fail = (what, e) => { readFailed = true; if (!firstErr) firstErr = what + ": " + String(e && e.message || e).slice(0, 100); };
   const fragWork = {};   // prefix -> { set:{id:summary}, del:Set(id) }
   const avtrWork = {};   // prefix -> { add:Set, rem:Set }
   const idxWork = {};    // indexBucket -> { token -> {add:Set, rem:Set} }
@@ -452,7 +453,7 @@ async function applyIndexOps(env, ops) {
     const fw = fragWork[p], aw = avtrWork[p];
     if (fw && (Object.keys(fw.set).length || fw.del.size)) await (async () => {
       let cur = { v: 1, e: {} }, rf = false;
-      try { const o = await env.CATALOG.get(`fragments/${p}.json`); if (o) cur = await o.json(); } catch (_) { rf = true; readFailed = true; }
+      try { const o = await env.CATALOG.get(`fragments/${p}.json`); if (o) cur = await o.json(); } catch (e) { rf = true; fail(`get fragments/${p}`, e); }
       if (rf) return;
       if (!cur || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
       // NO-OP GUARD: only rewrite when a summary actually CHANGES (re-adding an already-indexed
@@ -468,12 +469,12 @@ async function applyIndexOps(env, ops) {
       }
       if (dirty) {
         try { await env.CATALOG.put(`fragments/${p}.json`, JSON.stringify({ v: 1, e: cur.e }), ttl);
-          if (base) changed.push(base + `/fragments/${p}.json`); } catch (_) { readFailed = true; }
+          if (base) changed.push(base + `/fragments/${p}.json`); } catch (e) { fail(`put fragments/${p}`, e); }
       }
     })();
     if (aw && (aw.add.size || aw.rem.size)) await (async () => {
       let cur = { v: 1, ids: [] }, rf = false;
-      try { const o = await env.CATALOG.get(`avtr/${p}.json`); if (o) cur = await o.json(); } catch (_) { rf = true; readFailed = true; }
+      try { const o = await env.CATALOG.get(`avtr/${p}.json`); if (o) cur = await o.json(); } catch (e) { rf = true; fail(`get avtr/${p}`, e); }
       if (rf) return;
       if (!cur || !Array.isArray(cur.ids)) cur = { v: 1, ids: [] };
       const s = new Set(cur.ids);
@@ -486,7 +487,7 @@ async function applyIndexOps(env, ops) {
       for (const id of aw.add) { if (!s.has(id)) { s.add(id); dirty = true; } }
       if (dirty) {
         try { await env.CATALOG.put(`avtr/${p}.json`, JSON.stringify({ v: 1, ids: Array.from(s) }), ttl);
-          if (base) changed.push(base + `/avtr/${p}.json`); } catch (_) { readFailed = true; }
+          if (base) changed.push(base + `/avtr/${p}.json`); } catch (e) { fail(`put avtr/${p}`, e); }
       }
     })();
   };
@@ -494,7 +495,7 @@ async function applyIndexOps(env, ops) {
   // Index token lists.
   await runPool(Object.entries(idxWork), INDEX_IO_CONCURRENCY, async ([b, toks]) => {
     let cur = { v: 1, t: {} }, rf = false;
-    try { const o = await env.CATALOG.get(`index/${b}.json`); if (o) cur = await o.json(); } catch (_) { rf = true; readFailed = true; }
+    try { const o = await env.CATALOG.get(`index/${b}.json`); if (o) cur = await o.json(); } catch (e) { rf = true; fail(`get index/${b}`, e); }
     if (rf) return;
     if (!cur || typeof cur.t !== "object" || cur.t === null) cur = { v: 1, t: {} };
     // NO-OP GUARD per token: only rewrite the bucket when at least one token's posting list actually
@@ -521,11 +522,11 @@ async function applyIndexOps(env, ops) {
     }
     if (dirty) {
       try { await env.CATALOG.put(`index/${b}.json`, JSON.stringify({ v: 1, t: cur.t }), ttl);
-        if (base) changed.push(base + `/index/${b}.json`); } catch (_) { readFailed = true; }
+        if (base) changed.push(base + `/index/${b}.json`); } catch (e) { fail(`put index/${b}`, e); }
     }
   });
   // Any failed read or write → the caller requeues the whole batch (re-applying is idempotent).
-  if (readFailed) throw new Error("index bucket read/write failed");
+  if (readFailed) throw new Error(firstErr || "index bucket read/write failed");
   return changed;
 }
 
@@ -778,6 +779,7 @@ export default {
           iqDepth: meta.iqDepth || 0,   // search-index op queue depth (keys, ~150 ops each); drains to 0 as fold/rebuild ops apply
           iqpDepth: meta.iqpDepth || 0, // v40 priority lane (fold ops), drained before iqDepth
           foldPending: meta.foldPending || 0, // v40 fancy-font avatars whose plain-text tokens are still queued
+          lastDrain: meta.lastDrain || "",    // v43 last index-drain report (applied/ops/buckets/keys/err)
           iqDropped: meta.iqDropped || 0, // v40 pre-v40 every-check re-asserts dropped from the backlog
           lastFlush: meta.lastFlush || null,
           lastAdded: meta.lastAdded || 0,
@@ -827,7 +829,7 @@ export default {
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
           lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
-          version: 42,   // v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 43,   // v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -1487,6 +1489,7 @@ async function flushR2(env) {
   let iqDroppedNow = 0;                       // v40 legacy re-asserts dropped from the backlog this flush
   let iqLeft = false, iqMoved = false;        // v40 index-backlog chaining signals
   let foldPendingNow = prevMeta.foldPending || 0;   // v40 "Fonts waiting" (fold ops queued)
+  let lastDrainNow = prevMeta.lastDrain || "";      // v43 drain report
   const pendNames = await listPrefix(env, "pend:");
   const repNames  = await listPrefix(env, "rep:");
   const admuNames = await listPrefix(env, "admu:");
@@ -1841,22 +1844,32 @@ async function flushR2(env) {
         take(op);
       }
     }
-    let applied = true;
+    let applied = true, drainErr = "";
+    const tApply = Date.now();
     if (toApply.length) {
       // No edge-cache purge on index buckets (they carry the 5-min INDEX_TTL, self-heal).
-      try { await applyIndexOps(env, toApply); } catch (_) { applied = false; }
+      try { await applyIndexOps(env, toApply); } catch (e) { applied = false; drainErr = String(e && e.message || e).slice(0, 140); }
     }
-    for (const kn of drained) await env.AVATAR_KV.delete(kn);
     // Leftover / on-failure-all → requeue by lane (idempotent). NO expiry: an index op is the only
-    // thing that makes an avatar searchable, so it must never be dropped.
+    // thing that makes an avatar searchable, so it must never be dropped. v43: requeue FIRST, then
+    // delete the drained keys, so hitting the subrequest ceiling between the two can only duplicate
+    // ops (harmless), never lose them.
     const requeue = applied ? leftover : [...toApply, ...leftover];
     const fold = requeue.filter((o) => o.fz), rest = requeue.filter((o) => !o.fz);
-    for (let i = 0; i < fold.length; i += MAX_INDEX_OPS_PER_FLUSH) {
-      const part = fold.slice(i, i + MAX_INDEX_OPS_PER_FLUSH);
-      await env.AVATAR_KV.put(iqpKey(part.length), JSON.stringify(part));
-    }
-    for (let i = 0; i < rest.length; i += MAX_INDEX_OPS_PER_FLUSH)
-      await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(rest.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
+    let requeueOk = true;
+    try {
+      for (let i = 0; i < fold.length; i += MAX_INDEX_OPS_PER_FLUSH) {
+        const part = fold.slice(i, i + MAX_INDEX_OPS_PER_FLUSH);
+        await env.AVATAR_KV.put(iqpKey(part.length), JSON.stringify(part));
+      }
+      for (let i = 0; i < rest.length; i += MAX_INDEX_OPS_PER_FLUSH)
+        await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(rest.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
+    } catch (e) { requeueOk = false; drainErr = drainErr || ("requeue: " + String(e && e.message || e).slice(0, 120)); }
+    if (requeueOk) for (const kn of drained) await env.AVATAR_KV.delete(kn);
+    // v43 drain report for /health (no logs available otherwise).
+    lastDrainNow = `applied=${applied} ops=${toApply.length} buckets=${used.size}/${bucketCap} keys=${drained.length}` +
+      ` dropped=${iqDroppedNow} left=${requeue.length} shards=${prefixes.length} applyMs=${Date.now() - tApply}` +
+      (drainErr ? ` err=${drainErr}` : "");
     iqMoved = applied && (toApply.length > 0 || iqDroppedNow > 0);
     // Fonts waiting = fold ops still queued: the op counts carried in the undrained iqp: key names
     // plus what was just requeued (exact, no value reads).
@@ -1955,6 +1968,7 @@ async function flushR2(env) {
     iqDepth: iqDepthNow,   // search-index op queue depth (keys) — watch it drain to 0 after a fold/rebuild
     iqpDepth: iqpDepthNow, // v40 priority lane (fold ops) depth in keys
     foldPending: foldPendingNow, // v40 fold ops queued (admin "Fonts waiting")
+    lastDrain: lastDrainNow,     // v43 last index-drain report
     iqDropped: (prevMeta.iqDropped || 0) + iqDroppedNow,   // v40 legacy re-asserts dropped (running total)
     backend: "r2",
   })); } catch (_) { /* ceiling: meta stale ONE cycle (self-corrects next flush); the return below is computed from in-memory state so the chain still gets the right pendRemaining */ }
