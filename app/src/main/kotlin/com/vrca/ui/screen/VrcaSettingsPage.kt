@@ -561,6 +561,31 @@ internal fun SettingsPage(
                                 }
                             }
 
+                            // Floor probe (read-only): system settings + properties
+                            // naming floor/boundary/tracking, to find where Quest keeps
+                            // the floor height VRChat follows live.
+                            Text("Floor / boundary values", style = MaterialTheme.typography.labelMedium)
+                            var floorDump by remember { mutableStateOf("") }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                floorDump = "Reading…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    val dump = runCatching { com.vrca.osc.FloorProbe.dump(ctx) }
+                                        .getOrElse { "error: ${it.message}" }
+                                    floorDump = dump
+                                }
+                            }) {
+                                Text("Read floor values")
+                            }
+                            if (floorDump.isNotEmpty()) {
+                                SelectionContainer {
+                                    Text(
+                                        floorDump,
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+
                             // Instance roster: shows the log file + parsed
                             // location/world/roster + the last log lines with what the
                             // parser made of each — so a "not in a world" with a
