@@ -174,7 +174,11 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
             // (head/wrist tracking, every avatar param). Once per process, never
             // stopped: re-announcing in the same VRChat session gets nothing.
             val appCtx = applicationContext
-            Thread({ runCatching { com.vrca.osc.OscAnnouncer.start(appCtx) } }, "vrca-announce-start")
+            Thread({
+                // Last process died mid hand-drag (sticky axes): stop the player first.
+                runCatching { com.vrca.osc.HandDrag.clearStale(appCtx) }
+                runCatching { com.vrca.osc.OscAnnouncer.start(appCtx) }
+            }, "vrca-announce-start")
                 .apply { isDaemon = true; start() }
             // Start the instance-roster / log reader in the BACKGROUND at launch,
             // not just when the Home roster panel is visible. It owns the "VRChat

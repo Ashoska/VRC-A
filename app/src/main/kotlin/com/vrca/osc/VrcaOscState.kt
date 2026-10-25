@@ -151,6 +151,7 @@ object VrcaOscState {
 
     fun onParam(name: String, value: Any?) {
         if (value != null) { params[name] = value; seenMs[name] = System.currentTimeMillis() }
+        pruneStale()
         lastRxMs = System.currentTimeMillis()
         if (!_live.value) _live.value = true
         if (name == "EyeHeightAsMeters") {
@@ -199,6 +200,17 @@ object VrcaOscState {
                 com.vrca.vrchat.AvatarGlobalDb.onAvatarChanged(com.vrca.app.VrcaApplication.instance, id)
             }
         }
+    }
+
+    @Volatile private var lastPruneMs = 0L
+
+    /** Every avatar brings its own param names; drop names unseen for 10 min (checked
+     *  at most once a minute) so switching avatars all night doesn't grow the maps. */
+    private fun pruneStale() {
+        val now = System.currentTimeMillis()
+        if (now - lastPruneMs < 60_000L) return
+        lastPruneMs = now
+        seenMs.entries.removeIf { (k, at) -> (now - at > 600_000L).also { if (it) params.remove(k) } }
     }
 
     /** Called periodically so `isLive` can flip false when OSC stops. */

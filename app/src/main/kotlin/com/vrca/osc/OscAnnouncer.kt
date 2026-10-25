@@ -5,6 +5,7 @@ import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import org.json.JSONObject
 import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.net.DatagramPacket
 import java.net.InetAddress
 import java.util.concurrent.ConcurrentHashMap
@@ -47,6 +48,10 @@ object OscAnnouncer {
     @Volatile private var pushVrchat: String? = null
     @Volatile private var selfTestSeenMs = 0L
     @Volatile private var selfTestNote = ""
+    private val linkLock = Any()
+    private var linkOut: DataOutputStream? = null
+    /** Latest [reportDrag] state, re-sent to the bridge on every (re)link. */
+    @Volatile private var dragState = ""
 
     /** True while the VRChat instance that's running now is pushing to us, so its
      *  avatar params / avatar info arrive the moment they change. VRChat only sends a
@@ -97,6 +102,8 @@ object OscAnnouncer {
                 sock.connect(LocalSocketAddress(OscBridge.relayName(ctx)))
                 linked = true; failures = 0
                 linkNote = "linked to bridge"
+                synchronized(linkLock) { linkOut = DataOutputStream(sock.outputStream.buffered()) }
+                if (dragState.isNotEmpty()) writeToBridge(2, dragState)
                 readFrames(DataInputStream(sock.inputStream.buffered()))
             } catch (e: Exception) {
                 failures++
@@ -105,9 +112,26 @@ object OscAnnouncer {
                 if (failures % 5 == 1) OscBridgeService.start(ctx)
             } finally {
                 linked = false
+                synchronized(linkLock) { linkOut = null }
                 runCatching { sock.close() }
             }
             try { Thread.sleep(1_000) } catch (_: InterruptedException) { break }
+        }
+    }
+
+    /** [HandDrag]: tell the bridge whether a drag is moving the player and where its
+     *  OSC goes. The `/input` axes are sticky in VRChat, so if this process dies
+     *  mid-drag the bridge (which outlives it) sends the zeros instead. */
+    fun reportDrag(host: String, port: Int, moving: Boolean) {
+        dragState = "$host\n$port\n${if (moving) 1 else 0}"
+        writeToBridge(2, dragState)
+    }
+
+    private fun writeToBridge(type: Int, text: String) {
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        synchronized(linkLock) {
+            val out = linkOut ?: return
+            runCatching { out.writeByte(type); out.writeInt(bytes.size); out.write(bytes); out.flush() }
         }
     }
 
@@ -183,7 +207,8 @@ object OscAnnouncer {
         if (address == "/vrca/selftest") { selfTestSeenMs = System.currentTimeMillis(); return }
         lastAddress = address
         val isParam = address.startsWith("/avatar/parameters/")
-        counts.merge(if (isParam) "/avatar/parameters/*" else address, 1, Int::plus)
+        val key = if (isParam) "/avatar/parameters/*" else address
+        if (counts.size < 64 || counts.containsKey(key)) counts.merge(key, 1, Int::plus)
         val tags = str() ?: return
         if (address.startsWith("/tracking/vrsystem/")) {
             val floats = tags.drop(1).filter { it == 'f' }.map { Float.fromBits(int()) }
@@ -207,7 +232,12 @@ object OscAnnouncer {
                 // the OSCQuery poll slows to a 1 s safety net while it's live.
                 if (!paused) VrcaOscState.onParam(name, v)
             } else {
-                others[address] = if (v is Float) "%.3f".format(v) else v.toString()
+                // New avatar: its params replace the old one's (VRChat re-sends them), so
+                // names from past avatars don't pile up. Other paths are a fixed set.
+                if (address == "/avatar/change") params.clear()
+                if (others.size < 64 || others.containsKey(address)) {
+                    others[address] = if (v is Float) "%.3f".format(v) else v.toString()
+                }
                 // Avatar id/name, eye height + the world's size limits.
                 if (!paused && address.startsWith("/avatar/")) VrcaOscState.onAvatarInfo(address, v)
             }
@@ -223,6 +253,7 @@ object OscAnnouncer {
         if (st != null) {
             val age = (System.currentTimeMillis() - bridgeStatusMs) / 1000
             append("\nbridge pid ").append(st.optInt("pid")).append(" up ").append(st.optLong("upSec")).append(" s")
+                .append("  drag stops after a crash: ").append(st.optInt("dragStops"))
             if (age > 3) append("  (status ").append(age).append(" s old)")
             append("\nannouncing as ").append(st.optString("name"))
             append("  OSCQuery http://").append(st.optString("ip")).append(':').append(st.optInt("http"))

@@ -6,6 +6,7 @@ import android.net.LocalSocket
 import android.os.Process
 import android.util.Log
 import org.json.JSONObject
+import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -32,7 +33,10 @@ import java.net.SocketTimeoutException
  * still needs one VRChat restart.
  *
  * Relay frames: [type:1][length:4][payload]: type 0 = one OSC datagram, 1 = status JSON
- * (once a second). Only our own uid may connect.
+ * (once a second). Only our own uid may connect. The main process sends back type 2 =
+ * hand-drag state ("host\nport\nmoving"): VRChat's `/input` axes are sticky, so when
+ * the main process dies mid-drag the bridge sends the zeros ([stopDrag]), otherwise
+ * the player keeps moving until VRC-A is reopened.
  */
 object OscBridge {
 
@@ -58,6 +62,10 @@ object OscBridge {
     @Volatile private var lastPacketMs = 0L
     @Volatile private var startedMs = 0L
     @Volatile private var clientSinceMs = 0L
+    @Volatile private var dragHost = ""
+    @Volatile private var dragPort = 0
+    @Volatile private var dragMoving = false
+    @Volatile private var dragStops = 0
 
     private val clientLock = Any()
     private var client: LocalSocket? = null
@@ -117,7 +125,46 @@ object OscBridge {
                 clientOut = DataOutputStream(s.outputStream.buffered())
                 clientSinceMs = System.currentTimeMillis()
             }
+            Thread({ clientReadLoop(s) }, "vrca-bridge-client").apply { isDaemon = true; start() }
         }
+    }
+
+    /** Reads the main process's frames; its end (crash, swipe, kill) = EOF here. */
+    private fun clientReadLoop(s: LocalSocket) {
+        runCatching {
+            val input = DataInputStream(s.inputStream.buffered())
+            while (running) {
+                val type = input.readUnsignedByte()
+                val len = input.readInt()
+                if (len < 0 || len > 4096) break
+                val buf = ByteArray(len); input.readFully(buf)
+                if (type == 2) {
+                    val p = String(buf, Charsets.UTF_8).split('\n')
+                    dragHost = p.getOrNull(0).orEmpty()
+                    dragPort = p.getOrNull(1)?.toIntOrNull() ?: 0
+                    dragMoving = p.getOrNull(2) == "1"
+                }
+            }
+        }
+        synchronized(clientLock) {
+            if (client === s) { runCatching { s.close() }; client = null; clientOut = null; clientSinceMs = 0L }
+        }
+        if (dragMoving) stopDrag()
+    }
+
+    /** Main process died mid-drag: put VRChat's movement axes back to 0. */
+    private fun stopDrag() {
+        dragMoving = false
+        val host = dragHost.ifEmpty { "127.0.0.1" }; val port = if (dragPort > 0) dragPort else 9000
+        runCatching {
+            val out = com.illposed.osc.transport.udp.OSCPortOut(java.net.InetAddress.getByName(host), port)
+            repeat(3) {
+                out.send(com.illposed.osc.OSCMessage("/input/Vertical", listOf(0f)))
+                out.send(com.illposed.osc.OSCMessage("/input/Horizontal", listOf(0f)))
+            }
+            out.close()
+            dragStops++
+        }.onFailure { Log.w(TAG, "drag stop failed", it) }
     }
 
     /** Returns true when the frame reached a connected main process. */
@@ -159,6 +206,7 @@ object OscBridge {
         put("relayed", relayed)
         put("upSec", (System.currentTimeMillis() - startedMs) / 1000)
         put("pid", Process.myPid())
+        put("dragStops", dragStops)
         put("mdns", MdnsAnnouncer.diag())
     }.toString()
 

@@ -19,6 +19,10 @@ import kotlin.math.sin
  * The stick value is hand speed x [strength] / [REF_SPEED]; VRChat then applies the
  * world's own walk/run speed, so it is not 1:1 yet (the live readout shows VRChat's
  * actual VelocityX/Z for tuning). No vertical: OSC has no up/down movement input.
+ * The axes are sticky in VRChat (they hold until 0 is sent), so a crash mid-drag would
+ * keep the player moving: each grab is reported to the bridge ([OscAnnouncer.reportDrag]),
+ * which sends the zeros if this process dies, and a saved flag makes the next start
+ * send them too ([clearStale]) for when the bridge wasn't running.
  */
 object HandDrag {
 
@@ -27,6 +31,7 @@ object HandDrag {
     private const val SMOOTH = 0.35f      // low-pass on hand velocity (0..1, higher = snappier)
     private const val DEADZONE = 0.04f    // stick values below this are sent as 0
     private const val GESTURE_FIST = 1f
+    private const val PREFS = "hand_drag"
 
     @Volatile var enabled = false
         private set
@@ -38,9 +43,35 @@ object HandDrag {
     @Volatile private var handSpeed = 0f
     @Volatile private var sendError = ""
 
+    private var appContext: Context? = null
+
+    /** Main-process start: if the last process died mid-drag, stop VRChat's movement. */
+    fun clearStale(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val target = prefs.getString("moving", null) ?: return
+        val host = target.substringBefore(':'); val port = target.substringAfter(':').toIntOrNull() ?: 9000
+        runCatching {
+            val o = OSCPortOut(InetAddress.getByName(host), port)
+            repeat(3) {
+                o.send(OSCMessage("/input/Vertical", listOf(0f)))
+                o.send(OSCMessage("/input/Horizontal", listOf(0f)))
+            }
+            o.close()
+        }
+        prefs.edit().remove("moving").apply()
+    }
+
+    private fun markMoving(host: String, port: Int, moving: Boolean) {
+        OscAnnouncer.reportDrag(host, port, moving)
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)?.edit()?.apply {
+            if (moving) putString("moving", "$host:$port") else remove("moving")
+        }?.apply()
+    }
+
     fun setEnabled(context: Context, on: Boolean) {
         if (on == enabled) return
         enabled = on
+        appContext = context.applicationContext
         if (on) {
             if (!OscAnnouncer.running) OscAnnouncer.start(context)
             Thread({ loop() }, "vrca-hand-drag").apply { isDaemon = true; start() }
@@ -53,6 +84,7 @@ object HandDrag {
         var prevMs = 0L
         var velX = 0f; var velZ = 0f
         var lastSentF = 0f; var lastSentR = 0f; var lastSentMs = 0L
+        var target = "127.0.0.1" to 9000
         fun send(f: Float, r: Float) {
             val o = out ?: return
             runCatching {
@@ -63,7 +95,10 @@ object HandDrag {
             lastSentF = f; lastSentR = r; lastSentMs = System.currentTimeMillis()
         }
         fun release() {
-            if (out != null) { repeat(3) { send(0f, 0f) }; runCatching { out?.close() } }
+            if (out != null) {
+                repeat(3) { send(0f, 0f) }; runCatching { out?.close() }
+                markMoving(target.first, target.second, false)
+            }
             out = null; prev = null; velX = 0f; velZ = 0f
             grabHand = ""; stickF = 0f; stickR = 0f; handSpeed = 0f
         }
@@ -80,10 +115,11 @@ object HandDrag {
                 release()
             } else {
                 if (out == null) {
-                    val target = VrcaOscQuery.oscSendTargetFlow.value ?: ("127.0.0.1" to 9000)
+                    target = VrcaOscQuery.oscSendTargetFlow.value ?: ("127.0.0.1" to 9000)
                     out = runCatching { OSCPortOut(InetAddress.getByName(target.first), target.second) }
                         .onFailure { sendError = it.message ?: "open failed" }.getOrNull()
                     grabHand = hand
+                    if (out != null) markMoving(target.first, target.second, true)
                 }
                 val p = prev
                 if (p != null && now > prevMs) {
