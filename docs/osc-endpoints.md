@@ -23,7 +23,7 @@ Status: horizontal drag works over OSC (`HandDrag`); vertical is unsolved. Every
 ## Ideas for other features
 - **Camera remote** (`/usercamera/*`, ~40 endpoints, mostly read/write): `Capture`, `CaptureDelayed`, `Mode`, `Zoom`, `Exposure`, `Aperture`, `FocalDistance`, `GreenScreen` + `Hue`/`Saturation`/`Lightness`, `Streaming`, `Flying`/`FlySpeed`, `SmoothMovement`/`SmoothingStrength`, `LookAtMe` (+ offsets), `LocalPlayer`/`RemotePlayer`, `TriggerTakesPhotos`, `PhotoRate`, `Duration`, `ShowUIInCamera`, `Lock`, `Close`, `Pose` (`ffffff`, read: camera position). A VRC-A panel could run VRChat's camera.
 - **Camera dolly paths** (`/dolly/Play`, `/dolly/PlayDelayed`, `/dolly/Import`, `/dolly/Export`, `/dolly/ExportLocal`): save, load and play dolly paths.
-- **World size limits** (`/avatar/eyeheightmin`, `/avatar/eyeheightmax`, `/avatar/eyeheightscalingallowed`, read): the avatar-size tool could show the world's range and disable itself where scaling is off.
-- **Current avatar** (`/avatar/name`, `/avatar/change`, read): live avatar name and id, e.g. an `{avatar}` chatbox token or the clone tool.
+- **World size limits** (`/avatar/eyeheightmin`, `/avatar/eyeheightmax`, `/avatar/eyeheightscalingallowed`, read): BUILT. The size tool shows them as the world's *recommended* range (not a clamp: OSC still sets 0.01-10,000 m unless the world enforces) and hides its controls when scaling is off.
+- **Current avatar** (`/avatar/name`, `/avatar/change`, read): BUILT as the `{avatar}` chatbox token + `VrcaOscState.avatarNameFlow`/`avatarIdFlow`.
 - **Debug overlays** (`/input/ShowDebugInfo0`-`9`): toggles for VRChat's debug menus (2 = build + FPS, 3 = output log).
 - Also listed: `/input/AFKToggle`, `/input/Voice`, `/chatbox/input` (`sTT`), `/chatbox/typing`, `/avatar/avatarfullfacetracking`. Eye/face tracking input (`/tracking/eye/*`, `/tracking/face/v1`) is not useful (Quest Pro only).

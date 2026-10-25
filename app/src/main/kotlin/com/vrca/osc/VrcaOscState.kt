@@ -171,6 +171,36 @@ object VrcaOscState {
         }
     }
 
+    // ---- world size limits + own avatar (/avatar/* OSCQuery nodes) --------------
+    // Pushed by VRChat to the announced app ([OscAnnouncer]) the moment they change,
+    // and also read by the /avatar poll ([VrcaOscQuery]) as the fallback.
+    private val _worldEyeHeightMin = MutableStateFlow<Float?>(null)
+    val worldEyeHeightMinFlow: StateFlow<Float?> = _worldEyeHeightMin.asStateFlow()
+    private val _worldEyeHeightMax = MutableStateFlow<Float?>(null)
+    val worldEyeHeightMaxFlow: StateFlow<Float?> = _worldEyeHeightMax.asStateFlow()
+    private val _scalingAllowed = MutableStateFlow<Boolean?>(null)
+    val scalingAllowedFlow: StateFlow<Boolean?> = _scalingAllowed.asStateFlow()
+    private val _avatarName = MutableStateFlow<String?>(null)
+    val avatarNameFlow: StateFlow<String?> = _avatarName.asStateFlow()
+    private val _avatarId = MutableStateFlow<String?>(null)
+    val avatarIdFlow: StateFlow<String?> = _avatarId.asStateFlow()
+
+    /** Fold one `/avatar/<node>` value (not a parameter). A new avatar id is also
+     *  handed to the crowdsource catalog ([com.vrca.vrchat.AvatarGlobalDb] dedupes). */
+    fun onAvatarInfo(path: String, value: Any?) {
+        when (path) {
+            "/avatar/eyeheightmin" -> (value as? Number)?.toFloat()?.let { _worldEyeHeightMin.value = it }
+            "/avatar/eyeheightmax" -> (value as? Number)?.toFloat()?.let { _worldEyeHeightMax.value = it }
+            "/avatar/eyeheightscalingallowed" -> (value as? Boolean)?.let { _scalingAllowed.value = it }
+            "/avatar/name" -> (value as? String)?.takeIf { it.isNotBlank() }?.let { _avatarName.value = it }
+            "/avatar/eyeheight" -> (value as? Number)?.toFloat()?.let { onParam("EyeHeightAsMeters", it) }
+            "/avatar/change" -> (value as? String)?.takeIf { it.startsWith("avtr_") }?.let { id ->
+                _avatarId.value = id
+                com.vrca.vrchat.AvatarGlobalDb.onAvatarChanged(com.vrca.app.VrcaApplication.instance, id)
+            }
+        }
+    }
+
     /** Called periodically so `isLive` can flip false when OSC stops. */
     fun tickLiveness() { _live.value = isLive }
 

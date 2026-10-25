@@ -5296,6 +5296,10 @@ class VrcaViewModel(
         if (out.contains("{scale}", ignoreCase = true))
             out = out.replace(Regex("\\{scale\\}", RegexOption.IGNORE_CASE),
                 com.vrca.osc.VrcaOscState.scaleLabel)
+        // Own avatar's name (VRChat /avatar/name, pushed on switch); empty until known.
+        if (out.contains("{avatar}", ignoreCase = true))
+            out = out.replace(Regex("\\{avatar\\}", RegexOption.IGNORE_CASE),
+                com.vrca.osc.VrcaOscState.avatarNameFlow.value.orEmpty())
         if (out.contains("{param:", ignoreCase = true))
             out = Regex("\\{param:([^}]+)\\}", RegexOption.IGNORE_CASE).replace(out) { m ->
                 com.vrca.osc.VrcaOscState.rawString(m.groupValues[1].trim())

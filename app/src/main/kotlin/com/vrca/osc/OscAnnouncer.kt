@@ -70,6 +70,16 @@ object OscAnnouncer {
     @Volatile private var startedMs = 0L
     @Volatile private var lastHttpMs = 0L
     @Volatile private var lastPacketMs = 0L
+    /** VRChat service (by its OSCQuery name) that last sent us a packet. */
+    @Volatile private var pushVrchat: String? = null
+
+    /** True while the VRChat instance that's running now is pushing to us, so its
+     *  avatar params / avatar info arrive the moment they change. VRChat only sends a
+     *  param on change, so silence here doesn't mean "dead": the poll stays on (slower). */
+    val pushLive: Boolean get() {
+        val v = pushVrchat ?: return false
+        return running && !paused && v == VrcaOscQuery.vrchatServiceName()
+    }
     private const val STUCK_MS = 10_000L
 
     /** VRChat read our OSCQuery info more than [STUCK_MS] ago but has sent nothing
@@ -305,6 +315,7 @@ object OscAnnouncer {
                 sock.receive(packet)
                 packets++
                 lastPacketMs = System.currentTimeMillis()
+                pushVrchat = VrcaOscQuery.vrchatServiceName()
                 runCatching { parse(packet.data, packet.offset, packet.offset + packet.length) }
             } catch (_: SocketTimeoutException) {
             } catch (e: Exception) { if (running) Log.w(TAG, "udp receive", e) }
@@ -349,27 +360,27 @@ object OscAnnouncer {
             val part = address.removePrefix("/tracking/vrsystem/").removeSuffix("/pose")
             poses[part] = floats.toFloatArray()
             poseMs[part] = System.currentTimeMillis()
-        } else if (isParam) {
-            val v = when (tags.getOrNull(1)) {
-                'f' -> Float.fromBits(int())
-                'i' -> int().toFloat()
-                'T' -> 1f
-                'F' -> 0f
-                else -> null
-            }
-            if (v != null) params[address.removePrefix("/avatar/parameters/")] = v
         } else {
-            // Everything else VRChat pushes (avatar id/name, eye height + the world's
-            // limits, …): keep the latest first argument as text for the readout.
-            val v: String? = when (tags.getOrNull(1)) {
-                'f' -> "%.3f".format(Float.fromBits(int()))
-                'i' -> int().toString()
-                'T' -> "true"
-                'F' -> "false"
+            // First argument, typed like the OSCQuery poll delivers it.
+            val v: Any? = when (tags.getOrNull(1)) {
+                'f' -> Float.fromBits(int())
+                'i' -> int()
+                'T' -> true
+                'F' -> false
                 's' -> str()
                 else -> null
+            } ?: return
+            if (isParam) {
+                val name = address.removePrefix("/avatar/parameters/")
+                params[name] = when (v) { is Boolean -> if (v) 1f else 0f; is Number -> v.toFloat(); else -> return }
+                // The push IS the app's live avatar-param source (instant, on change);
+                // the OSCQuery poll slows to a 1 s safety net while it's live.
+                if (!paused) VrcaOscState.onParam(name, v)
+            } else {
+                others[address] = if (v is Float) "%.3f".format(v) else v.toString()
+                // Avatar id/name, eye height + the world's size limits.
+                if (!paused && address.startsWith("/avatar/")) VrcaOscState.onAvatarInfo(address, v)
             }
-            if (v != null) others[address] = v
         }
     }
 
@@ -393,6 +404,7 @@ object OscAnnouncer {
         if (reRegisters > 0) append("\nre-announces: ").append(reRegisters).append("  last: ").append(lastReRegisterNote)
         if (drainNote.isNotEmpty()) append("\nlast graceful stop: ").append(drainNote)
         if (stuck) append("\n!! VRChat found VRC-A but is not sending")
+        append("\npush live: ").append(pushLive)
         append("\npackets received: ").append(packets)
         if (lastAddress.isNotEmpty()) append("  last ").append(lastAddress)
         counts.entries.sortedBy { it.key }.forEach { (k, v) -> append("\n  ").append(k).append(" x").append(v) }
