@@ -94,6 +94,10 @@ object VrcaOscQuery {
     private var nsd: NsdManager? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
 
+    /** VRChat's own OSCQuery service name while it's resolved (changes when VRChat
+     *  restarts), else null. Used by [OscAnnouncer]'s re-announce watchdog. */
+    fun vrchatServiceName(): String? = if (host != null) serviceName.ifEmpty { null } else null
+
     /** True while VRChat's OSCQuery service is reachable (VRChat open, OSC on). */
     fun isServiceUp(): Boolean =
         host != null && lastPollOkMs > 0L && System.currentTimeMillis() - lastPollOkMs < UP_GRACE_MS
