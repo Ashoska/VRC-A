@@ -159,6 +159,12 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
             // live values over OSCQuery HTTP. Discover VRChat's service + poll params
             // so {mute}/{afk}/{movement}/{scale}/{param:Name} resolve.
             com.vrca.osc.VrcaOscQuery.start(applicationContext)
+            // Announce VRC-A as an OSCQuery app so VRChat PUSHES its output to us
+            // (head/wrist tracking, every avatar param). Once per process, never
+            // stopped: re-announcing in the same VRChat session gets nothing.
+            val appCtx = applicationContext
+            Thread({ runCatching { com.vrca.osc.OscAnnouncer.start(appCtx) } }, "vrca-announce-start")
+                .apply { isDaemon = true; start() }
             // Start the instance-roster / log reader in the BACKGROUND at launch,
             // not just when the Home roster panel is visible. It owns the "VRChat
             // closed -> force presence offline" detection (applyLogPresence), which

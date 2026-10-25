@@ -56,6 +56,16 @@ object OscAnnouncer {
     @Volatile private var packets = 0L
     @Volatile private var lastAddress = ""
     @Volatile private var startedMs = 0L
+    @Volatile private var lastHttpMs = 0L
+    @Volatile private var lastPacketMs = 0L
+    private const val STUCK_MS = 10_000L
+
+    /** VRChat read our OSCQuery info more than [STUCK_MS] ago but has sent nothing
+     *  since: the re-announce case only a VRChat restart clears. */
+    val stuck: Boolean get() {
+        val read = lastHttpMs
+        return read > 0L && lastPacketMs < read && System.currentTimeMillis() - read > STUCK_MS
+    }
     private val counts = ConcurrentHashMap<String, Int>()
     private val poses = ConcurrentHashMap<String, FloatArray>()
     private val poseMs = ConcurrentHashMap<String, Long>()
@@ -78,6 +88,7 @@ object OscAnnouncer {
         if (!running) start(context) else paused = !paused
     }
 
+    @Synchronized
     fun start(context: Context) {
         paused = false
         if (running) return
@@ -139,6 +150,7 @@ object OscAnnouncer {
                     while (true) { val l = reader.readLine() ?: break; if (l.isEmpty()) break }
                     val path = requestLine.split(' ').getOrNull(1) ?: "/"
                     httpRequests++; lastHttpPath = path
+                    lastHttpMs = System.currentTimeMillis()
                     val body = if (path.contains("HOST_INFO")) hostInfo() else tree()
                     val bytes = body.toByteArray()
                     val head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
@@ -151,6 +163,8 @@ object OscAnnouncer {
 
     private fun hostInfo(): String = JSONObject().apply {
         put("NAME", serviceName)
+        // Fresh every request: a Wi-Fi change must not hand VRChat a stale address.
+        ownIp = localIpv4() ?: ownIp
         put("OSC_IP", ownIp)
         put("OSC_PORT", udpPort)
         put("OSC_TRANSPORT", "UDP")
@@ -194,6 +208,7 @@ object OscAnnouncer {
             try {
                 sock.receive(packet)
                 packets++
+                lastPacketMs = System.currentTimeMillis()
                 runCatching { parse(packet.data, packet.offset, packet.offset + packet.length) }
             } catch (_: SocketTimeoutException) {
             } catch (e: Exception) { if (running) Log.w(TAG, "udp receive", e) }
@@ -273,6 +288,7 @@ object OscAnnouncer {
         append(registerStatus.prependIndent("  ").let { "\n" + it.trimStart('\n') })
         append("\nVRChat read our tree: ").append(httpRequests).append(" requests")
         if (lastHttpPath.isNotEmpty()) append(" (last ").append(lastHttpPath).append(')')
+        if (stuck) append("\n!! VRChat found VRC-A but is not sending. Restart VRChat to reconnect.")
         append("\npackets received: ").append(packets)
         if (lastAddress.isNotEmpty()) append("  last ").append(lastAddress)
         counts.entries.sortedBy { it.key }.forEach { (k, v) -> append("\n  ").append(k).append(" x").append(v) }
