@@ -746,8 +746,15 @@ object UiLabScenes {
                     org.robolectric.Shadows.shadowOf(cm).setNetworkCapabilities(cm.activeNetwork, caps)
                     true
                 }
-                if (mode == "onboarded" || mode == "full") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
-                if (mode == "full") {
+                // `show headsetboot tos`: a returning user (tutorial done) with terms to accept: the normal
+                // boot, then the hand-off into the terms screen. `show headsetboot new`: a brand-new user:
+                // the welcome boot, then the hand-off into the tutorial (whose first step holds the terms).
+                // Both need the real backend (`--firestore`) to get past the device session.
+                if (mode == "onboarded" || mode == "full" || mode == "tos") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
+                if (mode == "tos" || mode == "new") {
+                    androidx.compose.runtime.remember { com.vrca.app.VrcaApplication.openedFromSwipe = true; true }
+                    VrcaApp()
+                } else if (mode == "full") {
                     androidx.compose.runtime.remember {
                         com.vrca.app.TosPrefs.accept(ctx, 1_000)
                         com.vrca.app.VrcaApplication.openedFromSwipe = true
