@@ -42,6 +42,26 @@ object OscAnnouncer {
     @Volatile var paused = false
         private set
     @Volatile private var portNote = ""
+
+    // ---- multicast receive (test) ----------------------------------------------
+    // Suspected reason a reopened VRC-A never gets the push back (device-tested: no
+    // goodbye, same name, same port re-bound, still 0 packets): while VRC-A is down,
+    // VRChat keeps sending to a port nothing is bound to, the kernel answers each
+    // datagram with "port unreachable", and VRChat's sender stops for the session.
+    // Linux never sends "port unreachable" for MULTICAST destinations, so in this mode
+    // HOST_INFO gives VRChat the group [MULTICAST_GROUP] (+ our port) as OSC_IP and
+    // we join it: while VRC-A is down the datagrams are just dropped, silently.
+    // Switching modes only reaches VRChat on its next start (it reads HOST_INFO once).
+    private const val MULTICAST_GROUP = "239.255.65.82"
+    @Volatile private var multicastMode = true
+    @Volatile private var blinkNote = ""
+
+    /** Debug switch; persisted. VRChat picks the new destination up on its next start. */
+    fun setMulticast(context: Context, on: Boolean) {
+        multicastMode = on
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("multicast", on).apply()
+    }
+    val isMulticast: Boolean get() = multicastMode
     private var udp: DatagramSocket? = null
     private var http: ServerSocket? = null
 
@@ -109,6 +129,7 @@ object OscAnnouncer {
         // (never withdrawn, see the class note) stays valid across restarts.
         serviceName = prefs.getString("name", null) ?: ("VRCA-" + (1000..9999).random())
         val savedUdp = prefs.getInt("udp", 0); val savedHttp = prefs.getInt("http", 0)
+        multicastMode = prefs.getBoolean("multicast", true)
         val u = runCatching { bindUdp(savedUdp) }.getOrElse { bindUdp(0) }
         val h = runCatching { bindHttp(savedHttp) }.getOrElse { bindHttp(0) }
         udp = u; http = h
@@ -120,8 +141,37 @@ object OscAnnouncer {
         MdnsAnnouncer.start(context, serviceName, httpPort, udpPort) { localIpv4() ?: ownIp.ifEmpty { null } }
     }
 
-    private fun bindUdp(port: Int) = DatagramSocket(null).apply {
-        reuseAddress = true; soTimeout = 2000; bind(InetSocketAddress(port))
+    private fun bindUdp(port: Int): DatagramSocket {
+        if (!multicastMode) {
+            return DatagramSocket(null).apply { reuseAddress = true; soTimeout = 2000; bind(InetSocketAddress(port)) }
+        }
+        val s = java.net.MulticastSocket(null).apply { reuseAddress = true; soTimeout = 2000; bind(InetSocketAddress(port)) }
+        val ni = localIpv4()?.let { runCatching { NetworkInterface.getByInetAddress(java.net.InetAddress.getByName(it)) }.getOrNull() }
+        s.joinGroup(InetSocketAddress(MULTICAST_GROUP, s.localPort), ni)
+        return s
+    }
+
+    /** Debug "port blink": close the receive socket for [ms], then re-bind the SAME port
+     *  (and rejoin the group). Packets coming back afterwards = a dead port alone doesn't
+     *  stop VRChat's sending (in this mode). Blocking: run off the main thread. */
+    fun blinkPort(ms: Long = 3_000L) {
+        if (!running) return
+        val port = udpPort
+        val before = packets
+        runCatching { udp?.close() }
+        blinkNote = "port $port closed for ${ms / 1000}s…"
+        try { Thread.sleep(ms) } catch (_: InterruptedException) {}
+        val u = runCatching { bindUdp(port) }.getOrElse { blinkNote = "re-bind failed: ${it.message}"; return }
+        udp = u
+        Thread({ udpLoop(u) }, "vrca-announce-udp").apply { isDaemon = true; start() }
+        val reopenedAt = System.currentTimeMillis()
+        blinkNote = "re-bound $port after ${ms / 1000}s (packets before: $before); watch the count"
+        Thread({
+            try { Thread.sleep(10_000) } catch (_: InterruptedException) {}
+            val after = packets - before
+            val fresh = lastPacketMs > reopenedAt
+            blinkNote = "blink $port: " + if (fresh) "packets CAME BACK ($after since)" else "NO packets in 10 s after re-bind"
+        }, "vrca-blink-check").apply { isDaemon = true; start() }
     }
 
     private fun bindHttp(port: Int) = ServerSocket().apply {
@@ -156,7 +206,7 @@ object OscAnnouncer {
         put("NAME", serviceName)
         // Fresh every request: a Wi-Fi change must not hand VRChat a stale address.
         ownIp = localIpv4() ?: ownIp
-        put("OSC_IP", ownIp)
+        put("OSC_IP", if (multicastMode) MULTICAST_GROUP else ownIp)
         put("OSC_PORT", udpPort)
         put("OSC_TRANSPORT", "UDP")
         put("EXTENSIONS", JSONObject().apply {
@@ -194,7 +244,7 @@ object OscAnnouncer {
 
     private fun udpLoop(sock: DatagramSocket) {
         val buf = ByteArray(8192)
-        while (running) {
+        while (running && !sock.isClosed) {
             val packet = DatagramPacket(buf, buf.size)
             try {
                 sock.receive(packet)
@@ -283,6 +333,8 @@ object OscAnnouncer {
         append("\nVRC-A OSCQuery http://").append(ownIp).append(':').append(httpPort)
         append("  OSC in ").append(ownIp).append(':').append(udpPort)
         if (portNote.isNotEmpty()) append("\n").append(portNote)
+        append("\nreceive: ").append(if (multicastMode) "multicast $MULTICAST_GROUP:$udpPort" else "direct $ownIp:$udpPort")
+        if (blinkNote.isNotEmpty()) append("\n").append(blinkNote)
         append("\n").append(MdnsAnnouncer.diag())
         append("\nVRChat read our tree: ").append(httpRequests).append(" requests")
         if (lastHttpPath.isNotEmpty()) append(" (last ").append(lastHttpPath).append(')')
