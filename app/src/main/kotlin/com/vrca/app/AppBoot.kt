@@ -301,7 +301,7 @@ internal fun AppBoot(
             val tutorial = launch {
                 if (firstOpen) {
                     set(Row.Tutorial, BootState.Working)
-                    when (withTimeoutOrNull(TUTORIAL_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx) }) {
+                    when (withTimeoutOrNull(PICTURES_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx) }) {
                         true -> set(Row.Tutorial, BootState.Done, BootNote.Ready)
                         null -> set(Row.Tutorial, BootState.Failed, BootNote.TimedOut)
                         false -> set(Row.Tutorial, BootState.Failed, BootNote.CantConnect)
@@ -590,9 +590,6 @@ private suspend fun vrchatHere(set: (BootState, BootNote?) -> Unit) {
  * Terms of Service: one `config/app` read (the terms version the admin last set) against what this
  * headset accepted. New terms don't fail boot; the terms screen after boot asks for them.
  */
-/** How long the Terms row may spend fetching the terms' pictures. */
-private const val TOS_PREFETCH_CAP_MS = 20_000L
-
 private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.CompletableDeferred<Boolean>, set: (BootState, BootNote?) -> Unit) {
     set(BootState.Working, null)
     var failed = false
@@ -613,8 +610,8 @@ private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.Completa
         return
     }
     // The terms are coming up: fetch their pictures while the boot screen is up, like the tutorial's
-    // (user, 2026-10-25). A failure holds boot on Retry like any check; a retry keeps what's fetched.
-    when (withTimeoutOrNull(TOS_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TosImageStore.ensureDownloaded(ctx) }) {
+    // (user, 2026-10-25). A stall holds boot on Retry like any check; a retry resumes what was fetched.
+    when (withTimeoutOrNull(PICTURES_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TosImageStore.ensureDownloaded(ctx) }) {
         true -> set(BootState.Warn, BootNote.NewTerms)
         null -> set(BootState.Failed, BootNote.TimedOut)
         false -> set(BootState.Failed, BootNote.CantConnect)

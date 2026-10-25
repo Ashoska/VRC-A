@@ -95,8 +95,9 @@ class DiscordRpcService : Service() {
         private const val NOTIF_CHANNEL = "vrca_pipeline"
         private const val NOTIF_ID = 1001
 
-        private const val DEFAULT_VRCHAT_IMAGE_URL =
-            "https://raw.githubusercontent.com/Ashoska/VRC-A-Image-store/main/vrchat-1102x620.jpg"
+        /** The default image's key in the image-store repo (`images/discord/default`). */
+        private const val DEFAULT_IMAGE_KEY = "discord/default"
+        private const val DEFAULT_VRCHAT_IMAGE_FALLBACK = "${com.vrca.ui.onboarding.ImageManifest.BASE}/images/discord/default.jpg"
 
         const val ACTION_START = "com.vrca.DISCORD_RPC_START"
         const val ACTION_STOP = "com.vrca.DISCORD_RPC_STOP"
@@ -1125,8 +1126,18 @@ class DiscordRpcService : Service() {
         }
     }
 
+    /**
+     * The default image from the image-store repo, with its checksum in the URL so Discord's media proxy
+     * (which caches by URL) shows a replaced picture instead of the old one. Read from the saved
+     * manifest; refreshed in the background at most once a minute.
+     */
+    private fun defaultImageUrl(): String {
+        scope.launch { runCatching { com.vrca.ui.onboarding.ImageManifest.get(applicationContext) } }
+        return com.vrca.ui.onboarding.ImageManifest.versionedUrl(applicationContext, DEFAULT_IMAGE_KEY) ?: DEFAULT_VRCHAT_IMAGE_FALLBACK
+    }
+
     private fun squashToSquareUrl(url: String): String {
-        if (url.isBlank() || url == DEFAULT_VRCHAT_IMAGE_URL) return url
+        if (url.isBlank() || url == defaultImageUrl()) return url
         val encoded = java.net.URLEncoder.encode(url, "UTF-8")
         return "https://images.weserv.nl/?url=$encoded&w=512&h=512&fit=fill"
     }
@@ -1236,7 +1247,7 @@ class DiscordRpcService : Service() {
                     if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
                         put("large_image", squashToSquareUrl(vrcPresence.worldImageUrl))
                     } else {
-                        put("large_image", DEFAULT_VRCHAT_IMAGE_URL)
+                        put("large_image", defaultImageUrl())
                     }
                     put("large_text", if (showWorldDetails) vrcPresence.worldName else "VRChat")
                 })
@@ -1249,7 +1260,7 @@ class DiscordRpcService : Service() {
                     })
                 }
                 put("assets", JSONObject().apply {
-                    put("large_image", DEFAULT_VRCHAT_IMAGE_URL)
+                    put("large_image", defaultImageUrl())
                     put("large_text", "VRChat")
                 })
             }

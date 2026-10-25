@@ -904,10 +904,12 @@ private const val REMOTE_PREFS_FILE = "vrca_remote"
 /** vrca_remote pref: the app version that last got past boot (the boot screen shows once per update). */
 private const val LAST_BOOT_VERSION_KEY = "last_boot_version_code"
 
-/** Cap on the new-user boot-time prefetch of the on-demand OSC tutorial images —
- *  a slow / no network never hangs boot; the tutorial step downloads any that
- *  missed with its own spinner. */
-internal const val TUTORIAL_PREFETCH_CAP_MS = 8_000L
+/**
+ * The longest boot will spend fetching on-demand pictures (tutorial, terms). A download that stops
+ * moving fails sooner, after OnDemandImages.STALL_MS without a byte; this cap only ends one that keeps
+ * crawling (user, 2026-10-25: slow internet must still get through, each retry resumes).
+ */
+internal const val PICTURES_PREFETCH_CAP_MS = 180_000L
 
 /** Per-attempt timeout for the cold-start anonymous sign-in (and the bootstrap
  *  Firestore writes). On a fresh first boot signInAnonymously()/the first

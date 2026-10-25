@@ -22,19 +22,20 @@ import androidx.compose.ui.unit.dp
 import com.vrca.ui.theme.GremlinColors
 
 /**
- * A Terms of Service picture by its file [name] in [TosImageStore] (on-demand, like the tutorial's
+ * A Terms of Service picture by its [name] in the repo's `images/tos/` ([TosImageStore]) (on-demand, like the tutorial's
  * TutorialImage): the frame keeps its size while the picture is fetched (Boot Cat thinking), it's
  * decoded off the main thread (Coil) and fades in. If boot's prefetch didn't cover it, it fetches it.
  */
 @Composable
 fun TosImage(name: String, contentDescription: String?, modifier: Modifier) {
     val ctx = LocalContext.current
-    var file by remember(name) { mutableStateOf(TosImageStore.cachedFileFor(ctx, name)) }
+    // Looked up off the main thread (the store may read its saved list from disk), then fetched if it
+    // isn't on the device yet or was replaced in the repo.
+    var file by remember(name) { mutableStateOf<java.io.File?>(null) }
     LaunchedEffect(name) {
-        if (file == null) {
-            TosImageStore.ensureDownloaded(ctx)
-            file = TosImageStore.cachedFileFor(ctx, name)
-        }
+        file = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { TosImageStore.cachedFileFor(ctx, name) }
+        // This picture first (on a slow connection it would otherwise share the line with the others).
+        if (file == null) file = TosImageStore.fetch(ctx, name)
     }
     var loaded by remember(name) { mutableStateOf(false) }
     val shown = androidx.compose.animation.core.animateFloatAsState(if (loaded) 1f else 0f, label = "tosImage")

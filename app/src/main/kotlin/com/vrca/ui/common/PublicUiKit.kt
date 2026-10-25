@@ -346,14 +346,14 @@ fun TutorialImage(
 ) {
     val ctx = LocalContext.current
     var fullscreen by rememberSaveable { mutableStateOf(false) }
-    var file by remember(index) {
-        mutableStateOf(com.vrca.ui.onboarding.TutorialImageStore.cachedFileFor(ctx, index))
-    }
+    // Looked up off the main thread (the store may read its saved list from disk), then fetched if it
+    // isn't on the device yet or was replaced in the repo.
+    var file by remember(index) { mutableStateOf<java.io.File?>(null) }
     LaunchedEffect(index) {
-        if (file == null) {
-            com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx)
-            file = com.vrca.ui.onboarding.TutorialImageStore.cachedFileFor(ctx, index)
-        }
+        val store = com.vrca.ui.onboarding.TutorialImageStore
+        file = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { store.cachedFileFor(ctx, index) }
+        // This step's picture first (on a slow connection it would otherwise share the line with the others).
+        if (file == null) file = store.fetch(ctx, index)
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
