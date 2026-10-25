@@ -409,6 +409,13 @@ function buildIndexOp(oldE, newE, fileId) {
 
 // Apply a batch of index ops to fragments/<p> + avtr/<p> + index/<b>, grouped so each object is
 // read+written ONCE. Returns the changed URLs for edge-cache purge.
+const INDEX_IO_CONCURRENCY = 6;   // Workers allow 6 simultaneous open connections per invocation
+// Run fn over items with at most n in flight.
+async function runPool(items, n, fn) {
+  let i = 0;
+  const worker = async () => { while (i < items.length) { const it = items[i++]; await fn(it); } };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
+}
 async function applyIndexOps(env, ops) {
   if (!ops.length) return [];
   // v40: a read that THROWS (vs an absent object) must never be treated as empty — writing back
@@ -437,13 +444,16 @@ async function applyIndexOps(env, ops) {
   const changed = [];
   const base = env.CATALOG_BASE ? env.CATALOG_BASE.replace(/\/$/, "") : null;
   const ttl = { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + INDEX_TTL } };
+  // v41: buckets are independent objects, so they're processed INDEX_IO_CONCURRENCY at a time
+  // instead of one by one (same subrequest count; a ~300-bucket drain took ~100 s of wall time
+  // sequentially, which also held the chain lock and starved the cron's reconcile).
   // Fragments + avtr share the avatarId prefix.
-  for (const p of new Set([...Object.keys(fragWork), ...Object.keys(avtrWork)])) {
+  const fragAvtr = async (p) => {
     const fw = fragWork[p], aw = avtrWork[p];
-    if (fw && (Object.keys(fw.set).length || fw.del.size)) {
+    if (fw && (Object.keys(fw.set).length || fw.del.size)) await (async () => {
       let cur = { v: 1, e: {} }, rf = false;
       try { const o = await env.CATALOG.get(`fragments/${p}.json`); if (o) cur = await o.json(); } catch (_) { rf = true; readFailed = true; }
-      if (rf) continue;
+      if (rf) return;
       if (!cur || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
       // NO-OP GUARD: only rewrite when a summary actually CHANGES (re-adding an already-indexed
       // avatar whose summary is identical, or a delete of an absent id, must not rewrite the bucket).
@@ -460,11 +470,11 @@ async function applyIndexOps(env, ops) {
         try { await env.CATALOG.put(`fragments/${p}.json`, JSON.stringify({ v: 1, e: cur.e }), ttl);
           if (base) changed.push(base + `/fragments/${p}.json`); } catch (_) { readFailed = true; }
       }
-    }
-    if (aw && (aw.add.size || aw.rem.size)) {
+    })();
+    if (aw && (aw.add.size || aw.rem.size)) await (async () => {
       let cur = { v: 1, ids: [] }, rf = false;
       try { const o = await env.CATALOG.get(`avtr/${p}.json`); if (o) cur = await o.json(); } catch (_) { rf = true; readFailed = true; }
-      if (rf) continue;
+      if (rf) return;
       if (!cur || !Array.isArray(cur.ids)) cur = { v: 1, ids: [] };
       const s = new Set(cur.ids);
       // NO-OP GUARD: only dirty when a membership actually changes (add of an id already present /
@@ -478,13 +488,14 @@ async function applyIndexOps(env, ops) {
         try { await env.CATALOG.put(`avtr/${p}.json`, JSON.stringify({ v: 1, ids: Array.from(s) }), ttl);
           if (base) changed.push(base + `/avtr/${p}.json`); } catch (_) { readFailed = true; }
       }
-    }
-  }
+    })();
+  };
+  await runPool([...new Set([...Object.keys(fragWork), ...Object.keys(avtrWork)])], INDEX_IO_CONCURRENCY, fragAvtr);
   // Index token lists.
-  for (const [b, toks] of Object.entries(idxWork)) {
+  await runPool(Object.entries(idxWork), INDEX_IO_CONCURRENCY, async ([b, toks]) => {
     let cur = { v: 1, t: {} }, rf = false;
     try { const o = await env.CATALOG.get(`index/${b}.json`); if (o) cur = await o.json(); } catch (_) { rf = true; readFailed = true; }
-    if (rf) continue;
+    if (rf) return;
     if (!cur || typeof cur.t !== "object" || cur.t === null) cur = { v: 1, t: {} };
     // NO-OP GUARD per token: only rewrite the bucket when at least one token's posting list actually
     // changed (a re-emitted ADD for an already-listed id, common after reconcile/requeue, was
@@ -512,7 +523,7 @@ async function applyIndexOps(env, ops) {
       try { await env.CATALOG.put(`index/${b}.json`, JSON.stringify({ v: 1, t: cur.t }), ttl);
         if (base) changed.push(base + `/index/${b}.json`); } catch (_) { readFailed = true; }
     }
-  }
+  });
   // Any failed read or write → the caller requeues the whole batch (re-applying is idempotent).
   if (readFailed) throw new Error("index bucket read/write failed");
   return changed;
@@ -816,7 +827,7 @@ export default {
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
           lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
-          version: 41,   // v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 42,   // v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -858,6 +869,10 @@ export default {
         const isChain = !!cont && !!env.ADMIN_KEY && cont === env.ADMIN_KEY;
         if (isChain) {
           await chainLockPut(env);   // refresh the single-flight lock so the cron keeps yielding
+          // v41: while a chain runs, the 2-min cron skips its whole cycle (chainBusy), so a long index
+          // drain starved reconcile/prune/author-rename. A chain step runs them itself when due
+          // (same lock, so no meta race).
+          await cronTasksIfDue(env);
           let res = null;
           try { res = await flushR2(env); } catch (e) { console.log("flush chain err", e); }
           const depth = parseInt(url.searchParams.get("n") || "1", 10) || 1;
@@ -904,9 +919,7 @@ export default {
       // shared `meta` record (the pendingBatches/lastFlush flicker). The chain finishes fast; the cron
       // just waits one cycle. (A crashed chain self-heals in ≤90s when the lock ages out.)
       if (await chainBusy(env)) return;
-      try { await reconcileIndex(env); } catch (e) { console.log("reconcile err", e); }
-      try { await pruneFillWorklist(env); } catch (e) { console.log("prune err", e); }
-      try { await propagateAuthorRenames(env); } catch (e) { console.log("arn err", e); }
+      await cronTasks(env);
       // Claim the single-flight lock, run one flush, and if pend work remains hand off to a
       // self-chaining drain (each step a FRESH ~1000-subrequest budget) instead of waiting 2 min for
       // the next cron. Releases the lock when there's nothing left to chain.
@@ -1432,6 +1445,20 @@ async function chainBusy(env) {
   } catch (_) { return false; }
 }
 async function chainLockPut(env) { try { await env.AVATAR_KV.put("flushlock", String(Date.now()), { expirationTtl: 120 }); } catch (_) {} }
+// The cron's maintenance steps (each isolated: one throwing must not skip the others). Stamped in
+// KV so a chain step can tell whether they're due (CRON_TASKS_EVERY_MS).
+const CRON_TASKS_EVERY_MS = 110_000;
+async function cronTasks(env) {
+  try { await env.AVATAR_KV.put("crontasks", String(Date.now()), { expirationTtl: 3600 }); } catch (_) {}
+  try { await reconcileIndex(env); } catch (e) { console.log("reconcile err", e); }
+  try { await pruneFillWorklist(env); } catch (e) { console.log("prune err", e); }
+  try { await propagateAuthorRenames(env); } catch (e) { console.log("arn err", e); }
+}
+async function cronTasksIfDue(env) {
+  let last = 0;
+  try { last = parseInt((await env.AVATAR_KV.get("crontasks")) || "0", 10) || 0; } catch (_) {}
+  if (Date.now() - last >= CRON_TASKS_EVERY_MS) await cronTasks(env);
+}
 async function chainLockDel(env) { try { await env.AVATAR_KV.delete("flushlock"); } catch (_) {} }
 function fireContinuation(env, ctx, depth) {
   if (!env.ADMIN_KEY) return;   // chaining is gated on the internal token; without it, single-flush only
