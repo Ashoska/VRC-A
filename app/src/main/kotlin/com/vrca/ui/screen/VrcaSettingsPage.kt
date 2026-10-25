@@ -595,13 +595,13 @@ internal fun SettingsPage(
                                 }) {
                                     Text("Start / pause announcing")
                                 }
-                                // Test: withdraw, keep listening 5 s, then close (start again after).
+                                // Send ourselves a packet: is our receive socket working?
                                 com.vrca.ui.common.GremlinSmallButton(onClick = {
                                     treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                        runCatching { com.vrca.osc.OscAnnouncer.stopGracefully() }
+                                        runCatching { com.vrca.osc.OscAnnouncer.selfTest() }
                                     }
                                 }) {
-                                    Text("Full stop (graceful)")
+                                    Text("Self-test")
                                 }
                             }
                             SelectionContainer {

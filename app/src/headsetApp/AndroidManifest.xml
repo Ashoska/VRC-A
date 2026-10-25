@@ -38,6 +38,9 @@
          without it Android silenced the mic after about one phrase in the background. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- OSC push (MdnsAnnouncer): receive mDNS queries + send our own announcements
+         on the Quest's Wi-Fi. Normal permission, no prompt. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- usesCleartextTraffic: VRChat's OSCQuery service is plain HTTP on the LAN
          (e.g. http://192.168.0.89:45631). Android blocks cleartext by default, so
@@ -56,6 +59,17 @@
         android:resizeableActivity="true"
         android:usesCleartextTraffic="true"
         tools:node="merge">
+
+        <!-- VRChat OSC bridge (com.vrca.osc.OscBridge): its own small process so VRChat's
+             push survives the main app being swiped, crashing or OS-killed (VRChat stops
+             sending for its session when our receive socket closes). Not stopped by a
+             swipe; stops itself 10 min after the main app is gone and VRChat is silent. -->
+        <service
+            android:name="com.vrca.osc.OscBridgeService"
+            android:process=":oscbridge"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Fixed panel (user request: the window shouldn't be resizable). Horizon lets users
              resize any Android panel (Meta's docs: "Users can resize panels freely"; no lock
              exists), so: the default size (Meta's <layout>) is also the MINIMUM, so the panel
