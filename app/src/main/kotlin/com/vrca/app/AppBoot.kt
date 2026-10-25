@@ -66,8 +66,9 @@ private enum class Row(val label: String, val blocking: Boolean) {
     Discord("Discord", false),
     VrchatHere("VRChat on this headset", false),
     Updates("Updates", true),
-    /** First open only: the tutorial's pictures, fetched while the screen is up. Blocking like the
-     *  rest (user rule: nothing that fails lets boot through); a Retry resumes where it stopped. */
+    /** First open only: the tutorial's AND the terms' pictures, fetched while the screen is up, so
+     *  neither screen loads pictures as the user reads it (user, 2026-10-25). Blocking like the rest
+     *  (user rule: nothing that fails lets boot through); a Retry resumes where it stopped. */
     Tutorial("Tutorial", true);
 
     /** Rows a build doesn't have: the VRChat log is only on the headset, and the admin build
@@ -271,7 +272,7 @@ internal fun AppBoot(
             val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
             val deviceHash = prefs.getString("device_id_hash", "").orEmpty()
             val authUid = prefs.getString("auth_uid", "").orEmpty()
-            val terms = launch { terms(ctx, maintenance) { s, n -> set(Row.Terms, s, n) } }
+            val terms = launch { terms(ctx, maintenance, fetchPictures = !firstOpen) { s, n -> set(Row.Terms, s, n) } }
             val account = launch {
                 set(Row.Account, BootState.Working)
                 val result = orNull { VrchatBanChecker.checkPhase1(deviceHash, authUid) }
@@ -296,12 +297,19 @@ internal fun AppBoot(
                     else -> set(Row.Updates, BootState.Failed, BootNote.CantConnect)
                 }
             }
-            // A new user's first open: fetch the tutorial's pictures while the screen is up. A failure
-            // holds boot on Retry like any check (a retry keeps the pictures already fetched).
+            // A new user's first open: fetch the tutorial's and the terms' pictures while the screen is up,
+            // side by side, and turn green only once both are in (the Terms row is hidden on the welcome, so
+            // its pictures are this row's job). A stall holds boot on Retry like any check; a retry resumes.
             val tutorial = launch {
                 if (firstOpen) {
                     set(Row.Tutorial, BootState.Working)
-                    when (withTimeoutOrNull(PICTURES_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx) }) {
+                    when (withTimeoutOrNull(PICTURES_PREFETCH_CAP_MS) {
+                        coroutineScope {
+                            val tutorialPics = async { com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx) }
+                            val termsPics = async { com.vrca.ui.onboarding.TosImageStore.ensureDownloaded(ctx) }
+                            tutorialPics.await() and termsPics.await()
+                        }
+                    }) {
                         true -> set(Row.Tutorial, BootState.Done, BootNote.Ready)
                         null -> set(Row.Tutorial, BootState.Failed, BootNote.TimedOut)
                         false -> set(Row.Tutorial, BootState.Failed, BootNote.CantConnect)
@@ -590,7 +598,7 @@ private suspend fun vrchatHere(set: (BootState, BootNote?) -> Unit) {
  * Terms of Service: one `config/app` read (the terms version the admin last set) against what this
  * headset accepted. New terms don't fail boot; the terms screen after boot asks for them.
  */
-private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.CompletableDeferred<Boolean>, set: (BootState, BootNote?) -> Unit) {
+private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.CompletableDeferred<Boolean>, fetchPictures: Boolean, set: (BootState, BootNote?) -> Unit) {
     set(BootState.Working, null)
     var failed = false
     val snap = withTimeoutOrNull(8_000L) {
@@ -609,6 +617,8 @@ private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.Completa
         set(BootState.Done, BootNote.Accepted)
         return
     }
+    // On a first open the visible Tutorial row fetches them along with the tutorial's.
+    if (!fetchPictures) { set(BootState.Warn, BootNote.NewTerms); return }
     // The terms are coming up: fetch their pictures while the boot screen is up, like the tutorial's
     // (user, 2026-10-25). A stall holds boot on Retry like any check; a retry resumes what was fetched.
     when (withTimeoutOrNull(PICTURES_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TosImageStore.ensureDownloaded(ctx) }) {

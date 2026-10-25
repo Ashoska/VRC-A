@@ -1022,7 +1022,7 @@ private fun welcomeSteps(checks: List<BootCheck>, status: BootStatus): List<Welc
         WelcomeStep(BootIcons.VrcaServers, "VRC-A servers", "Saying hi to the VRC-A servers...", service(status.servers)),
         WelcomeStep(BootIcons.Account, "Account standing", "Checking your paws are clean...", row(check("Account standing"))),
         WelcomeStep(BootIcons.Vrchat, "VRChat", "Checking VRChat is awake...", service(status.vrchat)),
-        WelcomeStep(BootIcons.Tutorial, "Tutorial", "Fetching your tutorial...", row(check("Tutorial")))
+        WelcomeStep(BootIcons.Tutorial, "Tutorial", "Fetching your tutorial and terms...", row(check("Tutorial")))
     )
 }
 
@@ -1379,7 +1379,7 @@ private fun welcomeFailure(checks: List<BootCheck>, status: BootStatus): String 
         status.internet == InternetLink.None -> "I can't find any internet, check your Wi-Fi"
         state("Device session") == BootState.Failed -> "This device won't let me in, trying again"
         state("Account standing") == BootState.Failed -> "I couldn't check your account, trying again"
-        state("Tutorial") == BootState.Failed -> "The tutorial got stuck, trying again"
+        state("Tutorial") == BootState.Failed -> "The tutorial and terms got stuck, trying again"
         else -> "VRC-A servers aren't answering, trying again"
     }
 }
