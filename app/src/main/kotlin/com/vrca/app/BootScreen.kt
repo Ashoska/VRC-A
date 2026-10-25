@@ -263,8 +263,8 @@ fun BootScreen(
     exit: Boolean = false,
     exitToTopBar: Boolean = true,
     /**
-     * When the terms come next (user, 2026-10-25): where their header's Boot Cat is (root coordinates),
-     * read while drawing. The logo glides and shrinks onto it and fades as it lands while the backdrop
+     * When the terms come next (user, 2026-10-25): where their header's logo is (window coordinates),
+     * read while drawing. The logo glides and shrinks onto it and hands over to it as it lands while the backdrop
      * fades off the terms screen already built underneath, so there's never an empty frame.
      */
     exitToRect: (() -> androidx.compose.ui.geometry.Rect?)? = null,
@@ -406,7 +406,12 @@ fun BootScreen(
                     introScale = {
                         val r = exitToRect?.invoke()
                         val toTarget = when {
-                            r != null -> 1f + (r.height * TERMS_CAT_FIT / with(density) { height.toPx() } - 1f) * exitP.value
+                            r != null -> {
+                                // The target's height in this screen's own pixels (window px differ on the scaled panel).
+                                val screen = coords[0]
+                                val h = if (screen != null && screen.isAttached) screen.windowToLocal(r.bottomCenter).y - screen.windowToLocal(r.topCenter).y else r.height
+                                1f + (h * TERMS_CAT_FIT / with(density) { height.toPx() } - 1f) * exitP.value
+                            }
                             exitToTopBar -> 1f + (TOP_BAR_LOGO_HEIGHT / height - 1f) * exitP.value
                             else -> 1f
                         }
@@ -414,9 +419,12 @@ fun BootScreen(
                     },
                     // A lambda, read while drawing: as a value it rebuilt the whole screen on every
                     // frame of the logo intro and the fold (UI Lab `perf`).
+                    // Landing on the terms header's logo (which has no drop shadow): the shadow fades out on
+                    // the way, so the two never show doubled.
+                    shadow = { if (exitToRect != null) 1f - exitP.value else 1f },
                     fadeIn = {
                         logoIn.value * when {
-                            // Onto the terms' Boot Cat: fades as it lands, while he fades in under it.
+                            // Onto the terms header's logo: hands over to it as it lands.
                             exitToRect != null -> 1f - ((exitP.value - TERMS_LAND_FROM) / (1f - TERMS_LAND_FROM)).coerceIn(0f, 1f)
                             exitToTopBar -> 1f
                             else -> 1f - exitP.value
@@ -430,10 +438,13 @@ fun BootScreen(
                                 translationX = (boxW / 2f - c.x) * (1f - settle.value)
                                 translationY = (boxH / 2f - c.y) * (1f - settle.value)
                                 val r = exitToRect?.invoke()
-                                if (r != null && exitP.value > 0f) {
-                                    // To the terms header's Boot Cat (root coordinates = this screen's).
-                                    translationX += (r.center.x - c.x) * exitP.value
-                                    translationY += (r.center.y - c.y) * exitP.value
+                                val screen = coords[0]
+                                if (r != null && screen != null && screen.isAttached && exitP.value > 0f) {
+                                    // To the terms header's logo: its window position in this screen's own
+                                    // coordinates (root coordinates were off on the scaled headset panel).
+                                    val t = screen.windowToLocal(r.center)
+                                    translationX += (t.x - c.x) * exitP.value
+                                    translationY += (t.y - c.y) * exitP.value
                                 } else if (exitToTopBar && exitP.value > 0f) {
                                     // To the top bar's logo: centred, half the 64dp bar down.
                                     translationX += (boxW / 2f - c.x) * exitP.value
@@ -563,10 +574,10 @@ private const val EXIT_FOLD_MS = 420
 private const val EXIT_LOGO_MS = 700
 /** Point of the logo's glide (0-1) where the backdrop starts fading to show the app. */
 private const val REVEAL_FROM = 0.35f
-/** The logo lands a little bigger than the terms' Boot Cat (its cat head is part of a wider logo). */
-private const val TERMS_CAT_FIT = 1.25f
-/** From this point of the glide the logo fades into the terms' Boot Cat. */
-internal const val TERMS_LAND_FROM = 0.7f
+/** The boot logo lands at exactly the size of the terms header's logo. */
+private const val TERMS_CAT_FIT = 1f
+/** From this point of the glide the boot logo hands over to the terms header's own logo underneath. */
+internal const val TERMS_LAND_FROM = 0.97f
 
 /**
  * The logo on its own (no tile: a speech bubble inside a box read oddly), with a flat
@@ -574,7 +585,7 @@ internal const val TERMS_LAND_FROM = 0.7f
  * was removed (it read as the logo blipping brighter and dimmer).
  */
 @Composable
-private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: () -> Float, modifier: Modifier = Modifier) {
+private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: () -> Float, modifier: Modifier = Modifier, shadow: () -> Float = { 1f }) {
     // The logo as a vector (vrca_logo_vector, traced by tools/symbol-lab/logo_trace.py): sharp at any size, which
     // matters on the headset where the whole panel zooms when its window is resized.
     val logo = com.vrca.ui.common.appLogoPainter()
@@ -589,7 +600,7 @@ private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: () -> Float, m
             Image(
                 painter = logo, contentDescription = null,
                 colorFilter = ColorFilter.tint(DropLayer.copy(alpha = 0.55f)),
-                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).offset(y = 5.dp).graphicsLayer { alpha = fadeIn() }
+                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).offset(y = 5.dp).graphicsLayer { alpha = fadeIn() * shadow() }
             )
             Image(
                 painter = logo, contentDescription = "VRC-A",

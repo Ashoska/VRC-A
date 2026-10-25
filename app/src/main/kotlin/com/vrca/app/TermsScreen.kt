@@ -36,7 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,13 +78,19 @@ private val TERMS_SECTIONS = listOf(
 )
 
 @Composable
-private fun Header(compact: Boolean, mark: Mark, subtitle: String) {
+private fun Header(compact: Boolean, subtitle: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        // The boot logo lands on him (BootScreen exitToRect): his spot is reported once it's placed, and he
-        // fades in as the logo fades onto him (read in the layer, so it only repaints).
-        BootCat(mark, 0, Modifier.size(if (compact) 34.dp else 40.dp)
-            .onGloballyPositioned { c -> c.boundsInRoot().let { if (BootReveal.termsCat.value != it) BootReveal.termsCat.value = it } }
-            .graphicsLayer { alpha = BootReveal.termsCatIn.floatValue })
+        // The VRC-A logo (user, 2026-10-25: the boot logo lands here, so it's the logo, not Boot Cat):
+        // its spot is reported once it's placed, and it shows as the gliding boot logo lands on it (read
+        // in the layer, so it only repaints).
+        val logo = com.vrca.ui.common.appLogoPainter()
+        androidx.compose.foundation.Image(
+            logo, "VRC-A",
+            Modifier.height(if (compact) 38.dp else 44.dp)
+                .aspectRatio(logo.intrinsicSize.width / logo.intrinsicSize.height)
+                .onGloballyPositioned { c -> c.boundsInWindow().let { if (BootReveal.termsCat.value != it) BootReveal.termsCat.value = it } }
+                .graphicsLayer { alpha = BootReveal.termsCatIn.floatValue }
+        )
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text("Terms of Service", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = G.Text)
@@ -254,7 +260,7 @@ internal fun TermsScreen(version: Int, updatedAtMs: Long, onAccept: () -> Unit) 
         val fade = Modifier.graphicsLayer { alpha = leave.value; val k = 0.98f + 0.02f * leave.value; scaleX = k; scaleY = k }
         if (wide) Row(Modifier.fillMaxSize().then(fade).padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Column(Modifier.width(310.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Header(compact = true, mark = if (agreed) Mark.Done else Mark.Working, subtitle = subtitle)
+                Header(compact = true, subtitle = subtitle)
                 TermsBar(marks, done = agreed, version = version)
                 // The list fills the panel: each card takes an equal share of the height.
                 TERMS_SECTIONS.forEachIndexed { i, s ->
@@ -279,7 +285,7 @@ internal fun TermsScreen(version: Int, updatedAtMs: Long, onAccept: () -> Unit) 
         } else {
             val scroll = rememberScrollState()
             Column(Modifier.fillMaxSize().then(fade).verticalScroll(scroll).padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                Header(compact = false, mark = if (agreed) Mark.Done else Mark.Working, subtitle = subtitle)
+                Header(compact = false, subtitle = subtitle)
                 TermsBar(marks, done = agreed, version = version)
                 TERMS_SECTIONS.forEachIndexed { i, s ->
                     PhoneSection(i, s, marks[i], open = i == open, locked = i > reached, celebrate = agreed, total, go) { if (!agreed) agreed = true }

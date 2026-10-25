@@ -686,9 +686,9 @@ internal object BootReveal {
     private val logo = mutableStateOf(false)
     val withLogo: Boolean get() = logo.value
     fun start(withLogo: Boolean) { logo.value = withLogo; active.value = true }
-    /** Where the terms header's Boot Cat is (root coordinates), once the terms screen is placed. */
+    /** Where the terms header's logo is (window coordinates), once the terms screen is placed. */
     val termsCat = mutableStateOf<androidx.compose.ui.geometry.Rect?>(null)
-    /** How far the terms' Boot Cat has faded in while the boot logo lands on him (1 = shown). */
+    /** How far the terms header's logo has faded in while the boot logo lands on it (1 = shown). */
     val termsCatIn = androidx.compose.runtime.mutableFloatStateOf(1f)
     fun end() { active.value = false }
 }
