@@ -23,10 +23,12 @@ import java.util.concurrent.ConcurrentHashMap
  * UDP port. Feeds [HandDrag]; avatar params are kept here only (not folded into
  * [VrcaOscState], which still polls).
  *
- * Stable identity (device-proven fix): stopping then starting with a NEW name/ports
- * left VRChat "sending" to the old address (0 packets until VRChat restarted). The
- * service name and both ports are saved per install and re-bound on every start, so
- * VRChat's remembered address stays valid.
+ * Never re-registers (device-proven): unregistering then registering again, with a new
+ * name/ports OR the same saved ones, left VRChat reading our HOST_INFO but sending 0
+ * packets until VRChat restarted. So the service is registered once per app process
+ * and stays up; "stop" only PAUSES (poses/params read as absent, nothing is torn
+ * down). The name and ports are still saved per install so a new app process
+ * re-binds the same address.
  */
 object OscAnnouncer {
 
@@ -35,6 +37,10 @@ object OscAnnouncer {
 
     @Volatile var running = false
         private set
+    /** Soft stop: the service stays registered and bound, readers just see nothing. */
+    @Volatile var paused = false
+        private set
+    @Volatile private var portNote = ""
     private var udp: DatagramSocket? = null
     private var http: ServerSocket? = null
     private var nsd: NsdManager? = null
@@ -54,30 +60,40 @@ object OscAnnouncer {
     private val poses = ConcurrentHashMap<String, FloatArray>()
     private val poseMs = ConcurrentHashMap<String, Long>()
     private val params = ConcurrentHashMap<String, Float>()
+    private val others = ConcurrentHashMap<String, String>()
 
     /** Latest pushed pose for `head` / `leftwrist` / `rightwrist` (x y z pitch yaw roll,
      *  meters + degrees), or null if none arrived within [maxAgeMs]. */
     fun pose(part: String, maxAgeMs: Long = 500): FloatArray? {
+        if (paused) return null
         val at = poseMs[part] ?: return null
         return if (System.currentTimeMillis() - at <= maxAgeMs) poses[part] else null
     }
 
     /** Latest pushed avatar parameter as a float (bools 0/1), or null. */
-    fun param(name: String): Float? = params[name]
+    fun param(name: String): Float? = if (paused) null else params[name]
+
+    /** Debug button: first tap registers; later taps pause/resume (never re-register). */
+    fun toggle(context: Context) {
+        if (!running) start(context) else paused = !paused
+    }
 
     fun start(context: Context) {
+        paused = false
         if (running) return
         running = true
         startedMs = System.currentTimeMillis()
-        packets = 0; httpRequests = 0; counts.clear(); poses.clear(); poseMs.clear(); params.clear()
+        packets = 0; httpRequests = 0; counts.clear(); poses.clear(); poseMs.clear(); params.clear(); others.clear()
         lastAddress = ""; lastHttpPath = ""; registerStatus = "registering…"
         ownIp = localIpv4() ?: "127.0.0.1"
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         serviceName = prefs.getString("name", null) ?: ("VRCA-" + (1000..9999).random())
-        val u = runCatching { bindUdp(prefs.getInt("udp", 0)) }.getOrElse { bindUdp(0) }
-        val h = runCatching { bindHttp(prefs.getInt("http", 0)) }.getOrElse { bindHttp(0) }
+        val savedUdp = prefs.getInt("udp", 0); val savedHttp = prefs.getInt("http", 0)
+        val u = runCatching { bindUdp(savedUdp) }.getOrElse { bindUdp(0) }
+        val h = runCatching { bindHttp(savedHttp) }.getOrElse { bindHttp(0) }
         udp = u; http = h
         udpPort = u.localPort; httpPort = h.localPort
+        portNote = "saved udp $savedUdp http $savedHttp → bound udp $udpPort http $httpPort"
         prefs.edit().putString("name", serviceName).putInt("udp", udpPort).putInt("http", httpPort).apply()
         Thread({ udpLoop(u) }, "vrca-announce-udp").apply { isDaemon = true; start() }
         Thread({ httpLoop(h) }, "vrca-announce-http").apply { isDaemon = true; start() }
@@ -91,18 +107,6 @@ object OscAnnouncer {
 
     private fun bindHttp(port: Int) = ServerSocket().apply {
         reuseAddress = true; bind(InetSocketAddress(port))
-    }
-
-    fun stop() {
-        running = false
-        val m = nsd
-        synchronized(registrations) {
-            registrations.forEach { l -> runCatching { m?.unregisterService(l) } }
-            registrations.clear()
-        }
-        runCatching { udp?.close() }; runCatching { http?.close() }
-        udp = null; http = null
-        registerStatus = "stopped"
     }
 
     private fun register(context: Context, type: String, port: Int) {
@@ -243,6 +247,18 @@ object OscAnnouncer {
                 else -> null
             }
             if (v != null) params[address.removePrefix("/avatar/parameters/")] = v
+        } else {
+            // Everything else VRChat pushes (avatar id/name, eye height + the world's
+            // limits, …): keep the latest first argument as text for the readout.
+            val v: String? = when (tags.getOrNull(1)) {
+                'f' -> "%.3f".format(Float.fromBits(int()))
+                'i' -> int().toString()
+                'T' -> "true"
+                'F' -> "false"
+                's' -> str()
+                else -> null
+            }
+            if (v != null) others[address] = v
         }
     }
 
@@ -250,9 +266,10 @@ object OscAnnouncer {
 
     fun diag(): String = buildString {
         if (!running && startedMs == 0L) { append("(not started)"); return@buildString }
-        append(if (running) "ANNOUNCING" else "stopped").append(" as ").append(serviceName)
+        append(if (paused) "PAUSED (still registered)" else "ANNOUNCING").append(" as ").append(serviceName)
         append("\nVRC-A OSCQuery http://").append(ownIp).append(':').append(httpPort)
         append("  OSC in ").append(ownIp).append(':').append(udpPort)
+        if (portNote.isNotEmpty()) append("\n").append(portNote)
         append(registerStatus.prependIndent("  ").let { "\n" + it.trimStart('\n') })
         append("\nVRChat read our tree: ").append(httpRequests).append(" requests")
         if (lastHttpPath.isNotEmpty()) append(" (last ").append(lastHttpPath).append(')')
@@ -261,6 +278,15 @@ object OscAnnouncer {
         counts.entries.sortedBy { it.key }.forEach { (k, v) -> append("\n  ").append(k).append(" x").append(v) }
         poses.entries.sortedBy { it.key }.forEach { (k, v) ->
             append("\n").append(k).append(": ").append(v.joinToString(" ") { "%.3f".format(it) })
+        }
+        if (others.isNotEmpty()) {
+            append("\npushed values:")
+            others.entries.sortedBy { it.key }.forEach { (k, v) -> append("\n  ").append(k).append(" = ").append(v) }
+        }
+        if (params.isNotEmpty()) {
+            append("\npushed params: ").append(params.size).append(" distinct")
+            listOf("GestureLeft", "GestureRight", "VelocityX", "VelocityY", "VelocityZ", "Grounded", "AFK", "MuteSelf")
+                .forEach { n -> params[n]?.let { append("\n  ").append(n).append(" = ").append("%.2f".format(it)) } }
         }
     }
 
