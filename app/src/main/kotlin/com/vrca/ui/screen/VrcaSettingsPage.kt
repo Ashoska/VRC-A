@@ -587,12 +587,22 @@ internal fun SettingsPage(
                                     kotlinx.coroutines.delay(500)
                                 }
                             }
-                            com.vrca.ui.common.GremlinSmallButton(onClick = {
-                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                    runCatching { com.vrca.osc.OscAnnouncer.toggle(ctx) }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        runCatching { com.vrca.osc.OscAnnouncer.toggle(ctx) }
+                                    }
+                                }) {
+                                    Text("Start / pause announcing")
                                 }
-                            }) {
-                                Text("Start / pause announcing")
+                                // Test: withdraw, keep listening 5 s, then close (start again after).
+                                com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        runCatching { com.vrca.osc.OscAnnouncer.stopGracefully() }
+                                    }
+                                }) {
+                                    Text("Full stop (graceful)")
+                                }
                             }
                             SelectionContainer {
                                 Text(
