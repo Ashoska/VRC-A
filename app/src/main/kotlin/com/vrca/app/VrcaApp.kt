@@ -562,6 +562,8 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
             onTosAccepted = {
                 TosPrefs.accept(ctx, requiredTosVersion)
                 tosAccepted = true
+                // Accepted: free the terms' on-demand pictures, like the tutorial's on finishing.
+                com.vrca.ui.onboarding.TosImageStore.clear(ctx)
                 scope.launch {
                     runCatching {
                         val data = hashMapOf(
@@ -601,6 +603,8 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
             onAccept = {
                 TosPrefs.accept(ctx, requiredTosVersion)
                 tosAccepted = true
+                // Accepted: free the terms' on-demand pictures, like the tutorial's on finishing.
+                com.vrca.ui.onboarding.TosImageStore.clear(ctx)
 
                 scope.launch {
                     runCatching {

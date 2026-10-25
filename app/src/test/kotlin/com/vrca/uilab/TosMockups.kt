@@ -325,17 +325,17 @@ private val SECTIONS2 = listOf(
     Sec2("Platform rules", BootIcons.Vrchat, "Third-party guidelines",
         "VRC-A works with VRChat and Discord, so their rules apply to everything you do through it, on top of these terms.",
         listOf("Follow VRChat's Terms and Community Guidelines", "Follow Discord's Terms when Discord status is on", "No spam or harassment through the chatbox"),
-        image = IMG + "chatbox.png"),
+        image = "tos_platform_rules.png"),
     Sec2("Login Centre", BootIcons.VrchatSignIn, "Your connected accounts",
         "Signing in to VRChat powers your status, friends, instances and avatar tools. Signing in to Discord is optional and shows what you're up to on your Discord profile. Your logins are kept encrypted on this device.",
-        image = IMG + "account.png",
+        image = "tos_login_centre.png",
         callout = com.vrca.app.Mark.Warn to "VRC-A isn't made by VRChat. Using third-party tools with your account is at your own risk."),
     Sec2("Data and privacy", BootIcons.Privacy, "What we store",
         "To sync your settings and keep VRC-A safe, a small amount is stored with us.",
         listOf("A random ID for this device", "Your app version and settings", "Never your VRChat password")),
     Sec2("Bugs and reports", BootIcons.Bug, "Crash reports and fixes",
         "If VRC-A crashes, a report is sent to the developer with your device model, the app version and what went wrong. Nothing personal is in it.",
-        image = IMG + "crash.png"),
+        image = "tos_bugs_reports.png"),
     Sec2("Account standing", BootIcons.Account, "Moderation, warnings and bans",
         "Accounts that break these terms can be warned, and repeat or serious cases banned from VRC-A.",
         callout = com.vrca.app.Mark.Failed to "Trying to get around a ban gets every device and account involved banned."),
@@ -352,9 +352,9 @@ private fun ReaderBody(s: Sec2, wide: Boolean) {
         // An image sits beside the paragraph it belongs to (above it on a narrow screen).
         if (s.image != null && wide) Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) { lead() }
-            SecImage(s.image, Modifier.weight(1f).aspectRatio(4f / 3f))
+            com.vrca.ui.onboarding.TosImage(s.image, null, Modifier.weight(1f).aspectRatio(4f / 3f))
         } else {
-            s.image?.let { SecImage(it, Modifier.fillMaxWidth().aspectRatio(16f / 10f)) }
+            s.image?.let { com.vrca.ui.onboarding.TosImage(it, null, Modifier.fillMaxWidth().aspectRatio(16f / 10f)) }
             lead()
         }
         if (s.points.isNotEmpty()) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
