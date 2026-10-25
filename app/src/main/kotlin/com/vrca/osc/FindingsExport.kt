@@ -12,7 +12,7 @@ import java.util.Locale
 
 /**
  * Headset debug: run every research readout (OSCQuery endpoint dump, floor probe,
- * announce status, hand-drag status) and save them to one text file in Downloads
+ * announce status, hand-drag status, the last ADB shell test report) and save them to one text file in Downloads
  * (`vrca-findings-<time>.txt`), because the dumps are too long to screenshot on the
  * Quest panel. Returns where it was saved. Blocking: run off the main thread.
  */
@@ -32,6 +32,8 @@ object FindingsExport {
             append(runCatching { VrcaOscQuery.dumpTree() }.getOrElse { "error: ${it.message}" })
             append("\n\n######## Floor / boundary values\n")
             append(runCatching { FloorProbe.dump(context) }.getOrElse { "error: ${it.message}" })
+            append("\n\n######## ADB shell tests (").append(AdbShell.status).append(")\n")
+            append(AdbProbes.lastReport.ifEmpty { "(not run)" })
             append('\n')
         }
         val name = "vrca-findings-$stamp.txt"

@@ -53,6 +53,15 @@
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 -dontwarn com.k2fsa.sherpa.onnx.**
 
+# libadb-android + Conscrypt (headset ADB shell tests, headsetApp flavor only): libadb finds
+# Conscrypt BY NAME (Class.forName("org.conscrypt.OpenSSLProvider"), reflective
+# Conscrypt.exportKeyingMaterial for pairing), and Conscrypt's JNI calls back into its Java side.
+-keep class org.conscrypt.** { *; }
+-dontwarn org.conscrypt.**
+-keep class io.github.muntashirakon.** { *; }
+-dontwarn io.github.muntashirakon.**
+-dontwarn org.bouncycastle.**
+
 # javaosc (OSC send/parse): keep its classes in their packages. Its argument-handler Activator calls
 # getPackage().getName() on its own class; AGP 9's R8 moved the renamed classes into the unnamed
 # package, where getPackage() is null, so EVERY OSC send threw a NullPointerException before
