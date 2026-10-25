@@ -10,10 +10,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -174,9 +172,9 @@ internal fun ConfigTab(
             ) {
                 Text("ToS version", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1); scope.launch { saveConfig() } }) { Text("-") }
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1); scope.launch { saveConfig() } }) { Text("-") }
                     Text(tosVersion.toString(), fontFamily = FontFamily.Monospace)
-                    OutlinedButton(onClick = { tosVersion += 1; scope.launch { saveConfig() } }) { Text("+") }
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { tosVersion += 1; scope.launch { saveConfig() } }) { Text("+") }
                 }
             }
 
@@ -198,18 +196,18 @@ internal fun ConfigTab(
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { if (tosText.trim().isEmpty()) tosText = DEFAULT_TOS_TEXT },
                     modifier = Modifier.weight(1f)
                 ) { Text("Use template") }
 
-                OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = { scope.launch { load() } },
                     modifier = Modifier.weight(1f)
                 ) { Text("Reload") }
             }
 
-            Button(
+            com.vrca.ui.common.GremlinButton(
                 onClick = { scope.launch { saveConfig() } },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Save") }

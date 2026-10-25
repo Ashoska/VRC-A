@@ -172,6 +172,10 @@ object BootIcons {
      *  with a play triangle inside, so the two crash-screen buttons read as a pair. */
     val Start = BootIcon(glyph("Start") { startTile() }, glyph("StartDetail") { startPlay() })
 
+    /** Stop and Pause (user, 2026-10-25: our own, like Start): the same eared tile, a rounded square or two bars inside. */
+    val Stop = BootIcon(glyph("Stop") { startTile() }, glyph("StopDetail") { stopSquare() })
+    val Pause = BootIcon(glyph("Pause") { startTile() }, glyph("PauseDetail") { pauseBars() })
+
     /** Data and privacy (terms screen): a padlock whose shackle is the cat-ear head, keyhole as the detail. */
     val Privacy = BootIcon(glyph("Privacy") { lockShackle(); lockBody() }, glyph("PrivacyDetail") { keyhole() })
 
@@ -187,6 +191,8 @@ object BootIcons {
     val BugVector: ImageVector = glyph("BugAll") { bugLines(); bugSeam() }
     /** Start in one colour: every play/start button in the app uses it (user: our own play symbol everywhere). */
     val StartVector: ImageVector = glyph("StartAll") { startTile(); startPlay() }
+    val StopVector: ImageVector = glyph("StopAll") { startTile(); stopSquare() }
+    val PauseVector: ImageVector = glyph("PauseAll") { startTile(); pauseBars() }
 
     private fun Glyph.startTile() {
         line("M5.6 7.6 6.8 3.8l2.8 3.8")
@@ -194,6 +200,8 @@ object BootIcons {
         line("M7 7.6h10a3 3 0 0 1 3 3v7a3 3 0 0 1 -3 3h-10a3 3 0 0 1 -3 -3v-7a3 3 0 0 1 3 -3z")
     }
     private fun Glyph.startPlay() = line("M10.2 10.9c-.4-.3-.9 0-.9.5v5.9c0 .5.5.8.9.5l4.7-3c.4-.3.4-.8 0-1z")
+    private fun Glyph.stopSquare() = line("M10.4 11.4h3.2a.9.9 0 0 1 .9.9v3.2a.9.9 0 0 1 -.9.9h-3.2a.9.9 0 0 1 -.9 -.9v-3.2a.9.9 0 0 1 .9 -.9z")
+    private fun Glyph.pauseBars() { line("M10.3 11.2v5.4"); line("M13.7 11.2v5.4") }
 
     private fun Glyph.lockShackle(open: Boolean = false) =
         line(if (open) "M6.9 10.6 7 3.4l3.5 3.2q1.5-.6 3 0L17 3.4l.1 3.4" else "M6.9 10.6 7 3.4l3.5 3.2q1.5-.6 3 0L17 3.4l.1 7.2")

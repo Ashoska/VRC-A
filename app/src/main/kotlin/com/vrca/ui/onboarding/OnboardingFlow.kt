@@ -337,12 +337,12 @@ fun OnboardingFlow(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (step > 0) {
-                            com.vrca.ui.common.GremlinQuietButton(onClick = { back() }) { Text("Back") }
+                            com.vrca.ui.common.GremlinSecondaryButton(onClick = { back() }) { Text("Back") }
                         } else Spacer(Modifier.width(8.dp))
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (replay) {
-                                com.vrca.ui.common.GremlinQuietButton(onClick = { finishNow() }) { Text("Exit tutorial") }
+                                com.vrca.ui.common.GremlinSecondaryButton(onClick = { finishNow() }) { Text("Exit tutorial") }
                                 Spacer(Modifier.width(4.dp))
                             }
                             if (!hardGateBlocked) {

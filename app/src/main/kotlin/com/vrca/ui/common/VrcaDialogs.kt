@@ -170,7 +170,7 @@ fun VrcaConfirmDialog(
                 horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                com.vrca.ui.common.GremlinQuietButton(onClick = onDismiss) { Text(dismissLabel) }
+                com.vrca.ui.common.GremlinSecondaryButton(onClick = onDismiss) { Text(dismissLabel) }
                 com.vrca.ui.common.GremlinButton(
                     onClick = onConfirm,
                     enabled = confirmEnabled,

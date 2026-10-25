@@ -17,14 +17,12 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -177,7 +175,7 @@ internal fun AnnouncementsTab(
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
+                    com.vrca.ui.common.GremlinButton(
                         onClick = {
                             scope.launch {
                                 setGlobalLoading(true)
@@ -235,19 +233,19 @@ internal fun AnnouncementsTab(
                     ) { Text(if (editingId == null) "Publish" else "Update") }
 
                     if (editingId != null) {
-                        OutlinedButton(
+                        com.vrca.ui.common.GremlinSecondaryButton(
                             onClick = { resetForm() },
                             modifier = Modifier.weight(1f)
                         ) { Text("Cancel") }
                     } else {
-                        OutlinedButton(
+                        com.vrca.ui.common.GremlinSecondaryButton(
                             onClick = { scope.launch { refresh() } },
                             modifier = Modifier.weight(1f)
                         ) { Text("Refresh") }
                     }
                 }
 
-                OutlinedButton(
+                com.vrca.ui.common.GremlinSecondaryButton(
                     onClick = {
                         scope.launch {
                             setGlobalLoading(true); setError(null)
@@ -321,14 +319,14 @@ internal fun AnnouncementsTab(
                         }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            OutlinedButton(
+                            com.vrca.ui.common.GremlinSecondaryButton(
                                 onClick = { loadIntoEditor(a, asCopy = false) },
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Filled.Edit, null, modifier = Modifier.height(16.dp))
                                 Spacer(Modifier.height(0.dp)); Text(" Edit")
                             }
-                            OutlinedButton(
+                            com.vrca.ui.common.GremlinSecondaryButton(
                                 onClick = { loadIntoEditor(a, asCopy = true) },
                                 modifier = Modifier.weight(1f)
                             ) {
@@ -338,7 +336,7 @@ internal fun AnnouncementsTab(
                         }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            OutlinedButton(
+                            com.vrca.ui.common.GremlinSecondaryButton(
                                 onClick = {
                                     scope.launch {
                                         setGlobalLoading(true)
@@ -365,7 +363,7 @@ internal fun AnnouncementsTab(
                                 modifier = Modifier.weight(1f)
                             ) { Text(if (a.active) "Disable" else "Enable") }
 
-                            OutlinedButton(
+                            com.vrca.ui.common.GremlinSecondaryButton(
                                 onClick = {
                                     scope.launch {
                                         setGlobalLoading(true)
@@ -392,7 +390,7 @@ internal fun AnnouncementsTab(
                                 }
                             ) { Text("P-") }
 
-                            OutlinedButton(
+                            com.vrca.ui.common.GremlinSecondaryButton(
                                 onClick = {
                                     scope.launch {
                                         setGlobalLoading(true)

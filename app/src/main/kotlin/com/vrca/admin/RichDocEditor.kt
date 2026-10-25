@@ -419,7 +419,7 @@ private fun blockLabel(b: RichBlock): String = when (b) {
 
 @Composable
 private fun AddBlockChip(label: String, icon: ImageVector, onClick: () -> Unit) {
-    OutlinedButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)) {
+    com.vrca.ui.common.GremlinSecondaryButton(onClick = onClick, size = com.vrca.ui.common.GremlinButtonSize.Small) {
         Icon(icon, null, modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(6.dp))
         Text(label)
@@ -499,12 +499,12 @@ private fun BlockCard(
                             }) { Icon(Icons.Filled.Delete, "Remove item") }
                         }
                     }
-                    OutlinedButton(onClick = { onChange(block.copy(items = block.items + "")) }) {
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { onChange(block.copy(items = block.items + "")) }) {
                         Icon(Icons.Filled.Add, null); Spacer(Modifier.width(6.dp)); Text("Add item")
                     }
                 }
                 is RichBlock.Image -> {
-                    Button(onClick = { onPickImage(0) }, enabled = !uploading) {
+                    com.vrca.ui.common.GremlinButton(onClick = { onPickImage(0) }, enabled = !uploading) {
                         if (uploading) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),
@@ -518,12 +518,12 @@ private fun BlockCard(
                         }
                     }
                     // Optional SECOND image → the two render side by side (each half width).
-                    OutlinedButton(onClick = { onPickImage(1) }, enabled = !uploading) {
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { onPickImage(1) }, enabled = !uploading) {
                         Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp))
                         Text(if (block.url2.isNullOrBlank()) "Add second image (side by side)" else "Replace second image")
                     }
                     if (!block.url2.isNullOrBlank()) {
-                        TextButton(onClick = { onChange(block.copy(url2 = null)) }) {
+                        com.vrca.ui.common.GremlinSecondaryButton(onClick = { onChange(block.copy(url2 = null)) }) {
                             Text("Remove second image")
                         }
                     }
@@ -535,7 +535,7 @@ private fun BlockCard(
                         label = { Text("GIF link (direct .gif URL, e.g. media.giphy.com/...)") },
                         singleLine = true
                     )
-                    Button(onClick = { onPickGif(0) }, enabled = !uploading) {
+                    com.vrca.ui.common.GremlinButton(onClick = { onPickGif(0) }, enabled = !uploading) {
                         if (uploading) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),
@@ -549,18 +549,18 @@ private fun BlockCard(
                         }
                     }
                     // Optional SECOND gif → the two render side by side (each half width).
-                    OutlinedButton(onClick = { onPickGif(1) }, enabled = !uploading) {
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = { onPickGif(1) }, enabled = !uploading) {
                         Icon(Icons.Filled.Gif, null); Spacer(Modifier.width(6.dp))
                         Text(if (block.url2.isNullOrBlank()) "Add second GIF (side by side)" else "Replace second GIF")
                     }
                     if (!block.url2.isNullOrBlank()) {
-                        TextButton(onClick = { onChange(block.copy(url2 = null)) }) {
+                        com.vrca.ui.common.GremlinSecondaryButton(onClick = { onChange(block.copy(url2 = null)) }) {
                             Text("Remove second GIF")
                         }
                     }
                 }
                 is RichBlock.Video -> {
-                    Button(onClick = onPickVideo, enabled = !uploading) {
+                    com.vrca.ui.common.GremlinButton(onClick = onPickVideo, enabled = !uploading) {
                         if (uploading) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),
@@ -573,7 +573,7 @@ private fun BlockCard(
                             Text(if (block.url.isBlank()) "Pick & upload video" else "Replace video")
                         }
                     }
-                    OutlinedButton(onClick = onPickPoster, enabled = !uploading) {
+                    com.vrca.ui.common.GremlinSecondaryButton(onClick = onPickPoster, enabled = !uploading) {
                         Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp))
                         Text(if (block.poster.isNullOrBlank()) "Add poster image" else "Replace poster")
                     }
@@ -582,11 +582,11 @@ private fun BlockCard(
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         listOf("info", "warn", "success").forEach { tone ->
                             if (block.tone == tone) {
-                                Button(onClick = {}, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)) { Text(tone) }
+                                com.vrca.ui.common.GremlinButton(onClick = {}, size = com.vrca.ui.common.GremlinButtonSize.Small) { Text(tone) }
                             } else {
-                                OutlinedButton(
+                                com.vrca.ui.common.GremlinSecondaryButton(
                                     onClick = { onChange(block.copy(tone = tone)) },
-                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)
+                                    size = com.vrca.ui.common.GremlinButtonSize.Small
                                 ) { Text(tone) }
                             }
                         }

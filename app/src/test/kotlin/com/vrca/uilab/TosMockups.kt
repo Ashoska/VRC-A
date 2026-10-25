@@ -445,7 +445,7 @@ internal fun TosMockB2(open: Int = 2) {
                             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            com.vrca.ui.common.GremlinButton("Back", {}, kind = com.vrca.ui.common.GremlinButtonKind.Quiet, size = GremlinButtonSize.Medium)
+                            com.vrca.ui.common.GremlinButton("Back", {}, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Medium)
                             Spacer(Modifier.weight(1f))
                             com.vrca.ui.common.GremlinButton(
                                 "Next: ${SECTIONS2[open + 1].title}", {}, kind = com.vrca.ui.common.GremlinButtonKind.Secondary,
