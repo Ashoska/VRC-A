@@ -639,6 +639,11 @@ object AvatarCatalogSweep {
 
     private suspend fun slotLoop(context: Context, adminKey: String, slot: Int, roles: List<Role>, liveIndex: Int, liveCount: Int) {
         val ownRole = roles.firstOrNull()
+        // A slot whose ONLY role is Fill does fills and nothing else (user's call, 2026-10-26): it never
+        // starts a long re-verify, so a new contribution is filled within seconds instead of waiting for
+        // whichever walking bot finishes its shard first. With fewer bots the roles share slots and the
+        // slot keeps walking.
+        val fillDedicated = roles.size == 1 && roles[0] == Role.FILL
         while (running && scope.isActive) {
             // HARD PAUSE: do nothing (no VRChat call, no counter touch, no alive-stamp) while
             // paused, so the counters stay frozen the instant the admin pauses — regardless of
@@ -684,7 +689,7 @@ object AvatarCatalogSweep {
                     if (r == Role.REPORTS) progress.getValue(r).helping =
                         if (didReports || lastPendingReports > 0) ""
                         else if (manifestUnfilled >= manifestStale) "Fill" else "Liveness"
-                    did = walkPass(context, adminKey, slot, r) || did
+                    did = walkPass(context, adminKey, slot, r, fillDedicated) || did
                 } else {
                     for (role in roles) {
                         if (!running) break
@@ -710,6 +715,7 @@ object AvatarCatalogSweep {
                 // so the backlog is chewed through in minutes instead of one shard per 20s.
                 val target = if (crawling) CRAWL_TERM_GAP_MS
                     else if (did || blitzActive() || (AvatarGlobalDb.shardWalkLive() && workRemaining())) ACTIVE_PAUSE_MS
+                    else if (fillDedicated && AvatarGlobalDb.shardWalkLive()) FILL_IDLE_MS
                     else IDLE_SLEEP_MS
                 var slept = 0L
                 while (slept < target && running && scope.isActive &&
@@ -836,7 +842,9 @@ object AvatarCatalogSweep {
     private val worklistMutex = Mutex()
     @Volatile private var worklistFetchedMs = 0L
     @Volatile private var worklistEmpty = false        // read OK but no work → idle (don't blind-walk)
-    private const val WORKLIST_TTL_MS = 60_000L
+    private const val WORKLIST_TTL_MS = 20_000L   // was 60 s; the Fill bot polls the list (cached CDN read)
+    // The dedicated Fill bot's wait between fill-list checks when nothing is waiting.
+    private const val FILL_IDLE_MS = 8_000L
     // A fill shard isn't re-walked within this window: its fills reach the Worker on the next flush
     // (~2 min) and only then leave the worklist, so a re-walk sooner would repeat the same checks.
     private const val FILL_REWALK_MS = 5 * 60_000L
@@ -1053,7 +1061,7 @@ object AvatarCatalogSweep {
     /** WALK one shard (post-cutover): read it, fill the unfilled + recheck the stale, push ops.
      *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the
      *  master-based passes. Returns true if it did VRChat work. */
-    private suspend fun walkPass(context: Context, adminKey: String, slot: Int, role: Role): Boolean {
+    private suspend fun walkPass(context: Context, adminKey: String, slot: Int, role: Role, fillDedicated: Boolean = false): Boolean {
         if (paused) return false
         val p = progress.getValue(role)
         // FILLS FIRST: a shard on the Worker's fill worklist (`_worklist.json`, kept exact by the
@@ -1063,6 +1071,10 @@ object AvatarCatalogSweep {
         // only when no fill shard is waiting does the bot take the oldest-swept shard.
         val fillPrefix = nextFillPrefix(context)
         val fillOnly = fillPrefix != null
+        if (fillDedicated && fillPrefix == null) {
+            p.status = "fills: none waiting"; p.curShard = ""; p.curShardTotal = 0; p.curShardDone = 0
+            return false
+        }
         val prefix = fillPrefix ?: nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
         // Failed read → leave the claim to EXPIRE (a ~30s backoff) so the shard stays oldest and is
