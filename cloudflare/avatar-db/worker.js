@@ -335,8 +335,9 @@ const MAX_SHARDS_PER_FLUSH = 120;   // raised 60->120: v24 dropped the index-buc
 // chain only runs while there's a backlog and idles back to the plain 2-min cron once pend is empty, so
 // steady state is unchanged; a drain burst adds a lock op + meta write per step (negligible KV).
 const FLUSH_LOCK_TTL_MS = 90_000;      // a chain holds this; the cron skips its cycle while it's fresh
-const MAX_CONTINUATION_DEPTH = 30;     // hard cap on chained steps per drain (runaway guard)
-const INDEX_CHAIN_DEPTH = 10;          // v40: extra chained steps per cron for an INDEX-only backlog (iq:/iqp:)
+const MAX_CONTINUATION_DEPTH = 8;      // v47: 30 -> 8. Steps now nest (each awaits the next), all inside
+                                       // the cron's 15-min limit: 8 x ~70 s ≈ 10 min.
+const INDEX_CHAIN_DEPTH = 8;           // v40/v47: chained steps per cron for an INDEX-only backlog (iq:/iqp:)
 const DEFAULT_SELF_URL = "https://vrca-avatar-db.shadowash321rulse.workers.dev";  // fallback if WORKER_SELF_URL unset
 // Coalesce _manifest.json writes. The LIVE entry count already rides `meta.entries` (which /health
 // max()es against the manifest), so the _manifest.json copy only needs periodic freshening, not a
@@ -842,7 +843,7 @@ export default {
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
           lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
-          version: 46,   // v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 47,   // v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -894,7 +895,9 @@ export default {
           const more = res && ((res.pendRemaining > 0 && res.progressed && depth < MAX_CONTINUATION_DEPTH) ||
             (res.iqRemaining && res.iqProgressed && depth < INDEX_CHAIN_DEPTH));
           if (more) {
-            fireContinuation(env, ctx, depth + 1);   // more to drain → hand off a fresh budget
+            // Hand off a fresh budget AND wait for it, so this request stays open and the next step
+            // can't be cut off (v47). The whole chain stays inside the cron's 15-min window via the caps.
+            await fireContinuation(env, ctx, depth + 1, true);
           } else {
             await chainLockDel(env);   // drained / capped / no progress → release the lock
           }
@@ -1587,20 +1590,22 @@ async function cronTasksIfDue(env) {
   if (Date.now() - last >= CRON_TASKS_EVERY_MS) await cronTasks(env);
 }
 async function chainLockDel(env) { try { await env.AVATAR_KV.delete("flushlock"); } catch (_) {} }
-function fireContinuation(env, ctx, depth) {
-  if (!env.ADMIN_KEY) return;   // chaining is gated on the internal token; without it, single-flush only
+// v47: returns the step's promise. A CHAIN STEP must AWAIT it (see the /flush chain handler): a fetch
+// handler's ctx.waitUntil only lives ~30 s after it responds, but a step takes ~60-70 s, so a step
+// fired via waitUntil from another step was cut off mid-flush every time (meta never saved, lock left
+// held, work redone later). The cron's scheduled handler may use waitUntil (it lives up to 15 min).
+function fireContinuation(env, ctx, depth, awaitIt = false) {
+  if (!env.ADMIN_KEY) return Promise.resolve();   // chaining is gated on the internal token
   const path = `/flush?cont=${encodeURIComponent(env.ADMIN_KEY)}&n=${depth}`;
+  const go = (p) => { const q = p.catch(() => {}); if (!awaitIt) ctx.waitUntil(q); return q; };
   // PREFER the self service-binding (env.SELF) — a plain fetch() to our own workers.dev hostname is an
   // unreliable way to self-invoke (Cloudflare loop-guard / edge-cache can drop it, which is why the
   // chain didn't fire on first deploy). The service binding routes straight to a fresh invocation of
   // THIS worker (fresh subrequest budget) with no DNS/cache in the path. Global fetch is the fallback.
   try {
-    if (env.SELF && typeof env.SELF.fetch === "function") {
-      ctx.waitUntil(env.SELF.fetch("https://self" + path).catch(() => {}));
-      return;
-    }
+    if (env.SELF && typeof env.SELF.fetch === "function") return go(env.SELF.fetch("https://self" + path));
   } catch (_) {}
-  ctx.waitUntil(fetch(selfBase(env) + path).catch(() => {}));
+  return go(fetch(selfBase(env) + path));
 }
 
 async function flushR2(env) {
