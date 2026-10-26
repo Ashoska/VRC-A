@@ -1077,7 +1077,12 @@ object AvatarCatalogSweep {
         // short-TTL recent-process guard (another bot / a just-done re-walk). WHOLE shard in one pass →
         // one grouped push at the end. A fill visit takes only the unfilled avatars.
         val work = entries.filterNot { wasRecentlyProcessed(it.fileId) }.let { w -> if (fillOnly) w.filter { needsFill(it) } else w }
-        if (work.isEmpty()) { p.status = "walking ($prefix clear)"; return false }
+        if (work.isEmpty()) {
+            // Show the shard actually being looked at, even when it turns out empty (otherwise the
+            // card kept the last shard that HAD work while "shards swept" climbed: looked stuck).
+            p.curShard = prefix; p.curShardTotal = 0; p.curShardDone = 0
+            p.status = "walking ($prefix clear)"; return false
+        }
         val batch = claimBatch(work, work.size)
         if (batch.isEmpty()) return false
         // LIVE per-shard progress: this bot is now on `prefix`, checking `batch.size` avatars.
