@@ -558,9 +558,11 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            val fillBot = !v.isReportsBot && v.role == AvatarCatalogSweep.Role.FILL
             val label = when {
                 v.isReportsBot && v.helping == "walk" -> "Reports + walk"
                 v.isReportsBot -> "Reports"
+                fillBot -> "Fills"
                 else -> "Shard walk"
             }
             Text(
@@ -571,6 +573,7 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             when {
                 !v.running -> StatusPill("Idle", AdminTone.Neutral)
                 onWalk -> StatusPill("shard ${v.curShard.uppercase()}", AdminTone.Primary)
+                fillBot -> StatusPill("Waiting", AdminTone.Neutral)
                 else -> StatusPill("Walking", AdminTone.Success)
             }
         }
