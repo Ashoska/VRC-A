@@ -842,7 +842,7 @@ export default {
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
           lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
-          version: 45,   // v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 46,   // v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -1289,16 +1289,22 @@ async function reconcileIndex(env) {
 // shards to the back — so the whole worklist self-corrects to the true set in a few minutes. It runs
 // ONLY while the worklist is implausibly larger than the unfilled count (bloat present), so once clean
 // it costs nothing; it re-arms automatically if the leak recurs.
-const PRUNE_BATCH = 40;            // shards checked per cron (bounded — Class B reads, cheap)
-const PRUNE_SLACK = 20;           // don't bother pruning once length is within this of the unfilled count
+// v46: it ALWAYS runs while the list is non-empty. The old gate (skip while length <= unfilled + 20)
+// compared the list against the `unfilled` COUNTER, which had drifted too (2026-10-26: 1,176 "unfilled"
+// and 1,012 listed shards vs 7 real unfilled avatars), so the pruner never ran and the bots kept reading
+// empty fill shards. It also RE-COUNTS: unfilled avatars can only live in listed shards (new ones are
+// added by the flush), so after each full pass over the list `unfilled` is set to what the pass found.
+const PRUNE_BATCH = 100;           // shards checked per cron (Class B reads; ~list size once it's clean)
 async function pruneFillWorklist(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   let fill = Array.isArray(meta.fillHint) ? meta.fillHint : null;
-  if (!fill || fill.length === 0) return;                                // nothing to prune
-  const unfilled = typeof meta.unfilled === "number" ? meta.unfilled : 0;
-  if (fill.length <= unfilled + PRUNE_SLACK) return;                     // plausibly clean → skip (0 reads)
-  const batch = fill.slice(0, PRUNE_BATCH);
-  const rest = fill.slice(PRUNE_BATCH);
+  if (!fill || fill.length === 0) {
+    if (meta.unfilled) { meta.unfilled = 0; await env.AVATAR_KV.put("meta", JSON.stringify(meta)); }
+    return;
+  }
+  // Pass bookkeeping: a pass = as many shards as the list held when it started.
+  if (!(meta.prunePassLeft > 0)) { meta.prunePassLeft = fill.length; meta.prunePassUnfilled = 0; }
+  const batch = fill.slice(0, Math.min(PRUNE_BATCH, meta.prunePassLeft));
   const kept = [];
   let changed = false;
   for (const sp of batch) {
@@ -1307,12 +1313,19 @@ async function pruneFillWorklist(env) {
     catch (_) { failed = true; }
     if (failed) { kept.push(sp); continue; }                            // transient read fail → keep, re-check later
     const e = (shard && shard.e) || {};
-    const hasUnfilled = Object.values(e).some((x) => x && x.id && String(x.id).startsWith("avtr_") && x.filled !== true);
-    if (hasUnfilled) kept.push(sp);                                     // still has work → keep
+    const n = Object.values(e).filter((x) => x && x.id && String(x.id).startsWith("avtr_") && x.filled !== true).length;
+    meta.prunePassUnfilled = (meta.prunePassUnfilled || 0) + n;
+    if (n > 0) kept.push(sp);                                           // still has work → keep
     else changed = true;                                               // fully filled → drop it
   }
+  const rest = fill.slice(batch.length);
   fill = [...rest, ...kept];   // rotate: checked-kept go to the back so the next run checks fresh ones
   meta.fillHint = fill;
+  meta.prunePassLeft = Math.max(0, meta.prunePassLeft - batch.length);
+  if (meta.prunePassLeft === 0) {
+    meta.unfilled = meta.prunePassUnfilled || 0;   // exact "Fills waiting" for the pass just finished
+    meta.lastFillRecount = new Date().toISOString();
+  }
   if (changed) {
     try {
       await env.CATALOG.put("_worklist.json",
