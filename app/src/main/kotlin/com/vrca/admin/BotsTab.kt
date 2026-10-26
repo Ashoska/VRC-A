@@ -550,7 +550,7 @@ private fun BotSection(
 @Composable
 private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
     fun n(x: Int) = "%,d".format(x)
-    val onWalk = v.curShard.isNotEmpty() && v.curShardTotal > 0
+    val onWalk = v.curShard.isNotEmpty()
     Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.fillMaxWidth()) {
         // Header: what this bot is DOING + its live shard position.
         Row(
@@ -575,7 +575,13 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             }
         }
         // LIVE progress through the CURRENT shard: avatar N / M + a bar.
-        if (onWalk) {
+        if (onWalk && v.curShardTotal == 0) {
+            Text(
+                "shard ${v.curShard.uppercase()}: nothing left to check",
+                style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else if (onWalk) {
             androidx.compose.material3.LinearProgressIndicator(
                 progress = (v.curShardDone.toFloat() / v.curShardTotal).coerceIn(0f, 1f),
                 modifier = Modifier.fillMaxWidth()

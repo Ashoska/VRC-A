@@ -840,6 +840,12 @@ object AvatarCatalogSweep {
     // A fill shard isn't re-walked within this window: its fills reach the Worker on the next flush
     // (~2 min) and only then leave the worklist, so a re-walk sooner would repeat the same checks.
     private const val FILL_REWALK_MS = 5 * 60_000L
+    // A fill shard a bot FINISHED (or found nothing to fill in) is treated as done for this long, even
+    // while it's still listed: its fills reach the Worker in batches and the list only drops it after
+    // the next flush + cache, so a 5-min revisit often read it again for nothing (user's call). A
+    // visit cut short by a rate-limit keeps the 5-min retry.
+    private const val FILL_DONE_HOLD_MS = 30 * 60_000L
+    // Per fill shard: not due again before this time (shared by all bots in this app).
     private val fillWalkedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
     // `checked` is pushed for an unchanged avatar only once it's this old (see walkPass): the
     // continuous lap re-verifies everything every day or two, and rewriting every shard per lap
@@ -847,7 +853,7 @@ object AvatarCatalogSweep {
     // staleness window, so the liveness count stays ~0.
     private const val CHECKED_PUSH_MIN_AGE_MS = 20L * 24 * 60 * 60 * 1000
 
-    /** Next shard from the Worker's fill worklist not walked in the last [FILL_REWALK_MS], or null.
+    /** Next due shard from the Worker's fill worklist (see [FILL_REWALK_MS] / [FILL_DONE_HOLD_MS]), or null.
      *  The shared queue is refilled at most once per [WORKLIST_TTL_MS] (single-flight), so all bots
      *  together cost one small CDN read a minute. */
     private suspend fun nextFillPrefix(context: Context): String? {
@@ -855,8 +861,8 @@ object AvatarCatalogSweep {
             val now = System.currentTimeMillis()
             while (true) {
                 val p = workQueue.poll() ?: return null
-                val t = fillWalkedAt[p]
-                if (t == null || now - t >= FILL_REWALK_MS) { fillWalkedAt[p] = now; return p }
+                val until = fillWalkedAt[p]
+                if (until == null || now >= until) { fillWalkedAt[p] = now + FILL_REWALK_MS; return p }
             }
         }
         pollDue()?.let { return it }
@@ -883,10 +889,10 @@ object AvatarCatalogSweep {
         }
     }
 
-    /** True when a fill shard is waiting that no bot visited in the last [FILL_REWALK_MS]. */
+    /** True when a fill shard on the list is due (not held by a recent visit). */
     private fun hasDueFill(): Boolean {
         val now = System.currentTimeMillis()
-        return workQueue.any { p -> fillWalkedAt[p]?.let { now - it >= FILL_REWALK_MS } ?: true }
+        return workQueue.any { p -> fillWalkedAt[p]?.let { now >= it } ?: true }
     }
 
     // ---- per-shard "last swept" ordering (local, persisted) ------------------
@@ -1077,7 +1083,13 @@ object AvatarCatalogSweep {
         // short-TTL recent-process guard (another bot / a just-done re-walk). WHOLE shard in one pass →
         // one grouped push at the end. A fill visit takes only the unfilled avatars.
         val work = entries.filterNot { wasRecentlyProcessed(it.fileId) }.let { w -> if (fillOnly) w.filter { needsFill(it) } else w }
-        if (work.isEmpty()) { p.status = "walking ($prefix clear)"; return false }
+        if (work.isEmpty()) {
+            if (fillOnly) fillWalkedAt[prefix] = System.currentTimeMillis() + FILL_DONE_HOLD_MS
+            // Show the shard actually being looked at, even when it turns out empty (otherwise the
+            // card kept the last shard that HAD work while "shards swept" climbed: looked stuck).
+            p.curShard = prefix; p.curShardTotal = 0; p.curShardDone = 0
+            p.status = "walking ($prefix clear)"; return false
+        }
         val batch = claimBatch(work, work.size)
         if (batch.isEmpty()) return false
         // LIVE per-shard progress: this bot is now on `prefix`, checking `batch.size` avatars.
@@ -1159,6 +1171,8 @@ object AvatarCatalogSweep {
             // On a rate-limit break, return false so slotLoop takes the IDLE sleep (not the 1.5s
             // active pause) — otherwise all 4 bots keep firing 3-call bursts every ~5s into an
             // already-throttled endpoint and the throttle never clears.
+            if (fillOnly && !rateLimited && running && !paused)
+                fillWalkedAt[prefix] = System.currentTimeMillis() + FILL_DONE_HOLD_MS   // finished → done for now
             return !rateLimited
         } finally { release(batch.map { it.fileId }) }
     }

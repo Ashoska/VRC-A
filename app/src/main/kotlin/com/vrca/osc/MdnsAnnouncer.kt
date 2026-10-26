@@ -81,22 +81,43 @@ object MdnsAnnouncer {
         return s
     }
 
+    @Volatile private var reopen = false
+    @Volatile var ipChanges = 0
+        private set
+
+    /** The device's Wi-Fi address changed (or first appeared): reopen the socket on the new
+     *  interface and announce in a fresh burst, so VRChat learns the reachable address. */
+    fun onIpChanged() { ipChanges++; reopen = true }
+
     private fun loop() {
-        val s = runCatching { openSocket() }.getOrElse { lastError = "socket: ${it.message}"; running = false; return }
-        socket = s
-        if (bound5353) Thread({ receiveLoop(s) }, "vrca-mdns-rx").apply { isDaemon = true; start() }
-        // A burst first (VRChat may be mid-start), then steady.
-        var n = 0
+        // A burst first (VRChat may be mid-start), then steady; again after every IP change.
         while (running) {
-            announce(s)
-            n++
-            try { Thread.sleep(if (n < 3) 1_000L else ANNOUNCE_MS) } catch (_: InterruptedException) { break }
+            val s = runCatching { openSocket() }.getOrElse {
+                lastError = "socket: ${it.message}"
+                try { Thread.sleep(5_000) } catch (_: InterruptedException) { return }
+                null
+            } ?: continue
+            socket = s
+            reopen = false
+            if (bound5353) Thread({ receiveLoop(s) }, "vrca-mdns-rx").apply { isDaemon = true; start() }
+            var n = 0
+            while (running && !reopen) {
+                announce(s)
+                n++
+                var waited = 0L
+                val wait = if (n < 3) 1_000L else ANNOUNCE_MS
+                while (waited < wait && running && !reopen) {
+                    try { Thread.sleep(250) } catch (_: InterruptedException) { return }
+                    waited += 250
+                }
+            }
+            runCatching { s.close() }   // ends this socket's receive thread
         }
     }
 
     private fun receiveLoop(s: MulticastSocket) {
         val buf = ByteArray(9000)
-        while (running) {
+        while (running && socket === s && !s.isClosed) {
             val p = DatagramPacket(buf, buf.size)
             try {
                 s.receive(p)
@@ -115,7 +136,7 @@ object MdnsAnnouncer {
                     }
                 }
             } catch (e: Exception) {
-                if (running) { lastError = "receive: ${e.message}"; Thread.sleep(1_000) }
+                if (running && socket === s && !s.isClosed) { lastError = "receive: ${e.message}"; Thread.sleep(1_000) }
             }
         }
     }
@@ -140,7 +161,9 @@ object MdnsAnnouncer {
     }
 
     private fun announce(s: MulticastSocket) {
-        val ip = ipSupplier() ?: return
+        // Never advertise loopback / no address: VRChat would never reach us (user report 2026-10-26:
+        // a bridge started before Wi-Fi was up announced 127.0.0.1 and VRChat never read our tree).
+        val ip = ipSupplier()?.takeIf { it != "127.0.0.1" } ?: return
         runCatching {
             val bytes = buildResponse(ip)
             s.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName(GROUP), PORT))

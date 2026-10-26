@@ -83,7 +83,9 @@ object OscBridge {
         running = true
         appContext = context.applicationContext
         startedMs = System.currentTimeMillis()
-        ownIp = localIpv4() ?: "127.0.0.1"
+        // No real address yet (bridge started before Wi-Fi, e.g. at power-on) → "" until the status
+        // loop sees one; never 127.0.0.1, which VRChat can't use (it never read our tree).
+        ownIp = localIpv4() ?: ""
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // Stable identity: same name + ports every start (see MdnsAnnouncer).
         serviceName = prefs.getString("name", null) ?: ("VRCA-" + (1000..9999).random())
@@ -98,7 +100,7 @@ object OscBridge {
         Thread({ httpLoop(h) }, "vrca-bridge-http").apply { isDaemon = true; start() }
         Thread({ relayAcceptLoop(context) }, "vrca-bridge-relay").apply { isDaemon = true; start() }
         Thread({ statusLoop(onIdle) }, "vrca-bridge-status").apply { isDaemon = true; start() }
-        MdnsAnnouncer.start(context, serviceName, httpPort, udpPort) { localIpv4() ?: ownIp.ifEmpty { null } }
+        MdnsAnnouncer.start(context, serviceName, httpPort, udpPort) { ownIp.ifEmpty { null } }
     }
 
     private fun bindUdp(port: Int) = DatagramSocket(null).apply {
@@ -184,8 +186,14 @@ object OscBridge {
     }
 
     private fun statusLoop(onIdle: () -> Unit) {
+        var tick = 0
         while (running) {
             try { Thread.sleep(1_000) } catch (_: InterruptedException) { break }
+            // Track the Wi-Fi address (it can appear after we start, or change on reconnect).
+            if (tick++ % 5 == 0) {
+                val ip = localIpv4()
+                if (ip != null && ip != ownIp) { ownIp = ip; MdnsAnnouncer.onIpChanged() }
+            }
             send(1, status().toByteArray())
             val now = System.currentTimeMillis()
             val noClient = synchronized(clientLock) { client == null }
@@ -206,6 +214,7 @@ object OscBridge {
         put("relayed", relayed)
         put("upSec", (System.currentTimeMillis() - startedMs) / 1000)
         put("pid", Process.myPid())
+        put("ipChanges", MdnsAnnouncer.ipChanges)
         put("dragStops", dragStops)
         put("mdns", MdnsAnnouncer.diag())
     }.toString()
@@ -236,8 +245,8 @@ object OscBridge {
     private fun hostInfo(): String = JSONObject().apply {
         put("NAME", serviceName)
         // Fresh every request: a Wi-Fi change must not hand VRChat a stale address.
-        ownIp = localIpv4() ?: ownIp
-        put("OSC_IP", ownIp)
+        localIpv4()?.let { if (it != ownIp) { ownIp = it; MdnsAnnouncer.onIpChanged() } }
+        put("OSC_IP", ownIp.ifEmpty { "127.0.0.1" })
         put("OSC_PORT", udpPort)
         put("OSC_TRANSPORT", "UDP")
         put("EXTENSIONS", JSONObject().apply {
@@ -287,10 +296,12 @@ object OscBridge {
         }
     }
 
+    /** The Wi-Fi IPv4 (wlan*) first, then any other up, non-loopback, non-VPN interface. */
     private fun localIpv4(): String? = runCatching {
-        NetworkInterface.getNetworkInterfaces().toList()
-            .filter { it.isUp && !it.isLoopback }
-            .flatMap { it.inetAddresses.toList() }
-            .firstOrNull { it is Inet4Address && !it.isLoopbackAddress }?.hostAddress
+        val up = NetworkInterface.getNetworkInterfaces().toList().filter { it.isUp && !it.isLoopback }
+        fun v4(ni: NetworkInterface) = ni.inetAddresses.toList()
+            .firstOrNull { it is Inet4Address && !it.isLoopbackAddress && !it.isLinkLocalAddress }?.hostAddress
+        up.filter { it.name.startsWith("wlan") }.firstNotNullOfOrNull { v4(it) }
+            ?: up.filter { !it.name.startsWith("tun") && !it.name.startsWith("dummy") }.firstNotNullOfOrNull { v4(it) }
     }.getOrNull()
 }

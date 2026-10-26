@@ -253,6 +253,7 @@ object OscAnnouncer {
         if (st != null) {
             val age = (System.currentTimeMillis() - bridgeStatusMs) / 1000
             append("\nbridge pid ").append(st.optInt("pid")).append(" up ").append(st.optLong("upSec")).append(" s")
+                .append("  address changes: ").append(st.optInt("ipChanges"))
                 .append("  drag stops after a crash: ").append(st.optInt("dragStops"))
             if (age > 3) append("  (status ").append(age).append(" s old)")
             append("\nannouncing as ").append(st.optString("name"))
