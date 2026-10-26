@@ -639,10 +639,9 @@ object AvatarCatalogSweep {
 
     private suspend fun slotLoop(context: Context, adminKey: String, slot: Int, roles: List<Role>, liveIndex: Int, liveCount: Int) {
         val ownRole = roles.firstOrNull()
-        // A slot whose ONLY role is Fill does fills and nothing else (user's call, 2026-10-26): it never
-        // starts a long re-verify, so a new contribution is filled within seconds instead of waiting for
-        // whichever walking bot finishes its shard first. With fewer bots the roles share slots and the
-        // slot keeps walking.
+        // A slot whose ONLY role is Fill walks when there's nothing to fill but drops its shard mid-walk
+        // as soon as a fill is waiting (user's call, 2026-10-26), like the Reports bot with reports, so a
+        // new contribution is filled within seconds. With fewer bots the roles share slots.
         val fillDedicated = roles.size == 1 && roles[0] == Role.FILL
         while (running && scope.isActive) {
             // HARD PAUSE: do nothing (no VRChat call, no counter touch, no alive-stamp) while
@@ -715,7 +714,6 @@ object AvatarCatalogSweep {
                 // so the backlog is chewed through in minutes instead of one shard per 20s.
                 val target = if (crawling) CRAWL_TERM_GAP_MS
                     else if (did || blitzActive() || (AvatarGlobalDb.shardWalkLive() && workRemaining())) ACTIVE_PAUSE_MS
-                    else if (fillDedicated && AvatarGlobalDb.shardWalkLive()) FILL_IDLE_MS
                     else IDLE_SLEEP_MS
                 var slept = 0L
                 while (slept < target && running && scope.isActive &&
@@ -843,7 +841,7 @@ object AvatarCatalogSweep {
     @Volatile private var worklistFetchedMs = 0L
     @Volatile private var worklistEmpty = false        // read OK but no work → idle (don't blind-walk)
     private const val WORKLIST_TTL_MS = 20_000L   // was 60 s; the Fill bot polls the list (cached CDN read)
-    // The dedicated Fill bot's wait between fill-list checks when nothing is waiting.
+    // How often the Fill-role bot, mid-walk, checks for a waiting fill (one cached CDN read per refresh).
     private const val FILL_IDLE_MS = 8_000L
     // A fill shard isn't re-walked within this window: its fills reach the Worker on the next flush
     // (~2 min) and only then leave the worklist, so a re-walk sooner would repeat the same checks.
@@ -1071,10 +1069,6 @@ object AvatarCatalogSweep {
         // only when no fill shard is waiting does the bot take the oldest-swept shard.
         val fillPrefix = nextFillPrefix(context)
         val fillOnly = fillPrefix != null
-        if (fillDedicated && fillPrefix == null) {
-            p.status = "fills: none waiting"; p.curShard = ""; p.curShardTotal = 0; p.curShardDone = 0
-            return false
-        }
         val prefix = fillPrefix ?: nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
         // Failed read → leave the claim to EXPIRE (a ~30s backoff) so the shard stays oldest and is
@@ -1111,6 +1105,8 @@ object AvatarCatalogSweep {
         val removes = mutableListOf<String>()
         val okChecked = mutableListOf<String>()
         var yieldedToReports = false
+        var yieldedToFills = false
+        var lastFillCheck = System.currentTimeMillis()
         try {
             var nulls = 0
             var rateLimited = false
@@ -1120,6 +1116,14 @@ object AvatarCatalogSweep {
                 // reports are pending (the 30s /health poll), handles them next cycle, and puts this
                 // shard back at the front (its sweep stamp is restored below).
                 if (role == Role.REPORTS && !fillOnly && lastPendingReports > 0) { yieldedToReports = true; break }
+                // The Fill-role bot walks when there's nothing to fill, but drops the shard the moment a
+                // fill is waiting, like the Reports bot does for reports (user's call). Other bots finish
+                // their shard first.
+                if (fillDedicated && !fillOnly && System.currentTimeMillis() - lastFillCheck >= FILL_IDLE_MS) {
+                    lastFillCheck = System.currentTimeMillis()
+                    refreshWorklist(context)
+                    if (hasDueFill()) { yieldedToFills = true; break }
+                }
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++; p.curShardDone++
                 if (chk == null) {
@@ -1172,11 +1176,11 @@ object AvatarCatalogSweep {
             }
             if (upserts.isNotEmpty() || removes.isNotEmpty() || okChecked.isNotEmpty())
                 pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
-            if (yieldedToReports) {
+            if (yieldedToReports || yieldedToFills) {
                 // Not fully re-verified → back to its old place at the front of the oldest-first walk.
                 // (The avatars already checked are skipped on the re-walk by the recent-process guard.)
                 if (prevSwept != null) sweptAt[prefix] = prevSwept else sweptAt.remove(prefix)
-                p.status = "walk $prefix: paused for reports"
+                p.status = "walk $prefix: paused for ${if (yieldedToReports) "reports" else "fills"}"
                 return true
             }
             p.status = "walk $prefix: filled=${p.filled} checked=${p.checked} removed=${p.removed}"
