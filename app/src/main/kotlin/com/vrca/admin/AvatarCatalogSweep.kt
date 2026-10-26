@@ -924,10 +924,27 @@ object AvatarCatalogSweep {
     }
     private fun stampSwept(context: Context, prefix: String) {
         sweptAt[prefix] = System.currentTimeMillis()
-        if (sweptPersistCounter.incrementAndGet() % 16 == 0) runCatching {
+        if (sweptPersistCounter.incrementAndGet() % 16 == 0) persistSwept(context)
+    }
+    private fun persistSwept(context: Context) {
+        runCatching {
             val j = org.json.JSONObject(); for ((k, v) in sweptAt) j.put(k, v)
             context.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
                 .edit().putString("shard_swept", j.toString()).apply()
+        }
+    }
+    // Shards a bot dropped mid-walk (for reports / fills). Any bot takes one right after fills,
+    // before the oldest-first walk, so the rest of the shard is carried on straight away. The
+    // already-checked avatars are skipped by the shared recent-process guard.
+    private val droppedShards = java.util.concurrent.ConcurrentLinkedDeque<String>()
+    private fun takeDroppedShard(): String? {
+        val now = System.currentTimeMillis()
+        while (true) {
+            val p = droppedShards.pollFirst() ?: return null
+            val claim = shardClaims[p]
+            if (claim != null && now - claim < SHARD_CLAIM_TTL_MS) continue   // someone already on it
+            shardClaims[p] = now
+            return p
         }
     }
     /** Oldest-swept shard prefix (unswept counts as oldest). `dueOnly` skips shards swept within
@@ -1065,11 +1082,11 @@ object AvatarCatalogSweep {
         // FILLS FIRST: a shard on the Worker's fill worklist (`_worklist.json`, kept exact by the
         // flush) is walked for its UNFILLED avatars only, so a new contribution is filled as the next
         // job instead of waiting for the oldest-first lap (~a day) to reach its shard. A re-verify in
-        // progress is FINISHED first (the user's call: no dropped shards for fills, they queue after);
-        // only when no fill shard is waiting does the bot take the oldest-swept shard.
+        // progress is FINISHED first (only the Reports / Fill-role bots drop one); a dropped shard is
+        // taken next, and only then the oldest-swept shard.
         val fillPrefix = nextFillPrefix(context)
         val fillOnly = fillPrefix != null
-        val prefix = fillPrefix ?: nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
+        val prefix = fillPrefix ?: takeDroppedShard() ?: nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
         // Failed read → leave the claim to EXPIRE (a ~30s backoff) so the shard stays oldest and is
         // RETRIED, and do NOT stamp sweptAt / advance the coverage bar (M1 — a flaky read must not hide
@@ -1177,9 +1194,13 @@ object AvatarCatalogSweep {
             if (upserts.isNotEmpty() || removes.isNotEmpty() || okChecked.isNotEmpty())
                 pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
             if (yieldedToReports || yieldedToFills) {
-                // Not fully re-verified → back to its old place at the front of the oldest-first walk.
+                // Not fully re-verified → the next free bot carries it on (droppedShards, taken right
+                // after fills); the old stamp is restored and SAVED now, so a restart before then still
+                // finds it at the front of the oldest-first walk instead of a lap away.
                 // (The avatars already checked are skipped on the re-walk by the recent-process guard.)
                 if (prevSwept != null) sweptAt[prefix] = prevSwept else sweptAt.remove(prefix)
+                persistSwept(context)
+                droppedShards.remove(prefix); droppedShards.addFirst(prefix)
                 p.status = "walk $prefix: paused for ${if (yieldedToReports) "reports" else "fills"}"
                 return true
             }
