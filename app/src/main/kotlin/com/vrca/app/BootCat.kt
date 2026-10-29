@@ -56,7 +56,7 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
     var from by remember { mutableStateOf(startFrom) }
     var shown by remember { mutableStateOf(mark) }
     var looping by remember { mutableStateOf(mark == Mark.Working || mark == Mark.Background) }
-    // Skipped and Done idle (BootCatSkip, BootCatDone) once their landing has finished.
+    // Skipped, Done and Warn idle (BootCatSkip, BootCatDone, BootCatWarn) once their landing has finished.
     var idle by remember { mutableStateOf(idles(mark) && startFrom == null) }
     val t = remember { Animatable(if (startFrom != null) 0f else Float.MAX_VALUE) }
     LaunchedEffect(Unit) {
@@ -106,6 +106,9 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
             if (idle && shown == Mark.Done) {
                 // Done, content: a purr wiggle, a content tilt, a small hop (BootCatDone).
                 DoneLoop(v, { markColor(Mark.Done, accent) }, hopLayer)
+            } else if (idle && shown == Mark.Warn) {
+                // Warn, uneasy: a nervous glance, a fidget, an uneasy sigh (BootCatWarn).
+                WarnLoop(v, { markColor(Mark.Warn, accent) }, Modifier.fillMaxSize())
             } else {
                 val head = remember { headPath() }
                 Canvas(hopLayer) { drawCat(head, from, shown, t.value, accent) }
@@ -328,7 +331,7 @@ private const val HOP_MS = 540f
 private fun headPath(): Path = PathParser().parsePathString(HEAD).toPath()
 
 /** Marks that idle with their own loop once their landing has finished. */
-private fun idles(m: Mark) = m == Mark.Skipped || m == Mark.Done
+private fun idles(m: Mark) = m == Mark.Skipped || m == Mark.Done || m == Mark.Warn
 
 /** The skipped landing's face paths (drawing is single-threaded, so one reused set is enough). */
 private val skipPaths = BootCatSkip.Paths()
