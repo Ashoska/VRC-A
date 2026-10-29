@@ -37,8 +37,8 @@ import kotlin.math.sin
 
 /**
  * Lab mock (throwaway, for the user's pick): three idle beats for the DONE Boot Cat on its happy face (closed happy
- * arcs, the "ω" mouth, green with the soft fill), each 3 s and starting/ending on that face. C comes in two options
- * (a small hop, an ear perk). Its blink is a happy squeeze (the arcs pull up tighter). `show donemock`.
+ * arcs, the "ω" mouth, green with the soft fill), each 3 s and starting/ending on that face.
+ * v2 (user): the eyes keep their exact shape (no squeeze or pulsing); B is a content tilt; C a small hop. `show donemock`.
  */
 object DoneMocks {
     private const val Y = 13.6f
@@ -47,8 +47,6 @@ object DoneMocks {
     private fun sm(x: Float): Float { val c = x.coerceIn(0f, 1f); return c * c * (3 - 2 * c) }
     private fun seg(p: Float, a: Float, b: Float) = ((p - a) / (b - a)).coerceIn(0f, 1f)
     private fun bump(p: Float, a: Float, b: Float) = if (p <= a || p >= b) 0f else sin(PI.toFloat() * seg(p, a, b)).let { it * it }
-    /** The happy squeeze at [a] (lasts 0.10): 0 relaxed .. 1 squeezed. */
-    private fun squeeze(p: Float, a: Float) = bump(p, a, a + 0.10f)
 
     private val head = Path(); private val eye = Path(); private val mouth = Path()
 
@@ -93,43 +91,32 @@ object DoneMocks {
         f()
     }
 
-    /** A: purr wiggle. A little side-to-side shimmy, eyes squeezing happily tighter, the "ω" widening. */
+    /** A: purr wiggle. A little side-to-side shimmy, the "ω" widening and deepening; the eyes keep their shape. */
     private fun DrawScope.purr(c: Color, p: Float) {
-        val env = bump(p, 0.10f, 0.70f).let { kotlin.math.sqrt(it) }
+        val env = kotlin.math.sqrt(bump(p, 0.10f, 0.70f))
         val wig = env * sin(2 * PI.toFloat() * seg(p, 0.10f, 0.70f) * 3)
-        val sq = squeeze(p, 0.80f)
         rotate(4.5f * wig, Offset(12f, 21.5f)) {
-            cat(c) { face(c, sq = sq + 0.6f * env, mw = 1f + 0.3f * env, md = 1f + 0.35f * env) }
+            cat(c) { face(c, mw = 1f + 0.3f * env, md = 1f + 0.35f * env) }
         }
     }
 
-    /** B: proud look. The chin lifts, one eye opens in a wink, closes, and he settles back. */
-    private fun DrawScope.proud(c: Color, p: Float) {
-        val lift = sm(seg(p, 0.08f, 0.24f)) * (1 - sm(seg(p, 0.66f, 0.82f)))
-        val wink = bump(p, 0.30f, 0.58f).let { if (it > 0f) sm(it * 1.6f) else 0f }
-        val sq = squeeze(p, 0.86f)
-        withTransform({ translate(0f, -0.7f * lift); scale(1f, 1f - 0.03f * lift, Offset(12f, 21.5f)) }) {
-            cat(c) { face(c, sq = sq, open = wink, dy = -0.3f * lift, mw = 1f + 0.1f * lift) }
+    /** B: content tilt. Slowly tilts to one side as the "ω" grows into a bigger grin, holds, slowly comes back. */
+    private fun DrawScope.tilt(c: Color, p: Float) {
+        val k = sm(seg(p, 0.10f, 0.34f)) * (1 - sm(seg(p, 0.62f, 0.86f)))
+        rotate(-9f * k, Offset(12f, 21.5f)) {
+            cat(c) { face(c, mw = 1f + 0.25f * k, md = 1f + 0.5f * k) }
         }
     }
 
-    /** C1: a small happy hop with a squash on landing (a smaller cousin of the all-done celebration). */
+    /** C: a small happy hop with a squash on landing; kept low so a row-size cat stays in its row. */
     private fun DrawScope.hop(c: Color, p: Float) {
-        val air = bump(p, 0.18f, 0.44f).let { kotlin.math.sqrt(it) }
+        val air = kotlin.math.sqrt(bump(p, 0.18f, 0.42f))
         val crouch = bump(p, 0.10f, 0.20f)
-        val land = bump(p, 0.43f, 0.58f)
-        val sx = 1f + 0.06f * crouch + 0.08f * land; val sy = 1f - 0.07f * crouch - 0.09f * land + 0.03f * air
-        val sq = squeeze(p, 0.66f)
-        withTransform({ translate(0f, -2.2f * air); scale(sx, sy, Offset(12f, 21.5f)) }) {
-            cat(c) { face(c, sq = sq + 0.4f * air, md = 1f + 0.3f * air) }
+        val land = bump(p, 0.41f, 0.56f)
+        val sx = 1f + 0.05f * crouch + 0.07f * land; val sy = 1f - 0.06f * crouch - 0.08f * land + 0.02f * air
+        withTransform({ translate(0f, -1.2f * air); scale(sx, sy, Offset(12f, 21.5f)) }) {
+            cat(c) { face(c, md = 1f + 0.3f * air) }
         }
-    }
-
-    /** C2: ear perk. Both ears flick up happily twice, the eyes squeezing with them. */
-    private fun DrawScope.perk(c: Color, p: Float) {
-        val e = bump(p, 0.14f, 0.28f) + 0.8f * bump(p, 0.32f, 0.46f)
-        val sq = squeeze(p, 0.70f)
-        cat(c, ex = 0.5f * e, ey = -1.2f * e) { face(c, sq = sq + 0.5f * e, md = 1f + 0.2f * e) }
     }
 
     private val order = ArrayList<Char>()
@@ -153,9 +140,8 @@ object DoneMocks {
             withTransform({ scale(s, s, Offset.Zero) }) {
                 when (if (kind == 'S') shuffled((t / BEAT).toInt(), listOf('A', 'B', 'H')) else kind) {
                     'A' -> purr(c, p)
-                    'B' -> proud(c, p)
+                    'B' -> tilt(c, p)
                     'H' -> hop(c, p)
-                    'E' -> perk(c, p)
                     else -> cat(c) { face(c) }
                 }
             }
@@ -172,7 +158,7 @@ object DoneMocks {
         LaunchedEffect(Unit) { val t0 = withFrameMillis { it }; while (true) withFrameMillis { ms.longValue = it - t0 } }
         Box(Modifier.fillMaxSize().background(G.Backdrop), contentAlignment = Alignment.Center) {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
-                listOf("Done now" to 'N', "A  Purr wiggle" to 'A', "B  Proud wink" to 'B', "C1  Small hop" to 'H', "C2  Ear perk" to 'E', "Shuffled (A B C1)" to 'S').forEach { (label, k) ->
+                listOf("Done now" to 'N', "A  Purr wiggle" to 'A', "B  Content tilt" to 'B', "C  Small hop" to 'H', "Shuffled" to 'S').forEach { (label, k) ->
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(label, color = G.Text, style = MaterialTheme.typography.labelLarge)
                         Spacer(Modifier.height(10.dp))
