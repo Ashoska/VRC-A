@@ -57,53 +57,74 @@ object WaitMocks {
     private val HEAD = head()
 
     /**
-     * The sleepy face: eye lines (scrunched by [sq]: shorter, a touch thicker, nudged together), lowered by [eyeDy];
-     * the mouth line [mw] wide, raised by [mouthDy].
+     * The sleepy face. Eyes: closed lines, scrunched by [sq] (shorter, thicker, nudged together), lowered by [eyeDy],
+     * shifted by [eyeDx], curved by [eyeCurve] (+ sinks into a soft "︶", - lifts into a happy "^"). Mouth: [mw] wide at
+     * [mouthDx], opened by [open] (the line parts into a little oval), curved into a smile by [smile]. All zero (mw 2) =
+     * the plain sleepy face every beat starts and ends on.
      */
-    private fun DrawScope.face(c: Color, sq: Float = 0f, eyeDy: Float = 0f, mw: Float = 2f, mouthDy: Float = 0f) {
+    private fun DrawScope.face(
+        c: Color, sq: Float = 0f, eyeDy: Float = 0f, eyeDx: Float = 0f, eyeCurve: Float = 0f,
+        mw: Float = 2f, mouthDx: Float = 0f, open: Float = 0f, smile: Float = 0f,
+    ) {
         val half = 1.2f * (1f - 0.45f * sq); val w = 1.9f + 0.6f * sq; val y = Y + eyeDy
+        val st = Stroke(w, cap = StrokeCap.Round, join = StrokeJoin.Round)
         for ((cx, inward) in listOf(9.3f to 1f, 14.7f to -1f)) {
-            val x = cx + 0.35f * sq * inward
-            drawLine(c, Offset(x - half, y), Offset(x + half, y), w, StrokeCap.Round)
+            val x = cx + eyeDx + 0.35f * sq * inward
+            drawPath(androidx.compose.ui.graphics.Path().apply { moveTo(x - half, y); quadraticTo(x, y + 2f * eyeCurve, x + half, y) }, c, style = st)
         }
-        drawLine(c, Offset(12f - mw / 2f, Y + 3.6f + mouthDy), Offset(12f + mw / 2f, Y + 3.6f + mouthDy), 1.8f, StrokeCap.Round)
+        val my = Y + 3.6f; val mx = 12f + mouthDx; val h = 1.6f * open
+        drawPath(androidx.compose.ui.graphics.Path().apply {
+            moveTo(mx - mw / 2f, my)
+            quadraticTo(mx, my - h + 2f * smile, mx + mw / 2f, my)
+            quadraticTo(mx, my + h + 2f * smile, mx - mw / 2f, my)
+        }, c, style = Stroke(1.8f, cap = StrokeCap.Round, join = StrokeJoin.Round))
     }
 
     private fun DrawScope.outline(c: Color, path: androidx.compose.ui.graphics.Path = HEAD) =
         drawPath(path, c, style = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round))
 
-    /** A: breathing. A slow breath in (the head swells a little from the chin, the eyes ease up) and out. */
+    /** A: breathing. Breath in: the head swells from the chin and the eyes sink into soft curves. Out: a little "o" puff. */
     private fun DrawScope.breathe(c: Color, p: Float) {
+        val inhale = bump(p, 0.04f, 0.56f)
+        val puff = bump(p, 0.50f, 0.92f)
         val b = sin(PI.toFloat() * seg(p, 0.05f, 0.90f)).let { it * it }
-        val sq = squeeze(p, 0.72f)
+        val sq = squeeze(p, 0.30f)
         withTransform({ scale(1f + 0.035f * b, 1f + 0.08f * b, Offset(12f, 21.5f)) }) {
             outline(c)
-            face(c, sq, eyeDy = -0.35f * b, mw = 2f + 0.5f * b)
+            face(c, sq, eyeDy = -0.3f * inhale, eyeCurve = 0.45f * inhale, mw = 2f - 0.6f * puff, open = 0.55f * puff)
         }
     }
 
-    /** B: nodding off. The head slowly droops to one side, catches itself with a little jolt, settles back. */
+    /**
+     * B: nodding off. The head droops to one side as the eyes grow heavy and the mouth falls open and slides; a jolt
+     * catches it (mouth snaps shut, eyes scrunch hard), a little past upright, then it settles.
+     */
     private fun DrawScope.nod(c: Color, p: Float) {
         val droop = sm(seg(p, 0.08f, 0.55f))
         val back = sm(seg(p, 0.55f, 0.62f))          // the catch: quick
         val over = bump(p, 0.58f, 0.80f)              // a little past upright, then settling
-        val rot = 8f * droop * (1 - back) - 2.5f * over
-        val dy = 0.7f * droop * (1 - back)
-        val sq = squeeze(p, 0.56f)                    // scrunches as he catches himself
-        withTransform({ translate(0f, dy); rotate(rot, Offset(12f, 21.5f)) }) {
+        val heavy = droop * (1 - back)
+        val rot = 8f * heavy - 2.5f * over
+        val sq = 1.3f * squeeze(p, 0.555f)
+        withTransform({ translate(0f, 0.7f * heavy); rotate(rot, Offset(12f, 21.5f)) }) {
             outline(c)
-            face(c, sq)
+            face(c, sq, eyeDy = 0.25f * heavy, eyeCurve = 0.5f * heavy, mw = 2f - 0.5f * heavy - 0.5f * over, mouthDx = 0.5f * heavy, open = 0.5f * heavy)
         }
     }
 
-    /** C: dreaming. The left ear twitches twice, then the mouth mumbles (narrows and wobbles), a squeeze between. */
+    /**
+     * C: dreaming. An ear twitch; the eyes flick side to side under the lids; a happy dream (smile, eyes lift into
+     * "^ ^"); then a sleepy chewing mumble.
+     */
     private fun DrawScope.dream(c: Color, p: Float) {
-        val tw = bump(p, 0.12f, 0.20f) + 0.7f * bump(p, 0.23f, 0.31f)
-        val mum = if (p in 0.48f..0.80f) sin(2 * PI.toFloat() * seg(p, 0.48f, 0.80f) * 3) else 0f
-        val env = bump(p, 0.46f, 0.82f).let { kotlin.math.sqrt(it) }
-        val sq = squeeze(p, 0.34f)
+        val tw = bump(p, 0.04f, 0.11f) + 0.7f * bump(p, 0.12f, 0.19f)
+        val rem = bump(p, 0.20f, 0.38f).let { kotlin.math.sqrt(it) } * sin(2 * PI.toFloat() * seg(p, 0.20f, 0.38f) * 4)
+        val happy = bump(p, 0.40f, 0.64f).let { kotlin.math.sqrt(it) }
+        val chewEnv = bump(p, 0.66f, 0.92f).let { kotlin.math.sqrt(it) }
+        val chew = chewEnv * (0.5f + 0.5f * sin(2 * PI.toFloat() * seg(p, 0.66f, 0.92f) * 3 - PI.toFloat() / 2))
+        val sq = squeeze(p, 0.385f)
         outline(c, head(-1.1f * tw, 1.5f * tw))
-        face(c, sq, mw = 2f - 0.8f * env + 0.5f * env * mum, mouthDy = -0.4f * env * kotlin.math.abs(mum))
+        face(c, sq, eyeDx = 0.55f * rem, eyeCurve = -0.4f * happy, mw = 2f + 0.4f * happy - 0.5f * chewEnv, open = 0.45f * chew, smile = 0.45f * happy)
     }
 
     private val order = ArrayList<Char>()
