@@ -11,6 +11,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -60,10 +62,20 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
         if (startFrom != null) { val dur = transitionMs(startFrom, mark); t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing)) }
     }
     var looping by remember { mutableStateOf(mark == Mark.Working || mark == Mark.Background) }
+    // When the loop showing now started, and how far it had got when a landing took over (the landing
+    // carries on from that pose: the AVD and LabLoop both start at 0 when they appear).
+    var loopStart by remember { mutableLongStateOf(Long.MIN_VALUE) }
+    var leftLoopAt by remember { mutableFloatStateOf(-1f) }
+    LaunchedEffect(looping, shown == Mark.Background) { if (looping) loopStart = androidx.compose.runtime.withFrameMillis { it } }
     LaunchedEffect(mark) {
         if (mark == shown) return@LaunchedEffect
+        val dur = transitionMs(shown, mark)
+        val now = androidx.compose.runtime.withFrameMillis { it }
+        leftLoopAt = if (looping && loopStart != Long.MIN_VALUE) (now - loopStart).toFloat() else -1f
         from = shown; shown = mark
-        val dur = transitionMs(from, mark)
+        // No transition (thinking <-> calm, back to waiting): straight to the new look. Dropping out of the
+        // loop for this one frame used to draw the landing's first frame (a small filled cat) in between.
+        if (dur == 0f) { looping = mark == Mark.Working || mark == Mark.Background; t.snapTo(Float.MAX_VALUE); return@LaunchedEffect }
         looping = false
         t.snapTo(0f)
         t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing))
@@ -92,7 +104,7 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
                     else if (u < 1.35f) { scaleX = 1f - 0.08f * sin(PI.toFloat() * (u - 1f) / 0.35f); scaleY = scaleX }
                 }
             }) {
-                drawCat(head, from, shown, t.value, accent, dx0)
+                drawCat(head, from, shown, t.value, accent, dx0, v, leftLoopAt)
             }
         }
     }
@@ -128,37 +140,50 @@ private fun LabLoop(calm: Boolean, v: Int, accent: Color, modifier: Modifier) {
     val ms = remember { mutableStateOf(0L) }
     LaunchedEffect(Unit) { val start = androidx.compose.runtime.withFrameMillis { it }; while (true) androidx.compose.runtime.withFrameMillis { ms.value = it - start } }
     Canvas(modifier) {
-        val t = ms.value.toFloat()
         val s = size.minDimension / 24f
-        withTransform({ scale(s, s, Offset.Zero) }) {
-            val stroke = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-            if (calm) {
-                drawPath(head, accent.copy(alpha = 0.18f), style = stroke)
-                drawLight(head, accent.copy(alpha = 0.5f), (t / 2400f) % 1f, 0.28f)
-                val dx = 0.5f * sin(2 * PI.toFloat() * (t / 3200f))
-                val c = accent.copy(alpha = 0.7f)
-                for (x in floatArrayOf(9.3f + dx, 14.7f + dx)) {
-                    drawCircle(c, 1.05f, Offset(x, Y0 + 0.35f))
-                    drawLine(c, Offset(x - 1.5f, Y0 - 0.3f), Offset(x + 1.5f, Y0 - 0.3f), 1.5f, StrokeCap.Round)
-                }
-            } else {
-                val ph = PHASES[v]; val ph2 = (2 * ph) % 1f
-                val cyc = (t / 2400f) % 1f
-                drawPath(head, accent.copy(alpha = 0.25f), style = stroke)
-                val grow = sm(t / 400f)
-                drawLight(head, accent.copy(alpha = grow), (2 * cyc + ph2) % 1f, 0.28f * grow)
-                val p = ((cyc + ph) % 1f) * 72f
-                val g = if (t in 8000f..9600f) { val u = (t - 8000f) / 1600f; if (u < 0.19f) u / 0.19f else if (u < 0.81f) 1f else (1f - u) / 0.19f } else 0f
-                val dx = 0.9f * sin(2 * PI.toFloat() * ((2 * cyc + ph2) % 1f)) - 1.5f * g
-                withTransform({ translate(0f, -0.5f * g) }) {
-                    if (p in 42f..60f) face(Face.Line, accent, dx)
-                    else {
-                        val sq = if (p in 36f..42f) 1f - 0.7f * sm((p - 36f) / 6f) else if (p in 60f..66f) 0.3f + 0.7f * sm((p - 60f) / 6f) else 1f
-                        squash(sq) { face(Face.Look, accent, dx) }
-                    }
-                }
+        withTransform({ scale(s, s, Offset.Zero) }) { drawLoopPose(head, loopPose(calm, v, ms.value.toFloat()), accent) }
+    }
+}
+
+/**
+ * Where the thinking ([calm] false) or calm loop is [t] ms after it started: the same tracks as
+ * boot_cat_avd.py. LabLoop draws it; a landing reads it to carry on from wherever the loop was.
+ */
+private class LoopPose(
+    val calm: Boolean, val outline: Float, val lightAt: Float, val lightLen: Float, val lightAlpha: Float,
+    val dx: Float, val dy: Float, val squash: Float, val line: Boolean,
+)
+
+private fun loopPose(calm: Boolean, v: Int, t: Float): LoopPose {
+    if (calm) return LoopPose(true, 0.18f, (t / 2400f) % 1f, 0.28f, 0.5f, 0.5f * sin(2 * PI.toFloat() * (t / 3200f)), 0f, 1f, false)
+    val ph = PHASES[v]; val ph2 = (2 * ph) % 1f
+    val cyc = (t / 2400f) % 1f
+    val grow = (t / 400f).coerceIn(0f, 1f) // linear, as the AVD's grow-in
+    val p = ((cyc + ph) % 1f) * 72f
+    val g = if (t in 8000f..9600f) { val u = (t - 8000f) / 1600f; if (u < 0.19f) u / 0.19f else if (u < 0.81f) 1f else (1f - u) / 0.19f } else 0f
+    val sq = if (p in 36f..42f) 1f - 0.7f * sm((p - 36f) / 6f) else if (p in 60f..66f) 0.3f + 0.7f * sm((p - 60f) / 6f) else 1f
+    return LoopPose(
+        false, 0.25f, (2 * cyc + ph2) % 1f, 0.28f * grow, grow,
+        0.9f * sin(2 * PI.toFloat() * ((2 * cyc + ph2) % 1f)) - 1.5f * g, -0.5f * g, sq, p in 42f..60f,
+    )
+}
+
+/** Draws [p] (outline, running light, eyes); [lids] further closes the eyes (1 = as the loop has them). */
+private fun DrawScope.drawLoopPose(head: Path, p: LoopPose, c: Color, outline: Float = p.outline, lightLen: Float = p.lightLen,
+                                   lightAlpha: Float = p.lightAlpha, lids: Float = 1f, dxMul: Float = 1f) {
+    drawPath(head, c.copy(alpha = c.alpha * outline), style = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    drawLight(head, c.copy(alpha = c.alpha * lightAlpha), p.lightAt, lightLen)
+    val dx = p.dx * dxMul
+    if (p.calm) {
+        val e = c.copy(alpha = c.alpha * 0.7f)
+        squash(lids) {
+            for (x in floatArrayOf(9.3f + dx, 14.7f + dx)) {
+                drawCircle(e, 1.05f, Offset(x, Y0 + 0.35f))
+                drawLine(e, Offset(x - 1.5f, Y0 - 0.3f), Offset(x + 1.5f, Y0 - 0.3f), 1.5f, StrokeCap.Round)
             }
         }
+    } else withTransform({ translate(0f, p.dy * dxMul) }) {
+        if (p.line) squash(lids) { face(Face.Line, c, dx) } else squash(p.squash * lids) { face(Face.Look, c, dx) }
     }
 }
 
@@ -319,6 +344,8 @@ private const val HEAD = "M3.92,10.46 L4.3,3 L8.2,7.1 Q12,5.1 15.8,7.1 L19.9,2.6
 private const val Y0 = 13.6f
 private const val FRAME = 1000f / 30f
 private const val HOP_MS = 540f
+/** Frames a landing spends leaving the loop (finishing the light, closing the eyes) before the pop. */
+private const val LEAVE = 6f
 
 private fun headPath(): Path = PathParser().parsePathString(HEAD).toPath()
 
@@ -326,7 +353,7 @@ private fun transitionMs(from: Mark?, to: Mark): Float = when {
     to == Mark.Working && from == Mark.Failed -> 38 * FRAME
     to == Mark.Working || to == Mark.Background -> if (from == Mark.Waiting) 14 * FRAME else 0f
     to == Mark.Waiting -> 0f
-    else -> 30 * FRAME
+    else -> (LEAVE + 30) * FRAME
 }
 
 private fun sm(x: Float): Float { val c = x.coerceIn(0f, 1f); return c * c * (3 - 2 * c) }
@@ -354,25 +381,34 @@ private fun resultFace(m: Mark): Face = when (m) {
 }
 
 /** Draws the cat for [to] at [ms] into the transition from [from] (all in the 24-unit grid). */
-private fun DrawScope.drawCat(head: Path, from: Mark?, to: Mark, ms: Float, accent: Color, dx0: Float) {
+private fun DrawScope.drawCat(head: Path, from: Mark?, to: Mark, ms: Float, accent: Color, dx0: Float, v: Int, leftLoopAt: Float) {
     val f = ms / FRAME
+    // The loop this landing leaves, carried on from where it was (null: it didn't come from a loop).
+    val pose = if (leftLoopAt >= 0f && (from == Mark.Working || from == Mark.Background)) loopPose(from == Mark.Background, v, leftLoopAt + ms) else null
     val s = size.minDimension / 24f
     withTransform({ scale(s, s, Offset.Zero) }) {
         when {
             // Asleep, waiting for its turn.
             to == Mark.Waiting -> cat(head, markColor(Mark.Waiting, accent), outline = 1f) { face(Face.Sleep, it) }
-            // Waking up: lids lift, colour warms to the accent, a tiny lift. The light comes after (the loop grows it in).
+            // Waking up: the sleepy eye lines shrink into round open eyes (no jump between the two), the mouth
+            // fades, the colour warms to the accent with a tiny lift and the outline dims to the loop's.
             to == Mark.Working && from != Mark.Failed -> {
                 val u = sm(f / 14f)
                 val c = lerp(markColor(Mark.Waiting, accent), accent, u)
                 withTransform({ translate(0f, -0.5f * sin(PI.toFloat() * u)) }) {
                     cat(head, c, outline = 1f - 0.75f * u) {
-                        if (u < 0.5f) face(Face.Line, it, dx0 * u)
-                        else squash(0.25f + 0.75f * sm((u - 0.5f) / 0.5f)) { face(Face.Look, it, dx0) }
+                        val e = sm((f - 2f) / 10f)
+                        for (x in floatArrayOf(9.3f, 14.7f)) {
+                            val cx = x + dx0 * e
+                            drawLine(it, Offset(cx - 1.2f * (1 - e), Y0), Offset(cx + 1.2f * (1 - e), Y0), 1.9f + 0.7f * e, StrokeCap.Round)
+                        }
+                        val m = 1f - sm(f / 6f)
+                        if (m > 0f) drawLine(it.copy(alpha = it.alpha * m), Offset(11f + 0.6f * (1 - m), Y0 + 3.6f), Offset(13f - 0.6f * (1 - m), Y0 + 3.6f), 1.8f, StrokeCap.Round)
                     }
                 }
             }
-            // Retry: shake off the x x eyes, a determined squint, then thinking again.
+            // Retry: shake off the x x eyes, a determined squint at full brightness, then it closes its eyes
+            // and opens them thinking (the outline dims to the loop's as they open).
             to == Mark.Working -> {
                 val neg = markColor(Mark.Failed, accent)
                 when {
@@ -380,51 +416,74 @@ private fun DrawScope.drawCat(head: Path, from: Mark?, to: Mark, ms: Float, acce
                         val u = f / 10f
                         val c = lerp(neg, accent, sm(u))
                         withTransform({ translate(1.2f * sin(u * PI.toFloat() * 3) * (1 - u), 0f) }) {
-                            cat(head, c, outline = 1f - 0.75f * sm(u), fill = 0.16f * (1 - u)) { squash(1f - 0.8f * sm(u)) { face(Face.Dead, it) } }
+                            cat(head, c, outline = 1f, fill = 0.16f * (1 - u)) { squash(1f - 0.8f * sm(u)) { face(Face.Dead, it) } }
                         }
                     }
-                    f < 32 -> cat(head, accent, outline = 0.25f) { squash(min(1f, 0.2f + sm((f - 10f) / 5f))) { face(Face.Determined, it) } }
-                    else -> cat(head, accent, outline = 0.25f) { squash(0.3f + 0.7f * sm((f - 32f) / 6f)) { face(Face.Look, it, dx0) } }
+                    f < 32 -> cat(head, accent, outline = 1f) { squash(min(1f, 0.2f + sm((f - 10f) / 5f))) { face(Face.Determined, it) } }
+                    f < 35 -> cat(head, accent, outline = 1f - 0.4f * sm((f - 32f) / 6f)) { squash(1f - 0.85f * sm((f - 32f) / 3f)) { face(Face.Determined, it) } }
+                    else -> cat(head, accent, outline = 1f - 0.75f * sm((f - 32f) / 6f)) { squash(0.15f + 0.85f * sm((f - 35f) / 3f)) { face(Face.Look, it, dx0) } }
                 }
             }
-            // Dozing off (skipped): no pop, the eyes blink shut into sleepy lines with a slow nod.
+            // Dozing off (skipped): no pop. From the loop: the light fades as the eyes close and the colour
+            // greys; then a slow nod as the sleepy face settles. From waiting (already asleep) the eyes
+            // never open: it only nods and settles.
             to == Mark.Skipped -> {
-                val c = lerp(markColor(from, accent), markColor(Mark.Skipped, accent), sm(f / 6f))
-                val u = min(1f, f / 26f)
+                val grey = markColor(Mark.Skipped, accent)
+                if (pose != null && f < LEAVE) {
+                    val k = sm(f / LEAVE)
+                    drawLoopPose(head, pose, lerp(accent, grey, k), outline = pose.outline + (1f - pose.outline) * k,
+                        lightAlpha = pose.lightAlpha * (1f - k), lids = 1f - 0.85f * k, dxMul = 1f - k)
+                    return@withTransform
+                }
+                val g = if (pose != null) f - LEAVE else f
+                val c = if (pose != null) grey else lerp(markColor(from, accent), grey, sm(g / 8f))
+                val u = min(1f, g / 26f)
                 withTransform({
                     translate(0f, 0.9f * sin(PI.toFloat() * u))
                     rotate(-5f * sin(PI.toFloat() * u), Offset(12f, 13f))
                 }) {
-                    cat(head, c, outline = 1f, fill = 0.16f) { squash(blink(f)) { face(if (f < 5) Face.Look else Face.Sleep, it) } }
+                    cat(head, c, outline = 1f, fill = 0.16f * sm(g / 8f)) {
+                        if (pose != null) squash(0.15f + 0.85f * sm(g / 6f)) { face(Face.Sleep, it) } else face(Face.Sleep, it)
+                    }
                 }
             }
-            // Landing on a result: blink into the new face, pop, a tint flash, and the face's own reaction.
+            // Landing on a result. First the loop finishes: its light runs on and grows right round the head
+            // while the outline brightens, the eyes close and the cat dips a little. Then the pop: the colour
+            // turns, a light tint flash, the eyes open into the new face, and the face's own reaction.
             else -> {
-                val c = lerp(markColor(from, accent), markColor(to, accent), sm(f / 6f))
-                var sc = if (f < 5) 0.7f + 0.48f * easeOut(f / 5f) else if (f < 10) 1.18f - 0.18f * easeOut((f - 5f) / 5f) else 1f
+                if (f < LEAVE) {
+                    val k = sm(f / LEAVE)
+                    withTransform({ scale(1f - 0.06f * k, 1f - 0.06f * k, Offset(12f, 13f)) }) {
+                        if (pose != null) drawLoopPose(head, pose, accent, outline = pose.outline + (1f - pose.outline) * k,
+                            lightLen = pose.lightLen + (1f - pose.lightLen) * k, lightAlpha = pose.lightAlpha + (1f - pose.lightAlpha) * k,
+                            lids = 1f - 0.85f * sm(f / (LEAVE - 1)), dxMul = 1f - k)
+                        else cat(head, markColor(from, accent), outline = 1f) { squash(1f - 0.85f * sm(f / (LEAVE - 1))) { face(Face.Look, it) } }
+                    }
+                    return@withTransform
+                }
+                val g = f - LEAVE
+                val c = lerp(markColor(from, accent), markColor(to, accent), sm(g / 6f))
+                var sc = if (g < 5) 0.94f + 0.18f * easeOut(g / 5f) else if (g < 10) 1.12f - 0.12f * easeOut((g - 5f) / 5f) else 1f
                 var rot = 0f; var tx = 0f
                 when (to) {
-                    Mark.Done -> if (f in 10f..20f) sc = 1f + 0.07f * sin((f - 10f) / 10f * PI.toFloat() * 2) * (1 - (f - 10f) / 10f)
-                    Mark.Warn -> if (f in 6f..24f) rot = -14f * sin((f - 6f) / 18f * PI.toFloat())
-                    Mark.Maintenance -> if (f in 6f..26f) rot = 10f * sin((f - 6f) / 20f * PI.toFloat() * 3) * (1 - (f - 6f) / 20f)
-                    Mark.Failed -> if (f in 6f..22f) tx = 1.6f * sin((f - 6f) / 16f * PI.toFloat() * 4) * (1 - (f - 6f) / 16f)
+                    Mark.Done -> if (g in 10f..20f) sc = 1f + 0.07f * sin((g - 10f) / 10f * PI.toFloat() * 2) * (1 - (g - 10f) / 10f)
+                    Mark.Warn -> if (g in 4f..22f) rot = -14f * sin((g - 4f) / 18f * PI.toFloat())
+                    Mark.Maintenance -> if (g in 4f..24f) rot = 10f * sin((g - 4f) / 20f * PI.toFloat() * 3) * (1 - (g - 4f) / 20f)
+                    Mark.Failed -> if (g in 4f..20f) tx = 1.6f * sin((g - 4f) / 16f * PI.toFloat() * 4) * (1 - (g - 4f) / 16f)
                     else -> {}
                 }
-                val flash = if (f < 14) 0.55f * (1 - f / 14f) else 0f
+                val flash = if (g < 12) 0.3f * (1 - g / 12f) else 0f
                 withTransform({
                     translate(tx, 0f)
                     rotate(rot, Offset(12f, 13f))
                     scale(sc, sc, Offset(12f, 13f))
                 }) {
-                    cat(head, c, outline = 1f, fill = 0.16f + flash) { squash(blink(f)) { face(if (f < 5) Face.Look else resultFace(to), it) } }
+                    cat(head, c, outline = 1f, fill = 0.16f * sm(g / 4f) + flash) { squash(0.15f + 0.85f * sm(g / 6f)) { face(resultFace(to), it) } }
                 }
             }
         }
     }
 }
-
-/** Eyes shut over 5 frames, open into the new face over the next 6. */
-private fun blink(f: Float): Float = if (f < 5) 1f - 0.85f * sm(f / 5f) else if (f < 11) 0.15f + 0.85f * sm((f - 5f) / 6f) else 1f
 
 private inline fun DrawScope.cat(head: Path, c: Color, outline: Float, fill: Float = 0f, face: DrawScope.(Color) -> Unit) {
     if (fill > 0f) drawPath(head, c.copy(alpha = c.alpha * fill.coerceAtMost(1f)))
