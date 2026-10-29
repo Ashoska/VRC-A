@@ -242,7 +242,6 @@ internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color 
 @Composable
 internal fun BootCatCountdown(left: Float, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary) {
     val head = remember { headPath() }
-    val eyes = remember { FloatArray(10) }
     val start = remember {
         androidx.compose.ui.graphics.PathMeasure().apply { setPath(PathParser().parsePathString(HEAD_TO_TOP).toPath(), false) }.length
     }
@@ -267,9 +266,16 @@ internal fun BootCatCountdown(left: Float, modifier: Modifier, color: Color = Ma
                 if (b > total) m.getSegment(0f, b - total, seg, true)
                 drawPath(seg, color, style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
             }
-            // The thinking cat's eyes (BootCatEyes, loop variant 0): looking around, pondering, following the light.
-            BootCatEyes.pose(0, ms.value.toFloat(), eyes)
-            with(BootCatEyes) { drawEyes(eyes, color) }
+            // A sway while looking around, squinting into the line and back once every 2.4 s cycle (the countdown's
+            // own eyes; it gets its own polish pass later).
+            val cyc = (ms.value.toFloat() / 2400f) % 1f
+            val p = cyc * 72f
+            val dx = 0.9f * sin(2 * PI.toFloat() * ((2 * cyc) % 1f))
+            if (p in 42f..60f) face(Face.Line, color, dx)
+            else {
+                val sq = if (p in 36f..42f) 1f - 0.7f * sm((p - 36f) / 6f) else if (p in 60f..66f) 0.3f + 0.7f * sm((p - 60f) / 6f) else 1f
+                squash(sq) { face(Face.Look, color, dx) }
+            }
         }
     }
 }

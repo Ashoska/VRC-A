@@ -20,7 +20,7 @@ import kotlin.math.sin
  * different point in each beat, and some beats have none, so it never lands on a fixed rhythm.
  *
  * This is the one source of the eyes: the thinking AVDs (`boot_cat_think_*.xml`) are SAMPLED from it by the UI Lab
- * (`genavd`, see BootCatAvdGen), and the countdown cat and the lab's loop draw it directly.
+ * (`genavd`, see BootCatAvdGen), and the lab's loop draws it directly.
  */
 internal object BootCatEyes {
     const val BEAT_MS = 2400f
