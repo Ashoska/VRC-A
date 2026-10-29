@@ -81,6 +81,9 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
                 if (BootCatLab.drawLoops) LabLoop(calm, v, accent, Modifier.fillMaxSize())
                 else CatLoop(if (calm) CALM else THINK[v], accent, Modifier.fillMaxSize())
             }
+        } else if (shown == Mark.Waiting) {
+            // Asleep, waiting for its turn: breathing, nodding off, dreaming (BootCatSleep).
+            SleepLoop(v, { markColor(Mark.Waiting, accent) }, Modifier.fillMaxSize())
         } else {
             val head = remember { headPath() }
             Canvas(Modifier.fillMaxSize().graphicsLayer {
