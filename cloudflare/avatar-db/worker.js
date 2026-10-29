@@ -230,8 +230,11 @@ function tokenizeFields(...fields) {
 // True when an entry's name/author contain "fancy" Unicode that NFKC folds to different ASCII — i.e.
 // it was indexed (before this fold shipped) under decorative tokens and needs a one-time re-index so
 // its plain-ASCII tokens enter the search index. Cheap string compare, no allocation on the ASCII path.
+// v48: the bio too. It was name + author only, so an avatar whose only fancy text was its bio
+// (49k of 346k) never got its plain words indexed unless the bio itself changed: "Rainworldǃ"
+// was findable only as "rainworldǃ", never "rainworld" (measured: 35 of 150 sampled bios).
 function needsFold(e) {
-  const s = (e.name || "") + " " + (e.author || "");
+  const s = (e.name || "") + " " + (e.author || "") + " " + (e.desc || "");
   return foldFancy(s) !== s;
 }
 // FOLD STAMP (v40). The plain-text (folded) tokens of a fancy entry are written to the index ONCE per
@@ -843,7 +846,7 @@ export default {
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
           lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
-          version: 47,   // v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 48,   // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -987,7 +990,8 @@ const HEAL_AVTR_READS_PER_RUN = 300;
 // current fold stamp into the PRIORITY lane (iqp:), so they don't wait for a 20-day checked push.
 // v41: a FINGERPRINT of the fold rules, so ANY CONFUSABLES/SMALLCAPS change re-arms that lap by
 // itself on deploy (unchanged fancy avatars get the new fold within ~70 min, nothing to remember).
-const FOLD_STAMP_V = "r" + (hashCode(JSON.stringify(CONFUSABLES) + JSON.stringify(SMALLCAPS)) >>> 0).toString(36);
+// "+bio" (v48): needsFold now covers the bio, so the lap re-arms once to queue bio-only fancy avatars.
+const FOLD_STAMP_V = "r" + (hashCode(JSON.stringify(CONFUSABLES) + JSON.stringify(SMALLCAPS) + "+bio") >>> 0).toString(36);
 const RC_MAX_ATTEMPTS = 3;            // retry a tainted (read-failed) count pass this many times, then
                                       // give up and keep the incremental count (never adopt a bad one)
 // PERIODIC RE-ARM: the incremental `unfilled`/`entries` counts DRIFT over time (a fill that doesn't
@@ -1214,7 +1218,8 @@ async function reconcileIndex(env) {
       // this FOLD_VER (foldLapV set at its start, above). A partial/carried-over lap that happens to cross
       // 4096 must NOT mark the fold done — that was the v24 bug that left fancy entries un-folded.
       if (meta.foldLapV === FOLD_VER) meta.foldVer = FOLD_VER;   // fancy-entry fold re-index complete
-      meta.entries = meta.rcEntries || 0;
+      // v48: the avatar COUNT is no longer adopted here (the daily backup's exact count is; see flushR2).
+      // A lap counts over ~70 min while flushes keep adding, and one lap left a +~7,000 phantom.
       meta.unfilled = meta.rcUnfilled || 0;
       meta.stale = meta.rcStale || 0;   // adopt the TRUE liveness backlog (drains live via the flush)
       meta.rcAdoptSkipped = 0;
@@ -1566,6 +1571,8 @@ async function backupStep(env) {
     await upload.complete(parts);
     const bytes = (st.bytes || 0) + startBytes + add.length;
     const done = { doneAt: Date.now(), lastCount: count, lastBytes: bytes, lastMs: Date.now() - st.startedAt };
+    // v48: snapshot the flush totals so the flush can adopt this exact count (+ what moved since).
+    try { const m = JSON.parse((await KV.get("meta")) || "{}"); done.addedAt = m.totalAdded || 0; done.removedAt = m.totalRemoved || 0; } catch (_) {}
     await KV.put("backup", JSON.stringify(done));
     try { await KV.delete("backup:buf"); } catch (_) {}
     return { done: true, count, parts: parts.length, bytes };
@@ -2014,8 +2021,24 @@ async function flushR2(env) {
   // entryCount and unfilled move by the deltas computed above; searchReady is always true. Written
   // only when something moved; short TTL + purge so the fresh number is live in ~1s. If a full
   // rebuild is ever run as an optional backstop, its authoritative counts are adopted once.
-  const countMoved = added > 0 || removed > 0 || unfilledDelta !== 0 || staleDelta !== 0;
   let entries = Math.max(0, (prevMeta.entries || 0) + added - removed);
+  // v48: EXACT COUNT from the daily backup. The running count only moves by deltas, so any one-off
+  // miscount stays forever (seen: +~7,000 phantom avatars after a recount lap, flat for days). The
+  // backup reads every shard, so its count is the truth (give or take avatars added while it ran);
+  // each finished backup is adopted once, and the manifest is rewritten so /health's max() drops too.
+  let countFromBackup = prevMeta.countFromBackup || 0;
+  try {
+    const b = JSON.parse((await env.AVATAR_KV.get("backup")) || "null");
+    if (b && b.doneAt && b.doneAt !== countFromBackup && typeof b.lastCount === "number" && b.lastCount > 0 &&
+        typeof b.addedAt === "number" && typeof b.removedAt === "number") {
+      // + whatever the flushes added/removed since the backup finished (totals snapshotted at the end).
+      const since = ((prevMeta.totalAdded || 0) - b.addedAt) - ((prevMeta.totalRemoved || 0) - b.removedAt);
+      entries = Math.max(0, b.lastCount + since + added - removed);
+      countFromBackup = b.doneAt;
+    }
+  } catch (_) {}
+  const countAdopted = countFromBackup !== (prevMeta.countFromBackup || 0);
+  const countMoved = added > 0 || removed > 0 || unfilledDelta !== 0 || staleDelta !== 0 || countAdopted;
   let unfilled = typeof prevMeta.unfilled === "number" ? prevMeta.unfilled : 0;
   let staleTotal = typeof prevMeta.stale === "number" ? prevMeta.stale : 0;   // running Liveness backlog
   let adoptedRebuild = prevMeta.adoptedRebuild || null;
@@ -2026,7 +2049,7 @@ async function flushR2(env) {
     // write, so a skipped flush also saves the manifest Class B read.
     const sinceManifest = nowChecked - (prevMeta.lastManifestMs || 0);
     const entryDelta = Math.abs(entries - (typeof prevMeta.lastManifestEntries === "number" ? prevMeta.lastManifestEntries : 0));
-    const writeManifest = !prevMeta.lastManifestMs || sinceManifest >= MANIFEST_MIN_INTERVAL_MS || entryDelta >= MANIFEST_MIN_DELTA;
+    const writeManifest = countAdopted || !prevMeta.lastManifestMs || sinceManifest >= MANIFEST_MIN_INTERVAL_MS || entryDelta >= MANIFEST_MIN_DELTA;
     unfilled = Math.max(0, unfilled + unfilledDelta);
     staleTotal = Math.max(0, staleTotal + staleDelta);
     if (writeManifest) {
@@ -2090,6 +2113,7 @@ async function flushR2(env) {
     ...(manifestWritten ? { lastManifestMs: nowChecked, lastManifestEntries: entries } : {}),
     ...(hintChanged || seeded ? { fillHint } : {}),  // bot fill worklist (seeded once, then maintained)
     adoptedRebuild,
+    countFromBackup,
     lastCommit: allShardsOk
       ? `R2 +${added} -${removed} (${prefixes.length} shards)`
       : `R2 partial: ${failedShards.size} shard(s) failed, drained the rest (+${added} -${removed})`,
