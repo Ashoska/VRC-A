@@ -368,7 +368,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "cats", "catframes", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "catframes", "thinkmock", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -761,6 +761,8 @@ object UiLabScenes {
             // every frame). `show catframes download` (0 -> 100% over 3 s, then lands in Done),
             // `show catframes countdown` (5 s, as the boot Retry), `show catframes hop` (Done + the celebration).
             "catframes" -> CatFrames(rest.trim())
+            // `show thinkmock`: three eye animations for the thinking Boot Cat beside the current one (ThinkMocks).
+            "thinkmock" -> ThinkMocks.Sheet()
             // `show buttons`: the button sheet (GremlinButton): both looks, every kind and state.
             "buttons" -> ButtonSheet()
             // `show download`: the downloading Boot Cat, in buttons and where downloads happen; its
