@@ -55,13 +55,16 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
     // [startFrom]: appear already landing from that mark (the download cat hands over to Done this way).
     var from by remember { mutableStateOf(startFrom) }
     var shown by remember { mutableStateOf(mark) }
+    var looping by remember { mutableStateOf(mark == Mark.Working || mark == Mark.Background) }
+    // Skipped and Done idle (BootCatSkip, BootCatDone) once their landing has finished.
+    var idle by remember { mutableStateOf(idles(mark) && startFrom == null) }
     val t = remember { Animatable(if (startFrom != null) 0f else Float.MAX_VALUE) }
     LaunchedEffect(Unit) {
-        if (startFrom != null) { val dur = transitionMs(startFrom, mark); t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing)) }
+        if (startFrom != null) {
+            val dur = transitionMs(startFrom, mark); t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing))
+            if (shown == mark) idle = idles(mark)
+        }
     }
-    var looping by remember { mutableStateOf(mark == Mark.Working || mark == Mark.Background) }
-    // Skipped idles (BootCatSkip) once its landing has finished.
-    var idle by remember { mutableStateOf(mark == Mark.Skipped && startFrom == null) }
     LaunchedEffect(mark) {
         if (mark == shown) return@LaunchedEffect
         from = shown; shown = mark
@@ -70,7 +73,7 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
         t.snapTo(0f)
         t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing))
         looping = mark == Mark.Working || mark == Mark.Background
-        idle = mark == Mark.Skipped
+        idle = idles(mark)
     }
     val hop = remember { Animatable(-1f) }
     LaunchedEffect(celebrate) {
@@ -91,16 +94,21 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
             // Skipped, awake and unbothered: yawning, a lazy look, humming (BootCatSkip).
             SkipLoop(v, { markColor(Mark.Skipped, accent) }, Modifier.fillMaxSize())
         } else {
-            val head = remember { headPath() }
-            Canvas(Modifier.fillMaxSize().graphicsLayer {
+            // The all-done hop rides on top of whichever is showing (the landing or the done idle).
+            val hopLayer = Modifier.fillMaxSize().graphicsLayer {
                 val h = hop.value
                 if (h >= 0f) {
                     val u = h / (HOP_MS * 0.74f)
                     if (u < 1f) { translationY = -2.6f * sin(PI.toFloat() * u) * size.height / 24f; scaleX = 1f + 0.06f * sin(PI.toFloat() * u); scaleY = scaleX }
                     else if (u < 1.35f) { scaleX = 1f - 0.08f * sin(PI.toFloat() * (u - 1f) / 0.35f); scaleY = scaleX }
                 }
-            }) {
-                drawCat(head, from, shown, t.value, accent)
+            }
+            if (idle && shown == Mark.Done) {
+                // Done, content: a purr wiggle, a content tilt, a small hop (BootCatDone).
+                DoneLoop(v, { markColor(Mark.Done, accent) }, hopLayer)
+            } else {
+                val head = remember { headPath() }
+                Canvas(hopLayer) { drawCat(head, from, shown, t.value, accent) }
             }
         }
     }
@@ -318,6 +326,9 @@ private const val FRAME = 1000f / 30f
 private const val HOP_MS = 540f
 
 private fun headPath(): Path = PathParser().parsePathString(HEAD).toPath()
+
+/** Marks that idle with their own loop once their landing has finished. */
+private fun idles(m: Mark) = m == Mark.Skipped || m == Mark.Done
 
 /** The skipped landing's face paths (drawing is single-threaded, so one reused set is enough). */
 private val skipPaths = BootCatSkip.Paths()
