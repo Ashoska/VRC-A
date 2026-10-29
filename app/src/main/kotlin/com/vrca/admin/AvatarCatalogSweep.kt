@@ -639,6 +639,10 @@ object AvatarCatalogSweep {
 
     private suspend fun slotLoop(context: Context, adminKey: String, slot: Int, roles: List<Role>, liveIndex: Int, liveCount: Int) {
         val ownRole = roles.firstOrNull()
+        // A slot whose ONLY role is Fill walks when there's nothing to fill but drops its shard mid-walk
+        // as soon as a fill is waiting (user's call, 2026-10-26), like the Reports bot with reports, so a
+        // new contribution is filled within seconds. With fewer bots the roles share slots.
+        val fillDedicated = roles.size == 1 && roles[0] == Role.FILL
         while (running && scope.isActive) {
             // HARD PAUSE: do nothing (no VRChat call, no counter touch, no alive-stamp) while
             // paused, so the counters stay frozen the instant the admin pauses — regardless of
@@ -684,7 +688,7 @@ object AvatarCatalogSweep {
                     if (r == Role.REPORTS) progress.getValue(r).helping =
                         if (didReports || lastPendingReports > 0) ""
                         else if (manifestUnfilled >= manifestStale) "Fill" else "Liveness"
-                    did = walkPass(context, adminKey, slot, r) || did
+                    did = walkPass(context, adminKey, slot, r, fillDedicated) || did
                 } else {
                     for (role in roles) {
                         if (!running) break
@@ -836,7 +840,9 @@ object AvatarCatalogSweep {
     private val worklistMutex = Mutex()
     @Volatile private var worklistFetchedMs = 0L
     @Volatile private var worklistEmpty = false        // read OK but no work → idle (don't blind-walk)
-    private const val WORKLIST_TTL_MS = 60_000L
+    private const val WORKLIST_TTL_MS = 20_000L   // was 60 s; the Fill bot polls the list (cached CDN read)
+    // How often the Fill-role bot, mid-walk, checks for a waiting fill (one cached CDN read per refresh).
+    private const val FILL_IDLE_MS = 8_000L
     // A fill shard isn't re-walked within this window: its fills reach the Worker on the next flush
     // (~2 min) and only then leave the worklist, so a re-walk sooner would repeat the same checks.
     private const val FILL_REWALK_MS = 5 * 60_000L
@@ -918,10 +924,27 @@ object AvatarCatalogSweep {
     }
     private fun stampSwept(context: Context, prefix: String) {
         sweptAt[prefix] = System.currentTimeMillis()
-        if (sweptPersistCounter.incrementAndGet() % 16 == 0) runCatching {
+        if (sweptPersistCounter.incrementAndGet() % 16 == 0) persistSwept(context)
+    }
+    private fun persistSwept(context: Context) {
+        runCatching {
             val j = org.json.JSONObject(); for ((k, v) in sweptAt) j.put(k, v)
             context.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
                 .edit().putString("shard_swept", j.toString()).apply()
+        }
+    }
+    // Shards a bot dropped mid-walk (for reports / fills). Any bot takes one right after fills,
+    // before the oldest-first walk, so the rest of the shard is carried on straight away. The
+    // already-checked avatars are skipped by the shared recent-process guard.
+    private val droppedShards = java.util.concurrent.ConcurrentLinkedDeque<String>()
+    private fun takeDroppedShard(): String? {
+        val now = System.currentTimeMillis()
+        while (true) {
+            val p = droppedShards.pollFirst() ?: return null
+            val claim = shardClaims[p]
+            if (claim != null && now - claim < SHARD_CLAIM_TTL_MS) continue   // someone already on it
+            shardClaims[p] = now
+            return p
         }
     }
     /** Oldest-swept shard prefix (unswept counts as oldest). `dueOnly` skips shards swept within
@@ -1053,17 +1076,17 @@ object AvatarCatalogSweep {
     /** WALK one shard (post-cutover): read it, fill the unfilled + recheck the stale, push ops.
      *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the
      *  master-based passes. Returns true if it did VRChat work. */
-    private suspend fun walkPass(context: Context, adminKey: String, slot: Int, role: Role): Boolean {
+    private suspend fun walkPass(context: Context, adminKey: String, slot: Int, role: Role, fillDedicated: Boolean = false): Boolean {
         if (paused) return false
         val p = progress.getValue(role)
         // FILLS FIRST: a shard on the Worker's fill worklist (`_worklist.json`, kept exact by the
         // flush) is walked for its UNFILLED avatars only, so a new contribution is filled as the next
         // job instead of waiting for the oldest-first lap (~a day) to reach its shard. A re-verify in
-        // progress is FINISHED first (the user's call: no dropped shards for fills, they queue after);
-        // only when no fill shard is waiting does the bot take the oldest-swept shard.
+        // progress is FINISHED first (only the Reports / Fill-role bots drop one); a dropped shard is
+        // taken next, and only then the oldest-swept shard.
         val fillPrefix = nextFillPrefix(context)
         val fillOnly = fillPrefix != null
-        val prefix = fillPrefix ?: nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
+        val prefix = fillPrefix ?: takeDroppedShard() ?: nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
         // Failed read → leave the claim to EXPIRE (a ~30s backoff) so the shard stays oldest and is
         // RETRIED, and do NOT stamp sweptAt / advance the coverage bar (M1 — a flaky read must not hide
@@ -1099,6 +1122,8 @@ object AvatarCatalogSweep {
         val removes = mutableListOf<String>()
         val okChecked = mutableListOf<String>()
         var yieldedToReports = false
+        var yieldedToFills = false
+        var lastFillCheck = System.currentTimeMillis()
         try {
             var nulls = 0
             var rateLimited = false
@@ -1108,6 +1133,14 @@ object AvatarCatalogSweep {
                 // reports are pending (the 30s /health poll), handles them next cycle, and puts this
                 // shard back at the front (its sweep stamp is restored below).
                 if (role == Role.REPORTS && !fillOnly && lastPendingReports > 0) { yieldedToReports = true; break }
+                // The Fill-role bot walks when there's nothing to fill, but drops the shard the moment a
+                // fill is waiting, like the Reports bot does for reports (user's call). Other bots finish
+                // their shard first.
+                if (fillDedicated && !fillOnly && System.currentTimeMillis() - lastFillCheck >= FILL_IDLE_MS) {
+                    lastFillCheck = System.currentTimeMillis()
+                    refreshWorklist(context)
+                    if (hasDueFill()) { yieldedToFills = true; break }
+                }
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++; p.curShardDone++
                 if (chk == null) {
@@ -1160,11 +1193,15 @@ object AvatarCatalogSweep {
             }
             if (upserts.isNotEmpty() || removes.isNotEmpty() || okChecked.isNotEmpty())
                 pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
-            if (yieldedToReports) {
-                // Not fully re-verified → back to its old place at the front of the oldest-first walk.
+            if (yieldedToReports || yieldedToFills) {
+                // Not fully re-verified → the next free bot carries it on (droppedShards, taken right
+                // after fills); the old stamp is restored and SAVED now, so a restart before then still
+                // finds it at the front of the oldest-first walk instead of a lap away.
                 // (The avatars already checked are skipped on the re-walk by the recent-process guard.)
                 if (prevSwept != null) sweptAt[prefix] = prevSwept else sweptAt.remove(prefix)
-                p.status = "walk $prefix: paused for reports"
+                persistSwept(context)
+                droppedShards.remove(prefix); droppedShards.addFirst(prefix)
+                p.status = "walk $prefix: paused for ${if (yieldedToReports) "reports" else "fills"}"
                 return true
             }
             p.status = "walk $prefix: filled=${p.filled} checked=${p.checked} removed=${p.removed}"

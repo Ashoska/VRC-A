@@ -74,8 +74,9 @@ object OscAnnouncer {
         return if (System.currentTimeMillis() - at <= maxAgeMs) poses[part] else null
     }
 
-    /** Latest pushed avatar parameter as a float (bools 0/1), or null. */
-    fun param(name: String): Float? = if (paused) null else params[name]
+    /** Latest pushed avatar parameter as a float (bools 0/1), or null. Until VRChat pushes it
+     *  (after a bridge relink nothing is held), the OSCQuery poll's fresh value stands in. */
+    fun param(name: String): Float? = if (paused) null else params[name] ?: VrcaOscState.freshFloat(name)
 
     /** Debug button: first tap starts; later taps pause/resume (the bridge keeps going). */
     fun toggle(context: Context) {
@@ -112,6 +113,12 @@ object OscAnnouncer {
                 if (failures % 5 == 1) OscBridgeService.start(ctx)
             } finally {
                 linked = false
+                // VRChat pushes a param only when it CHANGES, so anything held from before the link
+                // dropped may be out of date by the time it's back (e.g. a fist released meanwhile
+                // would restart a drag). Forget it all; pushLive stays off until VRChat sends again,
+                // and the OSCQuery poll carries the tokens in between.
+                pushVrchat = null
+                params.clear(); poses.clear(); poseMs.clear()
                 synchronized(linkLock) { linkOut = null }
                 runCatching { sock.close() }
             }
