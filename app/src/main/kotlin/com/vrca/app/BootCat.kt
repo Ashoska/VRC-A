@@ -145,7 +145,7 @@ private fun LabLoop(calm: Boolean, v: Int, accent: Color, modifier: Modifier) {
                 val ph = PHASES[v]; val ph2 = (2 * ph) % 1f
                 val cyc = (t / 2400f) % 1f
                 drawPath(head, accent.copy(alpha = 0.25f), style = stroke)
-                val grow = sm(t / 400f)
+                val grow = (t / 400f).coerceIn(0f, 1f) // linear, like the AVD's grow-in
                 drawLight(head, accent.copy(alpha = grow), (2 * cyc + ph2) % 1f, 0.28f * grow)
                 val p = ((cyc + ph) % 1f) * 72f
                 val g = if (t in 8000f..9600f) { val u = (t - 8000f) / 1600f; if (u < 0.19f) u / 0.19f else if (u < 0.81f) 1f else (1f - u) / 0.19f } else 0f

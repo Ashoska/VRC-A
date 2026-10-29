@@ -469,6 +469,8 @@ object UiLabScenes {
                     val p = ((t - 1200L).coerceAtLeast(0L) / 3000f).coerceAtMost(1f)
                     com.vrca.app.BootCatDownload(p, m, done = t > 4400L)
                 }
+                // Size unknown: the light runs round instead of a fill (then lands in Done at 4.4 s).
+                "downloadunknown" -> com.vrca.app.BootCatDownload(null, m, done = t > 4400L)
                 "countdown" -> {
                     val left = (5 - ((t - 1200L).coerceAtLeast(0L) / 1000L).toInt()).coerceAtLeast(0)
                     com.vrca.app.BootCatCountdown(left / 5f, m)
