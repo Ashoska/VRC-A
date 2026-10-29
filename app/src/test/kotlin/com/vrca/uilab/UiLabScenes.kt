@@ -368,7 +368,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "cats", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "catframes", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -456,6 +456,33 @@ object UiLabScenes {
     }
 
     /** Each cell replays one of the boot cat's animations every 4 s: [from] for 1.3 s, then [to]. */
+    @Composable
+    private fun CatFrames(arg: String) {
+        val G = com.vrca.ui.theme.GremlinColors
+        val words = arg.split(' ').filter { it.isNotBlank() }
+        var t by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(0L) }
+        androidx.compose.runtime.LaunchedEffect(Unit) { val t0 = androidx.compose.runtime.withFrameMillis { it }; while (true) androidx.compose.runtime.withFrameMillis { t = it - t0 } }
+        androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().background(G.Backdrop), contentAlignment = Alignment.Center) {
+            val m = Modifier.size(240.dp)
+            when (words.firstOrNull()) {
+                "download" -> {
+                    val p = ((t - 1200L).coerceAtLeast(0L) / 3000f).coerceAtMost(1f)
+                    com.vrca.app.BootCatDownload(p, m, done = t > 4400L)
+                }
+                "countdown" -> {
+                    val left = (5 - ((t - 1200L).coerceAtLeast(0L) / 1000L).toInt()).coerceAtLeast(0)
+                    com.vrca.app.BootCatCountdown(left / 5f, m)
+                }
+                "hop" -> com.vrca.app.BootCat(com.vrca.app.Mark.Done, 0, m, celebrate = t > 1200L)
+                else -> {
+                    val from = com.vrca.app.Mark.valueOf(words.getOrElse(0) { "Working" })
+                    val to = com.vrca.app.Mark.valueOf(words.getOrElse(1) { "Done" })
+                    com.vrca.app.BootCat(if (t < 1200L) from else to, 0, m)
+                }
+            }
+        }
+    }
+
     @Composable
     private fun SymbolSheet() {
         val B = com.vrca.app.BootIcons
@@ -728,6 +755,10 @@ object UiLabScenes {
             // `show symbols`: every custom symbol (BootIcons), large in the boot's two tones and at the
             // size the app uses them, plus the one-colour versions.
             "symbols" -> SymbolSheet()
+            // `show catframes <From> <To>`: one big Boot Cat in From, switching to To after 1.2 s (record it
+            // every frame). `show catframes download` (0 -> 100% over 3 s, then lands in Done),
+            // `show catframes countdown` (5 s, as the boot Retry), `show catframes hop` (Done + the celebration).
+            "catframes" -> CatFrames(rest.trim())
             // `show buttons`: the button sheet (GremlinButton): both looks, every kind and state.
             "buttons" -> ButtonSheet()
             // `show download`: the downloading Boot Cat, in buttons and where downloads happen; its
