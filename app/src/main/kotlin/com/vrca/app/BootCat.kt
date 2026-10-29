@@ -60,14 +60,17 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
         if (startFrom != null) { val dur = transitionMs(startFrom, mark); t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing)) }
     }
     var looping by remember { mutableStateOf(mark == Mark.Working || mark == Mark.Background) }
+    // Skipped idles (BootCatSkip) once its landing has finished.
+    var idle by remember { mutableStateOf(mark == Mark.Skipped && startFrom == null) }
     LaunchedEffect(mark) {
         if (mark == shown) return@LaunchedEffect
         from = shown; shown = mark
         val dur = transitionMs(from, mark)
-        looping = false
+        looping = false; idle = false
         t.snapTo(0f)
         t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing))
         looping = mark == Mark.Working || mark == Mark.Background
+        idle = mark == Mark.Skipped
     }
     val hop = remember { Animatable(-1f) }
     LaunchedEffect(celebrate) {
@@ -84,6 +87,9 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
         } else if (shown == Mark.Waiting) {
             // Asleep, waiting for its turn: breathing, nodding off, dreaming (BootCatSleep).
             SleepLoop(v, { markColor(Mark.Waiting, accent) }, Modifier.fillMaxSize())
+        } else if (idle && shown == Mark.Skipped) {
+            // Skipped, awake and unbothered: yawning, a lazy look, humming (BootCatSkip).
+            SkipLoop(v, { markColor(Mark.Skipped, accent) }, Modifier.fillMaxSize())
         } else {
             val head = remember { headPath() }
             Canvas(Modifier.fillMaxSize().graphicsLayer {
@@ -313,6 +319,9 @@ private const val HOP_MS = 540f
 
 private fun headPath(): Path = PathParser().parsePathString(HEAD).toPath()
 
+/** The skipped landing's face paths (drawing is single-threaded, so one reused set is enough). */
+private val skipPaths = BootCatSkip.Paths()
+
 private fun transitionMs(from: Mark?, to: Mark): Float = when {
     to == Mark.Working && from == Mark.Failed -> 38 * FRAME
     to == Mark.Working || to == Mark.Background -> if (from == Mark.Waiting) 14 * FRAME else 0f
@@ -378,7 +387,7 @@ private fun DrawScope.drawCat(head: Path, from: Mark?, to: Mark, ms: Float, acce
                     else -> cat(head, accent, outline = 0.25f) { squash(0.3f + 0.7f * sm((f - 32f) / 6f)) { face(Face.Look, it) } }
                 }
             }
-            // Dozing off (skipped): no pop, the eyes blink shut into sleepy lines with a slow nod.
+            // Settling into skipped: no pop, a blink into the unbothered resting face with a slow nod (the transitions pass will rework this).
             to == Mark.Skipped -> {
                 val c = lerp(markColor(from, accent), markColor(Mark.Skipped, accent), sm(f / 6f))
                 val u = min(1f, f / 26f)
@@ -386,7 +395,10 @@ private fun DrawScope.drawCat(head: Path, from: Mark?, to: Mark, ms: Float, acce
                     translate(0f, 0.9f * sin(PI.toFloat() * u))
                     rotate(-5f * sin(PI.toFloat() * u), Offset(12f, 13f))
                 }) {
-                    cat(head, c, outline = 1f, fill = 0.16f) { squash(blink(f)) { face(if (f < 5) Face.Look else Face.Sleep, it) } }
+                    cat(head, c, outline = 1f, fill = 0.16f) {
+                        // It opens its eyes into the skipped cat's resting face, where its idle loop (BootCatSkip) carries on.
+                        squash(blink(f)) { if (f < 5) face(Face.Look, it) else with(BootCatSkip) { face(skipPaths, it) } }
+                    }
                 }
             }
             // Landing on a result: blink into the new face, pop, a tint flash, and the face's own reaction.
