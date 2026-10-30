@@ -2503,9 +2503,9 @@ main{max-width:1240px;margin:0 auto;padding:12px 16px 20px}
 .feed{list-style:none;margin:4px 0 0;padding:0;flex:1 1 0;height:0;min-height:0;overflow:auto}
 .feed li{border-top:1px solid var(--edge);padding:10px 0;animation:in .45s ease-out}.feed li:first-child{border-top:0}
 .feed .h{display:flex;gap:8px;align-items:baseline}.feed .h b{font-weight:500}.feed .tm{color:var(--faint);font-size:12px;margin-left:auto;white-space:nowrap}
-.feed .m{color:var(--muted);font-size:12.5px;margin-top:2px}.feed .nm{color:var(--muted);font-size:12.5px;margin-top:4px;overflow-wrap:anywhere}
+.feed .m{color:var(--muted);font-size:12.5px;margin-top:2px}.feed .nm{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:7px}
 .more{background:none;border:0;color:var(--accent-soft);font:500 12px Roboto,system-ui,sans-serif;cursor:pointer;padding:2px 4px}.more:hover{text-decoration:underline}
-.badge{display:inline-block;font-size:11px;font-weight:500;padding:1px 7px;border-radius:999px;background:var(--raised);color:var(--accent-soft);margin-right:2px}
+.badge{display:inline-block;font-size:12.5px;line-height:1.35;font-weight:500;padding:4px 10px;border-radius:999px;background:var(--raised);border:1px solid var(--edge);color:var(--text);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @keyframes in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
 #tip{position:fixed;pointer-events:none;background:var(--raised);border:1px solid var(--edge);border-radius:10px;padding:7px 10px;font-size:12.5px;opacity:0;transition:opacity .12s;z-index:5;white-space:nowrap}
 #tip b{font-size:15px;font-variant-numeric:tabular-nums}#tip .tl{color:var(--muted)}
@@ -2612,9 +2612,9 @@ function item(ev){var li=document.createElement('li'),h=document.createElement('
   var names=ev.names||[];if(!names.length)(ev.batches||[]).forEach(function(x){(x.names||[]).forEach(function(n){names.push(n)})});
   var total=ev.nameCount||names.length;
   if(names.length){var nm=document.createElement('div');nm.className='nm';
-   function badges(list){list.forEach(function(n){var s=document.createElement('span');s.className='badge';s.textContent=n;nm.appendChild(s);nm.appendChild(document.createTextNode(' '))})}
+   function badges(list){list.forEach(function(n){var s=document.createElement('span');s.className='badge';s.textContent=n;s.title=n;if(more&&more.parentNode)nm.insertBefore(s,more);else nm.appendChild(s)})}var more=null;
    badges(names.slice(0,6));
-   if(names.length>6){var more=document.createElement('button');more.className='more';more.textContent='Show all '+fmt(total);
+   if(names.length>6){more=document.createElement('button');more.className='more';more.textContent='Show all '+fmt(total);
     more.onclick=function(){more.remove();badges(names.slice(6));if(total>names.length){var x=document.createElement('span');x.className='tm';x.textContent='+'+fmt(total-names.length)+' more not listed';nm.appendChild(x)}};nm.appendChild(more)}
    li.appendChild(nm)}
   return li}
