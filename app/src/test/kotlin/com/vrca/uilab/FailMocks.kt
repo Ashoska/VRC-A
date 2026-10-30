@@ -116,43 +116,38 @@ object FailMocks {
         }
     }
 
-    /** B: sniffle. The X eyes soften into sad closed arcs, a tear rolls down, a sniff; back to X. No squeeze. */
+    /** B: sniffle. The X eyes soften into sad closed arcs, the frown quivers, two small sniffs; back to X. No squeeze. */
     private fun DrawScope.sniffle(c: Color, p: Float) {
         val s = sm(seg(p, 0.08f, 0.20f)) * (1 - sm(seg(p, 0.74f, 0.86f)))
         val x = 1f - sm(seg(p, 0.08f, 0.14f)) * (1 - sm(seg(p, 0.80f, 0.86f)))
-        val sniff = bump(p, 0.60f, 0.68f)
-        withTransform({ translate(0f, 0.4f * s - 0.6f * sniff); scale(1f, 1f + 0.04f * sniff, PIVOT) }) {
+        val quiver = if (p in 0.22f..0.66f) sin(p * 260f) * bump(p, 0.22f, 0.66f) else 0f
+        val sniff = bump(p, 0.36f, 0.42f) + bump(p, 0.50f, 0.56f)
+        withTransform({ translate(0f, 0.4f * s - 0.5f * sniff); scale(1f, 1f + 0.035f * sniff, PIVOT) }) {
             cat(c) {
-                for (ex in floatArrayOf(9.3f, 14.7f)) eye(c, ex, Y, xs = x, sad = s)
-                mouth(c, deep = s)
-                val t = seg(p, 0.26f, 0.58f)
-                if (t > 0f && t < 1f) {
-                    val ty = Y + 1.6f + 3.6f * t * t; val a = (if (t < 0.15f) t / 0.15f else 1f) * (1f - sm((t - 0.8f) / 0.2f))
-                    val r = 0.8f + 0.15f * t
-                    drawCircle(c.copy(alpha = a), r, Offset(15.6f, ty))
-                    path.rewind(); path.moveTo(15.6f - r * 0.9f, ty - r * 0.3f); path.lineTo(15.6f, ty - r * 2.1f); path.lineTo(15.6f + r * 0.9f, ty - r * 0.3f); path.close()
-                    drawPath(path, c.copy(alpha = a))
-                }
+                for (ex in floatArrayOf(9.3f, 14.7f)) eye(c, ex, Y - 0.25f * sniff, xs = x, sad = s)
+                mouth(c, deep = s + 0.25f * quiver)
             }
         }
     }
 
-    /** C: glitch. Tries to start back up: the eyes flicker to normal dots with a jitter, holds a hopeful look, then fails back to X. */
-    private fun DrawScope.glitch(c: Color, p: Float) {
-        val on = when {
-            p in 0.16f..0.19f -> 1f
-            p in 0.24f..0.26f -> 1f
-            p in 0.30f..0.48f -> sm(seg(p, 0.30f, 0.32f))
-            else -> 0f
-        }
-        val jit = if (p in 0.15f..0.33f || p in 0.48f..0.56f) sin(p * 900f) else 0f
-        val lift = sm(seg(p, 0.32f, 0.38f)) * (1 - sm(seg(p, 0.48f, 0.52f)))
-        val droop = sm(seg(p, 0.52f, 0.60f)) * (1 - sm(seg(p, 0.66f, 0.80f)))
+    /** C: peek (playing dead). One X opens into a normal eye, checks left and right, then snaps back to X. */
+    private fun DrawScope.peek(c: Color, p: Float) {
+        val o = sm(seg(p, 0.14f, 0.22f)) * (1 - sm(seg(p, 0.62f, 0.66f)))
+        val look = when {
+            p < 0.26f -> 0f
+            p < 0.32f -> -0.8f * sm(seg(p, 0.26f, 0.32f))
+            p < 0.40f -> -0.8f
+            p < 0.46f -> -0.8f + 1.6f * sm(seg(p, 0.40f, 0.46f))
+            p < 0.54f -> 0.8f
+            else -> 0.8f * (1 - sm(seg(p, 0.54f, 0.60f)))
+        } * o
+        val flop = bump(p, 0.64f, 0.74f)
         val sq = 1f - 0.75f * squeeze(p, 0.84f)
-        withTransform({ translate(0.45f * jit, -0.5f * lift + 0.6f * droop); rotate(-4f * droop, PIVOT) }) {
+        withTransform({ translate(0f, 0.35f * flop); rotate(-3f * o, PIVOT) }) {
             cat(c) {
-                for (ex in floatArrayOf(9.3f, 14.7f)) eye(c, ex, Y, xs = (1f - on) * sq, dot = on)
-                mouth(c, flat = on, deep = droop)
+                eye(c, 9.3f, Y, xs = sq)
+                eye(c, 14.7f + look, Y, xs = (1f - o) * sq, dot = o)
+                mouth(c, flat = 0.6f * o)
             }
         }
     }
@@ -179,7 +174,7 @@ object FailMocks {
                 when (if (kind == 'S') shuffled((t / BEAT).toInt()) else kind) {
                     'A' -> dizzy(c, p)
                     'B' -> sniffle(c, p)
-                    'C' -> glitch(c, p)
+                    'C' -> peek(c, p)
                     else -> cat(c) { eye(c, 9.3f, Y); eye(c, 14.7f, Y); mouth(c) }
                 }
             }
@@ -196,7 +191,7 @@ object FailMocks {
         LaunchedEffect(Unit) { val t0 = withFrameMillis { it }; while (true) withFrameMillis { ms.longValue = it - t0 } }
         Box(Modifier.fillMaxSize().background(G.Backdrop), contentAlignment = Alignment.Center) {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
-                listOf("Failed now" to 'N', "A  Dizzy" to 'A', "B  Sniffle" to 'B', "C  Glitch" to 'C', "Shuffled" to 'S').forEach { (label, k) ->
+                listOf("Failed now" to 'N', "A  Dizzy" to 'A', "B  Sniffle" to 'B', "C  Peek" to 'C', "Shuffled" to 'S').forEach { (label, k) ->
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(label, color = G.Text, style = MaterialTheme.typography.labelLarge)
                         Spacer(Modifier.height(10.dp))
