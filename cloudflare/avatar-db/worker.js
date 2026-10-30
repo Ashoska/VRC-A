@@ -2607,8 +2607,10 @@ async function purgeStep(env) {
 // step), phase 2 builds every nm/ file from D1 (one D1 scan per NMFILL_BUCKETS_PER_STEP buckets). Steps ride
 // the search step, so they run once a minute and never overlap. Progress in the hub (`searchFill`).
 async function searchFillStep(env) {
-  const st = JSON.parse((await hubGet(env, "searchFill")) || "null");
-  if (!st || st.done) return {};
+  let st = JSON.parse((await hubGet(env, "searchFill")) || "null");
+  // First time D1 is attached: start the backfill by itself (no admin call needed). Runs once.
+  if (!st) { st = { phase: 1, next: 0, startedAt: new Date().toISOString(), auto: true }; await hubPut(env, "searchFill", JSON.stringify(st)); }
+  if (st.done) return {};
   const db = env.SEARCH; await ensureSearchSchema(db);
   if (st.phase === 1) {
     const from = st.next || 0, to = Math.min(4096, from + FILL_SHARDS_PER_STEP);
