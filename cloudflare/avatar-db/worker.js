@@ -571,6 +571,25 @@ export default {
     const url = new URL(req.url);
     if (req.method === "OPTIONS") return json({ ok: true });
     try {
+      // ---- v52 live page (placeholder for the website's live stats) ----------
+      // GET /live: one static page; it takes a /health snapshot and then listens on /live/ws, where the
+      // hub (Durable Object) pushes each run's events. Public view only: no device ids, no contributor
+      // names, no admin data.
+      // On the main domain (gremlininc.app, a custom domain of this Worker) the root is the live page too.
+      if (req.method === "GET" && (url.pathname === "/live" || (url.pathname === "/" && url.hostname.endsWith("gremlininc.app")))) {
+        return new Response(LIVE_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=300" } });
+      }
+      if (req.method === "GET" && url.pathname === "/live/stats") {
+        const h = hubStub(env);
+        if (!h) return json({ hours: [], days: [] });
+        const r = await h.fetch("https://hub/stats");
+        return new Response(r.body, { headers: { "content-type": "application/json", "cache-control": "public, max-age=30", "access-control-allow-origin": "*" } });
+      }
+      if (req.method === "GET" && url.pathname === "/live/ws") {
+        const h = hubStub(env);
+        if (!h || req.headers.get("Upgrade") !== "websocket") return json({ ok: false, error: "websocket only" }, 426);
+        return h.fetch("https://hub/ws", req);
+      }
       // ---- R2 catalog serving (edge-cached) --------------------------------
       // GET /catalog/<key> -> the R2 object at <key> (e.g. /catalog/shard/ab1.json).
       // Fallback path when no custom domain is attached; normally CATALOG_BASE points at
@@ -638,9 +657,10 @@ export default {
         // Wake the bot promptly: bump the live report count so the sweep's /health poll sees
         // it immediately instead of waiting for the next flush. Self-corrects at flush.
         if (isNewReport) {
-          const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+          const meta = JSON.parse((await hubGet(env, "meta")) || "{}");
           meta.reports = (meta.reports || 0) + 1;
-          await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+          await hubPut(env, "meta", JSON.stringify(meta));
+          await emit(env, { t: "report", status: cur.status, reports: meta.reports });
         }
         return json({ ok: true });
       }
@@ -686,9 +706,9 @@ export default {
         // Decrement the live report counter so /health (and the admin "queued" number) drops as
         // reports are resolved, instead of sticking high until the next flush recomputes it.
         if (repsResolved) {
-          const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+          const meta = JSON.parse((await hubGet(env, "meta")) || "{}");
           meta.reports = Math.max(0, (meta.reports || 0) - repsResolved);
-          await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+          await hubPut(env, "meta", JSON.stringify(meta));
         }
         // AUTHOR RENAMES (bot-verified): the bot's GET /avatars/{id} is authoritative VRChat data, so a
         // detected author display-name change (same authorId, new name) is queued here as `arn:<authorId>`.
@@ -724,7 +744,7 @@ export default {
         if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
           return json({ ok: false, error: "unauthorized" }, 401);
         }
-        const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        const meta = JSON.parse((await hubGet(env, "meta")) || "{}");
         meta.rc = 0; meta.rcDone = false; meta.reconcileScanned = 0; meta.reconcileFixed = 0;
         // v40: ?heal=1 also checks every entry's search presence (budgeted, ~a day); without it the
         // lap is the fast shard-only recount + fold catch-up (~70 min).
@@ -732,7 +752,7 @@ export default {
         // Reset the recount accumulators + the clean-pass guards so the re-armed pass computes a
         // fresh EXACT count (adopted only if the whole 4096-shard lap reads cleanly).
         meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcAdoptSkipped = 0;
-        await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+        await hubPut(env, "meta", JSON.stringify(meta));
         return json({ ok: true, reconcile: meta.rcHeal ? "re-armed WITH presence heal (budgeted, ~a day)" : "re-armed (shard-only pass, ~70 min)" });
       }
 
@@ -761,7 +781,7 @@ export default {
         if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
           return json({ ok: false, error: "unauthorized" }, 401);
         }
-        let recent = []; try { const r = await env.AVATAR_KV.get("recent"); if (r) recent = JSON.parse(r); } catch (_) {}
+        let recent = []; try { const r = await hubGet(env, "recent"); if (r) recent = JSON.parse(r); } catch (_) {}
         return json({ ok: true, recent: Array.isArray(recent) ? recent : [] });
       }
 
@@ -817,7 +837,7 @@ export default {
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
         // ONE cheap KV read (no list ops — those have a tight free-tier limit and this is
         // polled every 15s). Counts come from meta (set at flush).
-        const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        const meta = JSON.parse((await hubGet(env, "meta")) || "{}");
         let backupSt = null; try { backupSt = JSON.parse((await env.AVATAR_KV.get("backup")) || "null"); } catch (_) {}
         // Prefer the manifest's authoritative entryCount (Action-maintained); fall back to the
         // KV counter. max() so a fresh contribution that bumped KV past the last rebuild still shows.
@@ -886,7 +906,7 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 51,   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 52,   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -947,7 +967,7 @@ export default {
           return json({ chained: true, depth, pendRemaining: res ? res.pendRemaining : -1 });
         }
         await flushR2(env);
-        const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        const meta = JSON.parse((await hubGet(env, "meta")) || "{}");
         return json({
           triggered: true,
           lastCommit: meta.lastCommit || "none",
@@ -980,7 +1000,11 @@ export default {
       // shared `meta` record (the pendingBatches/lastFlush flicker). The chain finishes fast; the cron
       // just waits one cycle. (A crashed chain self-heals in ≤90s when the lock ages out.)
       // v45 daily db.json backup: one step per cron as its OWN invocation (own budget, no lock).
-      try { await maybeFireBackupStep(env, ctx); } catch (_) {}
+      // v52: the cron runs every minute, but backup steps stay 2 min apart (their progress record and
+      // carry buffer live in KV, which another machine can read ~60 s stale).
+      if (new Date(event.scheduledTime || Date.now()).getUTCMinutes() % 2 === 0) {
+        try { await maybeFireBackupStep(env, ctx); } catch (_) {}
+      }
       if (await chainBusy(env)) return;
       // Maintenance only when ~2 min have passed (it's every cron at the 2-min cadence; kept in case the
       // cadence ever speeds up, see wrangler.toml for why 1 min needs a Durable Object first).
@@ -1055,7 +1079,7 @@ const FOLD_VER = 6;   // bumped 5->6: foldFancy overhaul (strip zalgo marks + CO
                       // is stamped; this bump re-arms that corrected lap. tokenizeFields still emits raw ∪ folded
                       // so every fancy entry is indexed under BOTH forms as one consistent set.
 async function reconcileIndex(env) {
-  const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  const meta = JSON.parse((await hubGet(env, "meta")) || "{}");
   // ONE-TIME migration: zero the frozen legacy staleCount NOW (kills the phantom "queued" immediately)
   // and re-arm the recount so the new stale tally computes the true value on its next clean lap.
   if (meta.staleModel !== 1) {
@@ -1269,7 +1293,7 @@ async function reconcileIndex(env) {
       meta.rcUnconvHist = {}; meta.rcUnconvSample = [];
     }
   }
-  await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+  await hubPut(env, "meta", JSON.stringify(meta));
 }
 
 // ---- AUTHOR-RENAME propagation ------------------------------------------------------------------
@@ -1292,10 +1316,10 @@ async function reconcileIndex(env) {
 // added by the flush), so after each full pass over the list `unfilled` is set to what the pass found.
 const PRUNE_BATCH = 100;           // shards checked per cron (Class B reads; ~list size once it's clean)
 async function pruneFillWorklist(env) {
-  const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  const meta = JSON.parse((await hubGet(env, "meta")) || "{}");
   let fill = Array.isArray(meta.fillHint) ? meta.fillHint : null;
   if (!fill || fill.length === 0) {
-    if (meta.unfilled) { meta.unfilled = 0; await env.AVATAR_KV.put("meta", JSON.stringify(meta)); }
+    if (meta.unfilled) { meta.unfilled = 0; await hubPut(env, "meta", JSON.stringify(meta)); }
     return;
   }
   // Pass bookkeeping: a pass = as many shards as the list held when it started.
@@ -1330,7 +1354,7 @@ async function pruneFillWorklist(env) {
       if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_worklist.json"]);
     } catch (_) {}
   }
-  await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+  await hubPut(env, "meta", JSON.stringify(meta));
 }
 
 // `author`. The bots detect it authoritatively (their GET /avatars/{id} is real VRChat data) and queue
@@ -1340,7 +1364,7 @@ async function pruneFillWorklist(env) {
 // writes; runs ONLY while a rename is pending, so steady-state cost is zero. Rare event → slow is fine.
 const RENAME_SHARDS_PER_RUN = 8;   // ~8.5h to sweep the whole catalog for one author's rename
 async function propagateAuthorRenames(env) {
-  const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  const meta = JSON.parse((await hubGet(env, "meta")) || "{}");
   // Continue the active rename, or pick the next pending one (nothing pending → zero cost, just a list).
   if (!meta.arnActive) {
     const list = await env.AVATAR_KV.list({ prefix: "arn:", limit: 1 });
@@ -1392,7 +1416,7 @@ async function propagateAuthorRenames(env) {
     meta.arnLast = authorId; meta.arnLastFixed = meta.arnFixed || 0; meta.arnLastAt = new Date().toISOString();
     meta.arnActive = null; meta.arnName = null; meta.arnCursor = 0; meta.arnStepped = 0; meta.arnFixed = 0;
   }
-  await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+  await hubPut(env, "meta", JSON.stringify(meta));
 }
 
 // GitHub's own `schedule:` cron is best-effort — it drops/delays most runs (observed 10–12h
@@ -1411,7 +1435,7 @@ async function maybeDispatchRebuild(env) {
   await env.AVATAR_KV.put("last_rebuild_ms", String(now));   // claim the slot so we don't double-fire
   const ref = env.GH_REF || "main";
   const stampMeta = async (patch) => {
-    try { const m = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}"); await env.AVATAR_KV.put("meta", JSON.stringify({ ...m, ...patch })); } catch (_) {}
+    try { const m = JSON.parse((await hubGet(env, "meta")) || "{}"); await hubPut(env, "meta", JSON.stringify({ ...m, ...patch })); } catch (_) {}
   };
   try {
     const r = await fetch(
@@ -1465,12 +1489,12 @@ async function listPrefix(env, prefix, cap = 5000) {
 function selfBase(env) { return (env.WORKER_SELF_URL || DEFAULT_SELF_URL).replace(/\/$/, ""); }
 async function chainBusy(env) {
   try {
-    const v = await env.AVATAR_KV.get("flushlock");
+    const v = await hubGet(env, "flushlock");
     if (!v) return false;
     return (Date.now() - (parseInt(v, 10) || 0)) < FLUSH_LOCK_TTL_MS;
   } catch (_) { return false; }
 }
-async function chainLockPut(env) { try { await env.AVATAR_KV.put("flushlock", String(Date.now()), { expirationTtl: 120 }); } catch (_) {} }
+async function chainLockPut(env) { try { await hubPut(env, "flushlock", String(Date.now())); } catch (_) {} }
 // The cron's maintenance steps (each isolated: one throwing must not skip the others). Stamped in
 // KV so a chain step can tell whether they're due (CRON_TASKS_EVERY_MS).
 const CRON_TASKS_EVERY_MS = 110_000;
@@ -1587,7 +1611,7 @@ async function backupStep(env) {
       lastUnfilled: uf, fill: Array.from(fill) };
     // v48: snapshot the flush totals so the flush can adopt this exact count (+ what moved since).
     // v49: + the running unfilled-delta total, so the flush adopts the exact unfilled count the same way.
-    try { const m = JSON.parse((await KV.get("meta")) || "{}"); done.addedAt = m.totalAdded || 0; done.removedAt = m.totalRemoved || 0; done.ufAt = m.ufSum || 0; } catch (_) {}
+    try { const m = JSON.parse((await hubGet(env, "meta")) || "{}"); done.addedAt = m.totalAdded || 0; done.removedAt = m.totalRemoved || 0; done.ufAt = m.ufSum || 0; } catch (_) {}
     // v49: publish the "unconverted" registry (was the recount's): every non-ASCII letter that survives
     // folding (histogram) + a capped sample. GET /unconverted. Extend CONFUSABLES from it; the bots then
     // flag and re-fold the affected avatars as they walk.
@@ -1623,7 +1647,7 @@ async function cronTasksIfDue(env) {
   try { last = parseInt((await env.AVATAR_KV.get("crontasks")) || "0", 10) || 0; } catch (_) {}
   if (Date.now() - last >= CRON_TASKS_EVERY_MS) await cronTasks(env);
 }
-async function chainLockDel(env) { try { await env.AVATAR_KV.delete("flushlock"); } catch (_) {} }
+async function chainLockDel(env) { try { await hubDel(env, "flushlock"); } catch (_) {} }
 // v47: returns the step's promise. A CHAIN STEP must AWAIT it (see the /flush chain handler): a fetch
 // handler's ctx.waitUntil only lives ~30 s after it responds, but a step takes ~60-70 s, so a step
 // fired via waitUntil from another step was cut off mid-flush every time (meta never saved, lock left
@@ -1643,7 +1667,8 @@ function fireContinuation(env, ctx, depth, awaitIt = false) {
 }
 
 async function flushR2(env) {
-  const prevMeta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  const runStart = Date.now();
+  const prevMeta = JSON.parse((await hubGet(env, "meta")) || "{}");
   // iq: index-op queue depth (in KEYS, each ≈ up to MAX_INDEX_OPS_PER_FLUSH ops), stamped from the
   // drain below so /health can surface it WITHOUT its own list op (that endpoint is polled every 15s
   // and must stay list-free). Carried forward on a failed flush (drain skipped). Saturates at the
@@ -1676,7 +1701,7 @@ async function flushR2(env) {
       !repNames.length && !hasIndexQueue && !calmDue) {
     // Keep /health's "calm waiting" count current without a list op there (cheap: only when it moved).
     if ((prevMeta.calmDepth || 0) !== admcNames.length)
-      try { await env.AVATAR_KV.put("meta", JSON.stringify({ ...prevMeta, calmDepth: admcNames.length })); } catch (_) {}
+      try { await hubPut(env, "meta", JSON.stringify({ ...prevMeta, calmDepth: admcNames.length })); } catch (_) {}
     return;
   }
 
@@ -1694,7 +1719,7 @@ async function flushR2(env) {
     const stale = await listPrefix(env, "iq:", IQ_COMPACT_DELETE_BUDGET);
     for (const kn of stale) await env.AVATAR_KV.delete(kn);
     const done = (await env.AVATAR_KV.list({ prefix: "iq:", limit: 1 })).keys.length === 0;
-    await env.AVATAR_KV.put("meta", JSON.stringify({
+    await hubPut(env, "meta", JSON.stringify({
       ...prevMeta, iqDepth: done ? 0 : (prevMeta.iqDepth || 0),
       ...(done ? { iqCompactV: IQ_COMPACT_V } : {}),
       lastFlush: new Date().toISOString(),
@@ -2187,7 +2212,7 @@ async function flushR2(env) {
     }
   }
 
-  try { await env.AVATAR_KV.put("meta", JSON.stringify({
+  try { await hubPut(env, "meta", JSON.stringify({
     ...prevMeta,
     lastFlush: new Date().toISOString(),
     lastAdded: added, lastRemoved: removed,
@@ -2225,11 +2250,22 @@ async function flushR2(env) {
     wrPrev: prevMeta.wr && prevMeta.wr.d !== new Date().toISOString().slice(0, 10) ? prevMeta.wr : (prevMeta.wrPrev || null),
   })); } catch (_) { /* ceiling: meta stale ONE cycle (self-corrects next flush); the return below is computed from in-memory state so the chain still gets the right pendRemaining */ }
 
+  // v52 live event for this run (public view: counts + avatar names, never who sent them).
+  try {
+    await emit(env, { t: "run", ok: allShardsOk, added, removed, entries, ms: Date.now() - runStart,
+      shards: dirtyPrefixes.length, idx: idxWrites, calm: calmCleared,
+      // Every avatar name in this run's contributions (up to 300; nameCount says how many there were).
+      names: recentBatches.flatMap((b) => b.names || []).slice(0, 300),
+      nameCount: recentBatches.reduce((n, b) => n + (b.n || 0), 0),
+      batchCount: recentBatches.length,
+      pending: Math.max(0, pendNames.length - pendCleared), reports: Math.max(0, repNames.length - repCleared),
+      calmWaiting: Math.max(0, admcNames.length - calmCleared) });
+  } catch (_) {}
   // Rolling log of the most recent USER contribution batches (newest first) with FULL names, in a
   // DEDICATED key so it never bloats meta/health. Only rewritten when batches were processed this
   // flush → +1 small KV write per flush at most, nothing when idle. Capped at 20 batches.
   if (recentBatches.length) try {
-    let prev = []; try { const r = await env.AVATAR_KV.get("recent"); if (r) prev = JSON.parse(r); } catch (_) {}
+    let prev = []; try { const r = await hubGet(env, "recent"); if (r) prev = JSON.parse(r); } catch (_) {}
     prev = Array.isArray(prev) ? prev : [];
     // DEDUP the display log by CONTENT (contributor + the exact avatar set), not timestamp: a
     // contribution POST that times out on the phone but actually landed gets retried, creating a 2nd
@@ -2244,7 +2280,7 @@ async function flushR2(env) {
     for (const b of recentBatches) { const s = sigOf(b); if (!seen.has(s)) { seen.add(s); fresh.push(b); } }
     if (fresh.length) {
       const next = [...fresh.reverse(), ...prev].slice(0, 20);
-      await env.AVATAR_KV.put("recent", JSON.stringify(next));
+      await hubPut(env, "recent", JSON.stringify(next));
     }
   } catch (_) { /* best-effort display log; never let it abort the flush's return below */ }
   // For the self-chaining continuation: pend batches left after THIS flush's per-key drain, and
@@ -2311,3 +2347,286 @@ async function reshardFromMaster(env, loN, endN) {
   }
   return { written, entries };
 }
+
+
+// ---- v52 hub: one Durable Object for the run lock, the records and the live feed --------------------
+// KV can show another machine a value up to ~60 s old, which made 1-min runs skip each other (stale lock)
+// and could lose counts (a run reading `meta` from before the previous run). A Durable Object is one
+// instance, so every read sees the last write. Kept in the hub: `meta` (all counters / totals / writes
+// today), `recent` (the admin's recent contributions) and `flushlock`. `meta` and `recent` are mirrored to
+// KV on every write, so rolling back to a KV-only Worker loses nothing. Without the HUB binding every
+// helper falls back to KV (local tests, or a rollback). Also the live feed: each run sends one event,
+// broadcast to /live viewers over hibernating WebSockets (no duration billed while idle) with a short
+// history so a new viewer isn't empty. Cost: a few hub requests per run (~130k/month at 1 min), inside
+// the Workers Paid included Durable Object requests.
+const HUB_MIRROR = new Set(["meta", "recent"]);
+const HUB_HISTORY = 60;
+function hubStub(env) { return env.HUB ? env.HUB.get(env.HUB.idFromName("main")) : null; }
+async function hubGet(env, key) {
+  const h = hubStub(env);
+  if (!h) return env.AVATAR_KV.get(key);
+  const r = await h.fetch("https://hub/kv/" + encodeURIComponent(key));
+  return r.status === 200 ? r.text() : null;
+}
+async function hubPut(env, key, val) {
+  const h = hubStub(env);
+  if (!h) return env.AVATAR_KV.put(key, val);
+  const r = await h.fetch("https://hub/kv/" + encodeURIComponent(key), { method: "PUT", body: val });
+  if (!r.ok) throw new Error("hub put " + key + " " + r.status);
+}
+async function hubDel(env, key) {
+  const h = hubStub(env);
+  if (!h) return env.AVATAR_KV.delete(key);
+  await h.fetch("https://hub/kv/" + encodeURIComponent(key), { method: "DELETE" });
+}
+async function emit(env, ev) {
+  const h = hubStub(env);
+  if (!h) return;
+  try { await h.fetch("https://hub/event", { method: "POST", body: JSON.stringify({ ...ev, at: Date.now() }) }); } catch (_) {}
+}
+
+export class Hub {
+  constructor(ctx, env) { this.ctx = ctx; this.env = env; }
+  async fetch(req) {
+    const url = new URL(req.url);
+    const p = url.pathname;
+    if (p.startsWith("/kv/")) {
+      const key = decodeURIComponent(p.slice(4));
+      const sk = "k:" + key;
+      if (req.method === "GET") {
+        let v = await this.ctx.storage.get(sk);
+        if (v === undefined) {
+          // First use of a key: take over KV's copy once (continuity from the KV-only Worker).
+          v = HUB_MIRROR.has(key) ? await this.env.AVATAR_KV.get(key) : null;
+          await this.ctx.storage.put(sk, v);
+        }
+        return v == null ? new Response("", { status: 404 }) : new Response(v);
+      }
+      if (req.method === "PUT") {
+        const v = await req.text();
+        await this.ctx.storage.put(sk, v);
+        if (HUB_MIRROR.has(key)) { try { await this.env.AVATAR_KV.put(key, v); } catch (_) {} }
+        return new Response("ok");
+      }
+      if (req.method === "DELETE") { await this.ctx.storage.put(sk, null); return new Response("ok"); }
+    }
+    if (p === "/event" && req.method === "POST") {
+      const ev = await req.text();
+      const hist = (await this.ctx.storage.get("history")) || [];
+      hist.push(ev);
+      while (hist.length > HUB_HISTORY) hist.shift();
+      await this.ctx.storage.put("history", hist);
+      // Totals for the live page's graphs: per hour (48 kept) and per day (60 kept). One extra put per run.
+      try {
+        const e = JSON.parse(ev);
+        if (e.t === "run") {
+          const iso = new Date(e.at).toISOString();
+          const w = (e.shards || 0) + (e.idx || 0);
+          const hours = (await this.ctx.storage.get("hours")) || [];
+          let h = hours[hours.length - 1];
+          if (!h || h.h !== iso.slice(0, 13)) { h = { h: iso.slice(0, 13), a: 0, r: 0, w: 0, n: 0 }; hours.push(h); }
+          h.a += e.added || 0; h.r += e.removed || 0; h.w += w; h.n += 1;
+          while (hours.length > 48) hours.shift();
+          const days = (await this.ctx.storage.get("days")) || [];
+          let d = days[days.length - 1];
+          if (!d || d.d !== iso.slice(0, 10)) { d = { d: iso.slice(0, 10), a: 0, r: 0, w: 0, e: 0, c: 0 }; days.push(d); }
+          d.a += e.added || 0; d.r += e.removed || 0; d.w += w; d.c = (d.c || 0) + (e.batchCount != null ? e.batchCount : (e.batches || []).length); if (e.entries) d.e = e.entries;
+          while (days.length > 60) days.shift();
+          await this.ctx.storage.put({ hours, days });
+        }
+      } catch (_) {}
+      for (const ws of this.ctx.getWebSockets()) { try { ws.send(ev); } catch (_) {} }
+      return new Response("ok");
+    }
+    if (p === "/stats") {
+      const [hours, days] = [(await this.ctx.storage.get("hours")) || [], (await this.ctx.storage.get("days")) || []];
+      return new Response(JSON.stringify({ hours, days }), { headers: { "content-type": "application/json" } });
+    }
+    if (p === "/ws") {
+      if (req.headers.get("Upgrade") !== "websocket") return new Response("websocket only", { status: 426 });
+      const pair = new WebSocketPair();
+      this.ctx.acceptWebSocket(pair[1]);
+      // The viewer asks for the history once it's connected ("hello", below): a message sent before the 101
+      // reaches it can be dropped.
+      return new Response(null, { status: 101, webSocket: pair[0] });
+    }
+    return new Response("not found", { status: 404 });
+  }
+  async webSocketMessage(ws, msg) {
+    if (msg === "ping") { try { ws.send('{"t":"pong"}'); } catch (_) {} return; }
+    if (msg === "hello") {
+      const hist = (await this.ctx.storage.get("history")) || [];
+      try { ws.send(JSON.stringify({ t: "history", events: hist.map((e) => JSON.parse(e)) })); } catch (_) {}
+    }
+  }
+  async webSocketClose(ws, code) { try { ws.close(code, "bye"); } catch (_) {} }
+  async webSocketError(ws) { try { ws.close(1011, "error"); } catch (_) {} }
+}
+
+// The live page (v52): for testers and users (no budget/cost data). VRC-A colours (GremlinColors) and Roboto, all
+// times UTC; laid out for the UI Lab's two sizes (headset 1024x640: one screen, no scrolling; phone 411x891: one
+// column). Stat tiles, graphs from the hub's hourly/daily totals (/live/stats), queues, the live activity feed.
+const LIVE_HTML = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VRC-A Live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{--backdrop:#06101C;--panel:#0A1828;--card:#0F2236;--raised:#142B44;--edge:#223B57;--text:#EAF0FF;--muted:#B3C0DE;--faint:#7D8BA8;
+--accent:#8F7CFF;--accent-soft:#B7A9FF;--ok:#53E39F;--warn:#FFD166;--err:#FF6B6B}
+*{box-sizing:border-box}html,body{margin:0;background:var(--backdrop);color:var(--text);font:400 14px/1.45 Roboto,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+.top{background:var(--panel);border-bottom:1px solid var(--edge)}
+.top .in{max-width:1240px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;gap:12px}
+.logo{height:36px;width:auto;display:block;color:var(--text)}
+.crumb{color:var(--muted);font-weight:500}.sp{flex:1}
+.pill{display:flex;align-items:center;gap:8px;background:var(--raised);border:1px solid var(--edge);border-radius:999px;padding:6px 12px;font-weight:500;font-size:13px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--faint)}.dot.on{background:var(--ok);box-shadow:0 0 0 0 rgba(83,227,159,.5);animation:pulse 2s infinite}.dot.off{background:var(--err)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(83,227,159,.45)}70%{box-shadow:0 0 0 7px rgba(83,227,159,0)}100%{box-shadow:0 0 0 0 rgba(83,227,159,0)}}
+.next{color:var(--muted);font-variant-numeric:tabular-nums}
+main{max-width:1240px;margin:0 auto;padding:12px 16px 20px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.card{background:var(--card);border:1px solid var(--edge);border-radius:14px;padding:12px 14px}
+.lab{color:var(--muted);font-size:12px;font-weight:500;letter-spacing:.3px}
+.val{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:4px;line-height:1.15}
+.sub{color:var(--muted);font-size:12.5px;margin-top:4px;font-variant-numeric:tabular-nums}
+.up{color:var(--ok)}.dn{color:var(--err)}
+.meter{height:6px;background:var(--raised);border-radius:4px;overflow:hidden;margin-top:10px}.meter i{display:block;height:100%;width:0;background:var(--accent);border-radius:4px;transition:width .8s}
+.meter.warn i{background:var(--warn)}
+.cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,.9fr);grid-template-areas:"g n f" "r q f";gap:10px;margin-top:10px}
+#aG{grid-area:g}#aN{grid-area:n}#aR{grid-area:r}#aQ{grid-area:q}#aF{grid-area:f;display:flex;flex-direction:column;min-height:0}
+.ch-h{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}.ch-t{font-weight:500;font-size:14.5px}.ch-s{color:var(--muted);font-size:12.5px}
+.key{display:flex;gap:14px;color:var(--muted);font-size:12px;margin-left:auto}.key span{display:flex;align-items:center;gap:6px}.key i{display:inline-block;width:14px;height:0;border-top:2px dashed var(--warn)}
+.chart{position:relative;height:160px}.chart svg{width:100%;height:100%;display:block;overflow:visible}
+.empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;text-align:center;padding:0 20px}
+.q{display:grid;grid-template-columns:1fr auto;row-gap:7px;margin-top:8px}.q div:nth-child(even){font-weight:500;font-variant-numeric:tabular-nums;text-align:right}
+.q .n{color:var(--muted)}
+.feed{list-style:none;margin:4px 0 0;padding:0;flex:1 1 0;height:0;min-height:0;overflow:auto}
+.feed li{border-top:1px solid var(--edge);padding:10px 0;animation:in .45s ease-out}.feed li:first-child{border-top:0}
+.feed .h{display:flex;gap:8px;align-items:baseline}.feed .h b{font-weight:500}.feed .tm{color:var(--faint);font-size:12px;margin-left:auto;white-space:nowrap}
+.feed .m{color:var(--muted);font-size:12.5px;margin-top:2px}.feed .nm{color:var(--muted);font-size:12.5px;margin-top:4px;overflow-wrap:anywhere}
+.more{background:none;border:0;color:var(--accent-soft);font:500 12px Roboto,system-ui,sans-serif;cursor:pointer;padding:2px 4px}.more:hover{text-decoration:underline}
+.badge{display:inline-block;font-size:11px;font-weight:500;padding:1px 7px;border-radius:999px;background:var(--raised);color:var(--accent-soft);margin-right:2px}
+@keyframes in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+#tip{position:fixed;pointer-events:none;background:var(--raised);border:1px solid var(--edge);border-radius:10px;padding:7px 10px;font-size:12.5px;opacity:0;transition:opacity .12s;z-index:5;white-space:nowrap}
+#tip b{font-size:15px;font-variant-numeric:tabular-nums}#tip .tl{color:var(--muted)}
+.grid line{stroke:var(--edge);stroke-width:1}.axis text{fill:var(--faint);font-size:11px;font-family:Roboto,system-ui,sans-serif}
+@media (max-width:860px){.kpis{grid-template-columns:repeat(2,1fr)}.cols{grid-template-columns:1fr;grid-template-areas:"g" "n" "r" "q" "f"}.feed{flex:none;height:auto;max-height:420px}}
+@media (max-width:480px){.crumb{display:none}.val{font-size:22px}.chart{height:150px}}
+</style></head><body>
+<div class="top"><div class="in"><svg class="logo" viewBox="0 0 428 362" role="img" aria-label="VRC-A"><path fill="currentColor" fill-rule="evenodd" d="M418.4,357C417.8,356.8 416.6,355.7 415.5,354.3C415.1,353.8 414.5,353.2 414.2,353C414,352.8 411.8,350.6 409.3,348.2C406.9,345.7 404.4,343.1 403.7,342.4C403,341.7 401.2,339.9 399.7,338.4C398.2,336.9 393.5,332.2 389.4,328.1C385.3,324 381.4,320 380.7,319.2C380,318.5 378.2,316.7 376.7,315.2C375.2,313.7 371.3,309.8 368,306.5C364.7,303.2 358.9,297.3 355.1,293.4C341.8,280.1 337.9,276.1 337.1,275.1C336.6,274.6 335.9,273.9 335.5,273.7L334.8,273.2L284.5,273.2C130.7,273.1 25.1,272.9 24.5,272.7C24.2,272.6 23.3,272.3 22.5,272.1C21.7,271.9 20.7,271.5 20.2,271.3C19.7,271.1 18.7,270.7 18.1,270.5C16.4,269.8 14.7,268.9 13.8,268.2C12.7,267.4 8.8,263.4 7.9,262.2C7.2,261.2 6.1,259.1 5.9,258.3C5.9,258 5.7,257.4 5.5,257.1C5.3,256.7 5,255.5 4.7,254.4L4.2,252.4L4.3,163.1L4.3,73.8L4.7,71.8C5,70.7 5.4,69.3 5.6,68.8C5.8,68.3 6,67.7 6,67.6C6,67.5 6.2,67 6.5,66.4C6.8,65.9 7,65.3 7,65.3C7,65.1 8.1,63.4 8.6,62.8C9.4,62 11.6,58.5 12.2,57.3C12.9,55.7 13.7,54.6 14.8,53.2C15.5,52.4 16.5,51.2 17,50.5C17.6,49.8 18.4,48.9 18.9,48.4C19.8,47.6 20.7,46.5 21.6,45.3C21.9,45 22.6,44 23.3,43.3C24,42.5 24.7,41.7 25,41.3C26.5,39.4 31.9,32.8 32.7,31.9C33,31.7 33.8,30.7 34.6,29.7C38,25.6 39.2,24.2 39.5,24C39.6,23.9 40.3,23 41,22.1C41.7,21.2 42.9,19.7 43.7,18.9C45.6,16.9 45.5,17 46.2,16C46.6,15.5 47.5,14.5 48.2,13.7C48.9,13 49.9,11.8 50.4,11.1C51,10.3 51.5,9.7 51.6,9.5C51.9,9.2 53.7,8.2 54.4,8C54.8,7.9 55.3,7.6 55.7,7.4C56,7.2 56.3,7 56.5,7C56.6,7 57,6.8 57.4,6.6C58,6.3 59.6,5.8 61.5,5.3C62.6,5.1 65.9,4.8 67.7,4.9C70.7,5.1 73.6,5.7 75.5,6.6C76,6.8 76.5,7 76.6,7C76.7,7 77.8,7.5 78.9,8C80.8,8.9 81.1,9.2 82.3,10.4C83,11.2 84.4,12.7 85.3,13.9C86.3,15.1 87.6,16.6 88.2,17.4C88.9,18.1 90,19.5 90.8,20.5C91.5,21.4 92.7,22.9 93.5,23.7C94.2,24.4 95,25.4 95.2,25.8C95.5,26.1 96.4,27.1 97.3,28C98.2,28.9 99,29.8 99.1,30C99.3,30.3 99.7,30.9 100,31.4C100.3,31.9 101.2,32.9 101.9,33.6C102.6,34.3 103.7,35.6 104.3,36.4C104.9,37.2 105.7,38.2 106.1,38.6C107.1,39.7 108.6,41.4 109.1,42.2C109.4,42.6 110.2,43.5 110.9,44.3C112.1,45.6 114.3,48.2 114.9,49C116.2,50.8 116.7,51.4 117.5,52.1C118,52.5 118.6,53 118.9,53.1C119.3,53.2 145,53.3 213.8,53.4C305.6,53.4 308.1,53.4 308.8,53.1C309.5,52.8 311.5,50.8 311.9,49.9C312.2,49.4 313.9,47.4 314.5,46.8C314.7,46.7 315.5,45.7 316.4,44.6C317.3,43.5 318.9,41.6 320,40.3C321.1,39.1 322.3,37.6 322.9,36.9C323.4,36.3 324.4,35.1 325.2,34.3C325.9,33.6 326.7,32.7 326.8,32.5C327.5,31.5 328.6,30.1 329.8,28.8C330.5,28 331.4,27 331.8,26.4C332.2,25.9 333.4,24.6 334.3,23.6C335.3,22.6 336.3,21.4 336.6,21C336.9,20.6 337.6,19.8 338.1,19.1C339.9,17.1 341.1,15.7 341.6,15C343.6,12.5 346.6,9.5 347.7,8.9C349.6,7.9 354.6,6.3 356.4,6C358.2,5.7 363.6,5.7 365.4,6C367.1,6.3 371,7.6 373.8,8.9C374.8,9.3 376,10.4 376.8,11.5C377,11.8 377.9,12.8 378.8,13.7C379.6,14.5 380.6,15.7 381,16.2C381.3,16.7 382.3,17.8 383,18.5C383.8,19.3 384.6,20.3 384.9,20.7C385.2,21.2 385.6,21.8 385.8,22C385.9,22.2 386.8,23.2 387.7,24.2C388.7,25.1 389.8,26.4 390.2,27C390.7,27.6 392,29.1 393,30.4C394.1,31.6 395.9,33.7 397,35C398.1,36.3 399.4,37.8 399.8,38.3C400.2,38.8 400.7,39.3 400.8,39.5C400.9,39.7 401.8,40.8 402.7,41.8C403.7,42.8 404.6,43.9 404.8,44.2C405.6,45.3 406.9,46.8 408.2,48.2C409,48.9 409.7,49.9 410,50.2C410.2,50.6 411.1,51.7 412,52.6C413.9,54.5 414.2,54.9 415.4,57.1C416.2,58.8 417.8,61.3 418.4,62C418.9,62.5 419.4,63.3 420.4,65.5C420.9,66.5 421.4,67.4 421.5,67.4C421.6,67.5 421.8,67.9 421.9,68.4C422.1,68.9 422.3,69.5 422.5,69.8C422.7,70.2 422.9,71.1 423.1,72C423.4,73.5 423.4,75.3 423.4,101.8C423.3,117.2 423.3,158.8 423.3,194C423.1,307.9 423,354.5 422.8,355.1C422.6,355.6 421.2,356.7 420.4,357C419.7,357.2 419.1,357.2 418.4,357ZM413.8,338.4C414.2,338.2 414.5,337.9 414.6,337.8C414.7,337.7 414.7,336.9 414.7,336.1C415.1,297.8 415.2,276.7 415.1,180.9C415.1,84 415.1,76 414.8,75.4C414.2,73.9 412.9,71.3 412.5,70.9C412.3,70.7 411.8,69.8 411.3,69C410.1,66.7 409.6,66 409.3,65.4C408.5,64.3 407.5,63 406.8,62.3C406.4,61.9 405.8,61.2 405.5,60.8C405.2,60.3 404.1,59 403.1,57.9C402.1,56.7 401,55.3 400.7,54.8C400.4,54.3 399.5,53.2 398.9,52.4C398.2,51.6 397.1,50.2 396.5,49.3C395.9,48.5 395,47.3 394.5,46.7C394.1,46.2 393.5,45.4 393.2,45.1C393,44.7 392.4,44 391.9,43.4C391.5,42.9 390.8,42 390.4,41.4C390.1,40.9 389,39.6 388.2,38.6C387.3,37.6 386.4,36.3 386,35.9C385,34.4 384.8,34.1 383.6,32.6C382.9,31.9 381.9,30.6 381.3,29.8C380.8,28.9 380,27.8 379.6,27.3C376.8,23.9 375.8,22.6 374.8,21.7C373.7,20.6 371.8,19 371.6,19C371.5,19 371.1,18.8 370.8,18.6C370.5,18.4 369.9,18.1 369.4,18C369,17.8 368.2,17.5 367.7,17.4C364.4,16.2 364.1,16.1 360.9,16.1C358.5,16.1 357.8,16.2 357.1,16.4C356.6,16.6 355.7,16.9 354.9,17.1C351.6,18 350.4,18.7 348.1,20.7C347.2,21.4 344.6,24.2 344.1,25C343.8,25.3 343.4,25.9 343.1,26.3C342.8,26.7 342.3,27.4 342.1,27.8C341.3,28.8 338.8,32.2 337.9,33.3C337.4,33.8 336.7,34.8 336.3,35.4C335.9,36.1 334.9,37.3 334.1,38.2C332.8,39.6 332.1,40.5 331.1,42.1C330.9,42.3 330.2,43.3 329.5,44.1C328.8,44.9 327.9,46 327.6,46.6C327.2,47.1 326.7,47.8 326.5,48.1C326.3,48.3 326,48.7 325.8,48.9C325.1,49.9 324.4,50.9 323.3,52C322,53.5 321.4,54.2 321,55.1C320.9,55.4 320.1,56.4 319.4,57.2C317.9,58.8 317.2,59.6 317,60.2C316.9,60.4 316.6,60.8 316.3,61.1L315.7,61.5L287.8,61.5C272.4,61.5 259.7,61.4 259.6,61.4C259.5,61.3 226.1,61.2 185.4,61.2C113.9,61.2 111.4,61.2 110.9,60.9C110.7,60.8 110.3,60.4 110.2,60.1C109.7,59.2 108.8,57.9 107.6,56.5C106.9,55.7 106.2,54.8 105.9,54.4C105.5,53.7 104.1,51.9 103,50.5C102.7,50 102,49.1 101.5,48.5C101,47.9 100.4,47 100,46.5C99.7,46 98.6,44.7 97.6,43.6C96.7,42.4 95.7,41.1 95.3,40.6C95,40.1 94.1,38.9 93.4,38C92.7,37.1 91.6,35.8 91.1,35.1C89.9,33.4 88.9,32.1 87.4,30.2C85.6,27.8 85.4,27.5 84.6,26.2C84.2,25.5 83.4,24.4 82.8,23.8C82.2,23.1 81.3,22.1 80.8,21.4C79.2,19.5 78.7,19.1 75.2,17.5C72.6,16.3 71.3,16 67.9,15.3C67,15.1 65.4,15.2 64,15.6C63.5,15.7 62.7,15.9 62.2,15.9C61.8,16 61,16.2 60.6,16.4C60.1,16.6 59.4,16.9 59,17.1C58.6,17.2 58.2,17.4 58.1,17.5C58,17.6 57.6,17.8 57.2,17.9C55.7,18.4 52.1,21.3 51.1,22.8C50.8,23.2 50.4,23.8 50.1,24.2C49.8,24.6 49.2,25.3 48.9,25.8C48.6,26.2 48,27 47.5,27.6C47,28.1 46.2,29.3 45.6,30.2C45,31 43.9,32.5 43.1,33.4C42.3,34.3 41.3,35.6 40.9,36.2C40.5,36.8 39.8,37.7 39.3,38.3C38.5,39.3 36.7,41.7 35.4,43.6C35.1,43.9 34.5,44.7 34,45.4C32.2,47.5 32,47.7 31.6,48.2C31.4,48.5 30.9,49.3 30.5,49.9C30,50.6 29.2,51.6 28.6,52.2C27.4,53.7 26.5,54.9 26.1,55.6C25.8,56.3 24.7,57.7 24.4,57.9C24.2,58.1 22.1,60.6 21.3,61.6C21,62 20.2,63.1 19.4,64C18.7,64.9 17.9,65.9 17.8,66.2C17.6,66.5 17.1,67.2 16.8,67.7C16.5,68.3 16.1,69 16,69.3C15.9,69.6 15.5,70.4 15.1,71.1C13.3,74.3 13,75 12.3,77.7C12.2,78 12.2,111.4 12.2,161.4L12.2,244.6L12.7,246.8C13.1,248.7 13.7,250.3 14.4,251.5C14.6,251.7 14.9,252.3 15.1,252.8C16.7,256 19.8,259.1 23.2,261.1C23.6,261.3 24.3,261.7 24.8,262C25.3,262.3 25.9,262.6 26.2,262.7C29.1,264.1 30.7,264.4 35.2,264.7C37.4,264.8 78,264.8 182.2,264.8C261.4,264.7 328.3,264.6 330.7,264.6C336,264.4 336.1,264.5 337.4,265.9C338.7,267.2 341.9,270.6 346.6,275.2C348.9,277.5 353.8,282.4 357.4,286.1C361,289.7 368,296.8 373,301.8C399.9,328.8 402.4,331.4 407.4,336.7C408.6,337.9 409.7,338.7 410.7,338.8C411.6,339 413,338.8 413.8,338.4ZM322.1,219.9C320.8,219.6 319.4,218.7 318.2,217.5C316.8,216.1 316.4,215.5 315,213C314.8,212.5 314.5,211.9 314.4,211.8C313.7,210.6 312.3,207 311.9,205.4C311.5,203.7 310.9,202.4 310.4,202.2C310.2,202.1 308.5,202 304.7,201.9C298.9,201.8 298.6,201.8 298.2,202.8C297.6,204.5 297.2,205.7 296.9,206.6C296.7,207.1 296.3,208.2 296,209C295.7,209.8 295.3,210.9 295.1,211.4C294.4,213.4 292.7,215.3 290.8,216.3C288,217.7 283.4,217.3 281,215.5C279,213.9 278.2,212.7 277.8,210.3C277.5,208.5 277.5,208.3 277.8,206.7C277.9,205.6 278.2,204.6 278.4,204.2C278.6,203.7 278.9,203.1 279,202.8C279.1,202.4 279.4,201.8 279.6,201.4C279.8,201.1 280,200.6 280,200.5C280,200.4 280.2,199.9 280.4,199.4C281.2,197.8 281.8,196 282.1,194.5C282.9,190.1 283.1,189.6 285.1,186.7C285.5,186.2 286.3,184.7 286.9,183.4C287.5,182.1 288.1,180.9 288.3,180.6C288.4,180.3 288.7,179.8 288.9,179.4C289.1,179 289.3,178.6 289.4,178.3C289.6,178.1 289.8,177.7 289.9,177.3C290.1,177 290.2,176.6 290.3,176.5C290.7,175.9 290.8,175.6 291.7,173.8C292.1,172.9 292.6,172 292.7,171.8C292.8,171.7 293,171.3 293.1,170.9C293.3,170.5 293.6,170 293.7,169.7C293.9,169.3 294.1,168.9 294.3,168.6C294.4,168.3 294.7,167.8 294.9,167.4C296.2,165 298.4,162.6 300.4,161.6C302.7,160.4 305.8,160.4 308.1,161.6C310.2,162.6 312.7,165.5 315.2,169.7C316.2,171.4 318.2,175.3 319.8,178.8C320.2,179.6 320.9,180.9 321.3,181.7C321.7,182.6 322,183.3 322,183.4C322,183.8 323.1,185.6 323.9,186.6C325.5,188.4 325.9,189.2 326.4,190.8C326.6,191.6 326.9,192.5 326.9,192.9C327,193.3 327.2,194.3 327.5,195.2C328,196.8 328.2,197.3 328.8,199.2C329.3,200.3 330.2,202.4 330.5,202.8C330.6,202.9 331.1,203.6 331.5,204.3C331.9,205 332.3,205.8 332.5,206C333.5,207.5 334.2,210.6 333.9,213C333.7,215.7 331.9,218 329.2,219.4L327.8,220.1L325.3,220.1C323.8,220.1 322.6,220.1 322.1,219.9ZM199.9,216.1C196.9,215.8 193.5,215.1 191.6,214.2C190,213.6 188.3,212.7 187.7,212.2C187.3,212 186.7,211.6 186.2,211.2C185,210.3 182.6,207.6 181.9,206.3C181.8,206 181.5,205.6 181.4,205.5C181.3,205.4 181.1,205 181,204.6C180.9,204.2 180.7,203.8 180.6,203.6C180.4,203.4 180.1,202.5 179.8,201.6C179.4,200.1 179.3,199.5 179.1,196.5C178.8,190.6 179.1,188.4 180.5,183.2C180.7,182.5 181,181.4 181.1,180.8C181.2,180.2 181.5,179.3 181.8,178.7C182,178.2 182.2,177.6 182.2,177.4C182.2,177.2 182.4,176.7 182.6,176.2C182.8,175.8 183,175.3 183,175.2C183,174.9 184.2,172.7 184.6,172.1C184.8,171.8 185,171.5 185,171.4C185,171.1 187.7,168 189,166.7C192.3,163.5 196.5,161.4 200.4,161C203.4,160.7 207.4,160.9 208.9,161.6C209.2,161.7 209.9,161.9 210.4,162C211.8,162.3 216.1,164.6 216.8,165.5C216.9,165.6 217.3,166 217.8,166.4C219.9,168.3 221.6,171.3 222.1,173.8C222.5,176.3 222.6,177.5 222.3,179.2C222,180.5 221.9,180.9 221.3,181.7C219.7,184.3 217.2,185.2 214.9,184.2C213.4,183.6 212.5,182.7 211.8,181.2C211.3,180.2 211.2,179.8 211,178C210.8,175.4 210.4,174.8 208.6,173.8C207.4,173.1 206.4,172.9 204.1,172.7C200.9,172.5 199.5,173 197.4,175.1C195.1,177.3 192.8,182.1 191.7,186.8C191.6,187.5 191.4,188.5 191.2,189.1C190.9,190.5 190.7,194.7 191,196.1C191.6,199.8 194.6,202.8 199.4,204.3C200.6,204.6 201.7,204.9 202.7,204.9C205.9,205.2 213,204.2 215.2,203.3C216.1,202.9 217.9,201.8 218.2,201.5C218.2,201.4 218.7,201.1 219.3,200.8C220.2,200.4 220.7,200.3 221.7,200.2C222.8,200.1 223.1,200.2 224,200.6C225.4,201.2 226.5,202.3 227.2,203.7C227.8,204.7 227.8,204.9 227.8,206.4C227.8,207.8 227.8,208.1 227.3,209.2C226.9,209.9 226.4,210.8 226.1,211.1C225.5,211.7 224,212.7 223.2,213C222.8,213.1 222.4,213.3 222.1,213.5C221.3,213.9 218.8,214.6 215.6,215.2C213.2,215.7 211.7,215.9 208.2,216.1C203.2,216.4 203.7,216.4 199.9,216.1ZM77.2,215.6C76.5,215.2 75.2,213.9 75,213.3C74.9,213 74.6,212.5 74.4,212.2C74.2,211.9 74,211.5 74,211.3C74,211.2 73.8,210.7 73.6,210.3C73.4,209.9 73.1,209.3 73,208.9C72.9,208.5 72.6,207.9 72.4,207.5C72.2,207 72,206.6 72,206.4C72,206.3 71.8,205.8 71.6,205.3C71.4,204.8 71.1,204.1 71,203.7C70.9,203.3 70.7,202.7 70.6,202.5C70.3,202.2 69.9,201.1 69.3,199.1C69.1,198.6 68.8,197.9 68.6,197.4C68.5,197 68.2,196.1 68,195.6C67.8,195 67.6,194.2 67.4,193.7C66.9,192.2 66.5,191.1 66.2,190.3C66.1,189.9 65.8,189.1 65.6,188.5C65.2,187.5 64.7,185.8 63.6,182.2C63.4,181.4 63.1,180.3 63,179.8C62.9,179.3 62.7,178.7 62.6,178.5C62.4,178.2 62.1,176.9 61.8,175.5C61.4,173.6 61.3,172.7 61.3,171.1C61.3,169.2 61.3,169 61.7,168.1C62.3,166.9 62.8,166.3 64,165.6C64.9,165.1 65,165.1 66.7,165.1C68.4,165.1 68.5,165.1 69.4,165.7C71.5,166.8 72.1,167.8 73,171C73.3,172 73.7,173.5 74,174.4C74.3,175.3 74.7,176.9 75,178C75.3,179 75.5,179.9 75.6,180C75.7,180.1 75.9,180.8 76,181.4C76.2,182.1 76.5,183 76.6,183.6C76.8,184.1 77.2,185.3 77.5,186.2C77.7,187.2 78.1,188.3 78.3,188.8C78.4,189.2 78.7,190.1 78.9,190.8C79.1,191.5 79.5,192.3 79.6,192.7C79.8,193.1 80.1,193.8 80.2,194.3C80.6,196.1 81.6,196.5 82,195.1C82.1,194.7 82.3,194.3 82.4,194.2C82.5,194 82.8,193.5 83.1,193C83.4,192.5 83.8,191.8 84,191.4C84.2,191 84.7,190.2 85,189.7C85.3,189.1 85.8,188.3 86,187.9C86.2,187.5 86.7,186.8 87,186.2C87.3,185.7 87.8,184.8 88.1,184.3C88.4,183.8 88.8,183.1 89,182.8C89.2,182.4 89.6,181.6 90,181C90.7,179.9 91.1,179.2 91.9,177.7C92.2,177.3 92.5,176.8 92.6,176.7C92.7,176.5 93,176.1 93.2,175.8C93.4,175.4 93.8,174.7 94.1,174.2C94.4,173.7 94.8,173 94.9,172.8C95,172.5 95.3,172 95.6,171.7C95.8,171.4 96,171 96,170.9C96,170.8 96.2,170.4 96.5,170.1C96.8,169.7 97,169.4 97,169.3C97,169.2 97.6,168.3 98.3,167.2C99,166.2 99.7,165.1 99.8,164.9C100.3,164.2 101.3,163.2 102,162.7C103.3,161.8 105.5,161.5 107.1,161.9C109.1,162.4 110.8,165 110.8,167.5C110.8,168.9 110.1,171.1 109.4,172.1C109.2,172.4 109,172.7 109,172.8C109,172.8 108.7,173.4 108.2,174.1C107.8,174.7 107.3,175.5 107.1,175.9C106.9,176.3 106.6,176.8 106.4,177.1C106.2,177.4 106,177.7 106,177.8C106,177.9 105.8,178.2 105.5,178.6C105.2,179 105,179.3 105,179.4C105,179.5 104.8,179.9 104.5,180.2C104.2,180.6 104,181 104,181.1C104,181.2 103.8,181.5 103.6,181.8C103.4,182 103,182.5 102.8,182.9C102,184.5 101.6,185.1 101.3,185.5C101.1,185.7 101,186 101,186.1C101,186.2 100.8,186.5 100.6,186.8C100.4,187 100.1,187.5 99.9,187.9C99.7,188.3 99.2,189.1 98.8,189.8C98.3,190.4 98,191 98,191C98,191.1 97.7,191.6 97.4,192C97.1,192.5 96.8,192.9 96.8,193C96.8,193.1 96.6,193.4 96.4,193.7C96.2,194 96,194.3 96,194.4C96,194.5 95.8,194.9 95.5,195.2C95.2,195.6 95,196 95,196.1C95,196.2 94.8,196.6 94.5,196.9C94.2,197.3 94,197.7 94,197.8C94,197.8 93.7,198.4 93.2,199.1C92.8,199.7 92.3,200.7 92,201.2C91.7,201.7 91.3,202.5 91,202.9C90.7,203.4 90.3,204.2 90,204.7C89.7,205.3 89.2,206.1 89,206.5C88.7,206.9 88.3,207.7 88,208.2C87.7,208.8 87.4,209.4 87.3,209.5C87.3,209.6 87,210 86.9,210.4C85.8,212.6 85.4,213.3 84.6,214.1C83.4,215.2 82.3,215.6 79.8,215.7C78,215.8 77.7,215.8 77.2,215.6ZM326.6,215.3C327.8,214.9 328.8,214 329,213.1C329.1,212.7 329.2,211.8 329.1,211C329,209.8 328.9,209.4 328.4,208.3C327.7,207.1 327.2,206.3 326.5,205.3C326.1,204.7 325,202.5 325,202.3C325,202.2 324.8,201.8 324.7,201.4C324.5,201 324.2,200.4 324.1,199.9C324,199.4 323.7,198.7 323.5,198.2C323.3,197.8 323.1,197.1 323,196.7C322.9,196.3 322.7,195.7 322.6,195.5C322.4,195.2 322.2,194.3 322.1,193.4C321.8,191.6 321.4,190.8 320,189.3C319.3,188.6 318.7,187.6 317.4,184.8C317.2,184.3 316.8,183.4 316.5,182.8C316.2,182.2 316,181.6 316,181.6C316,181.4 313.3,176 312.2,174.1C311.8,173.3 311.3,172.4 311.1,172.2C310.8,171.6 310.4,170.9 309.1,169C307.7,166.9 305.7,165.3 304.4,165.3C302.6,165.3 300.3,167.3 298.9,169.9C298.2,171.3 295.3,177.1 292.5,183.2C290.6,187.1 289.7,188.8 289,189.7C287.8,191.1 287.3,192.3 287.2,194.3C287.1,195.2 286.9,196.3 286.7,196.7C286.6,197.1 286.3,197.8 286.2,198.3C286,198.8 285.7,199.7 285.4,200.3C285.2,200.8 284.8,201.6 284.6,202.1C284.4,202.5 283.9,203.5 283.6,204.2C282.2,207 282,208.7 282.7,210.2C283.3,211.4 283.9,211.9 285.1,212.2C286.4,212.6 287,212.6 288.1,212.2C289.5,211.8 290.5,210.6 291.1,208.5C291.6,206.9 292.3,204.8 292.5,204.4C292.6,204.2 292.9,203.5 293.1,202.8C294.1,199.8 294.3,199.3 294.7,198.5C295.5,197.1 294.8,197.2 304.7,197.2L313.4,197.2L314.1,197.7C314.7,198.1 314.9,198.3 315.3,199.7C315.6,200.6 316,201.8 316.2,202.6C317.3,207.4 318.7,210.5 320.7,213.2C322.3,215.5 324.3,216.2 326.6,215.3ZM128.3,214.4C128.1,214.3 127.7,214.1 127.3,214C125.8,213.5 124.3,211.7 123.8,210C123.6,209.1 123.5,208.4 123.5,205.8C123.5,204.1 123.5,202.6 123.4,202.5C123.4,202.4 123.2,200.8 123.1,199.1C123,197.3 122.7,194.9 122.5,193.6C121.6,187.5 121.5,183.1 121.9,177.6C122.1,174.9 122.3,174.2 122.7,172.9C123.3,171.3 123.5,170.9 124.7,169.4C125.6,168.4 126.4,167.7 129.1,165.9C130.2,165.2 130.7,164.9 132.9,163.8C135.1,162.7 136.5,162.2 138.2,161.9C139.1,161.8 140.3,161.6 140.9,161.4C141.6,161.3 143,161.2 144.4,161.2C146.4,161.2 147,161.2 148.7,161.7C149.8,161.9 151.4,162.4 152.1,162.8C153.5,163.4 155.6,164.7 156.4,165.5C157.4,166.4 158.8,168.3 159.3,169.4C160,170.8 160.5,173.3 160.5,174.9C160.5,176.3 160,178.8 159.5,179.5C159.4,179.7 159.1,180.2 159,180.5C158.8,180.8 158.2,181.6 157.6,182.3C156.2,183.8 156.2,184.2 157.5,184.8C157.9,185 158.5,185.4 158.8,185.6C159,185.8 159.3,186 159.4,186C159.7,186 161.4,187.5 162,188.3C164.1,191.1 165.6,195.6 166.1,200.5C166.2,202 166.4,203.9 166.5,204.7C166.9,207.6 166.4,209.4 164.9,210.9C163.1,212.7 160.3,213.3 158,212.2C157.3,211.9 156.5,211.3 156,210.8C154.8,209.7 154.5,208.6 154.4,205.3C154.4,203.9 154.2,201.8 154.1,200.7C153.6,196.6 152.3,195 148.4,193.6L146.8,193L143.1,192.8C140.3,192.7 139,192.8 137.8,192.9C134.7,193.4 134.6,193.6 135,197.2C135.2,198.6 135.4,200.4 135.6,201.2C136,203.7 136.7,207.7 136.8,208.7C136.9,210.3 135.8,212.1 133.9,213.4C132.3,214.5 129.4,215 128.3,214.4ZM209.2,213.5C209.6,213.4 210.8,213.3 211.8,213.2C212.9,213.1 214.2,212.9 214.8,212.8C217.7,212.1 219.6,211.7 219.7,211.5C219.8,211.4 220.3,211.2 220.8,211.1C222.6,210.5 224.3,209.4 224.8,208.3C225.1,207.8 225.2,206.3 225,205.5C224.8,204.7 223.9,203.6 223.1,203.2C222.5,202.9 221.2,202.9 220.6,203.2C220.4,203.3 219.8,203.7 219.3,204.1C218.8,204.6 218,205.1 217.6,205.4C216.7,206 213.9,206.8 212.1,207C211.3,207.1 210.2,207.3 209.8,207.4C208.7,207.7 202.8,207.9 201.5,207.7C197,206.9 193.4,205.1 191.1,202.5C190.6,201.9 190,201.1 189.9,200.8C189.7,200.4 189.4,200 189.3,199.8C189.2,199.7 188.9,199 188.6,198.2L188.1,196.9L188.1,194C188.1,192.4 188.2,190.6 188.3,190.1C188.8,187.1 189.4,184.6 189.6,184.2C189.7,184 189.9,183.3 190,182.8C190.1,182.3 190.4,181.5 190.6,181.1C190.8,180.6 191,180.1 191,180C191,179.9 191.3,179.2 191.6,178.5C193.9,174 197.5,170.6 200.6,170C203.3,169.5 206.2,169.7 208.2,170.6C211.3,172 212.8,173.1 213.2,174.5C213.4,174.9 213.6,176.3 213.7,177.6C213.9,178.9 214.1,180.1 214.1,180.3C214.2,180.6 214.6,181 215,181.4C215.6,181.9 215.8,182 216.6,182C217.4,182 217.6,181.9 218.2,181.4C218.6,181 219.1,180.3 219.3,179.8C219.7,179 219.7,178.7 219.7,177.1C219.7,172.2 217.1,168.2 212.1,165.6C210,164.5 208.2,164.1 205.4,163.8C201.9,163.5 198.8,163.8 197,164.6C196.1,165 195.9,165.1 194.4,165.9C192.2,167.1 189.2,170 187.7,172.2C187.3,172.9 186.8,173.6 186.7,173.8C186.2,174.5 185,177.1 184.9,177.7C184.8,178 184.7,178.5 184.5,178.8C184.3,179.2 184.1,179.9 184,180.4C183.9,181 183.7,181.7 183.6,182C183.4,182.3 183.1,183.4 182.9,184.3C182.7,185.3 182.4,186.6 182.3,187.2C181.8,189 181.6,193.7 181.8,196.8C182,199 182.1,199.8 182.5,201C182.8,201.9 183,202.6 183,202.7C183,202.9 184.2,205 184.9,206.1C185.5,206.9 187.5,209 187.7,209C187.7,209 188.1,209.3 188.5,209.6C189.3,210.2 192.2,211.7 193.3,212C193.7,212.1 194.5,212.3 195,212.5C196.8,213.2 200.9,213.6 204.9,213.6C206.9,213.6 208.9,213.6 209.2,213.5ZM82.2,212.5C82.9,212 83.7,210.9 83.9,210.1C84,209.8 84.2,209.4 84.3,209.2C84.4,208.9 85,208 85.4,207.1C85.9,206.1 86.5,205.1 86.7,204.8C87.6,203.3 88,202.7 88,202.5C88,202.5 88.2,202.1 88.5,201.8C88.8,201.4 89,201.1 89,201C89,200.8 90.8,197.7 91.6,196.5C91.8,196.2 92,195.8 92,195.7C92,195.6 92.2,195.3 92.4,195.1C92.6,194.8 92.9,194.3 93.1,194C93.2,193.7 93.6,193 93.9,192.5C94.2,192 94.6,191.3 94.8,190.9C95,190.6 95.3,190.1 95.5,189.8C95.7,189.6 96.3,188.5 97,187.3C97.7,186.2 98.4,185 98.6,184.7C98.8,184.3 99.1,183.8 99.3,183.5C100.2,181.9 101.3,180.2 101.6,179.7C101.8,179.3 102.2,178.6 102.6,178C103,177.4 103.4,176.7 103.6,176.4C103.8,176.2 104,175.9 104,175.8C104,175.7 104.7,174.6 105.5,173.5C107.6,170.5 108.5,167.8 107.7,166.3C107.3,165.4 106.6,164.7 105.9,164.5C105.4,164.3 105.2,164.3 104.2,164.7C103,165.2 102.4,165.7 101.5,167C100.4,168.8 100,169.3 100,169.5C100,169.5 99.9,169.7 99.7,169.9C99.5,170.1 99.2,170.5 99,170.9C98.8,171.3 98.4,172 98,172.6C97.6,173.1 97.2,173.8 97.1,174.2C96.9,174.5 96.6,175 96.4,175.2C96.2,175.5 96,175.8 96,175.9C96,176 95.9,176.3 95.7,176.5C95.5,176.8 95.2,177.3 94.9,177.7C93.9,179.6 93.4,180.4 93,181.1C92.6,181.8 92.2,182.4 91.1,184.4C90.8,185 90.4,185.7 90.2,186.1C90,186.5 89.7,187 89.5,187.2C89.3,187.4 89.1,187.9 88.9,188.2C88.8,188.5 88.4,189.2 88,189.8C87.6,190.4 87.2,191.2 87,191.6C86.8,192 86.4,192.7 86,193.3C85.6,193.9 85.1,194.8 84.9,195.2C84.7,195.6 84.2,196.3 83.9,196.8C83.2,198.1 82.1,200.1 81.5,201.7C80.9,203.1 80.6,203.4 80.1,203C79.9,202.9 79.8,202.5 79.7,202.2C79.7,201.9 79.5,201.1 79.3,200.6C79.1,200 79,199.5 79,199.3C79,199.2 78.8,198.7 78.6,198.3C78.4,197.9 78.1,197.1 77.9,196.7C77.8,196.2 77.6,195.7 77.5,195.5C77.4,195.3 77.1,194.6 77,194C76.7,192.9 76.3,191.6 75.6,189.7C75.4,189.1 75.1,188.1 74.9,187.6C74.8,187 74.5,186.1 74.3,185.5C73.2,182 73,181.3 73,181.1C73,181 72.8,180.2 72.5,179.3C71.8,176.9 71.3,175.2 71,173.7C70.3,170.5 69.9,169.3 69.3,168.8C68.5,168.1 67.8,167.8 66.6,167.8C65.5,167.8 65.4,167.8 64.7,168.5C64.1,169.2 64,169.3 63.9,170.6C63.8,172.1 64,174 64.5,175.6C64.7,176.1 64.9,177 65,177.6C65.1,178.1 65.3,178.7 65.4,178.9C65.4,179 65.7,179.8 65.9,180.6C66.1,181.4 66.5,182.5 66.6,183.1C66.8,183.6 67.2,184.9 67.5,185.8C67.8,186.8 68.2,188.1 68.5,188.8C68.8,189.5 69,190.3 69.1,190.6C69.1,190.8 69.3,191.4 69.5,191.8C69.7,192.1 69.9,192.8 70,193.2C70.1,193.7 70.3,194.3 70.4,194.5C70.6,194.8 70.8,195.5 71,196.1C71.2,196.6 71.5,197.5 71.6,198C72.5,200.2 72.7,200.6 72.9,201.3C73,201.7 73.3,202.4 73.5,202.8C73.7,203.3 73.9,203.8 73.9,204.1C74,204.4 74.2,204.9 74.4,205.4C74.7,205.8 74.9,206.4 75.1,206.8C76,209.4 77.3,211.9 77.8,212.6C78.2,213 78.3,213 79.8,213C81.2,212.9 81.5,212.8 82.2,212.5ZM132.1,211.3C132.5,211.1 133.2,210.5 133.5,210.2C134,209.5 134,209.4 134,208.1C133.9,207.4 133.7,206.2 133.5,205.6C133.3,204.9 133.1,203.7 133,202.9C132.9,202.1 132.7,200.9 132.6,200.2C132.2,198.3 131.9,194.5 132,192.6C132,192.1 133.4,191.2 134.5,191C135,190.9 135.9,190.7 136.4,190.5C139.5,189.5 145.3,189.6 148.7,190.8C151.2,191.6 152.4,192.2 154,193.6C155,194.5 155.7,195.7 156.3,197.6C157,199.8 157,200.2 157.1,204.6L157.2,208.4L157.9,209.2C158.3,209.8 158.7,210 159.4,210.3C160.3,210.5 160.3,210.5 161.4,210.3C162.3,210 162.6,209.8 163.2,209.2L163.9,208.5L163.8,205C163.7,203.1 163.6,201.2 163.5,200.7C163.4,200.2 163.2,199 163.1,198.1C162.8,196.4 161.9,193.5 161.3,192.4C161.2,192 161,191.7 161,191.6C161,191.2 159.5,189.3 158.9,188.8C157.9,188.1 156.4,187.2 155.6,186.9C155.2,186.8 154.8,186.5 154.5,186.4C154.3,186.3 153.7,186.1 153,185.9C150.7,185.4 149.8,185.1 149.7,184.8C149.6,184.3 150,184 150.6,183.9C151.3,183.8 152.3,183.3 153.5,182.4C155.4,181.1 156.7,179.6 157.3,177.9C157.7,177 157.8,176.7 157.8,174.8C157.8,173 157.7,172.6 157.3,171.6C156.8,170.2 155.8,168.7 154.9,167.8C154.1,167.1 152.5,165.8 152.3,165.8C152.2,165.8 151.9,165.7 151.7,165.5C151.4,165.3 150.3,165 149.2,164.7C147.5,164.2 146.9,164.1 144.6,164C141.7,164 140.8,164.1 138,164.8C135.5,165.5 133.7,166.3 130.9,168.1C128.3,169.6 126.6,171.1 125.8,172.5C125.1,173.8 125.1,173.8 124.8,176.7C124.5,179.3 124.4,185.1 124.7,187.4C124.8,188.2 124.9,189.9 125,191.2C125.1,192.4 125.3,194 125.4,194.8C126.1,198.9 126.3,202.7 126.2,207.3L126.1,209.1L126.7,210C127.5,211.2 128.6,211.8 130.1,211.8C131,211.8 131.3,211.8 132.1,211.3ZM261.1,197.7C260.5,197.6 259.6,197.4 259.2,197.3C257.4,196.9 255.2,196.8 249.5,196.9L243.4,196.9L242.4,196.4C240.9,195.6 240.1,194.7 239.8,193.2C239.4,191.6 239.4,190.8 239.8,189.4C240.1,188.4 240.4,188 241,187.3C242.3,186 242.7,185.9 247.8,185.5C250.9,185.3 254.2,185.1 258.8,185.1L265.4,185.1L266.5,185.6C268,186.5 268.7,187.3 269.2,188.9C270,191.3 269.7,192.7 268.2,194.7C266.4,197.1 264.1,198 261.1,197.7ZM264.7,194.4C266,193.6 266.9,192.1 266.9,190.9C266.9,190.2 266.8,189.9 266.4,189.3C265.4,187.9 265.4,187.9 261.4,187.9C259.4,187.8 254.8,187.9 251.2,188L244.8,188.2L243.9,188.6C242.6,189.2 242.2,190.1 242.2,191.5C242.2,192.5 242.2,192.7 242.6,193.2C243.4,194.3 243.4,194.3 250.1,194.2C255.5,194.2 256.2,194.2 257.8,194.5C260,194.9 260.4,194.9 262.3,195C263.7,195 263.8,195 264.7,194.4ZM302.4,189C300.7,189 299.2,188.9 299,188.8C298.7,188.6 298.8,188 299.3,186.9C299.6,186.3 299.8,185.7 299.9,185.5C300,185.3 300.3,184.5 300.6,183.8C300.9,183.1 301.3,182.3 301.5,181.9C301.7,181.5 302.1,180.6 302.5,179.8C302.8,179.1 303.2,178.2 303.3,177.9C303.7,176.8 304.6,176.5 304.9,177.3C305,177.5 305.4,178.3 305.8,179.1C306.2,179.8 306.9,181.2 307.4,182.2C307.9,183.3 308.4,184.3 308.6,184.5C309.3,185.8 310.5,188.4 310.5,188.6C310.5,189.2 310,189.2 302.4,189ZM131.5,184.8C131.1,184.6 131.1,184.5 130.9,181.2C130.7,177 130.9,175.9 131.7,174.7C132.1,174.3 132.6,173.7 133,173.5C133.3,173.2 133.9,172.8 134.2,172.5C134.6,172.2 135,172 135.1,172C135.2,172 135.6,171.8 136.1,171.6C136.5,171.4 137.3,171.1 137.9,170.9C138.4,170.8 139.1,170.6 139.2,170.5C139.7,170.2 142.8,169.8 144.3,169.8C146,169.8 147.3,170.1 148.5,170.8C149.7,171.5 150.8,172.8 151,173.8C151.2,174.8 151.2,176.3 150.9,176.9C150.5,177.8 148.6,179.3 147,180.1C146.6,180.3 146.1,180.5 145.9,180.6C145.6,180.8 144.3,181.4 142.3,182.1C141.7,182.3 140.6,182.7 139.9,182.9C139.1,183.1 138.2,183.4 137.8,183.6C137.4,183.7 136.6,183.9 136.1,184C135.5,184.1 134.7,184.3 134.3,184.4C133,184.8 131.9,185 131.5,184.8ZM135,181.4C135.2,181.3 135.9,181.1 136.4,181C137,180.9 137.8,180.7 138.2,180.5C138.7,180.3 139.6,180 140.2,179.8C142.4,179.1 143.6,178.7 143.7,178.5C143.9,178.4 144.3,178.2 144.7,178.1C146.4,177.5 148.3,175.9 148.3,175.1C148.3,174.3 147.7,173.5 146.9,173.1C146.3,172.9 145.8,172.8 143.7,172.8C141.1,172.8 139.9,173 138.8,173.5C138.4,173.7 137.8,173.8 137.5,173.9C137.3,174 136.8,174.2 136.4,174.4C136.1,174.6 135.7,174.8 135.6,174.9C135,175.1 134,176.3 133.8,176.9C133.7,177.3 133.7,178.4 133.7,179.3C133.7,180.8 133.7,181 134,181.3C134.4,181.7 134.4,181.7 135,181.4ZM246.2,134.6C245.4,134.5 243.7,134.2 242.5,134.1C240.3,133.9 237.9,133.3 235.2,132.6C234.5,132.4 233.3,132.1 232.7,131.9C230.1,131.4 227.5,130.2 223.9,128C223,127.4 222.1,126.9 220.8,126.2C220,125.8 219,125 217.6,123.7C216.9,123.1 215.9,122.2 215.3,121.7C214.7,121.1 213.9,120.2 213.5,119.5C213,118.9 212.6,118.3 212.5,118.3C212.2,118.3 211.7,118.8 210.3,120.3C209.1,121.5 207.2,123.2 205.2,124.7C203.8,125.7 203.1,126.1 200.7,127.2C200.2,127.5 199.2,128 198.6,128.3C198,128.7 197.4,129 197.3,129C197.2,129 196.8,129.2 196.4,129.4C196.1,129.6 195.5,129.9 195.1,130C194.7,130.1 194.1,130.4 193.7,130.6C192.7,131.1 189.2,131.8 186.2,132.1C184.8,132.2 183.2,132.5 182.6,132.6C180.9,133 173.6,133 171.9,132.6C171.3,132.5 169.3,132.2 167.6,132C165.8,131.8 163.6,131.5 162.7,131.3C161.1,130.9 160.4,130.6 157.6,129.3C157,129.1 156.5,128.8 156.3,128.8C156.2,128.7 155.6,128.4 155.1,128.1C154.5,127.8 153.3,127.1 152.4,126.7C151.4,126.2 150.3,125.5 149.9,125.2C146.2,122.4 144.7,121.1 142.4,118.3C140.4,116 139,113.9 139,113.2C139,113.1 138.8,112.6 138.5,112C137.8,110.6 137,108.9 137,108.7C137,108.6 136.8,108 136.6,107.3C136.2,106.3 135.8,103.5 135.8,102.5C135.8,102.3 135.9,102 136.1,101.7L136.3,101.3L141.1,101.3L145.8,101.3L146.3,101.8C146.8,102.2 146.9,102.4 147,103.9C147.1,104.8 147.3,105.9 147.5,106.3C147.7,106.7 148,107.6 148.2,108.2C149.4,111.8 149.5,111.9 151.5,114.3C152.9,115.9 154.5,117.4 155.6,118.1C155.8,118.3 156.4,118.6 156.8,118.9C159.6,120.9 161,121.7 162,122C162.4,122.1 163.1,122.3 163.6,122.5C166,123.4 170.5,124.5 173,124.8C174.9,125.1 179.4,125.1 181.2,124.8C183.7,124.5 186.6,123.8 189,123C190.3,122.6 191.7,122.2 192,122.1C192.6,122 194,121.2 195.8,120.1C197.1,119.3 197.5,119 198.8,117.9C201.9,115.4 202.4,114.9 203.3,113.6C203.8,112.8 204.3,112.1 204.5,111.8C204.8,111.4 205.7,109.5 206.4,108C206.9,106.9 207.4,104.4 207.3,104.1C207.1,103.6 207.5,102.5 207.9,102.3C208.2,102 209,102 212.8,102C215.5,102 217.5,102.1 217.7,102.2C218.1,102.4 218.3,103.1 218.4,104.7C218.5,106.4 219.1,108.7 219.5,109.6C219.7,110 219.9,110.5 220.1,110.8C220.2,111.2 220.6,111.8 221,112.3C221.4,112.8 222.1,113.9 222.6,114.6C223.5,115.9 225.2,117.6 228.7,120.5C229.8,121.4 232.9,122.9 236.1,124C236.6,124.2 237.1,124.4 237.4,124.5C237.6,124.6 238.2,124.9 238.8,125C239.4,125.2 240.3,125.4 240.8,125.6C244.5,126.6 251.1,126.9 255.8,126.2C257.3,126 258.8,125.7 259.2,125.6C259.6,125.4 260.4,125.2 261.1,125C262.2,124.7 263.7,124.1 265.1,123.5C265.7,123.2 267.3,122.5 268.5,122.1C270,121.5 273.7,118.7 276.2,116.2C277.7,114.6 281,109 281,108C281,107.8 281.2,107.1 281.4,106.3C281.6,105.6 281.8,104.6 281.8,104.2C281.8,102.8 281.7,102.8 287.2,102.8C293,102.8 292.8,102.8 292.7,104.7C292.7,105.4 292.6,106.5 292.4,107.2C292.3,108 292.1,109.1 292,109.8C291.9,110.4 291.6,111.3 291.4,111.8C291.2,112.3 291,112.7 291,112.8C291,113 289.3,115.7 288,117.3C287.6,117.8 287.2,118.5 287.1,118.8C286.7,119.7 285.7,120.8 284.8,121.6C284.3,121.9 283.3,122.9 282.5,123.6C281.7,124.3 280.8,125.1 280.5,125.3C279.7,125.9 278.2,126.8 277.6,127.1C277.3,127.2 276.6,127.6 276.1,128C275.5,128.4 274.9,128.8 274.6,128.9C274.3,129 273.9,129.3 273.7,129.4C272.5,130.3 269.1,131.6 267.2,131.9C266.9,132 265.8,132.2 264.9,132.5C264,132.8 262.4,133.2 261.4,133.4C259.7,133.8 258.8,133.9 253.8,134.6C251.6,134.9 248.1,134.9 246.2,134.6ZM116.6,106.7C115.4,106.5 113.8,106 113.1,105.5C112.9,105.3 112.6,105.2 112.5,105.2C112.2,105.2 109.9,103 109.1,102C108.1,100.7 107,99.1 107,98.9C107,98.9 106.8,98.3 106.5,97.7C105.9,96.6 105.9,96.5 105.9,94.3C105.8,92.9 105.9,91.6 106,90.9C106.2,89.8 107.1,87.9 107.8,86.8C108.1,86.4 108.6,85.8 108.8,85.4C110,83.6 111.1,82.6 112.8,82C113.2,81.8 113.6,81.6 113.7,81.5C113.9,81.4 114.7,81.1 115.6,80.7C117.2,80.2 117.5,80.2 119.5,80.2C121.5,80.2 121.8,80.2 123.1,80.7C123.8,80.9 124.8,81.3 125.2,81.6C125.6,81.8 126.1,82 126.3,82.1C127.1,82.3 128.4,83.3 129.1,84.1C130.9,86.3 132.3,88.9 132.8,90.8C133,91.6 133,95.7 132.8,96.5C132.2,99 129.8,102.6 127.7,104.2C126,105.5 125.6,105.7 124.3,106.2C123.2,106.7 122.9,106.7 120.3,106.8C118.8,106.8 117.1,106.7 116.6,106.7ZM305.5,106.7C304.1,106.5 302.4,106 301.9,105.5C301.7,105.3 301.4,105.1 301.2,105C300.6,104.7 299.6,103.9 298.4,102.7C297.6,101.9 297.2,101.3 296.6,100.1C296.1,99.2 295.6,98 295.4,97.5C295,96.7 294.9,96.4 294.9,94.3C294.8,93 294.9,91.5 295,91C295.2,90 296.1,87.6 296.5,87.1C296.6,87 296.8,86.6 297,86.2C297.4,85.2 298.2,84.2 299,83.5C299.8,82.9 301.2,82.1 301.7,81.9C301.9,81.8 302.3,81.6 302.5,81.5C302.8,81.3 303.7,80.9 304.6,80.7C306,80.2 306.4,80.2 308.4,80.2C310.4,80.2 310.7,80.2 311.9,80.7C315.1,81.8 316.8,82.9 318.4,84.8C319.6,86.2 320,86.7 320.7,88C321.4,89.2 321.7,93.8 321.3,96.8C320.9,99.3 320.3,100.3 317.6,103C315.1,105.3 314.7,105.7 312.8,106.3C311.8,106.6 311.2,106.7 309.2,106.7C307.8,106.8 306.2,106.7 305.5,106.7Z"/></svg><div class="crumb">Avatar catalog</div><div class="sp"></div>
+<div class="pill"><span id="dot" class="dot"></span><span id="conn">Connecting</span></div><div class="next"><span id="clock">–</span> UTC</div></div></div>
+<main>
+<section class="kpis">
+ <div class="card"><div class="lab">Avatars in the catalog</div><div class="val" data-n="entries">–</div><div class="sub"><span class="up" id="todayNet">–</span> today</div></div>
+ <div class="card"><div class="lab">New avatars today</div><div class="val" data-n="addedToday">–</div><div class="sub"><span data-n="addedHour">–</span> this hour</div></div>
+ <div class="card"><div class="lab">Removed today</div><div class="val" data-n="removedToday">–</div><div class="sub">no longer on VRChat · <span data-n="removedHour">–</span> this hour</div></div>
+ <div class="card"><div class="lab">Contributions today</div><div class="val" data-n="contribToday">–</div><div class="sub">batches sent by VRC-A users</div></div>
+</section>
+<section class="cols">
+  <div class="card" id="aG"><div class="ch-h"><span class="ch-t">Catalog size</span><span class="ch-s">per day, last 30 days (UTC)</span></div><div class="chart" id="cGrowth"></div></div>
+  <div class="card" id="aN"><div class="ch-h"><span class="ch-t">New avatars</span><span class="ch-s">per hour, last 48 h (UTC)</span></div><div class="chart" id="cNew"></div></div>
+  <div class="card" id="aR"><div class="ch-h"><span class="ch-t">Removed avatars</span><span class="ch-s">per hour, last 48 h (UTC)</span></div><div class="chart" id="cRemoved"></div></div>
+  <div class="card" id="aQ"><div class="ch-t">Waiting to be applied</div><div class="q">
+   <div class="n">Contribution batches</div><div data-n="pendingBatches">–</div>
+   <div class="n">Reports</div><div data-n="reports">–</div>
+   <div class="n">Updates to existing avatars</div><div data-n="calmWaiting">–</div>
+   <div class="n">Last update</div><div id="last">–</div>
+   <div class="n">Next update</div><div id="next">–</div></div></div>
+  <div class="card" id="aF"><div class="ch-h"><span class="ch-t">Live activity</span><span class="ch-s">times in UTC+0</span></div><ul class="feed" id="feed"><li class="m">Waiting for the next update…</li></ul></div>
+</section>
+</main>
+<div id="tip"></div>
+<script>
+var H=location.origin,shown={},snapH=null,stats={hours:[],days:[]},lastAt=0,DAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'],MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function p2(n){return (n<10?'0':'')+n}
+function utcTime(t,sec){var d=new Date(t);return p2(d.getUTCHours())+':'+p2(d.getUTCMinutes())+(sec?':'+p2(d.getUTCSeconds()):'')}
+function fmt(n){return Math.round(n).toLocaleString()}
+function setN(k,v){if(v==null||isNaN(v))return;var from=shown[k]==null?v:shown[k],t0=performance.now();
+ function st(t){var u=Math.min(1,(t-t0)/1100),e=1-Math.pow(1-u,3),c=from+(v-from)*e;shown[k]=c;
+  var els=document.querySelectorAll('[data-n="'+k+'"]');for(var i=0;i<els.length;i++)els[i].textContent=fmt(c);if(u<1)requestAnimationFrame(st)}
+ requestAnimationFrame(st)}
+var tip=document.getElementById('tip');
+function showTip(x,y,val,label){tip.textContent='';var b=document.createElement('b');b.textContent=val;var l=document.createElement('div');l.className='tl';l.textContent=label;
+ tip.appendChild(b);tip.appendChild(l);tip.style.opacity=1;var w=tip.offsetWidth;tip.style.left=Math.min(innerWidth-w-8,Math.max(8,x-w/2))+'px';tip.style.top=(y-tip.offsetHeight-12)+'px'}
+function hideTip(){tip.style.opacity=0}
+var NS='http://www.w3.org/2000/svg';function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e}
+function niceStep(m){if(m<=0)return 1;var p=Math.pow(10,Math.floor(Math.log10(m))),f=m/p;return (f<=1?1:f<=2?2:f<=5?5:10)*p}
+function niceScale(max){var st=Math.max(1,niceStep(max/4)),top=Math.max(st,Math.ceil(max/st)*st);return {max:top,ticks:Math.round(top/st)}}
+function frame(box,ymin,ymax,ticks){var W=box.clientWidth,Hh=box.clientHeight,L=46,R=8,T=8,B=22;box.textContent='';var svg=el('svg',{viewBox:'0 0 '+W+' '+Hh});box.appendChild(svg);
+ var g=el('g',{'class':'grid'}),ax=el('g',{'class':'axis'});svg.appendChild(g);svg.appendChild(ax);
+ for(var i=0;i<=ticks;i++){var v=ymin+(ymax-ymin)*i/ticks,y=T+(Hh-T-B)*(1-i/ticks);g.appendChild(el('line',{x1:L,x2:W-R,y1:y,y2:y}));
+  var t=el('text',{x:L-8,y:y+4,'text-anchor':'end'});t.textContent=v>=10000?(Math.round(v/100)/10).toLocaleString()+'k':fmt(v);ax.appendChild(t)}
+ return {svg:svg,ax:ax,W:W,H:Hh,L:L,R:R,T:T,B:B,y:function(v){return T+(Hh-T-B)*(1-(v-ymin)/(ymax-ymin))}}}
+function emptyMsg(box,msg){box.textContent='';var d=document.createElement('div');d.className='empty';d.textContent=msg;box.appendChild(d)}
+function hourLabel(h){var d=new Date(h+':00:00Z');return DAYS[d.getUTCDay()]+' '+p2(d.getUTCHours())+':00 UTC'}
+function bars(box,rows,opts){ // rows: [{k,label,v}]
+ if(!rows.length||rows.every(function(r){return !r.v})){emptyMsg(box,opts.empty);return}
+ var sc=niceScale(Math.max.apply(null,rows.map(function(r){return r.v}).concat([opts.line||0]))),max=sc.max,f=frame(box,0,max,sc.ticks),n=48,slot=(f.W-f.L-f.R)/n,bw=Math.max(2,slot-2);
+ var first=rows.length-n;
+ rows.forEach(function(r,i){var x=f.L+(i-first)*slot+1,y=f.y(r.v),h=f.y(0)-y;if(x<f.L-0.5)return;
+  var over=opts.line&&r.v>opts.line,rect=el('rect',{x:x,y:h>0?y:f.y(0)-1,width:bw,height:Math.max(1,h),rx:Math.min(2,bw/2),fill:over?'var(--warn)':'var(--accent)'});f.svg.appendChild(rect);
+  var hit=el('rect',{x:x-1,y:f.T,width:slot,height:f.H-f.T-f.B,fill:'transparent'});
+  hit.addEventListener('pointermove',function(e){rect.setAttribute('opacity','.75');showTip(e.clientX,e.clientY,fmt(r.v)+(opts.unit||''),r.label+(over?' · over the free pace':''))});
+  hit.addEventListener('pointerleave',function(){rect.removeAttribute('opacity');hideTip()});f.svg.appendChild(hit)});
+ if(opts.line){var ly=f.y(opts.line);f.svg.appendChild(el('line',{x1:f.L,x2:f.W-f.R,y1:ly,y2:ly,stroke:'var(--warn)','stroke-width':1.5,'stroke-dasharray':'5 4'}))}
+ [0,24].forEach(function(o){var i=first+o;if(i>=0&&rows[i]){var t=el('text',{x:f.L+o*slot,y:f.H-6});t.textContent=hourLabel(rows[i].k);f.ax.appendChild(t)}});
+ var t=el('text',{x:f.W-f.R,y:f.H-6,'text-anchor':'end'});t.textContent='now';f.ax.appendChild(t)}
+function line(box,rows,opts){
+ if(rows.length<2){emptyMsg(box,opts.empty);return}
+ var vs=rows.map(function(r){return r.v}),lo=Math.min.apply(null,vs),hi=Math.max.apply(null,vs),st=niceStep(Math.max(40,(hi-lo)*1.3)/4),y0=Math.floor(lo/st)*st,y1=Math.max(y0+st,Math.ceil(hi/st)*st);
+ var f=frame(box,y0,y1,Math.round((y1-y0)/st)),n=rows.length,X=function(i){return f.L+(f.W-f.L-f.R)*(n==1?0:i/(n-1))};
+ var d=rows.map(function(r,i){return (i?'L':'M')+X(i)+' '+f.y(r.v)}).join(' ');
+ f.svg.appendChild(el('path',{d:d,fill:'none',stroke:'var(--accent)','stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round'}));
+ var dot=el('circle',{r:5,fill:'var(--accent)',stroke:'var(--card)','stroke-width':2,opacity:0}),hair=el('line',{y1:f.T,y2:f.H-f.B,stroke:'var(--edge)','stroke-width':1,opacity:0});
+ f.svg.appendChild(hair);f.svg.appendChild(dot);
+ var last=el('circle',{cx:X(n-1),cy:f.y(rows[n-1].v),r:4,fill:'var(--accent)',stroke:'var(--card)','stroke-width':2});f.svg.appendChild(last);
+ var hit=el('rect',{x:f.L,y:f.T,width:f.W-f.L-f.R,height:f.H-f.T-f.B,fill:'transparent'});f.svg.appendChild(hit);
+ hit.addEventListener('pointermove',function(e){var b=f.svg.getBoundingClientRect(),px=(e.clientX-b.left)*(f.W/b.width),i=Math.round((px-f.L)/((f.W-f.L-f.R)/Math.max(1,n-1)));i=Math.max(0,Math.min(n-1,i));
+  var x=X(i),y=f.y(rows[i].v);hair.setAttribute('x1',x);hair.setAttribute('x2',x);hair.setAttribute('opacity',1);dot.setAttribute('cx',x);dot.setAttribute('cy',y);dot.setAttribute('opacity',1);
+  showTip(b.left+x*(b.width/f.W),b.top+y*(b.height/f.H),fmt(rows[i].v)+' avatars',rows[i].label)});
+ hit.addEventListener('pointerleave',function(){hair.setAttribute('opacity',0);dot.setAttribute('opacity',0);hideTip()});
+ [0,n-1].forEach(function(i){var t=el('text',{x:X(i),y:f.H-6,'text-anchor':i?'end':'start'});t.textContent=rows[i].label;f.ax.appendChild(t)})}
+function hourRows(key){var map={};stats.hours.forEach(function(h){map[h.h]=h});var out=[],now=new Date();now.setUTCMinutes(0,0,0);
+ for(var i=47;i>=0;i--){var d=new Date(now.getTime()-i*3600e3),k=d.toISOString().slice(0,13);out.push({k:k,label:hourLabel(k),v:map[k]?map[k][key]:0})}return out}
+function draw(){
+ var started=stats.hours.length?' (since '+hourLabel(stats.hours[0].h)+')':'';
+ bars(document.getElementById('cNew'),hourRows('a'),{empty:'Fills in as avatars are added'+started,unit:' new'});
+ bars(document.getElementById('cRemoved'),hourRows('r'),{empty:'Fills in as avatars are removed'+started,unit:' removed'});
+ var days=stats.days.slice(-30).filter(function(d){return d.e}).map(function(d){return {label:MON[+d.d.slice(5,7)-1]+' '+(+d.d.slice(8,10)),v:d.e}});
+ if(days.length===1&&snapH)days.unshift({label:'start',v:days[0].v});
+ line(document.getElementById('cGrowth'),days,{empty:'Draws a point each day the catalog changes'})}
+function today(){var d=new Date().toISOString().slice(0,10),t=stats.days.filter(function(x){return x.d===d})[0]||{a:0,r:0,c:0};
+ var hk=new Date().toISOString().slice(0,13),hh=stats.hours.filter(function(x){return x.h===hk})[0]||{a:0,r:0};
+ setN('addedToday',t.a);setN('removedToday',t.r);setN('contribToday',t.c||0);setN('addedHour',hh.a);setN('removedHour',hh.r);var net=t.a-t.r,e=document.getElementById('todayNet');e.textContent=(net>=0?'+':'−')+fmt(Math.abs(net));e.className=net>=0?'up':'dn'}
+function snap(h){snapH=h;setN('entries',h.entries);setN('pendingBatches',h.pendingBatches);setN('reports',h.reports);setN('calmWaiting',h.calmWaiting);if(h.lastFlush)lastAt=Date.parse(h.lastFlush)}
+function refresh(){fetch(H+'/health',{cache:'no-store'}).then(function(r){return r.json()}).then(snap).catch(function(){});
+ fetch(H+'/live/stats',{cache:'no-store'}).then(function(r){return r.json()}).then(function(s){stats=s;today();draw()}).catch(function(){})}
+function ago(ms){var s=Math.max(0,Math.round(ms/1000));return s<60?s+' s ago':Math.round(s/60)+' min ago'}
+setInterval(function(){if(lastAt)document.getElementById('last').textContent=ago(Date.now()-lastAt);document.getElementById('next').textContent='in '+(60-new Date().getUTCSeconds())+' s';document.getElementById('clock').textContent=utcTime(Date.now(),true)},1000);
+var feed=document.getElementById('feed'),empty=true;
+function item(ev){var li=document.createElement('li'),h=document.createElement('div');h.className='h';var b=document.createElement('b'),tm=document.createElement('span');tm.className='tm';
+ tm.textContent=utcTime(ev.at,true)+' UTC';
+ if(ev.t==='run'){var p=[];if(ev.added)p.push('+'+fmt(ev.added)+' new');if(ev.removed)p.push('−'+fmt(ev.removed)+' removed');if(ev.calm)p.push(ev.calm+' updated');
+  b.textContent=p.length?p.join(' · '):'Catalog updated';h.appendChild(b);h.appendChild(tm);li.appendChild(h);
+  var m=document.createElement('div');m.className='m';var nb=ev.batchCount!=null?ev.batchCount:(ev.batches||[]).length;m.textContent=(nb?nb+' contribution batch'+(nb===1?'':'es')+' · ':'')+'applied in '+((ev.ms||0)/1000).toFixed(1)+' s';li.appendChild(m);
+  var names=ev.names||[];if(!names.length)(ev.batches||[]).forEach(function(x){(x.names||[]).forEach(function(n){names.push(n)})});
+  var total=ev.nameCount||names.length;
+  if(names.length){var nm=document.createElement('div');nm.className='nm';
+   function badges(list){list.forEach(function(n){var s=document.createElement('span');s.className='badge';s.textContent=n;nm.appendChild(s);nm.appendChild(document.createTextNode(' '))})}
+   badges(names.slice(0,6));
+   if(names.length>6){var more=document.createElement('button');more.className='more';more.textContent='Show all '+fmt(total);
+    more.onclick=function(){more.remove();badges(names.slice(6));if(total>names.length){var x=document.createElement('span');x.className='tm';x.textContent='+'+fmt(total-names.length)+' more not listed';nm.appendChild(x)}};nm.appendChild(more)}
+   li.appendChild(nm)}
+  return li}
+ if(ev.t==='report'){b.textContent='Avatar reported '+(ev.status==='renamed'?'renamed':'unavailable');h.appendChild(b);h.appendChild(tm);li.appendChild(h);return li}
+ return null}
+function add(ev,live){var li=item(ev);if(!li)return;if(empty){feed.textContent='';empty=false}feed.insertBefore(li,feed.firstChild);while(feed.children.length>60)feed.removeChild(feed.lastChild);
+ if(live&&ev.t==='run'){lastAt=ev.at;if(ev.entries)setN('entries',ev.entries);setN('pendingBatches',ev.pending);setN('reports',ev.reports);setN('calmWaiting',ev.calmWaiting);setTimeout(refresh,1500)}}
+function connect(){var ws=new WebSocket(H.replace(/^http/,'ws')+'/live/ws'),dot=document.getElementById('dot'),c=document.getElementById('conn'),ping;
+ ws.onopen=function(){ws.send('hello');feed.textContent='';empty=true;dot.className='dot on';c.textContent='Live';ping=setInterval(function(){try{ws.send('ping')}catch(e){}},30000)};
+ ws.onmessage=function(m){var ev=JSON.parse(m.data);if(ev.t==='history')(ev.events||[]).forEach(function(e){add(e,false)});else add(ev,true)};
+ ws.onclose=function(){clearInterval(ping);dot.className='dot off';c.textContent='Reconnecting';setTimeout(connect,3000)}}
+var rz;addEventListener('resize',function(){clearTimeout(rz);rz=setTimeout(draw,150)});
+refresh();setInterval(refresh,60000);connect();
+</script></body></html>
+`;
