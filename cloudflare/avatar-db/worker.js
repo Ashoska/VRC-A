@@ -1782,6 +1782,8 @@ async function flushR2(env) {
       // can EXPAND a row to see every avatar. Stored in a DEDICATED `recent` key, not meta, so the
       // frequently-polled /health stays tiny.
       names: fids.map((fid) => (batch[fid] && batch[fid].name) || "").filter(Boolean),
+      // v52 live page: name + avatar id, so each name links to its VRChat page (not kept in `recent`).
+      items: fids.filter((fid) => batch[fid] && batch[fid].name).map((fid) => ({ n: batch[fid].name, a: batch[fid].id || "" })),
     });
   }
   const admuKeys = [];
@@ -2256,6 +2258,7 @@ async function flushR2(env) {
       shards: dirtyPrefixes.length, idx: idxWrites, calm: calmCleared,
       // Every avatar name in this run's contributions (up to 300; nameCount says how many there were).
       names: recentBatches.flatMap((b) => b.names || []).slice(0, 300),
+      ids: recentBatches.flatMap((b) => (b.items || []).map((x) => (/^avtr_[0-9a-f-]{36}$/.test(x.a) ? x.a : ""))).slice(0, 300),
       nameCount: recentBatches.reduce((n, b) => n + (b.n || 0), 0),
       batchCount: recentBatches.length,
       pending: Math.max(0, pendNames.length - pendCleared), reports: Math.max(0, repNames.length - repCleared),
@@ -2277,7 +2280,7 @@ async function flushR2(env) {
     const sigOf = (b) => `${b.by || ""}|${b.n || 0}|${(b.names || []).join("")}`;
     const seen = new Set(prev.map(sigOf));
     const fresh = [];
-    for (const b of recentBatches) { const s = sigOf(b); if (!seen.has(s)) { seen.add(s); fresh.push(b); } }
+    for (const b of recentBatches) { const s = sigOf(b); if (!seen.has(s)) { seen.add(s); const { items, ...keep } = b; fresh.push(keep); } }
     if (fresh.length) {
       const next = [...fresh.reverse(), ...prev].slice(0, 20);
       await hubPut(env, "recent", JSON.stringify(next));
@@ -2504,8 +2507,9 @@ main{max-width:1240px;margin:0 auto;padding:12px 16px 20px}
 .feed li{border-top:1px solid var(--edge);padding:10px 0;animation:in .45s ease-out}.feed li:first-child{border-top:0}
 .feed .h{display:flex;gap:8px;align-items:baseline}.feed .h b{font-weight:500}.feed .tm{color:var(--faint);font-size:12px;margin-left:auto;white-space:nowrap}
 .feed .m{color:var(--muted);font-size:12.5px;margin-top:2px}.feed .nm{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:7px}
+a.badge:hover{border-color:var(--accent);color:var(--accent-soft)}
 .more{background:none;border:0;color:var(--accent-soft);font:500 12px Roboto,system-ui,sans-serif;cursor:pointer;padding:2px 4px}.more:hover{text-decoration:underline}
-.badge{display:inline-block;font-size:12.5px;line-height:1.35;font-weight:500;padding:4px 10px;border-radius:999px;background:var(--raised);border:1px solid var(--edge);color:var(--text);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{text-decoration:none;display:inline-block;font-size:12.5px;line-height:1.35;font-weight:500;padding:4px 10px;border-radius:999px;background:var(--raised);border:1px solid var(--edge);color:var(--text);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @keyframes in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
 #tip{position:fixed;pointer-events:none;background:var(--raised);border:1px solid var(--edge);border-radius:10px;padding:7px 10px;font-size:12.5px;opacity:0;transition:opacity .12s;z-index:5;white-space:nowrap}
 #tip b{font-size:15px;font-variant-numeric:tabular-nums}#tip .tl{color:var(--muted)}
@@ -2517,10 +2521,10 @@ main{max-width:1240px;margin:0 auto;padding:12px 16px 20px}
 <div class="pill"><span id="dot" class="dot"></span><span id="conn">Connecting</span></div><div class="next"><span id="clock">–</span> UTC</div></div></div>
 <main>
 <section class="kpis">
- <div class="card"><div class="lab">Avatars in the catalog</div><div class="val" data-n="entries">–</div><div class="sub"><span class="up" id="todayNet">–</span> today</div></div>
- <div class="card"><div class="lab">New avatars today</div><div class="val" data-n="addedToday">–</div><div class="sub"><span data-n="addedHour">–</span> this hour</div></div>
- <div class="card"><div class="lab">Removed today</div><div class="val" data-n="removedToday">–</div><div class="sub">no longer on VRChat · <span data-n="removedHour">–</span> this hour</div></div>
- <div class="card"><div class="lab">Contributions today</div><div class="val" data-n="contribToday">–</div><div class="sub">batches sent by VRC-A users</div></div>
+ <div class="card"><div class="lab">Avatars</div><div class="val" data-n="entries">–</div><div class="sub"><span class="up" id="todayNet">–</span> today</div></div>
+ <div class="card"><div class="lab">New today</div><div class="val" data-n="addedToday">–</div><div class="sub"><span data-n="addedHour">–</span> this hour</div></div>
+ <div class="card"><div class="lab">Removed today</div><div class="val" data-n="removedToday">–</div><div class="sub"><span data-n="removedHour">–</span> this hour</div></div>
+ <div class="card"><div class="lab">Contributions today</div><div class="val" data-n="contribToday">–</div><div class="sub">sent by VRC-A users</div></div>
 </section>
 <section class="cols">
   <div class="card" id="aG"><div class="ch-h"><span class="ch-t">Catalog size</span><span class="ch-s">per day, last 30 days (UTC)</span></div><div class="chart" id="cGrowth"></div></div>
@@ -2552,12 +2556,12 @@ function hideTip(){tip.style.opacity=0}
 var NS='http://www.w3.org/2000/svg';function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e}
 function niceStep(m){if(m<=0)return 1;var p=Math.pow(10,Math.floor(Math.log10(m))),f=m/p;return (f<=1?1:f<=2?2:f<=5?5:10)*p}
 function niceScale(max){var st=Math.max(1,niceStep(max/4)),top=Math.max(st,Math.ceil(max/st)*st);return {max:top,ticks:Math.round(top/st)}}
-function frame(box,ymin,ymax,ticks){var W=box.clientWidth,Hh=box.clientHeight,L=46,R=8,T=8,B=22;box.textContent='';var svg=el('svg',{viewBox:'0 0 '+W+' '+Hh});box.appendChild(svg);
+function frame(box,ymin,ymax,ticks){box.classList.remove('isEmpty');var W=box.clientWidth,Hh=box.clientHeight,L=(ymax>=10000&&(ymax-ymin)<4000)?62:46,R=8,T=8,B=22;box.textContent='';var svg=el('svg',{viewBox:'0 0 '+W+' '+Hh});box.appendChild(svg);
  var g=el('g',{'class':'grid'}),ax=el('g',{'class':'axis'});svg.appendChild(g);svg.appendChild(ax);
  for(var i=0;i<=ticks;i++){var v=ymin+(ymax-ymin)*i/ticks,y=T+(Hh-T-B)*(1-i/ticks);g.appendChild(el('line',{x1:L,x2:W-R,y1:y,y2:y}));
-  var t=el('text',{x:L-8,y:y+4,'text-anchor':'end'});t.textContent=v>=10000?(Math.round(v/100)/10).toLocaleString()+'k':fmt(v);ax.appendChild(t)}
+  var t=el('text',{x:L-8,y:y+4,'text-anchor':'end'});t.textContent=(v>=10000&&(ymax-ymin)>=4000)?(Math.round(v/100)/10).toLocaleString()+'k':fmt(v);ax.appendChild(t)}
  return {svg:svg,ax:ax,W:W,H:Hh,L:L,R:R,T:T,B:B,y:function(v){return T+(Hh-T-B)*(1-(v-ymin)/(ymax-ymin))}}}
-function emptyMsg(box,msg){box.textContent='';var d=document.createElement('div');d.className='empty';d.textContent=msg;box.appendChild(d)}
+function emptyMsg(box,msg){box.textContent='';box.classList.add('isEmpty');var d=document.createElement('div');d.className='empty';d.textContent=msg;box.appendChild(d)}
 function hourLabel(h){var d=new Date(h+':00:00Z');return DAYS[d.getUTCDay()]+' '+p2(d.getUTCHours())+':00 UTC'}
 function bars(box,rows,opts){ // rows: [{k,label,v}]
  if(!rows.length||rows.every(function(r){return !r.v})){emptyMsg(box,opts.empty);return}
@@ -2593,8 +2597,7 @@ function draw(){
  bars(document.getElementById('cNew'),hourRows('a'),{empty:'Fills in as avatars are added'+started,unit:' new'});
  bars(document.getElementById('cRemoved'),hourRows('r'),{empty:'Fills in as avatars are removed'+started,unit:' removed'});
  var days=stats.days.slice(-30).filter(function(d){return d.e}).map(function(d){return {label:MON[+d.d.slice(5,7)-1]+' '+(+d.d.slice(8,10)),v:d.e}});
- if(days.length===1&&snapH)days.unshift({label:'start',v:days[0].v});
- line(document.getElementById('cGrowth'),days,{empty:'Draws a point each day the catalog changes'})}
+  line(document.getElementById('cGrowth'),days,{empty:'The line starts once there are two days of data (UTC)'})}
 function today(){var d=new Date().toISOString().slice(0,10),t=stats.days.filter(function(x){return x.d===d})[0]||{a:0,r:0,c:0};
  var hk=new Date().toISOString().slice(0,13),hh=stats.hours.filter(function(x){return x.h===hk})[0]||{a:0,r:0};
  setN('addedToday',t.a);setN('removedToday',t.r);setN('contribToday',t.c||0);setN('addedHour',hh.a);setN('removedHour',hh.r);var net=t.a-t.r,e=document.getElementById('todayNet');e.textContent=(net>=0?'+':'−')+fmt(Math.abs(net));e.className=net>=0?'up':'dn'}
@@ -2612,10 +2615,13 @@ function item(ev){var li=document.createElement('li'),h=document.createElement('
   var names=ev.names||[];if(!names.length)(ev.batches||[]).forEach(function(x){(x.names||[]).forEach(function(n){names.push(n)})});
   var total=ev.nameCount||names.length;
   if(names.length){var nm=document.createElement('div');nm.className='nm';
-   function badges(list){list.forEach(function(n){var s=document.createElement('span');s.className='badge';s.textContent=n;s.title=n;if(more&&more.parentNode)nm.insertBefore(s,more);else nm.appendChild(s)})}var more=null;
-   badges(names.slice(0,6));
+   var ids=ev.ids||[];
+   function badges(from,to){for(var i=from;i<Math.min(to,names.length);i++){var id=ids[i],s=document.createElement(id?'a':'span');s.className='badge';s.textContent=names[i];
+     if(id){s.href='https://vrchat.com/home/avatar/'+id;s.target='_blank';s.rel='noopener';s.title=names[i]+' (opens on VRChat)'}else s.title=names[i];
+     if(more&&more.parentNode)nm.insertBefore(s,more);else nm.appendChild(s)}}var more=null;
+   badges(0,6);
    if(names.length>6){more=document.createElement('button');more.className='more';more.textContent='Show all '+fmt(total);
-    more.onclick=function(){more.remove();badges(names.slice(6));if(total>names.length){var x=document.createElement('span');x.className='tm';x.textContent='+'+fmt(total-names.length)+' more not listed';nm.appendChild(x)}};nm.appendChild(more)}
+    more.onclick=function(){more.remove();badges(6,names.length);if(total>names.length){var x=document.createElement('span');x.className='tm';x.textContent='+'+fmt(total-names.length)+' more not listed';nm.appendChild(x)}};nm.appendChild(more)}
    li.appendChild(nm)}
   return li}
  if(ev.t==='report'){b.textContent='Avatar reported '+(ev.status==='renamed'?'renamed':'unavailable');h.appendChild(b);h.appendChild(tm);li.appendChild(h);return li}

@@ -13,6 +13,11 @@ name = "vrca-avatar-db"
 main = "worker.js"
 compatibility_date = "2026-08-18"
 
+# The main domain serves this Worker (custom domain, attached 2026-10-30): https://gremlininc.app/ is the live
+# page (the root is the live page only on this host; every other endpoint answers here too). Kept in config so a
+# deploy never drops it.
+routes = [{ pattern = "gremlininc.app", custom_domain = true }]
+
 # The pending-queue KV store (Cloudflare -> Storage & databases -> KV).
 [[kv_namespaces]]
 binding = "AVATAR_KV"
