@@ -150,9 +150,23 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
     val totals = health?.let { "＋${it.optInt("totalAdded")}  ·  －${it.optInt("totalRemoved")}" } ?: "—"
     val lastFlush = health?.optString("lastFlush", "—") ?: "—"
     val fillsWaiting = health?.let { "%,d".format(it.optInt("unfilled")) } ?: "—"
-    val fontsWaiting = health?.let { "%,d".format(it.optInt("foldPending")) } ?: "—"
+    // v53 search (D1 + name files) and the guaranteed cache-clear queue, from the same /health poll.
+    val search = health?.optJSONObject("search")
+    val searchState = search?.let { s ->
+        val f = s.optJSONObject("fill"); val last = s.optJSONObject("last")
+        when {
+            f != null && !f.optBoolean("done") && f.optInt("phase") == 1 -> "copying ${"%,d".format(f.optInt("next"))}/4096 · ${"%,d".format(f.optInt("avatars"))} avatars"
+            f != null && !f.optBoolean("done") -> "name files ${"%,d".format(f.optInt("next"))}/4096"
+            s.optBoolean("d1") -> "live · last ${last?.optInt("applied") ?: 0} changes, ${last?.optInt("d1Written") ?: 0} rows"
+            else -> "off"
+        }
+    } ?: "—"
+    val cacheClears = search?.let { s ->
+        val last = s.optJSONObject("last")
+        if (s.optBoolean("purgeStuck")) "STUCK ${durLabel(last?.optLong("purgeOldestMs") ?: 0L)}"
+        else "ok · last ${last?.optInt("purged") ?: 0} cleared, ${last?.optInt("purgeFailed") ?: 0} retrying"
+    } ?: "—"
     val backup = health?.optString("backup", "")?.ifBlank { "—" } ?: "—"
-    val indexQueue = health?.let { "%,d keys · %,d font keys".format(it.optInt("iqDepth"), it.optInt("iqpDepth")) } ?: "—"
     // Recount status — visible so you can watch the periodic reconcile correct a drifted "unfilled"
     // (phantom-backlog) count. "idle" = count is current; "running N/4096" = a recount lap is in progress.
     val recount = health?.let {
@@ -214,8 +228,8 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
             AdminLabeledRow("Totals", totals)
             AdminLabeledRow("Pending", pending)
             AdminLabeledRow("Fills waiting", fillsWaiting)
-            AdminLabeledRow("Fonts waiting", fontsWaiting)
-            AdminLabeledRow("Index queue", indexQueue)
+            AdminLabeledRow("Search", searchState)
+            AdminLabeledRow("Cache clears", cacheClears)
             AdminLabeledRow("Backup", backup)
             AdminLabeledRow("Last flush", lastFlush)
             AdminLabeledRow("Recount", recount)
