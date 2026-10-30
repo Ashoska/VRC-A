@@ -55,10 +55,9 @@ GH_REPO = "VRC-A"
 GH_REF = "VRC-A-Official"
 
 [triggers]
-# Every minute (v50, user 2026-10-30: new avatars become clonable/searchable ~1 min after they're
-# sent). Measured cost: the same as every 2 min at today's volume and up to ~10k new avatars/day
-# (each avatar gets its own writes either way); the per-tick overhead (KV prefix lists, lock, meta)
-# stays inside the plan's included KV ops. Only at ~50k+ new avatars/day does it write noticeably
-# more than 2 min (less batching per file); see avatar-catalog-worker.md (v50). Maintenance steps
-# keep their ~2-min pace (cronTasksIfDue).
-crons = ["* * * * *"]
+# Every 2 minutes. v50 tried every minute (2026-10-30) and it can't work on KV: KV shows other
+# machines a value up to ~60 s old, so the next run still saw the finished run's `flushlock`
+# (skipped every other minute) and could read the `meta` record from before the previous run and
+# overwrite it (lost counts). 2 min keeps every run past that window. 1 min needs the lock + meta
+# moved to a strongly consistent Durable Object (planned with the live feed, avatar-catalog-worker.md).
+crons = ["*/2 * * * *"]
