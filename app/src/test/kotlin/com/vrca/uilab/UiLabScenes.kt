@@ -186,6 +186,16 @@ object UiLabScenes {
             )
             "status-ok" -> VrchatPipelineState.statusPageState = null
             "alerts" -> addSampleAlerts(ctx)
+            // Avatar search (v53): 130 sample results for any query, 500-per-batch rules (so 3 pages, no more).
+            "avatar-search" -> com.vrca.vrchat.AvatarSearch.labBatches = { q, offset ->
+                val names = listOf("Moontail", "Moon Fox", "Rexouium", "Nardoragon", "Avali", "Protogen", "Kitsune Neko", "Shep", "Rusk", "Taidum")
+                val plats = listOf(listOf("PC", "Quest"), listOf("PC"), listOf("PC", "Quest", "iOS"), listOf("Quest"))
+                val all = (0 until 130).map { i ->
+                    com.vrca.vrchat.AvatarSearch.Result(id = "avtr_%08d-0000-0000-0000-000000000000".format(i), name = names[i % names.size] + if (i >= names.size) " ${i / names.size + 1}" else "",
+                        author = listOf("Ghurst", "Ashoska", "Blue", "Mira")[i % 4], imageUrl = "", platforms = plats[i % plats.size], authorId = "usr_x", imageFileId = "", source = "catalog")
+                }
+                com.vrca.vrchat.AvatarSearch.Batch(all.drop(offset).take(500), false, offset)
+            }
             "no-alerts" -> InAppAlertState.dismissAll(ctx)
             "sending" -> {
                 d.vm.setAfkEnabledFlag(true); d.vm.setCycleEnabledFlag(true); d.vm.updateTimeEnabled(true)
