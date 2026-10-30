@@ -22,17 +22,12 @@ import kotlin.math.sin
  *  - B, almost dozing: the lids sink until nearly shut and the head droops; it catches itself (eyes pop wide, a bob).
  *  - C, slow cat blink: a long content blink; the eyes close into soft happy curves, a small smile shows, a slight tilt.
  *
- * This is the one source: the app plays AVDs (`boot_cat_calm_0..3.xml`) SAMPLED from [pose] by the UI Lab (`genavd`,
- * BootCatAvdGen), so they run on the RenderThread and keep moving while the main thread is busy (user: no lag); the
- * lab, which can't play AVDs, draws [drawBg] (`BgLoop` in BootCat).
+ * Drawn in Compose (`BgLoop` in BootCat), the clock read only while drawing; the same code runs in the app and the UI Lab.
  */
 internal object BootCatBg {
     const val BEAT_MS = 4800f
     const val LAP_MS = 2400f
     private val ORDERS = arrayOf("ABCBAC", "BCACBA", "CABACB", "ACBCAB")
-    /** One full run of a variant's beats (the AVD loops this). */
-    val SEQUENCE_MS = BEAT_MS * 6
-    const val VARIANTS = 4
     const val Y = 13.6f
     val X = floatArrayOf(9.3f, 14.7f)
     val PIVOT = Offset(12f, 21.5f)
@@ -101,8 +96,7 @@ internal object BootCatBg {
     val CLIP_BOTTOM = DOT_Y + 1.2f
     /**
      * The happy closed lid, drawn at lid offset 0 (shift it by [lidY] - lidY(0)): a quad from x-1.5 to x+1.5, ends
-     * 0.3 up, middle 1.3 down. Only moves and fades are animated (no shape morph: the AVD can then be played and
-     * checked in the UI Lab), so this curve fades in over the flat lid by [CURVE] instead of bending out of it.
+     * 0.3 up, middle 1.3 down. It fades in over the flat lid by [CURVE].
      */
     fun curvedLid(x: Float) = floatArrayOf(x - 1.5f, lidY(0f) - 0.3f, x, lidY(0f) + 1.3f, x + 1.5f, lidY(0f) - 0.3f)
     /** The small smile under the eyes (fades in by [SMILE]). */
@@ -116,7 +110,7 @@ internal object BootCatBg {
         drawPath(tmp, c, style = Stroke(w, cap = StrokeCap.Round))
     }
 
-    /** Draws loop [variant] at [ms] (24-unit grid), the same model the AVD plays. [light] draws the running light. */
+    /** Draws loop [variant] at [ms] (24-unit grid). [light] draws the running light. */
     fun DrawScope.drawBg(head: Path, light: DrawScope.(Float) -> Unit, c: Color, variant: Int, ms: Float) {
         pose(variant, ms, pose)
         val eye = c.copy(alpha = c.alpha * 0.7f)
@@ -126,7 +120,9 @@ internal object BootCatBg {
             val dx = pose[DX]; val dy = pose[DY]; val lid = lidY(pose[LOWER]); val shift = lid - lidY(0f); val cv = pose[CURVE]
             for (x0 in X) {
                 val x = x0 + dx
-                clipRect(x - 2f, lid + dy, x + 2f, CLIP_BOTTOM + dy) { drawCircle(eye, DOT_R, Offset(x, DOT_Y + dy)) }
+                // The dot starts below the lid line's bottom edge: the two see-through layers never overlap (a
+                // brighter second shade showed where they did).
+                clipRect(x - 2f, lid + 0.75f + dy, x + 2f, CLIP_BOTTOM + dy) { drawCircle(eye, DOT_R, Offset(x, DOT_Y + dy)) }
                 if (cv < 1f) drawLine(eye.copy(alpha = eye.alpha * (1f - cv)), Offset(x - 1.5f, lid + dy), Offset(x + 1.5f, lid + dy), 1.5f, StrokeCap.Round)
                 if (cv > 0f) quad(curvedLid(x), shift + dy, eye.copy(alpha = eye.alpha * cv), 1.5f)
             }

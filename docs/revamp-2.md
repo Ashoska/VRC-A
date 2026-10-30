@@ -11,7 +11,7 @@ checked in the UI Lab and merged before the next.
   ears as the recurring touch, one small detail that takes the state colour (`BootIcons`).
 - Status shown by the boot cats (`BootCat`: thinking / result faces / reactions) wherever the app shows
   the state of something; colour is never the only signal.
-- Motion read while drawing only; RenderThread loops (AVD) for anything that must move while the app
+- Motion read while drawing only; Compose loops (the user dropped AVDs, 2026-10-30) for anything that must move while the app
   is busy; every page passes the lab `perf` check.
 - Process per page: mock-up sheet (every state) → user approval → build → lab screenshots / recording →
   merge. Sheets for users come from the lab, not hand-made mocks.

@@ -26,9 +26,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.PathParser
-import androidx.compose.ui.viewinterop.AndroidView
 import com.vrca.ui.theme.GremlinColors
 import kotlinx.coroutines.delay
 import kotlin.math.PI
@@ -40,10 +38,10 @@ import kotlin.math.sin
 /**
  * The boot rows' state mark: a little VRC-A cat whose face says how the check went (user design,
  * 2026-10-22; head = the tester's ear sketch on a round body). While a check runs it THINKS: a light
- * runs round the head, the eyes look around, ponder and follow the light ([BootCatEyes]). That loop is an
- * AnimatedVectorDrawable ([THINK], sampled from [BootCatEyes] by the UI Lab's `genavd`) so it keeps moving
- * on the RenderThread while the main thread is busy; everything else (waking up, landing on a result,
- * retrying, dozing off, the all-done hop) is drawn here with every animation read while drawing.
+ * runs round the head, the eyes look around, ponder and follow the light ([BootCatEyes]). Every loop and
+ * transition is drawn in Compose with the clock read only while drawing (the user chose this over pre-built
+ * AnimatedVectorDrawables, 2026-10-30: smaller and simpler; a long main-thread stall can pause them, which the
+ * debug stall recorder would show).
  *
  * [variant] picks the loop's beat order so rows checking at once don't move in lockstep; [hopDelayMs] is
  * when this row's all-done hop starts after [celebrate] turns true (one after another down the list).
@@ -51,7 +49,7 @@ import kotlin.math.sin
 @Composable
 internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Boolean = false, hopDelayMs: Long = 0, startFrom: Mark? = null) {
     val accent = MaterialTheme.colorScheme.primary
-    val v = Math.floorMod(variant, THINK.size)
+    val v = Math.floorMod(variant, BootCatEyes.VARIANTS)
     // The mark before this one (what a transition starts from) and how far the transition is.
     // [startFrom]: appear already landing from that mark (the download cat hands over to Done this way).
     var from by remember { mutableStateOf(startFrom) }
@@ -85,9 +83,7 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
     Box(modifier) {
         if (looping) {
             Crossfade(shown == Mark.Background, label = "catLoop") { calm ->
-                // AVDs on the RenderThread (no main-thread lag); the lab can't play them, so it draws their sources.
-                if (BootCatLab.drawLoops) { if (calm) BgLoop(v, accent, Modifier.fillMaxSize()) else LabLoop(v, accent, Modifier.fillMaxSize()) }
-                else CatLoop(if (calm) CALM[v] else THINK[v], accent, Modifier.fillMaxSize())
+                if (calm) BgLoop(v, accent, Modifier.fillMaxSize()) else ThinkLoop(v, accent, Modifier.fillMaxSize())
             }
         } else if (shown == Mark.Waiting) {
             // Asleep, waiting for its turn: breathing, nodding off, dreaming (BootCatSleep).
@@ -125,32 +121,9 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
     }
 }
 
-/** The thinking / calm loop: the AnimatedVectorDrawable in an ImageView, tinted [color]. */
+/** The thinking cat ([BootCatEyes]), looping from when it appears. */
 @Composable
-private fun CatLoop(res: Int, color: Color, modifier: Modifier) {
-    AndroidView(
-        factory = { c ->
-            android.widget.ImageView(c).apply {
-                val d = c.getDrawable(res)!!.mutate()
-                setImageDrawable(d)
-                (d as? android.graphics.drawable.Animatable)?.start()
-            }
-        },
-        update = { it.imageTintList = android.content.res.ColorStateList.valueOf(color.toArgb()) },
-        onRelease = { (it.drawable as? android.graphics.drawable.Animatable)?.stop() },
-        modifier = modifier
-    )
-}
-
-/**
- * The UI Lab's JVM Android doesn't play AnimatedVectorDrawables, so the lab sets [drawLoops] and the
- * thinking / background loops are drawn here instead, from the same [BootCatEyes] / [BootCatBg] the AVDs are sampled from.
- * Never set by the app.
- */
-object BootCatLab { @JvmField var drawLoops = false }
-
-@Composable
-private fun LabLoop(v: Int, accent: Color, modifier: Modifier) {
+private fun ThinkLoop(v: Int, accent: Color, modifier: Modifier) {
     val head = remember { headPath() }
     val eyes = remember { FloatArray(10) }
     val ms = remember { mutableStateOf(0L) }
@@ -161,7 +134,7 @@ private fun LabLoop(v: Int, accent: Color, modifier: Modifier) {
         withTransform({ scale(s, s, Offset.Zero) }) {
             val stroke = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round)
             drawPath(head, accent.copy(alpha = 0.25f), style = stroke)
-            val grow = (t / 400f).coerceIn(0f, 1f) // linear, like the AVD's grow-in
+            val grow = (t / 400f).coerceIn(0f, 1f) // the light grows in, linear
             drawLight(head, accent.copy(alpha = grow), ((t / 1200f) + BootCatEyes.LIGHT_PHASE[v]) % 1f, 0.28f * grow)
             BootCatEyes.pose(v, t, eyes)
             with(BootCatEyes) { drawEyes(eyes, accent) }
@@ -169,7 +142,7 @@ private fun LabLoop(v: Int, accent: Color, modifier: Modifier) {
     }
 }
 
-/** The background cat drawn from [BootCatBg] (the lab's stand-in for its AVD), looping from when it appears. */
+/** The background cat ([BootCatBg]), looping from when it appears. */
 @Composable
 private fun BgLoop(v: Int, accent: Color, modifier: Modifier) {
     val head = remember { headPath() }
@@ -326,14 +299,6 @@ private fun DrawScope.drawLight(head: Path, c: Color, at: Float, len: Float) {
 }
 
 
-/** Loads the cat loops once (their first load parses XML and animators), like the boot spinner. */
-fun preloadBootCat(ctx: android.content.Context) {
-    (THINK + CALM).forEach { runCatching { ctx.getDrawable(it) } }
-}
-
-/** The background cat's loops, sampled from [BootCatBg] by the UI Lab's `genavd`. */
-private val CALM = intArrayOf(com.vrca.R.drawable.boot_cat_calm_0, com.vrca.R.drawable.boot_cat_calm_1, com.vrca.R.drawable.boot_cat_calm_2, com.vrca.R.drawable.boot_cat_calm_3)
-private val THINK = intArrayOf(com.vrca.R.drawable.boot_cat_think_0, com.vrca.R.drawable.boot_cat_think_1, com.vrca.R.drawable.boot_cat_think_2, com.vrca.R.drawable.boot_cat_think_3)
 private const val HEAD = "M3.92,10.46 L4.3,3 L8.2,7.1 Q12,5.1 15.8,7.1 L19.9,2.6 L20.08,10.46 A8.6,8.6 0 1,1 3.92,10.46 Z"
 private const val Y0 = 13.6f
 private const val FRAME = 1000f / 30f
