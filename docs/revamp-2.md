@@ -60,6 +60,14 @@ revamped with that page. A page is DONE only when everything listed under it is 
     after it inherit it.
 11. **Admin**: all tabs, the admin UI kit, user detail; the Config tab's VRC-A servers maintenance
     switch is a placeholder for this.
+    User wish (2026-10-30): the states should feel live and reactive, not static text. Every bot,
+    queue and server state should move the moment it changes (counters ticking, bots shown working /
+    idle / rate-limited / stopped as it happens, the shard each one is on, pushes landing), using the
+    Boot Cat-style marks and the "everything shown is watched state" rule. The Bots tab also drops its
+    leftovers from before Worker v49 (the "Liveness queued" number, "✓ checked" wording); its push
+    readout is now "+new ~calm ✓font −removed". Data that is already free to watch: the local bot
+    progress (`AvatarCatalogSweep` RoleView), the flush readout, the Worker `/health` poll (also
+    `writesToday`, `calmWaiting`). Any faster polling or new listener needs a cost check first.
 
 Leftovers to delete (no callers): `ButtonOverlay`, `AboutScreen`, `DependenciesScreen`,
 `SettingsScreen` (`ui/settings/`), `MainScreen` (`ui/conversation/`). Checked and removed when the
