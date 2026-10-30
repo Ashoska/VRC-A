@@ -2628,8 +2628,12 @@ function item(ev){var li=document.createElement('li'),h=document.createElement('
      if(lnk){s.href='https://vrchat.com/home/avatar/'+it.a;s.target='_blank';s.rel='noopener';s.title=nmTxt+' (opens on VRChat)'}else s.title=nmTxt+(kind==='rem'?' (no longer on VRChat)':'');
      if(more&&more.parentNode)nm.insertBefore(s,more);else nm.appendChild(s)}}
    badges(0,6);
-   if(list.length>6){more=document.createElement('button');more.className='more';more.textContent='Show all '+fmt(total);
-    more.onclick=function(){more.remove();badges(6,list.length);if(total>list.length){var x=document.createElement('span');x.className='tm';x.textContent='+'+fmt(total-list.length)+' more (list shows the first 300)';nm.appendChild(x)}};nm.appendChild(more)}
+   if(list.length>6){more=document.createElement('button');more.className='more';more.textContent='Show all '+fmt(total);nm.appendChild(more);var extra=[],open=false;
+    more.onclick=function(){open=!open;
+     if(open){var before=nm.children.length;badges(6,list.length);for(var k=nm.children.length-1;k>=0;k--){var c=nm.children[k];if(c!==more&&extra.indexOf(c)<0&&k>=6)extra.push(c)}
+      if(total>list.length){var x=document.createElement('span');x.className='tm';x.textContent='+'+fmt(total-list.length)+' more (list shows the first 300)';nm.insertBefore(x,more);extra.push(x)}
+      more.textContent='Show less'}
+     else{extra.forEach(function(c){c.remove()});extra=[];more.textContent='Show all '+fmt(total)}}}
    li.appendChild(g)}
   group(ev.addedItems,ev.added,'add','Added');
   group(ev.removedItems,ev.removed,'rem','Removed');
