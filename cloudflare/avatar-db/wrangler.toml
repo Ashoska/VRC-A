@@ -17,6 +17,9 @@ compatibility_date = "2026-08-18"
 # page (the root is the live page only on this host; every other endpoint answers here too). Kept in config so a
 # deploy never drops it.
 routes = [{ pattern = "gremlininc.app", custom_domain = true }]
+# KEEP: the apps and admin bots call the workers.dev address. With `routes` set, wrangler turns workers.dev OFF
+# unless this says otherwise (that happened 2026-10-30: error 1042 on every app/bot call for ~12 min).
+workers_dev = true
 
 # The pending-queue KV store (Cloudflare -> Storage & databases -> KV).
 [[kv_namespaces]]
