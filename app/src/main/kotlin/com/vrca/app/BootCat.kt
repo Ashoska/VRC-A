@@ -11,10 +11,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -58,6 +60,13 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
     // Skipped, Done and Warn idle (BootCatSkip, BootCatDone, BootCatWarn) once their landing has finished.
     var idle by remember { mutableStateOf(idles(mark) && startFrom == null) }
     val t = remember { Animatable(if (startFrom != null) 0f else Float.MAX_VALUE) }
+    // When the thinking / background loop started (written by the loop), so a landing can carry its light on
+    // from where it was instead of it snapping off: [lightAt] = its lap position at the switch (-1 = none).
+    val loopStart = remember { longArrayOf(0L) }
+    var lightAt by remember { mutableFloatStateOf(-1f) }
+    var calmLight by remember { mutableStateOf(false) }
+    // How strong the outline was before the landing (the loops draw a faint one), so it eases up instead of jumping.
+    var fromOutline by remember { mutableFloatStateOf(1f) }
     LaunchedEffect(Unit) {
         if (startFrom != null) {
             val dur = transitionMs(startFrom, mark); t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing))
@@ -66,8 +75,22 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
     }
     LaunchedEffect(mark) {
         if (mark == shown) return@LaunchedEffect
+        val dur = transitionMs(shown, mark)
+        if (dur <= 0f) {
+            // No landing (Working <-> Background, back to sleep): switch straight over. Turning the loop off for a frame
+            // here drew one frame of the result landing (a small solid cat) before the Background loop.
+            from = shown; shown = mark
+            looping = mark == Mark.Working || mark == Mark.Background
+            idle = idles(mark)
+            return@LaunchedEffect
+        }
+        if (looping) {
+            val el = (withFrameMillis { it } - loopStart[0]).toFloat()
+            calmLight = shown == Mark.Background
+            lightAt = if (calmLight) (el / 2400f) % 1f else (el / 1200f + BootCatEyes.LIGHT_PHASE[v]) % 1f
+            fromOutline = if (calmLight) 0.18f else 0.25f
+        } else { lightAt = -1f; fromOutline = 1f }
         from = shown; shown = mark
-        val dur = transitionMs(from, mark)
         looping = false; idle = false
         t.snapTo(0f)
         t.animateTo(dur, tween(dur.toInt(), easing = LinearEasing))
@@ -83,7 +106,7 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
     Box(modifier) {
         if (looping) {
             Crossfade(shown == Mark.Background, label = "catLoop") { calm ->
-                if (calm) BgLoop(v, accent, Modifier.fillMaxSize()) else ThinkLoop(v, accent, Modifier.fillMaxSize())
+                if (calm) BgLoop(v, accent, Modifier.fillMaxSize(), loopStart) else ThinkLoop(v, accent, Modifier.fillMaxSize(), loopStart)
             }
         } else if (shown == Mark.Waiting) {
             // Asleep, waiting for its turn: breathing, nodding off, dreaming (BootCatSleep).
@@ -115,7 +138,7 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
                 FailLoop(v, { markColor(Mark.Failed, accent) }, Modifier.fillMaxSize())
             } else {
                 val head = remember { headPath() }
-                Canvas(hopLayer) { drawCat(head, from, shown, t.value, accent) }
+                Canvas(hopLayer) { drawCat(head, from, shown, t.value, accent, lightAt, calmLight, fromOutline) }
             }
         }
     }
@@ -123,11 +146,11 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
 
 /** The thinking cat ([BootCatEyes]), looping from when it appears. */
 @Composable
-private fun ThinkLoop(v: Int, accent: Color, modifier: Modifier) {
+private fun ThinkLoop(v: Int, accent: Color, modifier: Modifier, loopStart: LongArray) {
     val head = remember { headPath() }
     val eyes = remember { FloatArray(10) }
     val ms = remember { mutableStateOf(0L) }
-    LaunchedEffect(Unit) { val start = androidx.compose.runtime.withFrameMillis { it }; while (true) androidx.compose.runtime.withFrameMillis { ms.value = it - start } }
+    LaunchedEffect(Unit) { val start = androidx.compose.runtime.withFrameMillis { it }; loopStart[0] = start; while (true) androidx.compose.runtime.withFrameMillis { ms.value = it - start } }
     Canvas(modifier) {
         val t = ms.value.toFloat()
         val s = size.minDimension / 24f
@@ -144,10 +167,10 @@ private fun ThinkLoop(v: Int, accent: Color, modifier: Modifier) {
 
 /** The background cat ([BootCatBg]), looping from when it appears. */
 @Composable
-private fun BgLoop(v: Int, accent: Color, modifier: Modifier) {
+private fun BgLoop(v: Int, accent: Color, modifier: Modifier, loopStart: LongArray) {
     val head = remember { headPath() }
     val ms = remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) { val t0 = androidx.compose.runtime.withFrameMillis { it }; while (true) androidx.compose.runtime.withFrameMillis { ms.longValue = it - t0 } }
+    LaunchedEffect(Unit) { val t0 = androidx.compose.runtime.withFrameMillis { it }; loopStart[0] = t0; while (true) androidx.compose.runtime.withFrameMillis { ms.longValue = it - t0 } }
     Canvas(modifier) {
         val s = size.minDimension / 24f
         withTransform({ scale(s, s, Offset.Zero) }) {
@@ -293,7 +316,7 @@ private fun idles(m: Mark) = m == Mark.Skipped || m == Mark.Done || m == Mark.Wa
 private val skipPaths = BootCatSkip.Paths()
 
 private fun transitionMs(from: Mark?, to: Mark): Float = when {
-    to == Mark.Working && from == Mark.Failed -> 38 * FRAME
+    to == Mark.Working && from == Mark.Failed -> 24 * FRAME
     to == Mark.Working || to == Mark.Background -> if (from == Mark.Waiting) 14 * FRAME else 0f
     to == Mark.Waiting -> 0f
     else -> 30 * FRAME
@@ -323,16 +346,28 @@ private fun resultFace(m: Mark): Face = when (m) {
     Mark.Working, Mark.Background -> Face.Look
 }
 
-/** Draws the cat for [to] at [ms] into the transition from [from] (all in the 24-unit grid). */
-private fun DrawScope.drawCat(head: Path, from: Mark?, to: Mark, ms: Float, accent: Color) {
+/**
+ * Draws the cat for [to] at [ms] into the transition from [from] (all in the 24-unit grid). [lightAt] >= 0: the loop's
+ * running light was there at the switch ([calm]: the background one); it carries on round and fades out over 9 frames
+ * instead of snapping off. [fromOutline]: the outline's strength before (the loops draw a faint one); it eases up.
+ */
+private fun DrawScope.drawCat(head: Path, from: Mark?, to: Mark, ms: Float, accent: Color, lightAt: Float = -1f, calm: Boolean = false, fromOutline: Float = 1f) {
     val f = ms / FRAME
     val s = size.minDimension / 24f
+    val lightFade = if (lightAt >= 0f) 1f - sm(f / 9f) else 0f
+    fun DrawScope.fadingLight(c: Color) {
+        if (lightFade <= 0f) return
+        val at = (lightAt + ms / (if (calm) 2400f else 1200f)) % 1f
+        drawLight(head, c.copy(alpha = c.alpha * (if (calm) 0.5f else 1f) * lightFade), at, 0.28f * (0.4f + 0.6f * lightFade))
+    }
+    // Outline and the soft fill ease in from the loop's faint outline (no fill) over 6 frames.
+    val outIn = fromOutline + (1f - fromOutline) * sm(f / 6f)
     withTransform({ scale(s, s, Offset.Zero) }) {
         when {
             // Asleep, waiting for its turn.
             to == Mark.Waiting -> cat(head, markColor(Mark.Waiting, accent), outline = 1f) { face(Face.Sleep, it) }
             // Waking up: lids lift, colour warms to the accent, a tiny lift. The light comes after (the loop grows it in).
-            to == Mark.Working && from != Mark.Failed -> {
+            (to == Mark.Working || to == Mark.Background) && from != Mark.Failed -> {
                 val u = sm(f / 14f)
                 val c = lerp(markColor(Mark.Waiting, accent), accent, u)
                 withTransform({ translate(0f, -0.5f * sin(PI.toFloat() * u)) }) {
@@ -345,16 +380,17 @@ private fun DrawScope.drawCat(head: Path, from: Mark?, to: Mark, ms: Float, acce
             // Retry: shake off the x x eyes, a determined squint, then thinking again.
             to == Mark.Working -> {
                 val neg = markColor(Mark.Failed, accent)
+                // Quicker than it was (38 frames, user: too long next to the others): shake 8, squint 10, open 6.
                 when {
-                    f < 10 -> {
-                        val u = f / 10f
+                    f < 8 -> {
+                        val u = f / 8f
                         val c = lerp(neg, accent, sm(u))
                         withTransform({ translate(1.2f * sin(u * PI.toFloat() * 3) * (1 - u), 0f) }) {
                             cat(head, c, outline = 1f - 0.75f * sm(u), fill = 0.16f * (1 - u)) { squash(1f - 0.8f * sm(u)) { face(Face.Dead, it) } }
                         }
                     }
-                    f < 32 -> cat(head, accent, outline = 0.25f) { squash(min(1f, 0.2f + sm((f - 10f) / 5f))) { face(Face.Determined, it) } }
-                    else -> cat(head, accent, outline = 0.25f) { squash(0.3f + 0.7f * sm((f - 32f) / 6f)) { face(Face.Look, it) } }
+                    f < 18 -> cat(head, accent, outline = 0.25f) { squash(min(1f, 0.2f + sm((f - 8f) / 4f))) { face(Face.Determined, it) } }
+                    else -> cat(head, accent, outline = 0.25f) { squash(0.3f + 0.7f * sm((f - 18f) / 6f)) { face(Face.Look, it) } }
                 }
             }
             // Settling into skipped: no pop, a blink into the unbothered resting face with a slow nod (the transitions pass will rework this).
@@ -365,7 +401,8 @@ private fun DrawScope.drawCat(head: Path, from: Mark?, to: Mark, ms: Float, acce
                     translate(0f, 0.9f * sin(PI.toFloat() * u))
                     rotate(-5f * sin(PI.toFloat() * u), Offset(12f, 13f))
                 }) {
-                    cat(head, c, outline = 1f, fill = 0.16f) {
+                    fadingLight(c)
+                    cat(head, c, outline = outIn, fill = 0.16f * sm(f / 6f)) {
                         // It opens its eyes into the skipped cat's resting face, where its idle loop (BootCatSkip) carries on.
                         squash(blink(f)) { if (f < 5) face(Face.Look, it) else with(BootCatSkip) { face(skipPaths, it) } }
                     }
@@ -374,22 +411,31 @@ private fun DrawScope.drawCat(head: Path, from: Mark?, to: Mark, ms: Float, acce
             // Landing on a result: blink into the new face, pop, a tint flash, and the face's own reaction.
             else -> {
                 val c = lerp(markColor(from, accent), markColor(to, accent), sm(f / 6f))
-                var sc = if (f < 5) 0.7f + 0.48f * easeOut(f / 5f) else if (f < 10) 1.18f - 0.18f * easeOut((f - 5f) / 5f) else 1f
+                // The pop starts from full size: a small squash as the eyes shut, a spring past full, a settle. It used to
+                // start at 0.7 on frame one, which read as a one-frame flicker (user, 2026-10-30).
+                var sc = when {
+                    f < 4 -> 1f - 0.12f * sm(f / 4f)
+                    f < 9 -> 0.88f + 0.26f * easeOut((f - 4f) / 5f)
+                    f < 14 -> 1.14f - 0.14f * easeOut((f - 9f) / 5f)
+                    else -> 1f
+                }
                 var rot = 0f; var tx = 0f
                 when (to) {
-                    Mark.Done -> if (f in 10f..20f) sc = 1f + 0.07f * sin((f - 10f) / 10f * PI.toFloat() * 2) * (1 - (f - 10f) / 10f)
+                    Mark.Done -> if (f in 14f..24f) sc = 1f + 0.07f * sin((f - 14f) / 10f * PI.toFloat() * 2) * (1 - (f - 14f) / 10f)
                     Mark.Warn -> if (f in 6f..24f) rot = -14f * sin((f - 6f) / 18f * PI.toFloat())
                     Mark.Maintenance -> if (f in 6f..26f) rot = 10f * sin((f - 6f) / 20f * PI.toFloat() * 3) * (1 - (f - 6f) / 20f)
                     Mark.Failed -> if (f in 6f..22f) tx = 1.6f * sin((f - 6f) / 16f * PI.toFloat() * 4) * (1 - (f - 6f) / 16f)
                     else -> {}
                 }
-                val flash = if (f < 14) 0.55f * (1 - f / 14f) else 0f
+                // The tint flash rises over 3 frames, then fades (it used to start at full on frame one).
+                val flash = if (f < 3) 0.45f * sm(f / 3f) else if (f < 14) 0.45f * (1 - (f - 3f) / 11f) else 0f
                 withTransform({
                     translate(tx, 0f)
                     rotate(rot, Offset(12f, 13f))
                     scale(sc, sc, Offset(12f, 13f))
                 }) {
-                    cat(head, c, outline = 1f, fill = 0.16f + flash) { squash(blink(f)) { face(if (f < 5) Face.Look else resultFace(to), it) } }
+                    fadingLight(c)
+                    cat(head, c, outline = outIn, fill = 0.16f * sm(f / 6f) + flash) { squash(blink(f)) { face(if (f < 5) Face.Look else resultFace(to), it) } }
                 }
             }
         }
