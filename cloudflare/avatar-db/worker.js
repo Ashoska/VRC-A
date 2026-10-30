@@ -840,7 +840,11 @@ export default {
         } catch (e) { return json({ ok: false, error: String(e) }, 500); }
       }
       // v53 search (D1). Public; served on gremlininc.app so the edge cache works (and on workers.dev).
-      if (req.method === "GET" && url.pathname === "/search") return handleSearch(req, env, ctx, url);
+      // Only on gremlininc.app: workers.dev has no edge cache, so the speed limit can't work there.
+      if (req.method === "GET" && url.pathname === "/search") {
+        if (!url.hostname.endsWith("gremlininc.app") && !env.SEARCH_ANY_HOST) return json({ ok: false, error: "use gremlininc.app/search" }, 403);
+        return handleSearch(req, env, ctx, url);
+      }
       // v53 search step: internal (token), fired by the cron after each flush as its own invocation.
       if (req.method === "GET" && url.pathname === "/searchstep") {
         const cont = url.searchParams.get("cont");
@@ -2678,7 +2682,8 @@ async function searchRateLimit(req, url) {
   const dev = (req.headers.get("x-vrca-device") || "none").slice(0, 64).replace(/[^A-Za-z0-9_-]/g, "");
   const o = parseInt(url.searchParams.get("o") || "0", 10) || 0;
   const cache = caches.default, now = Date.now();
-  const k = (s) => new Request("https://rl.vrca.internal/" + encodeURIComponent(s));
+  // Cache keys must live on this zone's own host (a foreign host is silently not stored).
+  const k = (s) => new Request(`https://${url.host}/__rl/` + encodeURIComponent(s));
   const gap = o > 0 ? SEARCH_PAGE_GAP_MS : SEARCH_GAP_MS;
   const devKey = k(`d:${o > 0 ? "p" : "n"}:${ip}:${dev}`), ipKey = k(`i:${ip}`);
   let last = 0, win = { s: now, n: 0 };
