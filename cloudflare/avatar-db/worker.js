@@ -2506,7 +2506,7 @@ main{max-width:1240px;margin:0 auto;padding:12px 16px 20px}
 .q .n{color:var(--muted)}
 .feed{list-style:none;margin:4px 0 0;padding:0;flex:1 1 0;height:0;min-height:0;overflow:auto}
 .feed li{border-top:1px solid var(--edge);padding:8px 0;animation:in .45s ease-out}.feed li:first-child{border-top:0}
-.feed .h{display:flex;gap:8px;align-items:center}.feed .h b{font-weight:500;display:flex;gap:6px;flex-wrap:wrap}
+.feed .h{display:flex;gap:8px;align-items:center}.feed .h b{font-weight:500;display:flex;gap:6px;flex-wrap:nowrap;min-width:0}.feed .h .tag{white-space:nowrap}
 .feed li.add{box-shadow:inset 3px 0 0 var(--ok);padding-left:12px}.feed li.rem{box-shadow:inset 3px 0 0 var(--err);padding-left:12px}
 .tag{font-size:12.5px;font-weight:500;padding:2px 9px;border-radius:999px}.tag.add{color:var(--ok);background:rgba(83,227,159,.12)}.tag.rem{color:var(--err);background:rgba(255,107,107,.12)}.feed .tm{color:var(--faint);font-size:12px;margin-left:auto;white-space:nowrap}
 .feed .m{color:var(--muted);font-size:12.5px;margin-top:2px}.feed .nm{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:4px}
@@ -2616,7 +2616,7 @@ function item(ev){var li=document.createElement('li'),h=document.createElement('
  tm.textContent=utcTime(ev.at,true)+' UTC';
  if(ev.t==='run'){if(!ev.added&&!ev.removed)return null;
   li.className=ev.added?'add':'rem';
-  if(ev.added){var ba=document.createElement('span');ba.className='tag add';ba.textContent='+'+fmt(ev.added)+' new avatar'+(ev.added===1?'':'s');b.appendChild(ba)}
+  if(ev.added){var ba=document.createElement('span');ba.className='tag add';ba.textContent='+'+fmt(ev.added)+' added';b.appendChild(ba)}
   if(ev.removed){var br=document.createElement('span');br.className='tag rem';br.textContent='−'+fmt(ev.removed)+' removed';br.title='No longer on VRChat';b.appendChild(br)}
   h.appendChild(b);h.appendChild(tm);li.appendChild(h);
   var m=document.createElement('div');m.className='m row';var nb=ev.batchCount!=null?ev.batchCount:(ev.batches||[]).length;
