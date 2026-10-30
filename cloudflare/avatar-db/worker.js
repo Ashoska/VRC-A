@@ -2027,7 +2027,9 @@ async function flushR2(env) {
     // re-folds the entry if its plain-text tokens are out of date and stamps `fv`, so it's flagged
     // once per rules change. Nothing to fix → no write. (Older admin apps still send every unchanged
     // avatar here: ASCII ones are a no-op, fancy ones get the same one-time stamp.)
-    for (const fid of ops.checked) if (e[fid]) {
+    // v53: font checks only re-fold the OLD search files' tokens; with those off (D1 folds every write itself)
+    // a font flag must not rewrite the shard (it was pure wasted writes).
+    if (LEGACY_SEARCH_FILES) for (const fid of ops.checked) if (e[fid]) {
       const ent = e[fid];
       if (needsFold(ent)) {
         const sig = foldSig(ent);
