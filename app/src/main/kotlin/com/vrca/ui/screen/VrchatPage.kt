@@ -881,8 +881,12 @@ private fun AvatarSearchPanel() {
     fun refreshResult(u: com.vrca.vrchat.AvatarSearch.Result) {
         scope.launch { val i = loaded.indexOfFirst { it.id == u.id }; if (i >= 0) loaded[i] = u }
     }
+    // 3-second cooldown after each Search press (the server enforces the same limit). The button shows the
+    // countdown Boot Cat, whose outline drains with the time left; read while drawing the cat.
+    val cooldown = remember { androidx.compose.animation.core.Animatable(0f) }
     fun run(term: String, reuse: Boolean) {
         val q = term.trim(); if (q.isEmpty()) return
+        if (!reuse) { if (cooldown.value > 0f) return; scope.launch { cooldown.snapTo(1f); cooldown.animateTo(0f, androidx.compose.animation.core.tween(3000, easing = androidx.compose.animation.core.LinearEasing)) } }
         query = q; shownQuery = q; searched = true; page = 0; more = false; platFilter = null
         deadIds.clear(); loaded.clear()
         val s = ++seq
@@ -914,7 +918,10 @@ private fun AvatarSearchPanel() {
             value = query, onValueChange = { query = it }, onSearch = { run(query, reuse = false) },
             placeholder = "Avatar name or creator", modifier = Modifier.weight(1f)
         )
-        com.vrca.ui.common.GremlinButton("Search", onClick = { run(query, reuse = false) }, enabled = query.isNotBlank(), loading = searching)
+        val coolingDown by remember { androidx.compose.runtime.derivedStateOf { cooldown.value > 0f } }
+        com.vrca.ui.common.GremlinButton("Search", onClick = { run(query, reuse = false) },
+            enabled = query.isNotBlank() && !coolingDown, loading = searching,
+            leading = if (coolingDown && !searching) ({ com.vrca.app.BootCatCountdown(cooldown.value, Modifier.size(20.dp)) }) else null)
     }
     // Recent searches (remembered for 20 minutes): tap to reopen with no request.
     if (recent.isNotEmpty() && !searching) {

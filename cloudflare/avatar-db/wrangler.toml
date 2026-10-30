@@ -39,6 +39,11 @@ bucket_name = "vrca-avatar-catalog"
 # for a fresh subrequest budget per drain step. A plain fetch() to our own workers.dev hostname is
 # unreliable for self-invocation (Cloudflare loop-guard / edge-cache), so a service binding is the
 # blessed path — it routes straight to a new invocation of this worker with no DNS/cache in between.
+# v53: the full db.json backup (+ unconverted.json) lives here: NO public domain, Worker-only.
+[[r2_buckets]]
+binding = "PRIVATE"
+bucket_name = "vrca-avatar-private"
+
 # v53 search (D1): one row per avatar + FTS5 index, fed by the search step (worker.js "v53"). The backfill
 # starts by itself the first time the search step sees this binding with no backfill record.
 [[d1_databases]]

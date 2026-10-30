@@ -846,9 +846,36 @@ object AvatarGlobalDb {
     // ---- v53: D1 search (GET /search on gremlininc.app): one request per Search press, 500 per batch ----
     data class SearchBatch(val results: List<Entry>, val more: Boolean)
     private const val SEARCH_URL = "https://gremlininc.app/search"
-    /** One batch from the server's D1 search, or null when it isn't available (the caller falls back). */
+    // A random id for this install (not tied to the user or the device hash): the server keys its 3-second
+    // search limit on IP + this id, so friends on one Wi-Fi don't block each other.
+    @Volatile private var installId: String? = null
+    private fun installId(context: Context): String = installId ?: run {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        (prefs.getString("search_install_id", null) ?: java.util.UUID.randomUUID().toString().replace("-", "")
+            .also { prefs.edit().putString("search_install_id", it).apply() }).also { installId = it }
+    }
+
+    /** One batch from the server's D1 search, or null when it isn't available (the caller falls back).
+     *  The server allows one new search per 3 s (and a further batch per 1.5 s); a "too fast" answer is
+     *  waited out and retried once. */
     suspend fun searchD1(context: Context, query: String, offset: Int, author: String? = null): SearchBatch? {
         if (!d1SearchLive(context)) return null
+        repeat(2) {
+            when (val r = searchD1Once(context, query, offset, author)) {
+                is D1Result.Ok -> return r.batch
+                is D1Result.TooFast -> delay(r.waitMs.coerceIn(200L, 4_000L))
+                D1Result.Unavailable -> return null
+            }
+        }
+        return null
+    }
+    private sealed class D1Result {
+        class Ok(val batch: SearchBatch) : D1Result()
+        class TooFast(val waitMs: Long) : D1Result()
+        object Unavailable : D1Result()
+    }
+    private suspend fun searchD1Once(context: Context, query: String, offset: Int, author: String?): D1Result {
+        val device = installId(context)
         return kotlinx.coroutines.withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
@@ -856,14 +883,19 @@ object AvatarGlobalDb {
                 val au = author?.takeIf { it.isNotBlank() }?.let { "&au=" + java.net.URLEncoder.encode(it.trim(), "UTF-8") } ?: ""
                 conn = (URL("$SEARCH_URL?q=$q&o=$offset$au").openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    setRequestProperty("X-VRCA-Device", device)
                     connectTimeout = 10_000; readTimeout = 15_000
                 }
-                if (conn.responseCode != 200) return@withContext null
+                if (conn.responseCode == 429) {
+                    val wait = runCatching { JSONObject(conn.errorStream.bufferedReader().readText()).optLong("retryAfterMs", 3_000L) }.getOrDefault(3_000L)
+                    return@withContext D1Result.TooFast(wait)
+                }
+                if (conn.responseCode != 200) return@withContext D1Result.Unavailable
                 val j = JSONObject(conn.inputStream.bufferedReader().readText())
-                if (!j.optBoolean("ok", false)) return@withContext null
-                val arr = j.optJSONArray("r") ?: return@withContext SearchBatch(emptyList(), false)
-                SearchBatch((0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.let { o -> compactEntry(o, "a") } }, j.optBoolean("more", false))
-            } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+                if (!j.optBoolean("ok", false)) return@withContext D1Result.Unavailable
+                val arr = j.optJSONArray("r") ?: return@withContext D1Result.Ok(SearchBatch(emptyList(), false))
+                D1Result.Ok(SearchBatch((0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.let { o -> compactEntry(o, "a") } }, j.optBoolean("more", false)))
+            } catch (e: Exception) { D1Result.Unavailable } finally { runCatching { conn?.disconnect() } }
         }
     }
 
