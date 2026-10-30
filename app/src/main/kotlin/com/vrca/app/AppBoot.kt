@@ -53,6 +53,9 @@ internal object BootResults {
     @Volatile var banId: String? = null
     /** The Updates row's release check, or null if it didn't finish. */
     @Volatile var release: ReleaseCheckResult? = null
+    /** The terms' version and change time as the Terms row read them (null = not read this run). */
+    @Volatile var tosVersion: Int? = null
+    @Volatile var tosUpdatedAtMs: Long? = null
     /** The release check, handed over once (then cleared so it can't go stale). */
     fun takeRelease(): ReleaseCheckResult? = release.also { release = null }
 }
@@ -366,6 +369,7 @@ internal fun AppBoot(
         VrchatAuthManager.isLoggedIn(ctx) && com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
     // Decided once, when the hand-off is about to start.
     var toMainApp by remember { mutableStateOf(false) }
+    var toTerms by remember { mutableStateOf(false) }
     LaunchedEffect(blockingDone, shown) {
         if (blockingDone && shown) {
             // Discord doesn't hold boot (user, 2026-10-23: it was the slowest row by far). Boot only
@@ -388,6 +392,16 @@ internal fun AppBoot(
             // First open: the Ready moment waits until Boot Cat has listed every check.
             if (firstOpen) { snapshotFlow { welcomeListed }.first { it }; timeline.event("Boot Cat listed every check") }
             val mainNext = withContext(Dispatchers.IO) { mainAppNext() }
+            // The terms come next (user, 2026-10-25: boot hands over to them like it does to the app).
+            val termsNext = rows[Row.Terms.ordinal].note == BootNote.NewTerms &&
+                rows[Row.Account.ordinal].note != BootNote.Restricted
+            if (termsNext) {
+                BootReveal.termsCatIn.floatValue = 0f
+                prepareApp()
+                withTimeoutOrNull(APP_BUILD_CAP_MS) { snapshotFlow { appReadyNow && BootReveal.termsCat.value != null }.first { it } }
+                repeat(2) { androidx.compose.runtime.withFrameNanos { } }
+                timeline.event("terms built behind the boot screen")
+            }
             if (mainNext) {
                 prepareApp()
                 withTimeoutOrNull(APP_BUILD_CAP_MS) { snapshotFlow { appReadyNow }.first { it } }
@@ -402,6 +416,8 @@ internal fun AppBoot(
             timeline.event("hand-off (fold starts)")
             timeline.write(ctx, "handed off")
             toMainApp = BuildConfig.IS_HEADSET_BUILD && mainNext
+            toTerms = termsNext && BootReveal.termsCat.value != null
+            if (termsNext && !toTerms) BootReveal.termsCatIn.floatValue = 1f
             // The app shows through during the logo's glide (BootScreen): keep its own top-bar logo
             // hidden until the flying one lands on that spot, so there are never two.
             if (toMainApp) BootReveal.hideTopBarLogo.value = true
@@ -428,7 +444,11 @@ internal fun AppBoot(
         celebrate = celebrate,
         exit = exiting,
         exitToTopBar = toMainApp,
-        onExited = { onDone(toMainApp) },
+        exitToRect = if (toTerms) ({ BootReveal.termsCat.value }) else null,
+        onExitProgress = { p ->
+            if (toTerms) BootReveal.termsCatIn.floatValue = ((p - TERMS_LAND_FROM) / (1f - TERMS_LAND_FROM)).coerceIn(0f, 1f)
+        },
+        onExited = { BootReveal.termsCatIn.floatValue = 1f; onDone(toMainApp || toTerms) },
         onSignIn = if (signInNeeded && error == null) ({ showLogin = true }) else null
     )
     // Sign in right here, over the boot screen (which stays underneath, so it doesn't replay).
@@ -610,6 +630,7 @@ private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.Completa
     val version = (snap.getLong("tosVersion") ?: 1L).toInt().coerceAtLeast(1)
     // The terms' own change time, not the doc's updatedAt (any Config-tab save stamps that; see VrcaApp).
     val updatedAt = snap.getTimestamp("tosUpdatedAt")?.toDate()?.time ?: 0L
+    BootResults.tosVersion = version; BootResults.tosUpdatedAtMs = updatedAt
     val accepted = TosPrefs.acceptedVersion(ctx) >= version && TosPrefs.acceptedAtMs(ctx) >= updatedAt
     if (accepted) {
         // Strays from a kill between accepting and the clear.
@@ -665,6 +686,10 @@ internal object BootReveal {
     private val logo = mutableStateOf(false)
     val withLogo: Boolean get() = logo.value
     fun start(withLogo: Boolean) { logo.value = withLogo; active.value = true }
+    /** Where the terms header's logo is (window coordinates), once the terms screen is placed. */
+    val termsCat = mutableStateOf<androidx.compose.ui.geometry.Rect?>(null)
+    /** How far the terms header's logo has faded in while the boot logo lands on it (1 = shown). */
+    val termsCatIn = androidx.compose.runtime.mutableFloatStateOf(1f)
     fun end() { active.value = false }
 }
 

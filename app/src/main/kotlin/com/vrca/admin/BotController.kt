@@ -208,7 +208,7 @@ object BotController {
                     if (AvatarGlobalDb.shardWalkLive()) {
                         runCatching { AvatarGlobalDb.fetchManifest(app) }.getOrNull()?.let { man ->
                             man.optInt("unfilled", -1).let { if (it >= 0) AvatarCatalogSweep.setManifestUnfilled(it) }
-                            man.optInt("staleCount", -1).let { if (it >= 0) AvatarCatalogSweep.setManifestStale(it) }
+                            man.optString("foldV", "").let { if (it.isNotEmpty()) AvatarCatalogSweep.setManifestFoldV(it) }
                             man.optInt("entryCount", -1).let { if (it >= 0) recordCatalogGrowth(app, it) }
                         }
                     }

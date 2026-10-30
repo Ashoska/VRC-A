@@ -56,6 +56,7 @@ const SHARD_TTL = 21600; // 6h (was 5 min); purge-on-write keeps it fresh — fo
 // for hours (the overnight→morning flicker). At 5 min a purge-miss self-heals fast and search stays
 // consistent. Costs a few more R2 Class B (cheap) reads on the search path; clone LOOKUPS are untouched.
 const INDEX_TTL = 300; // 5 min — search-index buckets (fragments/avtr/index)
+const IDX_PURGE_CAP = 150; // v49: changed search files refreshed on the CDN per flush (5 purge calls max)
 
 // The AUTHORITATIVE catalog size lives in _manifest.json (the Action rewrites entryCount every
 // ~20 min). meta.entries in KV only moves on a flush, so between rebuilds — and whenever
@@ -386,6 +387,37 @@ function entryEquivalent(a, b) {
   return true;
 }
 
+// v49 CALM LANE (user, 2026-10-30): bot REFRESHES of avatars that already exist (a changed name/bio/perf
+// on a filled avatar) and font flags don't need to land within 2 minutes, so the bots send them with
+// `calm: true` and they wait (as `admc:<ts>:<uuid>` keys, durable in KV) until the oldest is CALM_HOLD_MS
+// old, then drain together: several changes to one shard become ONE write. New contributions, fills,
+// removals and re-keys stay on the 2-min fast lane, so anything that becomes clonable is also searchable
+// in the same flush. Safety: a calm op never CREATES an entry (an avatar removed meanwhile stays removed),
+// and every write stamps the entry's `mt` (op time) so an older op can never overwrite a newer one.
+const CALM_HOLD_MS = 30 * 60_000;
+const CALM_MAX_KEYS = 300;   // drain early if this many calm batches pile up
+function calmKey(ts) { return "admc:" + String(ts).padStart(13, "0") + ":" + crypto.randomUUID(); }
+function calmKeyTs(k) { const n = parseInt(String(k).split(":")[1], 10); return Number.isFinite(n) ? n : 0; }
+// The bots flag an avatar for a font check when its text has ANY non-ASCII character and its `fv` stamp
+// isn't the current fold rules version (published as `foldV` in _manifest.json). The Worker re-folds it
+// if needed and stamps `fv`, so it's flagged once per rules change, never again. Same test as the bot's.
+function hasNonAscii(e) { return /[^\x00-\x7F]/.test((e.name || "") + (e.author || "") + (e.desc || "")); }
+// Worker-owned per-entry fields a bot/device payload never carries: keep them across an upsert. When the
+// text changed, the upsert's own index op re-indexes it under the CURRENT fold, so fz/fv are re-stamped.
+function carryWorkerFields(prev, inc, textChanged) {
+  if (!prev) return;
+  if (textChanged) {
+    if (needsFold(inc)) inc.fz = foldSig(inc);
+    if (hasNonAscii(inc)) inc.fv = FOLD_STAMP_V;
+  } else {
+    if (prev.fz !== undefined) inc.fz = prev.fz;
+    if (prev.fv !== undefined) inc.fv = prev.fv;
+  }
+}
+function textChangedBetween(a, b) {
+  return !a || !b || (a.name || "") !== (b.name || "") || (a.author || "") !== (b.author || "") || (a.desc || "") !== (b.desc || "");
+}
+
 // Op: { id, del, frag|null, add:[tok], rem:[tok], avtr:'a'|'r'|null }.
 function buildIndexOp(oldE, newE, fileId) {
   if (!newE) {
@@ -626,7 +658,11 @@ export default {
         if (upserts.length) {
           const payload = {};
           for (const e of upserts) payload[e.fileId] = cleanEntry(e);
-          await env.AVATAR_KV.put("admu:" + crypto.randomUUID(), JSON.stringify(payload), { expirationTtl: 7 * 86400 });
+          // v49: every bot batch carries its time (`mt` newest-wins guard in the flush). `calm: true` =
+          // refreshes of existing avatars → the calm lane (see CALM_HOLD_MS); everything else is fast.
+          const ts = Date.now(); payload.__ts = ts;
+          await env.AVATAR_KV.put(body.calm === true ? calmKey(ts) : "admu:" + crypto.randomUUID(),
+            JSON.stringify(payload), { expirationTtl: 7 * 86400 });
         }
         if (removes.length) {
           await env.AVATAR_KV.put("admr:" + crypto.randomUUID(), JSON.stringify(removes), { expirationTtl: 7 * 86400 });
@@ -820,9 +856,9 @@ export default {
           rcReadFail: meta.rcReadFail || 0,
           rcAttempts: meta.rcAttempts || 0,
           rcAdoptSkipped: meta.rcAdoptSkipped || 0,
-          // Liveness backlog (entries due a 30d recheck). Computed by the recount, drained live by the
-          // flush as bots recheck — REPLACES the frozen legacy staleCount the removed GitHub Action left.
-          stale: typeof meta.stale === "number" ? meta.stale : 0,
+          // v49: no per-avatar "last checked" any more (the bots walk every shard continuously), so the
+          // liveness backlog is always 0; kept for older admin apps that read it.
+          stale: 0,
           unfilled: typeof meta.unfilled === "number" ? meta.unfilled : 0,   // live Fill backlog (not just the coalesced manifest)
           fillShards: Array.isArray(meta.fillHint) ? meta.fillHint.length : 0, // shards in _worklist.json (should track unfilled, not balloon)
           // Author-rename propagation: the author currently being applied across the catalog (null =
@@ -844,9 +880,13 @@ export default {
           shardCount: 4096,
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
-          unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
+          unconverted: (backupSt && typeof backupSt.unconverted === "number") ? backupSt.unconverted : (meta.unconverted || 0),   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
           lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
-          version: 48,   // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          calmWaiting: meta.calmDepth || 0,   // v49 calm-lane batches waiting (bot refreshes + font flags)
+          foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
+          writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
+          writesYesterday: meta.wrPrev || null,
+          version: 49,   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -988,35 +1028,14 @@ const RECONCILE_SHARDS_PER_RUN = 120; // previously: one-time pass → ~5h for a
 const HEAL_AVTR_READS_PER_RUN = 300;
 // v40 re-arm: a fresh lap that queues the plain-text (folded) tokens of every fancy entry without a
 // current fold stamp into the PRIORITY lane (iqp:), so they don't wait for a 20-day checked push.
-// v41: a FINGERPRINT of the fold rules, so ANY CONFUSABLES/SMALLCAPS change re-arms that lap by
-// itself on deploy (unchanged fancy avatars get the new fold within ~70 min, nothing to remember).
-// "+bio" (v48): needsFold now covers the bio, so the lap re-arms once to queue bio-only fancy avatars.
+// v41: a FINGERPRINT of the fold rules (CONFUSABLES/SMALLCAPS). v49: it no longer re-arms a lap; it is
+// published as `foldV` in _manifest.json and stamped on each re-folded avatar as `fv`, and the bots flag
+// non-ASCII avatars whose `fv` is behind it as they walk (see hasNonAscii / the flush's font check).
 const FOLD_STAMP_V = "r" + (hashCode(JSON.stringify(CONFUSABLES) + JSON.stringify(SMALLCAPS) + "+bio") >>> 0).toString(36);
 const RC_MAX_ATTEMPTS = 3;            // retry a tainted (read-failed) count pass this many times, then
                                       // give up and keep the incremental count (never adopt a bad one)
-// PERIODIC RE-ARM: the incremental `unfilled`/`entries` counts DRIFT over time (a fill that doesn't
-// decrement, a contribution counted unfilled but filled elsewhere), and a drifted `unfilled` makes the
-// FILL bots blind-walk the WHOLE catalog forever chasing a PHANTOM backlog they can never drain
-// ("shards 7000+, filled 0, checked 0, queued 74 stuck"). The one-time heal corrected it once then set
-// rcDone; after that the count could drift again with nothing to fix it. So re-arm the recount every
-// RECONCILE_REARM_MS: it re-walks the catalog, recomputes the TRUE entries/unfilled, and adopts them on
-// a clean lap — snapping "queued 74" back to reality so the bots stop chasing ghosts. Cheap: shard reads
-// (Class B) + zero index ops when the index is already healthy.
-// Cost note: a recount lap is ~4,100 R2 CLASS B reads (the near-free tier — the same reads a clone
-// lookup uses) + ~1 manifest write; ZERO Class A writes on a healthy index (index ops are enqueued only
-// for genuinely-broken entries, which is the repair you'd want). That's ~$0.002 per lap. At 30 days it's
-// far under a cent a month — nowhere near the Class A write cost that caused the bill.
-const RECONCILE_REARM_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days (matches the recheck cadence)
-// A catalog entry is "due for a liveness recheck" once its `checked` is older than this — MUST match
-// the app's RECHECK_INTERVAL_MS (30d). The recount tallies the TRUE count; the flush drains it live as
-// bots recheck/remove. This REPLACES the manifest's old `staleCount`, which was a FROZEN artifact from
-// the removed GitHub Action (the Worker never recomputed it → a permanent phantom liveness "queued N",
-// staleCount/4 ≈ 73 per bot, that could never drain).
-const STALE_CUTOFF_MS = 30 * 24 * 60 * 60 * 1000;
-// Bump to force a one-time re-index of the WHOLE catalog's fancy-Unicode entries: when meta.foldVer is
-// behind this, the reconcile lap emits an ADD index op for every needsFold() entry so its NFKC-FOLDED
-// (plain-ASCII) tokens enter the search index (the old fancy-glyph tokens stay as harmless orphans).
-// After that lap, plain-text search finds fancy-named/authored avatars. Set on clean lap completion.
+// HISTORICAL (v49: no longer starts anything; only reported in /health). It used to force a one-time
+// full fold re-index lap when bumped. Fold changes now reach every avatar via the bots' font flags.
 const FOLD_VER = 6;   // bumped 5->6: foldFancy overhaul (strip zalgo marks + CONFUSABLES cross-script
                       // look-alikes + per-char Latin accent-fold), so re-arm ONE fresh full lap to re-fold
                       // the whole catalog under the corrected fold + populate the "unconverted" registry.
@@ -1050,45 +1069,14 @@ async function reconcileIndex(env) {
     } catch (_) {}
     // fall through → run the recount this run (rcDone is now false)
   }
-  // ONE-TIME fold re-index: if foldVer is behind, run a FRESH full lap DEDICATED to this FOLD_VER so the
-  // entry loop emits folded-token ADD ops for every existing fancy entry, over ALL 4096 shards.
-  //
-  // This reset MUST fire regardless of meta.rcDone. The old `&& meta.rcDone` guard meant a FOLD_VER bump
-  // that landed mid-lap (rcDone=false — the normal case on a deploy during churn) did NOT reset the
-  // carried-over cursor + reconcileScanned, so foldPass rode a partial lap that "completed" as soon as
-  // reconcileScanned crossed 4096 (from prior steps) and stamped foldVer having gated only a tail slice of
-  // shards — leaving fancy entries elsewhere (ᵂᴴᴵᵀᴱ ᵀᴵᴳᴱᴿ's avatars) raw-only + unsearchable by plain text,
-  // with foldPass then dormant. `meta.foldLapV` marks the FOLD_VER the CURRENT fresh lap was started for:
-  // the reset fires once (first run where foldLapV is behind), starts a clean 0->4096 lap, and foldVer is
-  // stamped ONLY when a lap whose foldLapV === FOLD_VER completes (see the completion branch) — so a
-  // partial/carried lap can never mark the fold done.
-  if (meta.foldVer !== FOLD_VER && meta.foldLapV !== FOLD_VER) {
-    meta.rcDone = false;
-    meta.rc = 0; meta.reconcileScanned = 0;
-    meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
-    meta.foldLapV = FOLD_VER;   // this fresh lap is dedicated to FOLD_VER; only it may stamp foldVer
-    // fall through → run the lap; foldVer is stamped on clean completion of THIS dedicated lap
-  }
-  if (meta.foldStampV !== FOLD_STAMP_V) {
-    meta.rcDone = false;
-    meta.rc = 0; meta.reconcileScanned = 0;
-    meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
-    meta.foldStampV = FOLD_STAMP_V;
-  }
-  const foldPass = meta.foldVer !== FOLD_VER;   // emit folded-token ADDs for fancy entries this lap
-  // Re-arm a completed heal once it's older than the interval, so the count is periodically re-truthed.
-  if (meta.rcDone) {
-    const doneMs = meta.rcDoneAt ? (Date.parse(meta.rcDoneAt) || 0) : 0;
-    if (doneMs && Date.now() - doneMs > RECONCILE_REARM_MS) {
-      meta.rcDone = false;
-      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0;
-      meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
-      // fall through → run a fresh recount lap this run
-    } else {
-      return;   // heal current + within the window → the incremental flush maintains the index
-    }
-  }
-  const rcStaleBefore = Date.now() - STALE_CUTOFF_MS;   // recount stale cutoff for this lap
+  // v49 (user, 2026-10-30): NO AUTOMATIC LAPS. A full lap used to start by itself on a FOLD_VER bump, on
+  // ANY CONFUSABLES/SMALLCAPS edit (FOLD_STAMP_V) and every 30 days. The fold laps were the costly ones
+  // (the Sep/Oct bills): the bots now flag fancy avatars whose `fv` is behind the current rules as they
+  // walk, so a rules change reaches every avatar within about a day, a shard at a time. The 30-day
+  // recount's jobs (exact unfilled count, fill worklist, "unconverted" registry) moved into the daily
+  // backup, which reads every shard anyway. So this lap now runs ONLY when armed by hand
+  // (GET /admin/reconcile, optionally ?heal=1), e.g. to repair a damaged index.
+  if (meta.rcDone) return;
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   const idxCache = {};         // index-bucket -> { token -> Set(ids) } (per-run cache for the fold gate)
@@ -1119,7 +1107,7 @@ async function reconcileIndex(env) {
   // 0, stuck at a random number"). Accumulated across the pass into meta, adopted authoritatively on
   // completion. (Slightly high in the rare real-backlog case since fills happen during the ~day pass,
   // but for a PHANTOM count it finds the true near-zero and fixes the churn.)
-  let entriesSeen = 0, unfilledSeen = 0, staleSeen = 0, stepped = 0, readFail = 0;
+  let entriesSeen = 0, unfilledSeen = 0, stepped = 0, readFail = 0;
   for (let n = 0; n < RECONCILE_SHARDS_PER_RUN; n++) {
     if (heal && avtrReads >= HEAL_AVTR_READS_PER_RUN) break;   // heal budget spent → resume next run
     const prefix = cursor.toString(16).padStart(3, "0");
@@ -1140,7 +1128,6 @@ async function reconcileIndex(env) {
       if (!id || !id.startsWith("avtr_")) continue;
       entriesSeen++;
       if (e.filled !== true) { unfilledSeen++; shardHasUnfilled = true; }
-      if (((e.checked || e.added || 0)) < rcStaleBefore) staleSeen++;   // due for a 30d liveness recheck
       // Tally anything that didn't fully fold to ASCII (see foldResidualCps / the "unconverted" registry).
       const resid = foldResidualCps(e);
       if (resid.size) {
@@ -1201,7 +1188,6 @@ async function reconcileIndex(env) {
   meta.reconcileFixed = (meta.reconcileFixed || 0) + missing.length; // entries re-indexed this pass
   meta.rcEntries = (meta.rcEntries || 0) + entriesSeen;             // authoritative recount (this pass)
   meta.rcUnfilled = (meta.rcUnfilled || 0) + unfilledSeen;
-  meta.rcStale = (meta.rcStale || 0) + staleSeen;                   // true Liveness backlog (this pass)
   meta.rcReadFail = (meta.rcReadFail || 0) + readFail;              // shards we couldn't read this pass
   // One full 4096-step lap → decide. ONLY adopt the recomputed counts when the whole lap read cleanly
   // (rcReadFail === 0) — a tainted pass would UNDER-count and show a phantom "lost N avatars" drop
@@ -1221,13 +1207,13 @@ async function reconcileIndex(env) {
       // v48: the avatar COUNT is no longer adopted here (the daily backup's exact count is; see flushR2).
       // A lap counts over ~70 min while flushes keep adding, and one lap left a +~7,000 phantom.
       meta.unfilled = meta.rcUnfilled || 0;
-      meta.stale = meta.rcStale || 0;   // adopt the TRUE liveness backlog (drains live via the flush)
+      meta.stale = 0;
       meta.rcAdoptSkipped = 0;
       // Push the corrected counts straight to the manifest (what the admin/bots read) + purge.
       try {
         let man = {}; const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json();
         man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
-          entryCount: meta.entries, unfilled: meta.unfilled, staleCount: meta.stale, searchReady: true, lastUpdate: new Date().toISOString() };
+          entryCount: meta.entries, unfilled: meta.unfilled, staleCount: 0, foldV: FOLD_STAMP_V, searchReady: true, lastUpdate: new Date().toISOString() };
         await env.CATALOG.put("_manifest.json", JSON.stringify(man),
           { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
         if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
@@ -1502,6 +1488,10 @@ async function cronTasks(env) {
 // complete) + ~45 KV writes, i.e. effectively free; it never touches the index, meta or flush lock.
 const BACKUP_EVERY_MS = 24 * 60 * 60 * 1000;
 const BACKUP_SHARDS_PER_STEP = 200;
+// v49: a step also stops once it holds this much JSON, so the Worker's 128 MB memory stays safe as the
+// catalog grows (at 5M avatars 200 shards would be ~90 MB; this keeps a step's peak well under the limit).
+const BACKUP_STEP_CHARS = 16 * 1024 * 1024;
+const BACKUP_UNCONV_SAMPLE_CAP = 400;
 const BACKUP_PART_BYTES = 5 * 1024 * 1024;        // R2: every part but the last must be this size
 const BACKUP_STALE_MS = 6 * 60 * 60 * 1000;       // an upload stuck this long is aborted + restarted
 async function maybeFireBackupStep(env, ctx) {
@@ -1528,7 +1518,10 @@ async function backupStep(env) {
     const up = await env.CATALOG.createMultipartUpload("db.json", {
       httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=3600" },
     });
-    st = { ...st, uploadId: up.uploadId, next: 0, parts: [], count: 0, bytes: 0, startedAt: now };
+    // v49: uf/fill/hist/sample = the old monthly recount's jobs, done here (the backup reads every shard):
+    // exact unfilled count, shards holding unfilled avatars (fill worklist), "unconverted" font registry.
+    st = { ...st, uploadId: up.uploadId, next: 0, parts: [], count: 0, bytes: 0, startedAt: now,
+      uf: 0, fill: [], hist: {}, sample: [] };
     carry = enc.encode('{"name":"VRC-A Avatar Store","version":1,"avatars":{\n');
   } else {
     const b = await KV.get("backup:buf", "arrayBuffer");
@@ -1538,17 +1531,35 @@ async function backupStep(env) {
   // Read this step's shards (a failed read aborts the step WITHOUT saving, so it's retried).
   const chunks = [];
   let count = st.count;
-  const end = Math.min(4096, st.next + BACKUP_SHARDS_PER_STEP);
-  for (let n = st.next; n < end; n++) {
+  let uf = st.uf || 0;
+  const fill = new Set(Array.isArray(st.fill) ? st.fill : []);
+  const hist = Object.assign({}, st.hist || {});
+  const sample = Array.isArray(st.sample) ? st.sample.slice() : [];
+  const stepEnd = Math.min(4096, st.next + BACKUP_SHARDS_PER_STEP);
+  let chars = 0, n = st.next;
+  for (; n < stepEnd; n++) {
+    if (n > st.next && chars >= BACKUP_STEP_CHARS) break;   // memory cap: the rest go in the next step
     const prefix = n.toString(16).padStart(3, "0");
     const o = await env.CATALOG.get(`shard/${prefix}.json`);   // throws on a real failure → step retried
     if (!o) continue;
     const shard = await o.json();
+    let shardUnfilled = false;
     for (const [fid, e] of Object.entries((shard && shard.e) || {})) {
-      chunks.push((count > 0 ? ",\n" : "") + JSON.stringify(fid) + ":" + JSON.stringify(e));
+      const line = (count > 0 ? ",\n" : "") + JSON.stringify(fid) + ":" + JSON.stringify(e);
+      chunks.push(line); chars += line.length;
       count++;
+      if (!e || typeof e !== "object") continue;
+      if (e.filled !== true) { uf++; shardUnfilled = true; }
+      const resid = foldResidualCps(e);
+      if (resid.size) {
+        for (const cp of resid) hist[cp] = (hist[cp] || 0) + 1;
+        if (sample.length < BACKUP_UNCONV_SAMPLE_CAP)
+          sample.push({ id: e.id, n: (e.name || "").slice(0, 48), au: (e.author || "").slice(0, 48), r: Array.from(resid) });
+      }
     }
+    if (shardUnfilled) fill.add(prefix);
   }
+  const end = n;
   const last = end >= 4096;
   const startBytes = st.next === 0 ? carry.length : 0;   // the header is counted once
   if (last) chunks.push(`\n},"count":${count}}`);
@@ -1570,16 +1581,30 @@ async function backupStep(env) {
     }
     await upload.complete(parts);
     const bytes = (st.bytes || 0) + startBytes + add.length;
-    const done = { doneAt: Date.now(), lastCount: count, lastBytes: bytes, lastMs: Date.now() - st.startedAt };
+    const done = { doneAt: Date.now(), lastCount: count, lastBytes: bytes, lastMs: Date.now() - st.startedAt,
+      lastUnfilled: uf, fill: Array.from(fill) };
     // v48: snapshot the flush totals so the flush can adopt this exact count (+ what moved since).
-    try { const m = JSON.parse((await KV.get("meta")) || "{}"); done.addedAt = m.totalAdded || 0; done.removedAt = m.totalRemoved || 0; } catch (_) {}
+    // v49: + the running unfilled-delta total, so the flush adopts the exact unfilled count the same way.
+    try { const m = JSON.parse((await KV.get("meta")) || "{}"); done.addedAt = m.totalAdded || 0; done.removedAt = m.totalRemoved || 0; done.ufAt = m.ufSum || 0; } catch (_) {}
+    // v49: publish the "unconverted" registry (was the recount's): every non-ASCII letter that survives
+    // folding (histogram) + a capped sample. GET /unconverted. Extend CONFUSABLES from it; the bots then
+    // flag and re-fold the affected avatars as they walk.
+    try {
+      let total = 0; for (const k in hist) total += hist[k];
+      const top = Object.entries(hist).map(([cp, k]) => ({ cp: +cp, ch: String.fromCodePoint(+cp), n: k })).sort((a, b) => b.n - a.n);
+      done.unconverted = top.length;
+      await env.CATALOG.put("unconverted.json",
+        JSON.stringify({ v: 1, ts: new Date().toISOString(), distinctCodepoints: top.length, totalHits: total, codepoints: top, sample }),
+        { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=60" } });
+      if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/unconverted.json"]);
+    } catch (_) {}
     await KV.put("backup", JSON.stringify(done));
     try { await KV.delete("backup:buf"); } catch (_) {}
     return { done: true, count, parts: parts.length, bytes };
   }
   await KV.put("backup:buf", buf);
   await KV.put("backup", JSON.stringify({ ...st, next: end, parts, count,
-    bytes: (st.bytes || 0) + startBytes + add.length }));
+    bytes: (st.bytes || 0) + startBytes + add.length, uf, fill: Array.from(fill), hist, sample }));
   return { next: end, count, parts: parts.length };
 }
 /** One-line backup status for /health ("Backup" row in the admin Bots tab). */
@@ -1627,11 +1652,17 @@ async function flushR2(env) {
   let iqLeft = false, iqMoved = false;        // v40 index-backlog chaining signals
   let foldPendingNow = prevMeta.foldPending || 0;   // v40 "Fonts waiting" (fold ops queued)
   let lastDrainNow = prevMeta.lastDrain || "";      // v43 drain report
+  let idxWrites = 0;                                // v49 search-file writes this flush (write counters)
   const pendNames = await listPrefix(env, "pend:");
   const repNames  = await listPrefix(env, "rep:");
   const admuNames = await listPrefix(env, "admu:");
   const admrNames = await listPrefix(env, "admr:");
   const admkNames = await listPrefix(env, "admk:");
+  // v49 calm lane: drained only once its OLDEST batch has waited CALM_HOLD_MS (or too many piled up).
+  const admcNames = await listPrefix(env, "admc:");
+  const nowMs = Date.now();
+  const calmDue = admcNames.length > 0 &&
+    (nowMs - calmKeyTs(admcNames[0]) >= CALM_HOLD_MS || admcNames.length >= CALM_MAX_KEYS);
   const hasIndexQueue = (await env.AVATAR_KV.list({ prefix: "iq:", limit: 1 })).keys.length > 0 ||
     (await env.AVATAR_KV.list({ prefix: "iqp:", limit: 1 })).keys.length > 0;
 
@@ -1640,7 +1671,12 @@ async function flushR2(env) {
   // index carry-forward queue keep the flush active only while any exist; a fully-idle catalog
   // costs just one KV list per minute.
   if (!pendNames.length && !admuNames.length && !admrNames.length && !admkNames.length &&
-      !repNames.length && !hasIndexQueue) return;
+      !repNames.length && !hasIndexQueue && !calmDue) {
+    // Keep /health's "calm waiting" count current without a list op there (cheap: only when it moved).
+    if ((prevMeta.calmDepth || 0) !== admcNames.length)
+      try { await env.AVATAR_KV.put("meta", JSON.stringify({ ...prevMeta, calmDepth: admcNames.length })); } catch (_) {}
+    return;
+  }
 
   // ONE-TIME iq: COMPACTION. The pre-gating fold laps flooded iq: with ~1400 keys of no-op re-adds
   // (already-present tokens). They drain only ~1 key/flush (~300 cheap-but-full ops), so ~47h to clear,
@@ -1667,7 +1703,9 @@ async function flushR2(env) {
 
   // Group every pending op by shard prefix so each shard is read + written ONCE.
   const shardOps = {};
-  const S = (sp) => (shardOps[sp] ||= { adds: {}, upserts: {}, removes: new Set(), checked: new Set(), renames: {} });
+  // upTs = each upsert's op time (newest wins across both lanes); calmOnly = fids whose winning op is a
+  // calm refresh (may never CREATE an entry).
+  const S = (sp) => (shardOps[sp] ||= { adds: {}, upserts: {}, upTs: {}, calmOnly: new Set(), removes: new Set(), checked: new Set(), renames: {} });
 
   const pendKeys = [];
   const recentBatches = [];   // admin "recent contributions" view (free: built from data already read)
@@ -1680,7 +1718,7 @@ async function flushR2(env) {
   // makes real progress every flush. No cap change → no throughput/iq slowdown.
   const failedShards = new Set();
   const pendKeyShards = new Map(), admuKeyShards = new Map(), admrKeyShards = new Map(),
-        admkKeyShards = new Map(), repKeyShards = new Map();
+        admkKeyShards = new Map(), repKeyShards = new Map(), admcKeyShards = new Map();
   const shardsOf = (fids) => { const s = new Set(); for (const fid of fids) if (FILE_RE.test(fid)) s.add(shardPrefix(fid)); return s; };
   // Consume pending USER batches only until MAX_SHARDS_PER_FLUSH distinct shards are queued, then STOP
   // (leave the rest for the next 1-min flush) so a big burst can't blow the subrequest limit and wedge
@@ -1707,7 +1745,8 @@ async function flushR2(env) {
     if (!reserve(fids)) break;                                                 // over budget → defer rest
     pendKeys.push(kn);
     pendKeyShards.set(kn, shardsOf(fids));
-    for (const fid of fids) S(shardPrefix(fid)).adds[fid] = batch[fid];
+    const bts = typeof batch.__ts === "number" ? batch.__ts : nowMs;
+    for (const fid of fids) { const ne = batch[fid]; if (ne && typeof ne === "object") ne.mt = bts; S(shardPrefix(fid)).adds[fid] = ne; }
     if (fids.length) recentBatches.push({
       ts: typeof batch.__ts === "number" ? batch.__ts : Date.now(),
       by: typeof batch.__by === "string" ? batch.__by : "",
@@ -1727,7 +1766,30 @@ async function flushR2(env) {
     if (!reserve(fids)) break;   // over budget → defer to next flush
     admuKeys.push(kn);
     admuKeyShards.set(kn, shardsOf(fids));
-    for (const fid of fids) S(shardPrefix(fid)).upserts[fid] = batch[fid];
+    // Pre-v49 batches carry no __ts: treat them as "now" (newest), which is what they were before.
+    const bts = typeof batch.__ts === "number" ? batch.__ts : nowMs;
+    for (const fid of fids) {
+      const o = S(shardPrefix(fid));
+      if (o.upTs[fid] !== undefined && o.upTs[fid] > bts) continue;   // a newer op already won
+      o.upserts[fid] = batch[fid]; o.upTs[fid] = bts; o.calmOnly.delete(fid);
+    }
+  }
+  // v49 calm lane (only when due). Same newest-wins merge; the winner remembers it was calm.
+  const admcKeys = [];
+  if (calmDue) for (const kn of admcNames) {
+    const val = await env.AVATAR_KV.get(kn);
+    if (!val) { admcKeys.push(kn); continue; }
+    let batch; try { batch = JSON.parse(val); } catch (_) { admcKeys.push(kn); continue; }
+    const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
+    if (!reserve(fids)) break;   // over budget → the rest wait for the next flush (still due)
+    admcKeys.push(kn);
+    admcKeyShards.set(kn, shardsOf(fids));
+    const bts = typeof batch.__ts === "number" ? batch.__ts : calmKeyTs(kn);
+    for (const fid of fids) {
+      const o = S(shardPrefix(fid));
+      if (o.upTs[fid] !== undefined && o.upTs[fid] >= bts) continue;  // fast/newer op wins
+      o.upserts[fid] = batch[fid]; o.upTs[fid] = bts; o.calmOnly.add(fid);
+    }
   }
   const admrKeys = [];
   for (const kn of admrNames) {
@@ -1787,10 +1849,8 @@ async function flushR2(env) {
   }
 
   const nowChecked = Date.now();
-  const staleCutoff = nowChecked - STALE_CUTOFF_MS;   // entries checked before this are due a recheck
   let added = 0, removed = 0, allShardsOk = true;
   let unfilledDelta = 0;      // incremental Fill-backlog delta (Worker owns the count now)
-  let staleDelta = 0;         // incremental Liveness-backlog delta (drains as bots recheck/remove)
   const indexOps = [];        // search-index ops computed from the SAME shard read (no re-fetch)
   const fillHintAdd = new Set();   // touched shards that still have an unfilled avatar
   const fillHintDone = new Set();  // touched shards that are now fully filled
@@ -1820,17 +1880,23 @@ async function flushR2(env) {
     // cache must be PURGED. A `checked`-only bump sets `dirty` (the timestamp must persist for sweep
     // pacing) but NOT `contentDirty` (no clone/search reader consults `checked`), so it never wastes a
     // purge — the biggest recurring purge saving at the 30d recheck cadence.
-    let dirty = false, contentDirty = false, sAdded = 0, sRemoved = 0, sUnfilled = 0, sStale = 0;
+    let dirty = false, contentDirty = false, sAdded = 0, sRemoved = 0, sUnfilled = 0;
     const sIndexOps = [];
     for (const fid of Object.keys(ops.adds)) if (!e[fid]) {
       const ne = ops.adds[fid]; e[fid] = ne; sAdded++; dirty = true; contentDirty = true;
       const op = buildIndexOp(null, ne, fid); if (op) sIndexOps.push(op);
       if (needsFold(ne)) ne.fz = foldSig(ne);   // the ADD already carries the folded tokens
+      if (hasNonAscii(ne)) ne.fv = FOLD_STAMP_V; // indexed under the current fold rules (bots won't flag it)
       if (ne.filled !== true) sUnfilled++;
     }
     for (const fid of Object.keys(ops.upserts)) {
       const inc = ops.upserts[fid];
       const prev = e[fid];
+      const ts = ops.upTs[fid] !== undefined ? ops.upTs[fid] : nowMs;
+      // v49 safety: a calm refresh never re-creates an avatar removed while it waited, and no op older
+      // than what's stored (its `mt`) may overwrite it.
+      if (!prev && ops.calmOnly.has(fid)) continue;
+      if (prev && typeof prev.mt === "number" && ts < prev.mt) continue;
       if (prev && typeof prev.added === "number") inc.added = prev.added; // `added` is immutable
       else if (!prev) sAdded++;
       if (!prev) { if (inc.filled !== true) sUnfilled++; }
@@ -1840,7 +1906,10 @@ async function flushR2(env) {
       // shouldn't rewrite the shard either. entryEquivalent compares the persisted fields.
       if (!prev || !entryEquivalent(prev, inc)) {
         const op = buildIndexOp(prev || null, inc, fid); if (op) sIndexOps.push(op);
-        if (needsFold(inc)) inc.fz = foldSig(inc);   // the op's token diff carries the folded tokens
+        // fz/fv: kept when the text didn't change; re-stamped (current fold) when it did or it's new.
+        if (prev) carryWorkerFields(prev, inc, textChangedBetween(prev, inc));
+        else { if (needsFold(inc)) inc.fz = foldSig(inc); if (hasNonAscii(inc)) inc.fv = FOLD_STAMP_V; }
+        inc.mt = ts;
         e[fid] = inc; dirty = true; contentDirty = true;
       }
     }
@@ -1853,38 +1922,28 @@ async function flushR2(env) {
     // every pass forever). The write volume is instead bounded by the RECHECK_INTERVAL_MS (widened
     // to 30d in the app): at 30d, re-verifying the whole catalog is ~1 shard write per avatar per
     // month — well under the R2 free tier — instead of the old 7d cadence's ~4x churn.
+    // v49: a bot `checked` id is now a FONT CHECK, never a timestamp write (the bots walk every shard
+    // continuously, so a "last checked" date bought nothing but a shard rewrite per visit). The bots
+    // flag only avatars with non-ASCII text whose `fv` isn't the current fold rules version; this
+    // re-folds the entry if its plain-text tokens are out of date and stamps `fv`, so it's flagged
+    // once per rules change. Nothing to fix → no write. (Older admin apps still send every unchanged
+    // avatar here: ASCII ones are a no-op, fancy ones get the same one-time stamp.)
     for (const fid of ops.checked) if (e[fid]) {
-      // A recheck that lands on a DUE entry drains the liveness backlog by one.
-      if (((e[fid].checked || e[fid].added || 0)) < staleCutoff) sStale--;
-      e[fid].checked = nowChecked; dirty = true;
-      // FOLD MAINTENANCE via the LIVENESS sweep (cheapest path). A checked-only bump means a bot
-      // re-verified an UNCHANGED avatar, so buildIndexOp never fires for it — the one path that
-      // previously left old fancy entries' plain (folded) tokens to the separate reconcile lap. If the
-      // entry is fancy (needsFold), re-assert its FULL union (raw ∪ folded) tokens so BOTH token sets
-      // stay indexed. applyIndexOps no-op-guards this per token (a cheap Class B read when already
-      // present, a one-token heal when the fold desynced), so the liveness bots maintain the fold as
-      // they walk — riding the checked write they already do, no new reads/VRChat/APK. The liveness walk
-      // is CONTINUOUS (oldest-swept-first, no 30d due gate), so every fancy avatar is re-asserted ~once
-      // per full lap (~15h at 4 bots) — cost ~1 index read per fancy avatar per lap. This re-assert uses
-      // the CURRENT foldFancy, so a new CONFUSABLES entry is picked up automatically as the walk re-checks
-      // each avatar — NO FOLD_VER bump / re-lap needed. avtr:null/frag:null (both already correct for an
-      // indexed entry) keeps it index-token-only.
-      // v40: gated by the fold stamp (foldSig) — a small fold-only op ONCE per fold result, not a full
-      // re-assert on every check (that flood jammed the index queue; see foldSig).
-      if (needsFold(e[fid])) {
-        const sig = foldSig(e[fid]);
-        if (e[fid].fz !== sig) {
-          const op = foldOp(e[fid]);
+      const ent = e[fid];
+      if (needsFold(ent)) {
+        const sig = foldSig(ent);
+        if (ent.fz !== sig) {
+          const op = foldOp(ent);
           if (op.add.length) sIndexOps.push(op);
-          e[fid].fz = sig;
+          ent.fz = sig; dirty = true;
         }
       }
+      if (hasNonAscii(ent) && ent.fv !== FOLD_STAMP_V) { ent.fv = FOLD_STAMP_V; dirty = true; }
     }
     for (const fid of ops.removes) if (e[fid]) {
       const prev = e[fid]; delete e[fid]; sRemoved++; dirty = true; contentDirty = true;
       const op = buildIndexOp(prev, null, fid); if (op) sIndexOps.push(op);
       if (prev.filled !== true) sUnfilled--;
-      if (((prev.checked || prev.added || 0)) < staleCutoff) sStale--;   // a due entry removed also drains it
     }
     // Bot FILL-hint (replaces the Action's worklist): does this shard, AFTER the ops, still hold
     // an unfilled avatar? Accurate + cheap (the shard is already in memory). Drives _worklist.json.
@@ -1901,7 +1960,7 @@ async function flushR2(env) {
     if (wrote) {   // fold the count deltas + index ops ONLY now that the shard actually persisted
       dirtyPrefixes.push(sp);
       if (contentDirty) purgePrefixes.push(sp);   // checked-only writes persist but skip the purge
-      added += sAdded; removed += sRemoved; unfilledDelta += sUnfilled; staleDelta += sStale;
+      added += sAdded; removed += sRemoved; unfilledDelta += sUnfilled;
       for (const op of sIndexOps) indexOps.push(op);
     }
   }
@@ -1927,6 +1986,8 @@ async function flushR2(env) {
   for (const n of admuKeys) if (keyClears(n, admuKeyShards)) await env.AVATAR_KV.delete(n);
   for (const n of admrKeys) if (keyClears(n, admrKeyShards)) await env.AVATAR_KV.delete(n);
   for (const n of admkKeys) if (keyClears(n, admkKeyShards)) await env.AVATAR_KV.delete(n);
+  let calmCleared = 0;
+  for (const n of admcKeys) if (keyClears(n, admcKeyShards)) { await env.AVATAR_KV.delete(n); calmCleared++; }
   for (const n of repClear) if (keyClears(n, repKeyShards)) { await env.AVATAR_KV.delete(n); repCleared++; }
 
   // FULL incremental SEARCH INDEX (add / rename / remove + avtr presence) — computed above from the SAME
@@ -1981,16 +2042,22 @@ async function flushR2(env) {
         take(op);
       }
     }
-    let applied = true, drainErr = "";
+    let applied = true, drainErr = "", idxChanged = [];
     const tApply = Date.now();
     if (toApply.length) {
       // No edge-cache purge on index buckets (they carry the 5-min INDEX_TTL, self-heal).
-      try { await applyIndexOps(env, toApply); } catch (e) { applied = false; drainErr = String(e && e.message || e).slice(0, 140); }
+      try { idxChanged = await applyIndexOps(env, toApply) || []; } catch (e) { applied = false; drainErr = String(e && e.message || e).slice(0, 140); }
     }
     // Leftover / on-failure-all → requeue by lane (idempotent). NO expiry: an index op is the only
     // thing that makes an avatar searchable, so it must never be dropped. v43: requeue FIRST, then
     // delete the drained keys, so hitting the subrequest ceiling between the two can only duplicate
     // ops (harmless), never lose them.
+    // v49: refresh the CHANGED search files on the CDN right away (as shards already are), so an avatar
+    // that just became clonable is also searchable in the same flush instead of after the 5-min TTL.
+    // Purges are free (no R2 op); capped at IDX_PURGE_CAP URLs (30 per call) to stay inside the
+    // subrequest budget — anything past the cap still self-heals via the TTL.
+    idxWrites = idxChanged.length;
+    if (idxChanged.length) try { await purgeCatalogUrls(env, idxChanged.slice(0, IDX_PURGE_CAP)); } catch (_) {}
     const requeue = applied ? leftover : [...toApply, ...leftover];
     const fold = requeue.filter((o) => o.fz), rest = requeue.filter((o) => !o.fz);
     let requeueOk = true;
@@ -2038,9 +2105,22 @@ async function flushR2(env) {
     }
   } catch (_) {}
   const countAdopted = countFromBackup !== (prevMeta.countFromBackup || 0);
-  const countMoved = added > 0 || removed > 0 || unfilledDelta !== 0 || staleDelta !== 0 || countAdopted;
+  // v49: the daily backup (which reads every shard) also publishes the exact UNFILLED count + the shards
+  // holding unfilled avatars (it replaced the monthly recount). Adopt both once per finished backup:
+  // unfilled = the backup's count + the running unfilled deltas since it finished; the fill worklist
+  // gains every shard it saw (union; the prune trims any filled since).
+  let backupFill = null, unfilledFromBackup = null;
+  const ufSum = (prevMeta.ufSum || 0) + unfilledDelta;   // running total of unfilled deltas
+  try {
+    const b = JSON.parse((await env.AVATAR_KV.get("backup")) || "null");
+    if (b && b.doneAt && b.doneAt !== (prevMeta.fillFromBackup || 0) && typeof b.lastUnfilled === "number") {
+      unfilledFromBackup = Math.max(0, b.lastUnfilled + (ufSum - (b.ufAt || 0)));
+      backupFill = { at: b.doneAt, fill: Array.isArray(b.fill) ? b.fill : [] };
+    }
+  } catch (_) {}
+  const needFoldV = prevMeta.manifestFoldV !== FOLD_STAMP_V;   // publish the font rules version once per change
+  const countMoved = added > 0 || removed > 0 || unfilledDelta !== 0 || countAdopted || unfilledFromBackup !== null || needFoldV;
   let unfilled = typeof prevMeta.unfilled === "number" ? prevMeta.unfilled : 0;
-  let staleTotal = typeof prevMeta.stale === "number" ? prevMeta.stale : 0;   // running Liveness backlog
   let adoptedRebuild = prevMeta.adoptedRebuild || null;
   let manifestWritten = false;
   if (countMoved) {
@@ -2049,9 +2129,9 @@ async function flushR2(env) {
     // write, so a skipped flush also saves the manifest Class B read.
     const sinceManifest = nowChecked - (prevMeta.lastManifestMs || 0);
     const entryDelta = Math.abs(entries - (typeof prevMeta.lastManifestEntries === "number" ? prevMeta.lastManifestEntries : 0));
-    const writeManifest = countAdopted || !prevMeta.lastManifestMs || sinceManifest >= MANIFEST_MIN_INTERVAL_MS || entryDelta >= MANIFEST_MIN_DELTA;
+    const writeManifest = countAdopted || unfilledFromBackup !== null || needFoldV || !prevMeta.lastManifestMs || sinceManifest >= MANIFEST_MIN_INTERVAL_MS || entryDelta >= MANIFEST_MIN_DELTA;
     unfilled = Math.max(0, unfilled + unfilledDelta);
-    staleTotal = Math.max(0, staleTotal + staleDelta);
+    if (unfilledFromBackup !== null) unfilled = unfilledFromBackup;
     if (writeManifest) {
       let man = {};
       try { const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json(); } catch (_) {}
@@ -2063,7 +2143,9 @@ async function flushR2(env) {
         adoptedRebuild = man.lastFullRebuild;
       }
       man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
-        entryCount: entries, unfilled, staleCount: staleTotal, searchReady: true, lastUpdate: new Date().toISOString() };
+        // staleCount stays 0 (v49: no per-avatar "last checked" any more; older admin apps read it).
+        // foldV = the font rules version the bots compare each avatar's `fv` stamp against.
+        entryCount: entries, unfilled, staleCount: 0, foldV: FOLD_STAMP_V, searchReady: true, lastUpdate: new Date().toISOString() };
       try {
         await env.CATALOG.put("_manifest.json", JSON.stringify(man), {
           httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" },
@@ -2089,6 +2171,7 @@ async function flushR2(env) {
   let hintChanged = false;
   if (allShardsOk) {
     const s = new Set(fillHint);
+    if (backupFill) for (const p of backupFill.fill) if (!s.has(p)) { s.add(p); hintChanged = true; }   // v49 backup adoption
     for (const p of fillHintAdd) if (!s.has(p)) { s.add(p); hintChanged = true; }
     for (const p of fillHintDone) if (s.has(p)) { s.delete(p); hintChanged = true; }
     if (hintChanged) {
@@ -2109,8 +2192,10 @@ async function flushR2(env) {
     totalAdded: (prevMeta.totalAdded || 0) + added,
     totalRemoved: (prevMeta.totalRemoved || 0) + removed,
     entries,
-    ...(countMoved ? { unfilled, stale: staleTotal } : {}),   // running Fill + Liveness backlogs (preserved when nothing moved)
-    ...(manifestWritten ? { lastManifestMs: nowChecked, lastManifestEntries: entries } : {}),
+    ...(countMoved ? { unfilled, stale: 0 } : {}),   // running Fill backlog (preserved when nothing moved)
+    ...(manifestWritten ? { lastManifestMs: nowChecked, lastManifestEntries: entries, manifestFoldV: FOLD_STAMP_V } : {}),
+    ufSum,
+    ...(backupFill && allShardsOk ? { fillFromBackup: backupFill.at } : {}),
     ...(hintChanged || seeded ? { fillHint } : {}),  // bot fill worklist (seeded once, then maintained)
     adoptedRebuild,
     countFromBackup,
@@ -2126,6 +2211,16 @@ async function flushR2(env) {
     lastDrain: lastDrainNow,     // v43 last index-drain report
     iqDropped: (prevMeta.iqDropped || 0) + iqDroppedNow,   // v40 legacy re-asserts dropped (running total)
     backend: "r2",
+    // v49 calm lane depth (batches waiting) + R2 WRITE COUNTERS for today (UTC): shard / search / other
+    // (manifest + worklist). /health shows them so every cost change can be measured, not guessed.
+    calmDepth: Math.max(0, admcNames.length - calmCleared),
+    wr: (() => {
+      const d = new Date().toISOString().slice(0, 10);
+      const w = prevMeta.wr && prevMeta.wr.d === d ? prevMeta.wr : { d, sh: 0, ix: 0, ot: 0 };
+      return { d, sh: w.sh + dirtyPrefixes.length, ix: w.ix + idxWrites,
+        ot: w.ot + (manifestWritten ? 1 : 0) + (hintChanged ? 1 : 0) };
+    })(),
+    wrPrev: prevMeta.wr && prevMeta.wr.d !== new Date().toISOString().slice(0, 10) ? prevMeta.wr : (prevMeta.wrPrev || null),
   })); } catch (_) { /* ceiling: meta stale ONE cycle (self-corrects next flush); the return below is computed from in-memory state so the chain still gets the right pendRemaining */ }
 
   // Rolling log of the most recent USER contribution batches (newest first) with FULL names, in a
