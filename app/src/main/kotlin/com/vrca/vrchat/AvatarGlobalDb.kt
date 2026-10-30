@@ -130,7 +130,10 @@ object AvatarGlobalDb {
         val perfIos: Int = 5,
         /** The bot has done a full first-fill (name/author/platforms/bio). Devices
          *  contribute filled=false; only the fill bot sets it true. */
-        val filled: Boolean = false
+        val filled: Boolean = false,
+        /** The Worker's font-version stamp (`fv`, only on avatars with non-ASCII text): which search fold
+         *  this entry was last indexed under. Differs from the manifest's `foldV` → the bots flag it. */
+        val fv: String = ""
     )
 
     private val map = ConcurrentHashMap<String, Entry>()   // fileId -> entry
@@ -379,7 +382,7 @@ object AvatarGlobalDb {
         context: Context, adminKey: String,
         upserts: List<Entry>, removeFileIds: List<String>,
         clearReports: List<String> = emptyList(), checkedFileIds: List<String> = emptyList(),
-        authorRenames: Map<String, String> = emptyMap()
+        authorRenames: Map<String, String> = emptyMap(), calm: Boolean = false
     ): Boolean {
         if (adminKey.isBlank()) return false
         val body = JSONObject().apply {
@@ -404,6 +407,9 @@ object AvatarGlobalDb {
             put("removes", JSONArray(removeFileIds))
             put("clearReports", JSONArray(clearReports))
             put("checked", JSONArray(checkedFileIds))
+            // Refreshes of avatars already in the catalog: the Worker holds these ~30 min and writes each
+            // shard once for all of them (nothing new becomes clonable/searchable later because of it).
+            if (calm) put("calm", true)
         }.toString()
         return kotlinx.coroutines.withContext(Dispatchers.IO) { post("$WORKER_URL/admin", body) }
     }
@@ -1471,6 +1477,7 @@ object AvatarGlobalDb {
         var checked = 0L; var added = 0L
         var perfPc = 5; var perfQuest = 5; var perfIos = 5
         var filled = false
+        var fv = ""
         val plats = ArrayList<String>(3)
         jr.beginObject()
         while (jr.hasNext()) {
@@ -1486,6 +1493,7 @@ object AvatarGlobalDb {
                 "perfQuest" -> perfQuest = jr.readIntSafe(5)
                 "perfIos" -> perfIos = jr.readIntSafe(5)
                 "filled" -> filled = jr.readBoolSafe()
+                "fv" -> fv = jr.readStringSafe()
                 "platforms" -> {
                     if (jr.peek() == JsonToken.BEGIN_ARRAY) {
                         jr.beginArray()
@@ -1501,7 +1509,7 @@ object AvatarGlobalDb {
         if (!id.startsWith("avtr_")) return null
         return Entry(
             fileId, id, name, author, authorId, plats,
-            if (checked != 0L) checked else added, desc, perfPc, perfQuest, perfIos, filled
+            if (checked != 0L) checked else added, desc, perfPc, perfQuest, perfIos, filled, fv
         )
     }
 
