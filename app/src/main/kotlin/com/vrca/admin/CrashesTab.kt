@@ -62,6 +62,7 @@ internal fun CrashesTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
     var tick by remember { mutableIntStateOf(0) }
     var open by remember { mutableStateOf<String?>(null) }
     val nowMs = remember(tick) { System.currentTimeMillis() }
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     LaunchedEffect(tick) {
         setError(null); loading = true
@@ -110,12 +111,30 @@ internal fun CrashesTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
                         row.deviceHash.take(16), fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (open == row.id) Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        com.vrca.ui.common.GremlinButton("Copy", onClick = {
+                            val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                            cm.setPrimaryClip(android.content.ClipData.newPlainText("VRC-A crash", row.text))
+                            android.widget.Toast.makeText(context, "Copied", android.widget.Toast.LENGTH_SHORT).show()
+                        }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = com.vrca.ui.common.GremlinButtonSize.Small)
+                        com.vrca.ui.common.GremlinButton("Share", onClick = {
+                            val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(android.content.Intent.EXTRA_SUBJECT, "VRC-A crash ${row.version} ${row.where}")
+                                putExtra(android.content.Intent.EXTRA_TEXT, row.text)
+                            }
+                            runCatching { context.startActivity(android.content.Intent.createChooser(send, "Share crash report")
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                        }, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = com.vrca.ui.common.GremlinButtonSize.Small)
+                    }
                     if (open == row.id) Box(
                         Modifier.padding(top = 6.dp).fillMaxWidth().heightIn(max = 320.dp).clip(RoundedCornerShape(8.dp))
                             .background(MaterialTheme.colorScheme.surface).verticalScroll(rememberScrollState())
                             .horizontalScroll(rememberScrollState()).padding(8.dp)
                     ) {
-                        Text(row.text, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, softWrap = false)
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Text(row.text, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, softWrap = false)
+                        }
                     }
                 }
             }

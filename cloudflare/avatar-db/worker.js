@@ -172,7 +172,10 @@ const CONFUSABLES = {
   "α":"a","Α":"a","β":"b","Β":"b","ε":"e","Ε":"e","ι":"i","Ι":"i","κ":"k","Κ":"k","ν":"v","Ν":"n","ο":"o","Ο":"o",
   "ρ":"p","Ρ":"p","τ":"t","Τ":"t","υ":"u","Υ":"y","χ":"x","Χ":"x","η":"n","Η":"h","Ζ":"z","Μ":"m",
   "ɾ":"r","ɳ":"n","ɫ":"l","ɡ":"g","ɐ":"a","ɘ":"e","ɔ":"o","ǝ":"e","ɓ":"b","ø":"o","Ø":"o","đ":"d","Đ":"d","ħ":"h","ı":"i",
-  "ǃ":".","ʚ":".","ɞ":".","ǀ":".","ǁ":".","ǂ":".","ˎ":".","ˊ":".","ˋ":".","˗":"."
+  "ǃ":".","ʚ":".","ɞ":".","ǀ":".","ǁ":".","ǂ":".","ˎ":".","ˊ":".","ˋ":".","˗":".",
+  // v40: top of the "unconverted" registry (letters used as Latin look-alikes) + upside-down text.
+  "я":"r","Я":"r","σ":"o","Σ":"e","Λ":"a","Δ":"a","ł":"l","Ł":"l","Ɇ":"e","ɇ":"e","Ð":"d","ð":"d","ɛ":"e","ƈ":"c","ɨ":"i","Ҝ":"k","ҝ":"k",
+  "ʍ":"w","ɥ":"h","ʇ":"t","ƃ":"g","ɹ":"r","ʎ":"y","ɯ":"m","ʞ":"k","ɟ":"f","ʌ":"v"
 };
 function foldFancy(s) {
   let out = "";
@@ -227,9 +230,59 @@ function tokenizeFields(...fields) {
 // True when an entry's name/author contain "fancy" Unicode that NFKC folds to different ASCII — i.e.
 // it was indexed (before this fold shipped) under decorative tokens and needs a one-time re-index so
 // its plain-ASCII tokens enter the search index. Cheap string compare, no allocation on the ASCII path.
+// v48: the bio too. It was name + author only, so an avatar whose only fancy text was its bio
+// (49k of 346k) never got its plain words indexed unless the bio itself changed: "Rainworldǃ"
+// was findable only as "rainworldǃ", never "rainworld" (measured: 35 of 150 sampled bios).
 function needsFold(e) {
-  const s = (e.name || "") + " " + (e.author || "");
+  const s = (e.name || "") + " " + (e.author || "") + " " + (e.desc || "");
   return foldFancy(s) !== s;
+}
+// FOLD STAMP (v40). The plain-text (folded) tokens of a fancy entry are written to the index ONCE per
+// distinct fold result, not on every liveness check: `e.fz` holds foldSig() of the fold last queued for
+// it, so a recheck only emits when the entry's name/author/bio changed or the fold rules (CONFUSABLES)
+// changed its result. The old every-check re-assert of the FULL token union flooded the index queue
+// (iqDepth pinned at 1000) and, past the subrequest ceiling, was silently dropped (ᵂᴴᴵᵀᴱ ᵀᴵᴳᴱᴿ's 8
+// avatars never got "white"/"tiger").
+function foldSig(e) {
+  return (hashCode(foldFancy(e.name || "") + "|" + foldFancy(e.author || "") + "|" + foldFancy(e.desc || "")) >>> 0).toString(36);
+}
+// Only the folded tokens the raw tokens lack (the raw ones are indexed on add), so a fold op touches
+// a few index buckets instead of the whole union.
+function foldOnlyTokens(e) {
+  const raw = new Set(), out = new Set();
+  for (const f of [e.name, e.author, e.desc]) {
+    if (!f) continue;
+    for (const w of String(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) raw.add(w);
+  }
+  for (const f of [e.name, e.author, e.desc]) {
+    if (!f) continue;
+    for (const w of foldFancy(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2 && !raw.has(w)) out.add(w);
+  }
+  return out;
+}
+// A fold op (marked fz:1). These ride the PRIORITY queue (iqp:), drained before the general backlog.
+function foldOp(e) {
+  return { id: e.id, del: false, frag: null, add: [...foldOnlyTokens(e)], rem: [], avtr: null, fz: 1 };
+}
+// A pre-v40 every-check re-assert (full union, no marker). Safe to DROP from the backlog: the fold
+// stamp re-emits whatever is still needed as a small marked op.
+// Priority-lane keys carry their op count ("iqp:<n>:<uuid>") so the flush can report the exact
+// number of queued fold ops from the key LIST alone, without reading any values.
+function iqpKey(n) { return "iqp:" + n + ":" + crypto.randomUUID(); }
+function iqpCount(k) { const n = parseInt(String(k).split(":")[1], 10); return Number.isFinite(n) ? n : 0; }
+function isLegacyReassert(o) {
+  return !!o && !o.fz && !o.del && !o.frag && !o.avtr && (!o.rem || !o.rem.length);
+}
+// Distinct R2 objects one op touches (fragment / avtr / index buckets). Each costs ~1 read + <=1 write,
+// so the drain budgets BUCKETS, not ops: 142 ops x ~10 tokens needed ~1,400 reads, over the ~1000
+// subrequest ceiling, and every read/write past it failed silently while the batch was cleared as done.
+function opBuckets(o, into) {
+  const id = o && o.id; if (!id || !String(id).startsWith("avtr_")) return;
+  const fp = fragBucketFor(id);
+  if (o.del || o.frag) into.add("f" + fp);
+  if (o.avtr) into.add("a" + fp);
+  for (const t of (o.add || [])) into.add("i" + indexBucketFor(t));
+  for (const t of (o.rem || [])) into.add("i" + indexBucketFor(t));
 }
 const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
 // Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The index-op backlog beyond this cap
@@ -285,7 +338,9 @@ const MAX_SHARDS_PER_FLUSH = 120;   // raised 60->120: v24 dropped the index-buc
 // chain only runs while there's a backlog and idles back to the plain 2-min cron once pend is empty, so
 // steady state is unchanged; a drain burst adds a lock op + meta write per step (negligible KV).
 const FLUSH_LOCK_TTL_MS = 90_000;      // a chain holds this; the cron skips its cycle while it's fresh
-const MAX_CONTINUATION_DEPTH = 30;     // hard cap on chained steps per drain (runaway guard)
+const MAX_CONTINUATION_DEPTH = 8;      // v47: 30 -> 8. Steps now nest (each awaits the next), all inside
+                                       // the cron's 15-min limit: 8 x ~70 s ≈ 10 min.
+const INDEX_CHAIN_DEPTH = 8;           // v40/v47: chained steps per cron for an INDEX-only backlog (iq:/iqp:)
 const DEFAULT_SELF_URL = "https://vrca-avatar-db.shadowash321rulse.workers.dev";  // fallback if WORKER_SELF_URL unset
 // Coalesce _manifest.json writes. The LIVE entry count already rides `meta.entries` (which /health
 // max()es against the manifest), so the _manifest.json copy only needs periodic freshening, not a
@@ -358,8 +413,20 @@ function buildIndexOp(oldE, newE, fileId) {
 
 // Apply a batch of index ops to fragments/<p> + avtr/<p> + index/<b>, grouped so each object is
 // read+written ONCE. Returns the changed URLs for edge-cache purge.
+const INDEX_IO_CONCURRENCY = 6;   // Workers allow 6 simultaneous open connections per invocation
+// Run fn over items with at most n in flight.
+async function runPool(items, n, fn) {
+  let i = 0;
+  const worker = async () => { while (i < items.length) { const it = items[i++]; await fn(it); } };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
+}
 async function applyIndexOps(env, ops) {
   if (!ops.length) return [];
+  // v40: a read that THROWS (vs an absent object) must never be treated as empty — writing back
+  // "empty + this batch" would wipe the bucket's other entries. Skip that bucket and throw at the end,
+  // so the caller requeues the whole batch (idempotent).
+  let readFailed = false, firstErr = "";
+  const fail = (what, e) => { readFailed = true; if (!firstErr) firstErr = what + ": " + String(e && e.message || e).slice(0, 100); };
   const fragWork = {};   // prefix -> { set:{id:summary}, del:Set(id) }
   const avtrWork = {};   // prefix -> { add:Set, rem:Set }
   const idxWork = {};    // indexBucket -> { token -> {add:Set, rem:Set} }
@@ -382,12 +449,16 @@ async function applyIndexOps(env, ops) {
   const changed = [];
   const base = env.CATALOG_BASE ? env.CATALOG_BASE.replace(/\/$/, "") : null;
   const ttl = { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + INDEX_TTL } };
+  // v41: buckets are independent objects, so they're processed INDEX_IO_CONCURRENCY at a time
+  // instead of one by one (same subrequest count; a ~300-bucket drain took ~100 s of wall time
+  // sequentially, which also held the chain lock and starved the cron's reconcile).
   // Fragments + avtr share the avatarId prefix.
-  for (const p of new Set([...Object.keys(fragWork), ...Object.keys(avtrWork)])) {
+  const fragAvtr = async (p) => {
     const fw = fragWork[p], aw = avtrWork[p];
-    if (fw && (Object.keys(fw.set).length || fw.del.size)) {
-      let cur = { v: 1, e: {} };
-      try { const o = await env.CATALOG.get(`fragments/${p}.json`); if (o) cur = await o.json(); } catch (_) {}
+    if (fw && (Object.keys(fw.set).length || fw.del.size)) await (async () => {
+      let cur = { v: 1, e: {} }, rf = false;
+      try { const o = await env.CATALOG.get(`fragments/${p}.json`); if (o) cur = await o.json(); } catch (e) { rf = true; fail(`get fragments/${p}`, e); }
+      if (rf) return;
       if (!cur || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
       // NO-OP GUARD: only rewrite when a summary actually CHANGES (re-adding an already-indexed
       // avatar whose summary is identical, or a delete of an absent id, must not rewrite the bucket).
@@ -402,12 +473,13 @@ async function applyIndexOps(env, ops) {
       }
       if (dirty) {
         try { await env.CATALOG.put(`fragments/${p}.json`, JSON.stringify({ v: 1, e: cur.e }), ttl);
-          if (base) changed.push(base + `/fragments/${p}.json`); } catch (_) {}
+          if (base) changed.push(base + `/fragments/${p}.json`); } catch (e) { fail(`put fragments/${p}`, e); }
       }
-    }
-    if (aw && (aw.add.size || aw.rem.size)) {
-      let cur = { v: 1, ids: [] };
-      try { const o = await env.CATALOG.get(`avtr/${p}.json`); if (o) cur = await o.json(); } catch (_) {}
+    })();
+    if (aw && (aw.add.size || aw.rem.size)) await (async () => {
+      let cur = { v: 1, ids: [] }, rf = false;
+      try { const o = await env.CATALOG.get(`avtr/${p}.json`); if (o) cur = await o.json(); } catch (e) { rf = true; fail(`get avtr/${p}`, e); }
+      if (rf) return;
       if (!cur || !Array.isArray(cur.ids)) cur = { v: 1, ids: [] };
       const s = new Set(cur.ids);
       // NO-OP GUARD: only dirty when a membership actually changes (add of an id already present /
@@ -419,14 +491,16 @@ async function applyIndexOps(env, ops) {
       for (const id of aw.add) { if (!s.has(id)) { s.add(id); dirty = true; } }
       if (dirty) {
         try { await env.CATALOG.put(`avtr/${p}.json`, JSON.stringify({ v: 1, ids: Array.from(s) }), ttl);
-          if (base) changed.push(base + `/avtr/${p}.json`); } catch (_) {}
+          if (base) changed.push(base + `/avtr/${p}.json`); } catch (e) { fail(`put avtr/${p}`, e); }
       }
-    }
-  }
+    })();
+  };
+  await runPool([...new Set([...Object.keys(fragWork), ...Object.keys(avtrWork)])], INDEX_IO_CONCURRENCY, fragAvtr);
   // Index token lists.
-  for (const [b, toks] of Object.entries(idxWork)) {
-    let cur = { v: 1, t: {} };
-    try { const o = await env.CATALOG.get(`index/${b}.json`); if (o) cur = await o.json(); } catch (_) {}
+  await runPool(Object.entries(idxWork), INDEX_IO_CONCURRENCY, async ([b, toks]) => {
+    let cur = { v: 1, t: {} }, rf = false;
+    try { const o = await env.CATALOG.get(`index/${b}.json`); if (o) cur = await o.json(); } catch (e) { rf = true; fail(`get index/${b}`, e); }
+    if (rf) return;
     if (!cur || typeof cur.t !== "object" || cur.t === null) cur = { v: 1, t: {} };
     // NO-OP GUARD per token: only rewrite the bucket when at least one token's posting list actually
     // changed (a re-emitted ADD for an already-listed id, common after reconcile/requeue, was
@@ -452,9 +526,11 @@ async function applyIndexOps(env, ops) {
     }
     if (dirty) {
       try { await env.CATALOG.put(`index/${b}.json`, JSON.stringify({ v: 1, t: cur.t }), ttl);
-        if (base) changed.push(base + `/index/${b}.json`); } catch (_) {}
+        if (base) changed.push(base + `/index/${b}.json`); } catch (e) { fail(`put index/${b}`, e); }
     }
-  }
+  });
+  // Any failed read or write → the caller requeues the whole batch (re-applying is idempotent).
+  if (readFailed) throw new Error(firstErr || "index bucket read/write failed");
   return changed;
 }
 
@@ -594,6 +670,17 @@ export default {
         return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length, authorRenames: authorRenames.length });
       }
 
+      if (req.method === "GET" && url.pathname === "/admin/backupstep") {
+        // v45: one step of the daily db.json backup (fired by the cron as its OWN invocation, so it has
+        // its own subrequest budget and never holds the flush lock). Token-gated like the chain.
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+          return json({ ok: false, error: "unauthorized" }, 401);
+        }
+        let r = null;
+        try { r = await backupStep(env); } catch (e) { r = { error: String(e && e.message || e).slice(0, 200) }; }
+        return json({ ok: true, backup: r });
+      }
+
       if (req.method === "GET" && url.pathname === "/admin/reconcile") {
         // Re-arm the ONE-TIME search-index reconciler (resets its cursor + done flag) so it walks all
         // 4096 clone shards again — only needed if a future audit suspects the search index drifted
@@ -603,11 +690,14 @@ export default {
         }
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
         meta.rc = 0; meta.rcDone = false; meta.reconcileScanned = 0; meta.reconcileFixed = 0;
+        // v40: ?heal=1 also checks every entry's search presence (budgeted, ~a day); without it the
+        // lap is the fast shard-only recount + fold catch-up (~70 min).
+        meta.rcHeal = url.searchParams.get("heal") === "1";
         // Reset the recount accumulators + the clean-pass guards so the re-armed pass computes a
         // fresh EXACT count (adopted only if the whole 4096-shard lap reads cleanly).
         meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcAdoptSkipped = 0;
         await env.AVATAR_KV.put("meta", JSON.stringify(meta));
-        return json({ ok: true, reconcile: "re-armed (one full pass will run over ~a day)" });
+        return json({ ok: true, reconcile: meta.rcHeal ? "re-armed WITH presence heal (budgeted, ~a day)" : "re-armed (shard-only pass, ~70 min)" });
       }
 
       if (req.method === "GET" && url.pathname === "/admin/reports") {
@@ -692,6 +782,7 @@ export default {
         // ONE cheap KV read (no list ops — those have a tight free-tier limit and this is
         // polled every 15s). Counts come from meta (set at flush).
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        let backupSt = null; try { backupSt = JSON.parse((await env.AVATAR_KV.get("backup")) || "null"); } catch (_) {}
         // Prefer the manifest's authoritative entryCount (Action-maintained); fall back to the
         // KV counter. max() so a fresh contribution that bumped KV past the last rebuild still shows.
         const manCount = await manifestEntryCount(env);
@@ -702,6 +793,11 @@ export default {
           pendingBatches: meta.pendingBatches || 0,
           reports: meta.reports || 0,
           iqDepth: meta.iqDepth || 0,   // search-index op queue depth (keys, ~150 ops each); drains to 0 as fold/rebuild ops apply
+          iqpDepth: meta.iqpDepth || 0, // v40 priority lane (fold ops), drained before iqDepth
+          foldPending: meta.foldPending || 0, // v40 fancy-font avatars whose plain-text tokens are still queued
+          backup: backupLine(backupSt),       // v45 daily db.json backup status
+          lastDrain: meta.lastDrain || "",    // v43 last index-drain report (applied/ops/buckets/keys/err)
+          iqDropped: meta.iqDropped || 0, // v40 pre-v40 every-check re-asserts dropped from the backlog
           lastFlush: meta.lastFlush || null,
           lastAdded: meta.lastAdded || 0,
           lastRemoved: meta.lastRemoved || 0,
@@ -715,6 +811,8 @@ export default {
           lastReconcile: meta.lastReconcile || null,
           reconcileScanned: meta.reconcileScanned || 0,
           reconcileFixed: meta.reconcileFixed || 0,
+          reconcileFoldQueued: meta.reconcileFoldQueued || 0,   // v40 fold ops queued to the priority lane by reconcile
+          reconcileHeal: meta.rcHeal === true,                  // v40 presence heal armed (on-demand)
           reconcileDone: !!meta.rcDone,          // one-time heal finished → reconciler idle (flush maintains)
           reconcileDoneAt: meta.rcDoneAt || null,
           // Recount-integrity guards (v8+): shards a recount lap couldn't read, retry attempts, and whether
@@ -748,7 +846,7 @@ export default {
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: meta.unconverted || 0,   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)
           lastDiag: meta.lastDiag || null,   // last flush's consumed/cleared/shards/failed/ok (cheap: rides the meta read)
-          version: 39,   // v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 48,   // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -790,11 +888,19 @@ export default {
         const isChain = !!cont && !!env.ADMIN_KEY && cont === env.ADMIN_KEY;
         if (isChain) {
           await chainLockPut(env);   // refresh the single-flight lock so the cron keeps yielding
+          // v41: while a chain runs, the 2-min cron skips its whole cycle (chainBusy), so a long index
+          // drain starved reconcile/prune/author-rename. A chain step runs them itself when due
+          // (same lock, so no meta race).
+          await cronTasksIfDue(env);
           let res = null;
           try { res = await flushR2(env); } catch (e) { console.log("flush chain err", e); }
           const depth = parseInt(url.searchParams.get("n") || "1", 10) || 1;
-          if (res && res.pendRemaining > 0 && res.progressed && depth < MAX_CONTINUATION_DEPTH) {
-            fireContinuation(env, ctx, depth + 1);   // more to drain → hand off a fresh budget
+          const more = res && ((res.pendRemaining > 0 && res.progressed && depth < MAX_CONTINUATION_DEPTH) ||
+            (res.iqRemaining && res.iqProgressed && depth < INDEX_CHAIN_DEPTH));
+          if (more) {
+            // Hand off a fresh budget AND wait for it, so this request stays open and the next step
+            // can't be cut off (v47). The whole chain stays inside the cron's 15-min window via the caps.
+            await fireContinuation(env, ctx, depth + 1, true);
           } else {
             await chainLockDel(env);   // drained / capped / no progress → release the lock
           }
@@ -833,17 +939,17 @@ export default {
       // this whole cycle — running reconcile/flush now would overlap the chain's flush and race the
       // shared `meta` record (the pendingBatches/lastFlush flicker). The chain finishes fast; the cron
       // just waits one cycle. (A crashed chain self-heals in ≤90s when the lock ages out.)
+      // v45 daily db.json backup: one step per cron as its OWN invocation (own budget, no lock).
+      try { await maybeFireBackupStep(env, ctx); } catch (_) {}
       if (await chainBusy(env)) return;
-      try { await reconcileIndex(env); } catch (e) { console.log("reconcile err", e); }
-      try { await pruneFillWorklist(env); } catch (e) { console.log("prune err", e); }
-      try { await propagateAuthorRenames(env); } catch (e) { console.log("arn err", e); }
+      await cronTasks(env);
       // Claim the single-flight lock, run one flush, and if pend work remains hand off to a
       // self-chaining drain (each step a FRESH ~1000-subrequest budget) instead of waiting 2 min for
       // the next cron. Releases the lock when there's nothing left to chain.
       await chainLockPut(env);
       let res = null;
       try { res = await flushR2(env); } catch (e) { console.log("flushR2 err", e); }
-      if (res && res.pendRemaining > 0 && res.progressed) {
+      if (res && ((res.pendRemaining > 0 && res.progressed) || (res.iqRemaining && res.iqProgressed))) {
         fireContinuation(env, ctx, 1);
       } else {
         await chainLockDel(env);
@@ -863,7 +969,11 @@ export default {
 // no reason to keep reading R2 forever. Re-run it any time with GET /admin/reconcile?key=… (resets the
 // cursor) if a future audit ever suspects drift. Bounded per run: RECONCILE_SHARDS_PER_RUN shard reads
 // + one avtr/ read per distinct id-bucket seen (cached within the run).
-const RECONCILE_SHARDS_PER_RUN = 24;  // one-time pass → ~5h for a full lap then STOP. Bumped 8→24 to
+// v40: 24 -> 120. The lap is now SHARD READS ONLY (the per-entry avtr presence check moved to the
+// on-demand heal mode below), so a run costs ~120 Class B reads and a full lap ~4,100 reads in ~70 min
+// (was 6h+, and each run tried ~1,600 avtr reads, past the ~1000-subrequest ceiling: the failed reads
+// counted as "missing" and queued full re-adds, which is most of reconcileFixed's 105k).
+const RECONCILE_SHARDS_PER_RUN = 120; // previously: one-time pass → ~5h for a full lap then STOP. Bumped 8→24 to
                                       // roll the fancy-Unicode fold re-index out ~3x faster (plain-text
                                       // search for fancy-named/authored avatars needs the folded tokens
                                       // in the index). COST-NEUTRAL vs the bill emergency: this only adds
@@ -872,6 +982,16 @@ const RECONCILE_SHARDS_PER_RUN = 24;  // one-time pass → ~5h for a full lap th
                                       // spare capacity over the raised emission (~97/min), so the TTL-free
                                       // iq: queue absorbs any transient backlog. Stays far under the
                                       // subrequest budget alongside flushR2 (~40 extra reads/run).
+// v40 presence HEAL mode (armed only by GET /admin/reconcile?heal=1): also checks every entry against
+// its avtr/ presence bucket and re-adds the genuinely missing. Budgeted per run so it never crosses the
+// ceiling, and a failed avtr read means "unknown, skip" (never "missing").
+const HEAL_AVTR_READS_PER_RUN = 300;
+// v40 re-arm: a fresh lap that queues the plain-text (folded) tokens of every fancy entry without a
+// current fold stamp into the PRIORITY lane (iqp:), so they don't wait for a 20-day checked push.
+// v41: a FINGERPRINT of the fold rules, so ANY CONFUSABLES/SMALLCAPS change re-arms that lap by
+// itself on deploy (unchanged fancy avatars get the new fold within ~70 min, nothing to remember).
+// "+bio" (v48): needsFold now covers the bio, so the lap re-arms once to queue bio-only fancy avatars.
+const FOLD_STAMP_V = "r" + (hashCode(JSON.stringify(CONFUSABLES) + JSON.stringify(SMALLCAPS) + "+bio") >>> 0).toString(36);
 const RC_MAX_ATTEMPTS = 3;            // retry a tainted (read-failed) count pass this many times, then
                                       // give up and keep the incremental count (never adopt a bad one)
 // PERIODIC RE-ARM: the incremental `unfilled`/`entries` counts DRIFT over time (a fill that doesn't
@@ -949,6 +1069,12 @@ async function reconcileIndex(env) {
     meta.foldLapV = FOLD_VER;   // this fresh lap is dedicated to FOLD_VER; only it may stamp foldVer
     // fall through → run the lap; foldVer is stamped on clean completion of THIS dedicated lap
   }
+  if (meta.foldStampV !== FOLD_STAMP_V) {
+    meta.rcDone = false;
+    meta.rc = 0; meta.reconcileScanned = 0;
+    meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcStale = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcFill = [];
+    meta.foldStampV = FOLD_STAMP_V;
+  }
   const foldPass = meta.foldVer !== FOLD_VER;   // emit folded-token ADDs for fancy entries this lap
   // Re-arm a completed heal once it's older than the interval, so the count is periodically re-truthed.
   if (meta.rcDone) {
@@ -966,7 +1092,10 @@ async function reconcileIndex(env) {
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   const idxCache = {};         // index-bucket -> { token -> Set(ids) } (per-run cache for the fold gate)
-  const missing = [];          // ADD index ops for entries not yet indexed
+  const missing = [];          // ADD index ops for entries not yet indexed (heal mode only)
+  const foldOps = [];          // v40 fold ops for fancy entries without a current fold stamp → iqp:
+  const heal = meta.rcHeal === true;
+  let avtrReads = 0;
   // Accumulate (across the multi-run lap) EVERY shard prefix that still holds an unfilled avatar. On
   // lap completion this becomes the AUTHORITATIVE fill worklist — the fix for the endless whole-catalog
   // "shard walk". The incremental flush only ever added a shard to the worklist when a fresh CONTRIBUTION
@@ -992,6 +1121,7 @@ async function reconcileIndex(env) {
   // but for a PHANTOM count it finds the true near-zero and fixes the churn.)
   let entriesSeen = 0, unfilledSeen = 0, staleSeen = 0, stepped = 0, readFail = 0;
   for (let n = 0; n < RECONCILE_SHARDS_PER_RUN; n++) {
+    if (heal && avtrReads >= HEAL_AVTR_READS_PER_RUN) break;   // heal budget spent → resume next run
     const prefix = cursor.toString(16).padStart(3, "0");
     cursor = (cursor + 1) & 0xfff;   // 0..4095 wrap
     // Distinguish a genuinely-ABSENT/empty shard (0 entries, fine to count as 0) from a transient
@@ -1019,13 +1149,21 @@ async function reconcileIndex(env) {
           unconvSample.push({ id, n: (e.name || "").slice(0, 48), au: (e.author || "").slice(0, 48),
             r: Array.from(resid) });
       }
+      // v40: fancy entry without a current fold stamp → its plain-text tokens go to the priority lane.
+      if (needsFold(e) && e.fz !== foldSig(e)) {
+        const fop = foldOp(e);
+        if (fop.add.length) foldOps.push(fop);
+      }
+      if (!heal) continue;   // presence check only in the on-demand heal mode
       const b = fragBucketFor(id);
       if (!(b in avtrCache)) {
         let ids = new Set();
-        try { const o = await env.CATALOG.get(`avtr/${b}.json`); if (o) { const j = await o.json(); if (Array.isArray(j.ids)) ids = new Set(j.ids); } } catch (_) {}
+        avtrReads++;
+        try { const o = await env.CATALOG.get(`avtr/${b}.json`); if (o) { const j = await o.json(); if (Array.isArray(j.ids)) ids = new Set(j.ids); } }
+        catch (_) { ids = null; }   // read failed → UNKNOWN (skip), never "missing"
         avtrCache[b] = ids;
       }
-      if (!avtrCache[b].has(id)) {
+      if (avtrCache[b] && !avtrCache[b].has(id)) {
         const op = buildIndexOp(null, e, fid);   // ADD: writes fragment + avtr + tokens
         if (op) { missing.push(op); avtrCache[b].add(id); }   // add to cache so siblings this run aren't re-flagged
       }
@@ -1043,6 +1181,13 @@ async function reconcileIndex(env) {
   // Enqueue the repairs (TTL-free) — the normal flush drains them via applyIndexOps.
   for (let i = 0; i < missing.length; i += MAX_INDEX_OPS_PER_FLUSH)
     await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(missing.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
+  for (let i = 0; i < foldOps.length; i += MAX_INDEX_OPS_PER_FLUSH) {
+    const part = foldOps.slice(i, i + MAX_INDEX_OPS_PER_FLUSH);
+    await env.AVATAR_KV.put(iqpKey(part.length), JSON.stringify(part));
+  }
+  // Keep "Fonts waiting" current between flushes (the next flush recomputes it exactly).
+  meta.foldPending = (meta.foldPending || 0) + foldOps.length;
+  meta.reconcileFoldQueued = (meta.reconcileFoldQueued || 0) + foldOps.length;
   meta.rcFill = Array.from(fillSeen);   // accumulate the fill-shard set across the lap (adopted on completion)
   meta.rcUnconvHist = unconvHist;       // accumulate the unconverted histogram + sample across the lap
   meta.rcUnconvSample = unconvSample;
@@ -1066,13 +1211,15 @@ async function reconcileIndex(env) {
   if (meta.reconcileScanned >= 4096) {
     const clean = (meta.rcReadFail || 0) === 0;
     const attempts = (meta.rcAttempts || 0);
+    meta.rcHeal = false;   // v40: a heal lap is one-shot
     if (clean) {
       meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
       // Stamp the fold version ONLY when the lap that just completed was the DEDICATED fresh fold lap for
       // this FOLD_VER (foldLapV set at its start, above). A partial/carried-over lap that happens to cross
       // 4096 must NOT mark the fold done — that was the v24 bug that left fancy entries un-folded.
       if (meta.foldLapV === FOLD_VER) meta.foldVer = FOLD_VER;   // fancy-entry fold re-index complete
-      meta.entries = meta.rcEntries || 0;
+      // v48: the avatar COUNT is no longer adopted here (the daily backup's exact count is; see flushR2).
+      // A lap counts over ~70 min while flushes keep adding, and one lap left a +~7,000 phantom.
       meta.unfilled = meta.rcUnfilled || 0;
       meta.stale = meta.rcStale || 0;   // adopt the TRUE liveness backlog (drains live via the flush)
       meta.rcAdoptSkipped = 0;
@@ -1150,16 +1297,22 @@ async function reconcileIndex(env) {
 // shards to the back — so the whole worklist self-corrects to the true set in a few minutes. It runs
 // ONLY while the worklist is implausibly larger than the unfilled count (bloat present), so once clean
 // it costs nothing; it re-arms automatically if the leak recurs.
-const PRUNE_BATCH = 40;            // shards checked per cron (bounded — Class B reads, cheap)
-const PRUNE_SLACK = 20;           // don't bother pruning once length is within this of the unfilled count
+// v46: it ALWAYS runs while the list is non-empty. The old gate (skip while length <= unfilled + 20)
+// compared the list against the `unfilled` COUNTER, which had drifted too (2026-10-26: 1,176 "unfilled"
+// and 1,012 listed shards vs 7 real unfilled avatars), so the pruner never ran and the bots kept reading
+// empty fill shards. It also RE-COUNTS: unfilled avatars can only live in listed shards (new ones are
+// added by the flush), so after each full pass over the list `unfilled` is set to what the pass found.
+const PRUNE_BATCH = 100;           // shards checked per cron (Class B reads; ~list size once it's clean)
 async function pruneFillWorklist(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   let fill = Array.isArray(meta.fillHint) ? meta.fillHint : null;
-  if (!fill || fill.length === 0) return;                                // nothing to prune
-  const unfilled = typeof meta.unfilled === "number" ? meta.unfilled : 0;
-  if (fill.length <= unfilled + PRUNE_SLACK) return;                     // plausibly clean → skip (0 reads)
-  const batch = fill.slice(0, PRUNE_BATCH);
-  const rest = fill.slice(PRUNE_BATCH);
+  if (!fill || fill.length === 0) {
+    if (meta.unfilled) { meta.unfilled = 0; await env.AVATAR_KV.put("meta", JSON.stringify(meta)); }
+    return;
+  }
+  // Pass bookkeeping: a pass = as many shards as the list held when it started.
+  if (!(meta.prunePassLeft > 0)) { meta.prunePassLeft = fill.length; meta.prunePassUnfilled = 0; }
+  const batch = fill.slice(0, Math.min(PRUNE_BATCH, meta.prunePassLeft));
   const kept = [];
   let changed = false;
   for (const sp of batch) {
@@ -1168,12 +1321,19 @@ async function pruneFillWorklist(env) {
     catch (_) { failed = true; }
     if (failed) { kept.push(sp); continue; }                            // transient read fail → keep, re-check later
     const e = (shard && shard.e) || {};
-    const hasUnfilled = Object.values(e).some((x) => x && x.id && String(x.id).startsWith("avtr_") && x.filled !== true);
-    if (hasUnfilled) kept.push(sp);                                     // still has work → keep
+    const n = Object.values(e).filter((x) => x && x.id && String(x.id).startsWith("avtr_") && x.filled !== true).length;
+    meta.prunePassUnfilled = (meta.prunePassUnfilled || 0) + n;
+    if (n > 0) kept.push(sp);                                           // still has work → keep
     else changed = true;                                               // fully filled → drop it
   }
+  const rest = fill.slice(batch.length);
   fill = [...rest, ...kept];   // rotate: checked-kept go to the back so the next run checks fresh ones
   meta.fillHint = fill;
+  meta.prunePassLeft = Math.max(0, meta.prunePassLeft - batch.length);
+  if (meta.prunePassLeft === 0) {
+    meta.unfilled = meta.prunePassUnfilled || 0;   // exact "Fills waiting" for the pass just finished
+    meta.lastFillRecount = new Date().toISOString();
+  }
   if (changed) {
     try {
       await env.CATALOG.put("_worklist.json",
@@ -1323,21 +1483,136 @@ async function chainBusy(env) {
   } catch (_) { return false; }
 }
 async function chainLockPut(env) { try { await env.AVATAR_KV.put("flushlock", String(Date.now()), { expirationTtl: 120 }); } catch (_) {} }
+// The cron's maintenance steps (each isolated: one throwing must not skip the others). Stamped in
+// KV so a chain step can tell whether they're due (CRON_TASKS_EVERY_MS).
+const CRON_TASKS_EVERY_MS = 110_000;
+async function cronTasks(env) {
+  try { await env.AVATAR_KV.put("crontasks", String(Date.now()), { expirationTtl: 3600 }); } catch (_) {}
+  try { await reconcileIndex(env); } catch (e) { console.log("reconcile err", e); }
+  try { await pruneFillWorklist(env); } catch (e) { console.log("prune err", e); }
+  try { await propagateAuthorRenames(env); } catch (e) { console.log("arn err", e); }
+}
+// ---- v45 daily db.json backup, built inside R2 (replaces the removed GitHub catalog-rebuild) ----
+// The catalog is too big for one Worker invocation's memory/subrequests, so the backup is a MULTIPART
+// upload built across ~20 cron steps: each step reads BACKUP_SHARDS_PER_STEP shards, appends their
+// entries in the master's line format ("file_…":{…} one per line, which reshardFromMaster parses),
+// uploads every full BACKUP_PART_BYTES chunk, and carries the remainder in KV. The last step adds
+// the footer and completes the upload, which swaps the new db.json in atomically; until then the
+// previous backup stays intact. Cost/day: ~4,100 Class B shard reads + ~35 Class A (parts + create/
+// complete) + ~45 KV writes, i.e. effectively free; it never touches the index, meta or flush lock.
+const BACKUP_EVERY_MS = 24 * 60 * 60 * 1000;
+const BACKUP_SHARDS_PER_STEP = 200;
+const BACKUP_PART_BYTES = 5 * 1024 * 1024;        // R2: every part but the last must be this size
+const BACKUP_STALE_MS = 6 * 60 * 60 * 1000;       // an upload stuck this long is aborted + restarted
+async function maybeFireBackupStep(env, ctx) {
+  if (!env.ADMIN_KEY || !env.CATALOG) return;
+  const st = JSON.parse((await env.AVATAR_KV.get("backup")) || "{}");
+  const due = st.uploadId || !st.doneAt || Date.now() - st.doneAt >= BACKUP_EVERY_MS;
+  if (!due) return;
+  const path = `/admin/backupstep?key=${encodeURIComponent(env.ADMIN_KEY)}`;
+  if (env.SELF && typeof env.SELF.fetch === "function") ctx.waitUntil(env.SELF.fetch("https://self" + path).catch(() => {}));
+  else ctx.waitUntil(fetch(selfBase(env) + path).catch(() => {}));
+}
+async function backupStep(env) {
+  const KV = env.AVATAR_KV;
+  let st = JSON.parse((await KV.get("backup")) || "{}");
+  const now = Date.now();
+  if (st.uploadId && now - (st.startedAt || 0) > BACKUP_STALE_MS) {
+    try { await env.CATALOG.resumeMultipartUpload("db.json", st.uploadId).abort(); } catch (_) {}
+    st = { doneAt: st.doneAt, lastCount: st.lastCount, lastBytes: st.lastBytes, lastErr: "stale upload restarted" };
+  }
+  const enc = new TextEncoder();
+  let carry;
+  if (!st.uploadId) {
+    if (st.doneAt && now - st.doneAt < BACKUP_EVERY_MS) return { skipped: "not due" };
+    const up = await env.CATALOG.createMultipartUpload("db.json", {
+      httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=3600" },
+    });
+    st = { ...st, uploadId: up.uploadId, next: 0, parts: [], count: 0, bytes: 0, startedAt: now };
+    carry = enc.encode('{"name":"VRC-A Avatar Store","version":1,"avatars":{\n');
+  } else {
+    const b = await KV.get("backup:buf", "arrayBuffer");
+    carry = b ? new Uint8Array(b) : new Uint8Array(0);
+  }
+  const upload = env.CATALOG.resumeMultipartUpload("db.json", st.uploadId);
+  // Read this step's shards (a failed read aborts the step WITHOUT saving, so it's retried).
+  const chunks = [];
+  let count = st.count;
+  const end = Math.min(4096, st.next + BACKUP_SHARDS_PER_STEP);
+  for (let n = st.next; n < end; n++) {
+    const prefix = n.toString(16).padStart(3, "0");
+    const o = await env.CATALOG.get(`shard/${prefix}.json`);   // throws on a real failure → step retried
+    if (!o) continue;
+    const shard = await o.json();
+    for (const [fid, e] of Object.entries((shard && shard.e) || {})) {
+      chunks.push((count > 0 ? ",\n" : "") + JSON.stringify(fid) + ":" + JSON.stringify(e));
+      count++;
+    }
+  }
+  const last = end >= 4096;
+  const startBytes = st.next === 0 ? carry.length : 0;   // the header is counted once
+  if (last) chunks.push(`\n},"count":${count}}`);
+  const add = enc.encode(chunks.join(""));
+  let buf = new Uint8Array(carry.length + add.length);
+  buf.set(carry, 0); buf.set(add, carry.length);
+  const parts = st.parts.slice();
+  let off = 0;
+  while (buf.length - off >= BACKUP_PART_BYTES) {
+    const part = await upload.uploadPart(parts.length + 1, buf.slice(off, off + BACKUP_PART_BYTES));
+    parts.push({ partNumber: part.partNumber, etag: part.etag });
+    off += BACKUP_PART_BYTES;
+  }
+  buf = buf.slice(off);
+  if (last) {
+    if (buf.length || !parts.length) {
+      const part = await upload.uploadPart(parts.length + 1, buf);
+      parts.push({ partNumber: part.partNumber, etag: part.etag });
+    }
+    await upload.complete(parts);
+    const bytes = (st.bytes || 0) + startBytes + add.length;
+    const done = { doneAt: Date.now(), lastCount: count, lastBytes: bytes, lastMs: Date.now() - st.startedAt };
+    // v48: snapshot the flush totals so the flush can adopt this exact count (+ what moved since).
+    try { const m = JSON.parse((await KV.get("meta")) || "{}"); done.addedAt = m.totalAdded || 0; done.removedAt = m.totalRemoved || 0; } catch (_) {}
+    await KV.put("backup", JSON.stringify(done));
+    try { await KV.delete("backup:buf"); } catch (_) {}
+    return { done: true, count, parts: parts.length, bytes };
+  }
+  await KV.put("backup:buf", buf);
+  await KV.put("backup", JSON.stringify({ ...st, next: end, parts, count,
+    bytes: (st.bytes || 0) + startBytes + add.length }));
+  return { next: end, count, parts: parts.length };
+}
+/** One-line backup status for /health ("Backup" row in the admin Bots tab). */
+function backupLine(st) {
+  if (!st) return "";
+  if (st.uploadId) return `running ${st.next || 0}/4096 shards, ${st.count || 0} avatars`;
+  if (st.doneAt) return `${new Date(st.doneAt).toISOString().slice(0, 16).replace("T", " ")} UTC, ${st.lastCount} avatars, ` +
+    `${((st.lastBytes || 0) / 1e6).toFixed(0)} MB` + (st.lastErr ? ` (${st.lastErr})` : "");
+  return "";
+}
+
+async function cronTasksIfDue(env) {
+  let last = 0;
+  try { last = parseInt((await env.AVATAR_KV.get("crontasks")) || "0", 10) || 0; } catch (_) {}
+  if (Date.now() - last >= CRON_TASKS_EVERY_MS) await cronTasks(env);
+}
 async function chainLockDel(env) { try { await env.AVATAR_KV.delete("flushlock"); } catch (_) {} }
-function fireContinuation(env, ctx, depth) {
-  if (!env.ADMIN_KEY) return;   // chaining is gated on the internal token; without it, single-flush only
+// v47: returns the step's promise. A CHAIN STEP must AWAIT it (see the /flush chain handler): a fetch
+// handler's ctx.waitUntil only lives ~30 s after it responds, but a step takes ~60-70 s, so a step
+// fired via waitUntil from another step was cut off mid-flush every time (meta never saved, lock left
+// held, work redone later). The cron's scheduled handler may use waitUntil (it lives up to 15 min).
+function fireContinuation(env, ctx, depth, awaitIt = false) {
+  if (!env.ADMIN_KEY) return Promise.resolve();   // chaining is gated on the internal token
   const path = `/flush?cont=${encodeURIComponent(env.ADMIN_KEY)}&n=${depth}`;
+  const go = (p) => { const q = p.catch(() => {}); if (!awaitIt) ctx.waitUntil(q); return q; };
   // PREFER the self service-binding (env.SELF) — a plain fetch() to our own workers.dev hostname is an
   // unreliable way to self-invoke (Cloudflare loop-guard / edge-cache can drop it, which is why the
   // chain didn't fire on first deploy). The service binding routes straight to a fresh invocation of
   // THIS worker (fresh subrequest budget) with no DNS/cache in the path. Global fetch is the fallback.
   try {
-    if (env.SELF && typeof env.SELF.fetch === "function") {
-      ctx.waitUntil(env.SELF.fetch("https://self" + path).catch(() => {}));
-      return;
-    }
+    if (env.SELF && typeof env.SELF.fetch === "function") return go(env.SELF.fetch("https://self" + path));
   } catch (_) {}
-  ctx.waitUntil(fetch(selfBase(env) + path).catch(() => {}));
+  return go(fetch(selfBase(env) + path));
 }
 
 async function flushR2(env) {
@@ -1347,12 +1622,18 @@ async function flushR2(env) {
   // and must stay list-free). Carried forward on a failed flush (drain skipped). Saturates at the
   // listPrefix cap (1000 keys); at ~150 ops/key that's ~150k queued ops before it stops being exact.
   let iqDepthNow = prevMeta.iqDepth || 0;
+  let iqpDepthNow = prevMeta.iqpDepth || 0;   // v40 priority lane (fold ops)
+  let iqDroppedNow = 0;                       // v40 legacy re-asserts dropped from the backlog this flush
+  let iqLeft = false, iqMoved = false;        // v40 index-backlog chaining signals
+  let foldPendingNow = prevMeta.foldPending || 0;   // v40 "Fonts waiting" (fold ops queued)
+  let lastDrainNow = prevMeta.lastDrain || "";      // v43 drain report
   const pendNames = await listPrefix(env, "pend:");
   const repNames  = await listPrefix(env, "rep:");
   const admuNames = await listPrefix(env, "admu:");
   const admrNames = await listPrefix(env, "admr:");
   const admkNames = await listPrefix(env, "admk:");
-  const hasIndexQueue = (await env.AVATAR_KV.list({ prefix: "iq:", limit: 1 })).keys.length > 0;
+  const hasIndexQueue = (await env.AVATAR_KV.list({ prefix: "iq:", limit: 1 })).keys.length > 0 ||
+    (await env.AVATAR_KV.list({ prefix: "iqp:", limit: 1 })).keys.length > 0;
 
   // Nothing to do → skip the whole flush (no shard reads, no meta write). This stops the
   // every-minute cron from writing `meta` ~1440×/day while the catalog is idle. Reports and the
@@ -1544,6 +1825,7 @@ async function flushR2(env) {
     for (const fid of Object.keys(ops.adds)) if (!e[fid]) {
       const ne = ops.adds[fid]; e[fid] = ne; sAdded++; dirty = true; contentDirty = true;
       const op = buildIndexOp(null, ne, fid); if (op) sIndexOps.push(op);
+      if (needsFold(ne)) ne.fz = foldSig(ne);   // the ADD already carries the folded tokens
       if (ne.filled !== true) sUnfilled++;
     }
     for (const fid of Object.keys(ops.upserts)) {
@@ -1558,6 +1840,7 @@ async function flushR2(env) {
       // shouldn't rewrite the shard either. entryEquivalent compares the persisted fields.
       if (!prev || !entryEquivalent(prev, inc)) {
         const op = buildIndexOp(prev || null, inc, fid); if (op) sIndexOps.push(op);
+        if (needsFold(inc)) inc.fz = foldSig(inc);   // the op's token diff carries the folded tokens
         e[fid] = inc; dirty = true; contentDirty = true;
       }
     }
@@ -1586,7 +1869,16 @@ async function flushR2(env) {
       // the CURRENT foldFancy, so a new CONFUSABLES entry is picked up automatically as the walk re-checks
       // each avatar — NO FOLD_VER bump / re-lap needed. avtr:null/frag:null (both already correct for an
       // indexed entry) keeps it index-token-only.
-      if (needsFold(e[fid])) sIndexOps.push({ id: e[fid].id, del: false, frag: null, add: [...tokensOf(e[fid])], rem: [], avtr: null });
+      // v40: gated by the fold stamp (foldSig) — a small fold-only op ONCE per fold result, not a full
+      // re-assert on every check (that flood jammed the index queue; see foldSig).
+      if (needsFold(e[fid])) {
+        const sig = foldSig(e[fid]);
+        if (e[fid].fz !== sig) {
+          const op = foldOp(e[fid]);
+          if (op.add.length) sIndexOps.push(op);
+          e[fid].fz = sig;
+        }
+      }
     }
     for (const fid of ops.removes) if (e[fid]) {
       const prev = e[fid]; delete e[fid]; sRemoved++; dirty = true; contentDirty = true;
@@ -1647,42 +1939,106 @@ async function flushR2(env) {
     // index op can touch fragment+avtr+index buckets (read+write). Cap the drain so the TOTAL stays well
     // under the ~1000 ceiling — a heavy new-avatar batch yields most index work to the iq: queue (drained
     // by the next chain step) instead of blowing the invocation. Falls to 0 for a very shard-heavy flush.
-    const iqCap = Math.max(0, Math.min(MAX_INDEX_OPS_PER_FLUSH, Math.floor((720 - 2 * prefixes.length) / 5)));
-    const iqNames = await listPrefix(env, "iq:", 1000);   // own cursor (never crowded out); we drain only a few
-    iqDepthNow = iqNames.length;   // queue depth at flush start (keys) → meta.iqDepth for /health
-    let queued = []; const drained = [];
-    for (const kn of iqNames) {
-      // THIS flush's NEW contribution ops (indexOps) get budget first, then only enough BACKLOG keys to
-      // fill the rest — so a freshly-added avatar is searchable within a flush or two, not stuck behind
-      // the backlog.
-      if (indexOps.length + queued.length >= iqCap) break;
-      const val = await env.AVATAR_KV.get(kn); drained.push(kn);
-      if (val) try { const a = JSON.parse(val); if (Array.isArray(a)) queued.push(...a); } catch (_) {}
+    // v40 BUCKET BUDGET. applyIndexOps costs ~1 read + <=1 write per DISTINCT bucket (fragment/avtr/
+    // index), not per op, so the drain is capped by buckets: the old op cap (142 ops x ~10 tokens =
+    // ~1,400 reads) ran past the ~1000-subrequest ceiling, every R2 call after it failed silently, and
+    // the batch was still cleared as applied — lost index updates. Now an op is applied only when its
+    // buckets fit; everything else stays queued, so nothing is dropped.
+    // 600 (not the old 720) leaves room for the same cron invocation's reconcile (<=120 shard reads),
+    // prune and author-rename steps, so the whole invocation stays under the ~1000 ceiling.
+    const bucketCap = Math.max(0, Math.floor((600 - 2 * prefixes.length) / 2));
+    const KEY_READ_CAP = 40;   // backlog keys read per flush (KV gets); legacy re-asserts drop for free
+    const used = new Set();
+    const toApply = [], leftover = [];
+    let full = false;
+    const take = (op) => {
+      if (full) { leftover.push(op); return; }
+      const b = new Set(); opBuckets(op, b);
+      let extra = 0; for (const x of b) if (!used.has(x)) extra++;
+      // Always admit the first op (one oversized op must not wedge the queue forever).
+      if (toApply.length && used.size + extra > bucketCap) { full = true; leftover.push(op); return; }
+      for (const x of b) used.add(x);
+      toApply.push(op);
+    };
+    // Order: this flush's contribution ops (new avatars searchable fast), this flush's fold ops, then
+    // the PRIORITY lane (iqp: fold ops), then the general backlog (iq:).
+    for (const op of indexOps) if (!op.fz) take(op);
+    for (const op of indexOps) if (op.fz) take(op);
+    const iqpNames = await listPrefix(env, "iqp:", 3000);
+    const iqNames = await listPrefix(env, "iq:", 3000);
+    iqDepthNow = iqNames.length; iqpDepthNow = iqpNames.length;
+    const drained = [];
+    let keysRead = 0;
+    for (const kn of [...iqpNames, ...iqNames]) {
+      if (full || keysRead >= KEY_READ_CAP) break;
+      const val = await env.AVATAR_KV.get(kn); drained.push(kn); keysRead++;
+      if (!val) continue;
+      let a = null; try { a = JSON.parse(val); } catch (_) {}
+      if (!Array.isArray(a)) continue;
+      for (const op of a) {
+        // Pre-v40 every-check re-asserts: dropped (the fold stamp re-emits what's still needed).
+        if (isLegacyReassert(op)) { iqDroppedNow++; continue; }
+        take(op);
+      }
     }
-    const all = [...indexOps, ...queued];   // NEW contributions FIRST, then backlog
-    const toApply = all.slice(0, iqCap);
-    let applied = true;
+    let applied = true, drainErr = "";
+    const tApply = Date.now();
     if (toApply.length) {
-      // No edge-cache purge on index buckets (they carry the 5-min INDEX_TTL, self-heal), so this is the
-      // cheap path; clone-shard purges (user-facing) already happened in the shard-write loop.
-      try { await applyIndexOps(env, toApply); } catch (_) { applied = false; }
+      // No edge-cache purge on index buckets (they carry the 5-min INDEX_TTL, self-heal).
+      try { await applyIndexOps(env, toApply); } catch (e) { applied = false; drainErr = String(e && e.message || e).slice(0, 140); }
     }
-    for (const kn of drained) await env.AVATAR_KV.delete(kn);
-    const requeue = applied ? all.slice(iqCap) : all;   // leftover / on-failure-all → requeue (idempotent)
-    for (let i = 0; i < requeue.length; i += MAX_INDEX_OPS_PER_FLUSH)
-      // NO expiry: an index op is the ONLY thing that makes an avatar searchable, so it must NEVER be
-      // dropped. The queue self-drains as flushes catch up; reconcile also reconciles the index from the
-      // clone shards, so an un-drained op is at worst redundant, never lost.
-      await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
-   } catch (_) { /* index drain hit the ceiling — batches ALREADY cleared above; iq: self-heals next flush */ }
+    // Leftover / on-failure-all → requeue by lane (idempotent). NO expiry: an index op is the only
+    // thing that makes an avatar searchable, so it must never be dropped. v43: requeue FIRST, then
+    // delete the drained keys, so hitting the subrequest ceiling between the two can only duplicate
+    // ops (harmless), never lose them.
+    const requeue = applied ? leftover : [...toApply, ...leftover];
+    const fold = requeue.filter((o) => o.fz), rest = requeue.filter((o) => !o.fz);
+    let requeueOk = true;
+    try {
+      for (let i = 0; i < fold.length; i += MAX_INDEX_OPS_PER_FLUSH) {
+        const part = fold.slice(i, i + MAX_INDEX_OPS_PER_FLUSH);
+        await env.AVATAR_KV.put(iqpKey(part.length), JSON.stringify(part));
+      }
+      for (let i = 0; i < rest.length; i += MAX_INDEX_OPS_PER_FLUSH)
+        await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(rest.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
+    } catch (e) { requeueOk = false; drainErr = drainErr || ("requeue: " + String(e && e.message || e).slice(0, 120)); }
+    if (requeueOk) for (const kn of drained) await env.AVATAR_KV.delete(kn);
+    // v43 drain report for /health (no logs available otherwise).
+    lastDrainNow = `applied=${applied} ops=${toApply.length} buckets=${used.size}/${bucketCap} keys=${drained.length}` +
+      ` dropped=${iqDroppedNow} left=${requeue.length} shards=${prefixes.length} applyMs=${Date.now() - tApply}` +
+      (drainErr ? ` err=${drainErr}` : "");
+    iqMoved = applied && (toApply.length > 0 || iqDroppedNow > 0);
+    // Fonts waiting = fold ops still queued: the op counts carried in the undrained iqp: key names
+    // plus what was just requeued (exact, no value reads).
+    const drainedSet = new Set(drained);
+    foldPendingNow = iqpNames.filter((k) => !drainedSet.has(k)).reduce((n, k) => n + iqpCount(k), 0) + fold.length;
+    iqLeft = requeue.length > 0 || (iqpNames.length + iqNames.length) > drained.length;
+   } catch (e) { /* index drain hit the ceiling — batches ALREADY cleared above; iq: self-heals next flush */
+     lastDrainNow = "drain threw: " + String(e && e.stack || e).slice(0, 300); }
   }
 
   // Manifest — the WORKER now owns it (search + counts are fully incremental, no Action needed).
   // entryCount and unfilled move by the deltas computed above; searchReady is always true. Written
   // only when something moved; short TTL + purge so the fresh number is live in ~1s. If a full
   // rebuild is ever run as an optional backstop, its authoritative counts are adopted once.
-  const countMoved = added > 0 || removed > 0 || unfilledDelta !== 0 || staleDelta !== 0;
   let entries = Math.max(0, (prevMeta.entries || 0) + added - removed);
+  // v48: EXACT COUNT from the daily backup. The running count only moves by deltas, so any one-off
+  // miscount stays forever (seen: +~7,000 phantom avatars after a recount lap, flat for days). The
+  // backup reads every shard, so its count is the truth (give or take avatars added while it ran);
+  // each finished backup is adopted once, and the manifest is rewritten so /health's max() drops too.
+  let countFromBackup = prevMeta.countFromBackup || 0;
+  try {
+    const b = JSON.parse((await env.AVATAR_KV.get("backup")) || "null");
+    if (b && b.doneAt && b.doneAt !== countFromBackup && typeof b.lastCount === "number" && b.lastCount > 0 &&
+        typeof b.addedAt === "number" && typeof b.removedAt === "number") {
+      // + whatever the flushes added/removed since the backup finished (totals snapshotted at the end).
+      const since = ((prevMeta.totalAdded || 0) - b.addedAt) - ((prevMeta.totalRemoved || 0) - b.removedAt);
+      entries = Math.max(0, b.lastCount + since + added - removed);
+      countFromBackup = b.doneAt;
+    }
+  } catch (_) {}
+  const countAdopted = countFromBackup !== (prevMeta.countFromBackup || 0);
+  const countMoved = added > 0 || removed > 0 || unfilledDelta !== 0 || staleDelta !== 0 || countAdopted;
   let unfilled = typeof prevMeta.unfilled === "number" ? prevMeta.unfilled : 0;
   let staleTotal = typeof prevMeta.stale === "number" ? prevMeta.stale : 0;   // running Liveness backlog
   let adoptedRebuild = prevMeta.adoptedRebuild || null;
@@ -1693,7 +2049,7 @@ async function flushR2(env) {
     // write, so a skipped flush also saves the manifest Class B read.
     const sinceManifest = nowChecked - (prevMeta.lastManifestMs || 0);
     const entryDelta = Math.abs(entries - (typeof prevMeta.lastManifestEntries === "number" ? prevMeta.lastManifestEntries : 0));
-    const writeManifest = !prevMeta.lastManifestMs || sinceManifest >= MANIFEST_MIN_INTERVAL_MS || entryDelta >= MANIFEST_MIN_DELTA;
+    const writeManifest = countAdopted || !prevMeta.lastManifestMs || sinceManifest >= MANIFEST_MIN_INTERVAL_MS || entryDelta >= MANIFEST_MIN_DELTA;
     unfilled = Math.max(0, unfilled + unfilledDelta);
     staleTotal = Math.max(0, staleTotal + staleDelta);
     if (writeManifest) {
@@ -1757,6 +2113,7 @@ async function flushR2(env) {
     ...(manifestWritten ? { lastManifestMs: nowChecked, lastManifestEntries: entries } : {}),
     ...(hintChanged || seeded ? { fillHint } : {}),  // bot fill worklist (seeded once, then maintained)
     adoptedRebuild,
+    countFromBackup,
     lastCommit: allShardsOk
       ? `R2 +${added} -${removed} (${prefixes.length} shards)`
       : `R2 partial: ${failedShards.size} shard(s) failed, drained the rest (+${added} -${removed})`,
@@ -1764,6 +2121,10 @@ async function flushR2(env) {
     lastDiag: `consumed=${pendKeys.length} cleared=${pendCleared} shards=${prefixes.length} dirty=${dirtyPrefixes.length} failed=${failedShards.size} ok=${allShardsOk}`,   // TEMP flush instrumentation
     reports: Math.max(0, repNames.length - repCleared),
     iqDepth: iqDepthNow,   // search-index op queue depth (keys) — watch it drain to 0 after a fold/rebuild
+    iqpDepth: iqpDepthNow, // v40 priority lane (fold ops) depth in keys
+    foldPending: foldPendingNow, // v40 fold ops queued (admin "Fonts waiting")
+    lastDrain: lastDrainNow,     // v43 last index-drain report
+    iqDropped: (prevMeta.iqDropped || 0) + iqDroppedNow,   // v40 legacy re-asserts dropped (running total)
     backend: "r2",
   })); } catch (_) { /* ceiling: meta stale ONE cycle (self-corrects next flush); the return below is computed from in-memory state so the chain still gets the right pendRemaining */ }
 
@@ -1792,7 +2153,10 @@ async function flushR2(env) {
   // For the self-chaining continuation: pend batches left after THIS flush's per-key drain, and
   // whether this step made progress (cleared ≥1). The caller chains another fresh-budget flush while
   // pend work remains AND progress is being made (so a step that can only re-hit failed shards stops).
-  return { pendRemaining: Math.max(0, pendNames.length - pendCleared), progressed: pendCleared > 0 };
+  return { pendRemaining: Math.max(0, pendNames.length - pendCleared), progressed: pendCleared > 0,
+    // v40: the index backlog also chains (bounded by INDEX_CHAIN_DEPTH) so it clears in about an hour
+    // instead of days at one drain per 2-min cron. Same total ops/cost, just compressed in time.
+    iqRemaining: iqLeft, iqProgressed: iqMoved };
 }
 
 // Purge a list of absolute catalog URLs from Cloudflare's edge cache (batches of 30, the

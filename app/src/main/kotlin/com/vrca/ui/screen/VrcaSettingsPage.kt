@@ -536,6 +536,275 @@ internal fun SettingsPage(
                                 )
                             }
 
+                            // Full OSCQuery tree: every endpoint VRChat advertises,
+                            // documented or not (hunting tracking output / play space).
+                            Text("OSCQuery full endpoint list", style = MaterialTheme.typography.labelMedium)
+                            var treeDump by remember { mutableStateOf("") }
+                            val treeScope = androidx.compose.runtime.rememberCoroutineScope()
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                treeDump = "Reading…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    val dump = runCatching { com.vrca.osc.VrcaOscQuery.dumpTree() }
+                                        .getOrElse { "error: ${it.message}" }
+                                    treeDump = dump
+                                }
+                            }) {
+                                Text("Dump all endpoints")
+                            }
+                            if (treeDump.isNotEmpty()) {
+                                SelectionContainer {
+                                    Text(
+                                        treeDump,
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+
+                            // Save every research readout to one file in Downloads
+                            // (too long to screenshot on the panel).
+                            var saveResult by remember { mutableStateOf("") }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                saveResult = "Saving…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    saveResult = runCatching { com.vrca.osc.FindingsExport.saveAll(ctx) }
+                                        .getOrElse { "save failed: ${it.message}" }
+                                }
+                            }) {
+                                Text("Save all findings to Downloads")
+                            }
+                            if (saveResult.isNotEmpty()) {
+                                Text(saveResult, style = MaterialTheme.typography.bodySmall)
+                            }
+
+                            // Announce VRC-A as an OSCQuery app so VRChat SENDS its
+                            // output (head/wrist tracking, avatar params) to us.
+                            Text("Announce to VRChat (receive test)", style = MaterialTheme.typography.labelMedium)
+                            var announceDiag by remember { mutableStateOf(com.vrca.osc.OscAnnouncer.diag()) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    announceDiag = com.vrca.osc.OscAnnouncer.diag()
+                                    kotlinx.coroutines.delay(500)
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        runCatching { com.vrca.osc.OscAnnouncer.toggle(ctx) }
+                                    }
+                                }) {
+                                    Text("Start / pause announcing")
+                                }
+                                // Send ourselves a packet: is our receive socket working?
+                                com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        runCatching { com.vrca.osc.OscAnnouncer.selfTest() }
+                                    }
+                                }) {
+                                    Text("Self-test")
+                                }
+                            }
+                            SelectionContainer {
+                                Text(
+                                    announceDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            // Hand drag prototype: fist + move hand = move (horizontal).
+                            // Vertical input tests: VRChat's sit/stand toggle (int and
+                            // bool forms) and LookVertical held up/down for 1 s.
+                            Text("Vertical input tests", style = MaterialTheme.typography.labelMedium)
+                            var vertResult by remember { mutableStateOf("") }
+                            fun runVert(test: () -> Unit) {
+                                vertResult = "Sending…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    test()
+                                    vertResult = com.vrca.osc.VerticalTests.lastResult
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.sitStandInt() } }) {
+                                    Text("Sit/stand (int)")
+                                }
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.sitStandBool() } }) {
+                                    Text("Sit/stand (bool)")
+                                }
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.lookVertical(1f) } }) {
+                                    Text("Look up 1s")
+                                }
+                                com.vrca.ui.common.GremlinSmallButton(onClick = { runVert { com.vrca.osc.VerticalTests.lookVertical(-1f) } }) {
+                                    Text("Look down 1s")
+                                }
+                            }
+                            if (vertResult.isNotEmpty()) {
+                                Text(vertResult, style = MaterialTheme.typography.bodySmall)
+                            }
+
+                            Text("Hand drag (prototype)", style = MaterialTheme.typography.labelMedium)
+                            var dragOn by remember { mutableStateOf(com.vrca.osc.HandDrag.enabled) }
+                            var dragStrength by remember { mutableStateOf(com.vrca.osc.HandDrag.strength) }
+                            var dragDiag by remember { mutableStateOf(com.vrca.osc.HandDrag.diag()) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    dragDiag = com.vrca.osc.HandDrag.diag()
+                                    kotlinx.coroutines.delay(200)
+                                }
+                            }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                val on = !dragOn
+                                dragOn = on
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    runCatching { com.vrca.osc.HandDrag.setEnabled(ctx, on) }
+                                }
+                            }) {
+                                Text(if (dragOn) "Turn drag off" else "Turn drag on")
+                            }
+                            Text("Strength ${"%.2f".format(dragStrength)}", style = MaterialTheme.typography.bodySmall)
+                            com.vrca.ui.common.GremlinSlider(
+                                value = dragStrength,
+                                onValueChange = { dragStrength = it; com.vrca.osc.HandDrag.strength = it },
+                                valueRange = 0.25f..4f
+                            )
+                            SelectionContainer {
+                                Text(
+                                    dragDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            // Floor probe (read-only): system settings + properties
+                            // naming floor/boundary/tracking, to find where Quest keeps
+                            // the floor height VRChat follows live.
+                            Text("Floor / boundary values", style = MaterialTheme.typography.labelMedium)
+                            var floorDump by remember { mutableStateOf("") }
+                            com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                floorDump = "Reading…"
+                                treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    val dump = runCatching { com.vrca.osc.FloorProbe.dump(ctx) }
+                                        .getOrElse { "error: ${it.message}" }
+                                    floorDump = dump
+                                }
+                            }) {
+                                Text("Read floor values")
+                            }
+                            if (floorDump.isNotEmpty()) {
+                                SelectionContainer {
+                                    Text(
+                                        floorDump,
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+
+                            // ADB shell tests (read-only): pair with the Quest's own
+                            // Wireless debugging, then run the floor/boundary hunt with
+                            // shell rights. Before/After brackets a floor change.
+                            if (com.vrca.osc.AdbShell.SUPPORTED) {
+                                Text("ADB shell tests", style = MaterialTheme.typography.labelMedium)
+                                var adbStatus by remember { mutableStateOf(com.vrca.osc.AdbShell.status) }
+                                var adbOut by remember { mutableStateOf("") }
+                                var adbBusy by remember { mutableStateOf(false) }
+                                var pairCode by remember { mutableStateOf("") }
+                                var adbPort by remember { mutableStateOf("") }
+                                var adbCommand by remember { mutableStateOf("") }
+                                androidx.compose.runtime.LaunchedEffect(Unit) {
+                                    while (true) {
+                                        adbStatus = com.vrca.osc.AdbShell.status
+                                        kotlinx.coroutines.delay(500)
+                                    }
+                                }
+                                fun runAdb(work: () -> String) {
+                                    if (adbBusy) return
+                                    adbBusy = true
+                                    adbOut = "Running…"
+                                    treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        val text = runCatching(work).getOrElse { "error: ${it.message}" }
+                                        adbOut = if (text.length > 6000) text.take(6000) + "\n… (full text: Save all findings)" else text
+                                        adbBusy = false
+                                    }
+                                }
+                                Text(adbStatus, style = MaterialTheme.typography.bodySmall)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    androidx.compose.material3.OutlinedTextField(
+                                        value = pairCode,
+                                        onValueChange = { pairCode = it.filter { ch -> ch.isDigit() }.take(6) },
+                                        modifier = Modifier.width(120.dp),
+                                        label = { Text("Pair code") },
+                                        singleLine = true,
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                        )
+                                    )
+                                    androidx.compose.material3.OutlinedTextField(
+                                        value = adbPort,
+                                        onValueChange = { adbPort = it.filter { ch -> ch.isDigit() }.take(5) },
+                                        modifier = Modifier.width(120.dp),
+                                        label = { Text("Port (auto)") },
+                                        singleLine = true,
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                        )
+                                    )
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        val code = pairCode
+                                        val port = adbPort.toIntOrNull()
+                                        runAdb { com.vrca.osc.AdbShell.pair(ctx, code, port) }
+                                    }) {
+                                        Text("Pair")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        val port = adbPort.toIntOrNull()
+                                        runAdb { com.vrca.osc.AdbShell.connect(ctx, port) }
+                                    }) {
+                                        Text("Connect")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        runAdb { com.vrca.osc.AdbShell.disconnect(); "Disconnected" }
+                                    }) {
+                                        Text("Disconnect")
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = { runAdb { com.vrca.osc.AdbProbes.runAll(ctx) } }) {
+                                        Text("Run all probes")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = { runAdb { com.vrca.osc.AdbProbes.snapshotBefore(ctx) } }) {
+                                        Text("Floor test: Before")
+                                    }
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = { runAdb { com.vrca.osc.AdbProbes.snapshotAfter(ctx) } }) {
+                                        Text("Floor test: After")
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    androidx.compose.material3.OutlinedTextField(
+                                        value = adbCommand,
+                                        onValueChange = { adbCommand = it },
+                                        modifier = Modifier.width(360.dp),
+                                        label = { Text("Shell command") },
+                                        singleLine = true
+                                    )
+                                    com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                        val cmd = adbCommand.trim()
+                                        if (cmd.isNotEmpty()) runAdb { com.vrca.osc.AdbProbes.runCommand(ctx, cmd) }
+                                    }) {
+                                        Text("Run")
+                                    }
+                                }
+                                if (adbOut.isNotEmpty()) {
+                                    SelectionContainer {
+                                        Text(
+                                            adbOut,
+                                            fontFamily = FontFamily.Monospace,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            }
+
                             // Instance roster: shows the log file + parsed
                             // location/world/roster + the last log lines with what the
                             // parser made of each — so a "not in a world" with a

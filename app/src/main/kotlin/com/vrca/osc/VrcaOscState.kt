@@ -151,6 +151,7 @@ object VrcaOscState {
 
     fun onParam(name: String, value: Any?) {
         if (value != null) { params[name] = value; seenMs[name] = System.currentTimeMillis() }
+        pruneStale()
         lastRxMs = System.currentTimeMillis()
         if (!_live.value) _live.value = true
         if (name == "EyeHeightAsMeters") {
@@ -171,8 +172,62 @@ object VrcaOscState {
         }
     }
 
+    // ---- world size limits + own avatar (/avatar/* OSCQuery nodes) --------------
+    // Pushed by VRChat to the announced app ([OscAnnouncer]) the moment they change,
+    // and also read by the /avatar poll ([VrcaOscQuery]) as the fallback.
+    private val _worldEyeHeightMin = MutableStateFlow<Float?>(null)
+    val worldEyeHeightMinFlow: StateFlow<Float?> = _worldEyeHeightMin.asStateFlow()
+    private val _worldEyeHeightMax = MutableStateFlow<Float?>(null)
+    val worldEyeHeightMaxFlow: StateFlow<Float?> = _worldEyeHeightMax.asStateFlow()
+    private val _scalingAllowed = MutableStateFlow<Boolean?>(null)
+    val scalingAllowedFlow: StateFlow<Boolean?> = _scalingAllowed.asStateFlow()
+    private val _avatarName = MutableStateFlow<String?>(null)
+    val avatarNameFlow: StateFlow<String?> = _avatarName.asStateFlow()
+    private val _avatarId = MutableStateFlow<String?>(null)
+    val avatarIdFlow: StateFlow<String?> = _avatarId.asStateFlow()
+
+    /** Fold one `/avatar/<node>` value (not a parameter). A new avatar id is also
+     *  handed to the crowdsource catalog ([com.vrca.vrchat.AvatarGlobalDb] dedupes). */
+    fun onAvatarInfo(path: String, value: Any?) {
+        when (path) {
+            "/avatar/eyeheightmin" -> (value as? Number)?.toFloat()?.let { _worldEyeHeightMin.value = it }
+            "/avatar/eyeheightmax" -> (value as? Number)?.toFloat()?.let { _worldEyeHeightMax.value = it }
+            "/avatar/eyeheightscalingallowed" -> (value as? Boolean)?.let { _scalingAllowed.value = it }
+            "/avatar/name" -> (value as? String)?.takeIf { it.isNotBlank() }?.let { _avatarName.value = it }
+            "/avatar/eyeheight" -> (value as? Number)?.toFloat()?.let { onParam("EyeHeightAsMeters", it) }
+            "/avatar/change" -> (value as? String)?.takeIf { it.startsWith("avtr_") }?.let { id ->
+                // A different avatar: drop the old one's params (a name it doesn't have would keep
+                // its last value); the poll / push refill the new avatar's within a second.
+                if (_avatarId.value != null && _avatarId.value != id) { params.clear(); seenMs.clear() }
+                _avatarId.value = id
+                com.vrca.vrchat.AvatarGlobalDb.onAvatarChanged(com.vrca.app.VrcaApplication.instance, id)
+            }
+        }
+    }
+
+    @Volatile private var lastPruneMs = 0L
+
+    /** Every avatar brings its own param names; drop names unseen for 10 min (checked
+     *  at most once a minute) so switching avatars all night doesn't grow the maps. */
+    private fun pruneStale() {
+        val now = System.currentTimeMillis()
+        if (now - lastPruneMs < 60_000L) return
+        lastPruneMs = now
+        seenMs.entries.removeIf { (k, at) -> (now - at > 600_000L).also { if (it) params.remove(k) } }
+    }
+
     /** Called periodically so `isLive` can flip false when OSC stops. */
-    fun tickLiveness() { _live.value = isLive }
+    fun tickLiveness() {
+        _live.value = isLive
+        // VRChat gone quiet (closed, OSC off, or bridge AND poll both lost it): the avatar info
+        // would otherwise keep showing the last session's name / height / world limits. Clear it;
+        // the next poll or push sets it again.
+        if (!isLive && !OscAnnouncer.pushLive && (_avatarName.value != null || _eyeHeight.value != null ||
+                _worldEyeHeightMin.value != null || _worldEyeHeightMax.value != null || _scalingAllowed.value != null)) {
+            _avatarName.value = null; _eyeHeight.value = null
+            _worldEyeHeightMin.value = null; _worldEyeHeightMax.value = null; _scalingAllowed.value = null
+        }
+    }
 
     fun clear() { params.clear(); seenMs.clear(); lastRxMs = 0L; _live.value = false }
 
@@ -203,8 +258,30 @@ object VrcaOscState {
 
     fun float(name: String): Float? = (params[name] as? Number)?.toFloat()
 
+    // The chatbox tokens only use a value VRChat is still reporting: seen within [PRESENT_MS]
+    // (the OSCQuery poll refreshes every value each 0.25-1 s), or the VRChat that's running now
+    // is pushing to the bridge (it sends a param only when it changes, so its last value holds).
+    // Otherwise (bridge gone AND the poll lost VRChat) the last value would stick: a tester kept
+    // showing "Muted" after unmuting. Stale = unknown = the token goes blank.
+    private fun live(name: String): Any? {
+        val v = params[name] ?: return null
+        val fresh = System.currentTimeMillis() - (seenMs[name] ?: 0L) <= PRESENT_MS
+        return if (fresh || OscAnnouncer.pushLive) v else null
+    }
+    private fun liveBool(name: String): Boolean? = when (val v = live(name)) {
+        is Boolean -> v
+        is Number -> v.toDouble() != 0.0
+        else -> null
+    }
+    private fun liveFloat(name: String): Float? = (live(name) as? Number)?.toFloat()
+    /** A param's value (bools 0/1) only if VRChat reported it within [PRESENT_MS], else null. */
+    fun freshFloat(name: String): Float? {
+        if (System.currentTimeMillis() - (seenMs[name] ?: 0L) > PRESENT_MS) return null
+        return when (val v = params[name]) { is Boolean -> if (v) 1f else 0f; is Number -> v.toFloat(); else -> null }
+    }
+
     /** Raw value for `{param:Name}` — bool/int/float rendered compactly. */
-    fun rawString(name: String): String = when (val v = params[name]) {
+    fun rawString(name: String): String = when (val v = live(name)) {
         null -> ""
         is Boolean -> if (v) "true" else "false"
         is Float -> if (v == v.toInt().toFloat()) v.toInt().toString() else "%.2f".format(v)
@@ -214,21 +291,21 @@ object VrcaOscState {
 
     // ---- built-ins -----------------------------------------------------------
 
-    val muteSelf: Boolean get() = bool("MuteSelf") ?: false
-    val afk: Boolean get() = bool("AFK") ?: false
+    val muteSelf: Boolean get() = liveBool("MuteSelf") ?: false
+    val afk: Boolean get() = liveBool("AFK") ?: false
 
     val moving: Boolean get() {
-        val x = float("VelocityX") ?: 0f
-        val y = float("VelocityY") ?: 0f
-        val z = float("VelocityZ") ?: 0f
+        val x = liveFloat("VelocityX") ?: 0f
+        val y = liveFloat("VelocityY") ?: 0f
+        val z = liveFloat("VelocityZ") ?: 0f
         return kotlin.math.sqrt(x * x + y * y + z * z) > MOVING_THRESHOLD
     }
 
     /** Human avatar-scale string: eye height in meters if VRChat sends it, else
      *  the ScaleFactor ratio as a percentage. "" when unknown. */
     val scaleLabel: String get() {
-        float("EyeHeightAsMeters")?.let { return "%.2fm".format(it) }
-        float("ScaleFactor")?.let { return "${(it * 100).toInt()}%" }
+        liveFloat("EyeHeightAsMeters")?.let { return "%.2fm".format(it) }
+        liveFloat("ScaleFactor")?.let { return "${(it * 100).toInt()}%" }
         return ""
     }
 }

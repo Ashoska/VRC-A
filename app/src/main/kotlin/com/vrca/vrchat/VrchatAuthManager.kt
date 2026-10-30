@@ -2178,7 +2178,10 @@ object VrchatAuthManager {
         'α' to 'a','Α' to 'a','β' to 'b','Β' to 'b','ε' to 'e','Ε' to 'e','ι' to 'i','Ι' to 'i','κ' to 'k','Κ' to 'k','ν' to 'v','Ν' to 'n','ο' to 'o','Ο' to 'o',
         'ρ' to 'p','Ρ' to 'p','τ' to 't','Τ' to 't','υ' to 'u','Υ' to 'y','χ' to 'x','Χ' to 'x','η' to 'n','Η' to 'h','Ζ' to 'z','Μ' to 'm',
         'ɾ' to 'r','ɳ' to 'n','ɫ' to 'l','ɡ' to 'g','ɐ' to 'a','ɘ' to 'e','ɔ' to 'o','ǝ' to 'e','ɓ' to 'b','ø' to 'o','Ø' to 'o','đ' to 'd','Đ' to 'd','ħ' to 'h','ı' to 'i',
-        'ǃ' to '.','ʚ' to '.','ɞ' to '.','ǀ' to '.','ǁ' to '.','ǂ' to '.','ˎ' to '.','ˊ' to '.','ˋ' to '.','˗' to '.')
+        'ǃ' to '.','ʚ' to '.','ɞ' to '.','ǀ' to '.','ǁ' to '.','ǂ' to '.','ˎ' to '.','ˊ' to '.','ˋ' to '.','˗' to '.',
+        // v40 (Worker): top of the "unconverted" registry + upside-down text.
+        'я' to 'r','Я' to 'r','σ' to 'o','Σ' to 'e','Λ' to 'a','Δ' to 'a','ł' to 'l','Ł' to 'l','Ɇ' to 'e','ɇ' to 'e','Ð' to 'd','ð' to 'd','ɛ' to 'e','ƈ' to 'c','ɨ' to 'i','Ҝ' to 'k','ҝ' to 'k',
+        'ʍ' to 'w','ɥ' to 'h','ʇ' to 't','ƃ' to 'g','ɹ' to 'r','ʎ' to 'y','ɯ' to 'm','ʞ' to 'k','ɟ' to 'f','ʌ' to 'v')
     private fun fancyFold(s: String): String {
         val n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC)
         val folded = buildString(n.length) {
@@ -2279,7 +2282,12 @@ object VrchatAuthManager {
                 // (don't guess); NO exact match → don't guess (a looser unique-token guess with no author
                 // is too risky — the user's explicit call). So a fancy-font name resolves iff its plain
                 // exact name is unique in the catalog.
-                val m = if (authorNorm.isNotBlank()) (if (exact.isNotEmpty()) exact else cand) else exact
+                // Author-locked fallback (no exact name): pick by how close each candidate's FULL
+                // name is to the log name ([closestByName]); a clearly closest one wins over
+                // token-siblings, a merely word-sharing one never counts: "Ashoska's Kipfel" (private) by Ashoska matched the
+                // same author's public "Kipfel | Gremlin.Inc" as a "unique" hit and cloned the wrong
+                // avatar (user-reported 2026-10-26).
+                val m = if (authorNorm.isNotBlank()) (if (exact.isNotEmpty()) exact else closestByName(avatarName, cand) { it.name }) else exact
                 if (m.size == 1) {
                     val e = m[0]
                     // CONFIRM live+public before offering (no worn image to match here — loading player —
@@ -2338,10 +2346,10 @@ object VrchatAuthManager {
             // growth, not just the one we return.
             if (merged.isNotEmpty())
                 com.vrca.vrchat.AvatarGlobalDb.harvestCandidates(context, merged.values.toList())
-            val matches = merged.values.filter {
+            val matches = closestByName(avatarName, merged.values.filter {
                 fancyFold(it.author) == authorNorm &&
                     !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.id, null)
-            }.distinctBy { it.id }
+            }.distinctBy { it.id }) { it.name }
             if (matches.size != 1) {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason =
                     if (matches.isEmpty()) "name+author: 0 avtrdb matches by author" else "name+author: ambiguous in avtrdb (${matches.size}) — won't guess"
@@ -2366,6 +2374,48 @@ object VrchatAuthManager {
                 com.vrca.vrchat.AvatarGlobalDb.contribute(context, c.imageFileId!!, c.id, avatarName, author, c.authorId, plats)
             WornAvatarResult(c.id, plats)
         }
+
+    /** How close a candidate's full name is to the log name, 0..1, after folding away fonts,
+     *  case, spacing and punctuation: 1 = same name, or the log name (4+ chars) is a mid-word
+     *  cut-off start of the candidate's (VRChat truncates long names in the log); 0 when their
+     *  numbers differ; otherwise 1 - edit distance / longer length. */
+    private fun nameCloseness(logName: String, candName: String): Float {
+        fun bare(s: String) = fancyFold(s).replace(Regex("[^\\p{L}\\p{N}]"), "")
+        val a = bare(logName); val b = bare(candName)
+        if (a.isEmpty() || b.isEmpty()) return 0f
+        if (a == b) return 1f
+        // Truncation only when the log name stops MID-WORD ("Meow M" of "Meow Meow Kitty"); a
+        // log name ending on a whole word is the full name, so "X" never takes "X 2".
+        val fa = fancyFold(logName); val fb = fancyFold(candName)
+        if (a.length >= 4 && fb.length > fa.length && fb.startsWith(fa) &&
+            fa.last().isLetterOrDigit() && fb[fa.length].isLetterOrDigit()) return 1f
+        // Different numbers = a different version/variant (v2 vs v3, "Kipfel 2"): never close.
+        if (a.filter { it.isDigit() } != b.filter { it.isDigit() }) return 0f
+        var prev = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            val cur = IntArray(b.length + 1); cur[0] = i
+            for (j in 1..b.length) {
+                cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1)
+            }
+            prev = cur
+        }
+        return 1f - prev[b.length].toFloat() / maxOf(a.length, b.length)
+    }
+
+    /** Author-locked pick by name closeness: the closest candidate wins when it is close to the
+     *  full name ([NAME_CLOSE_MIN], 1.0 = same name after folding or a mid-word truncation) and clearly ahead of the next one ([NAME_CLOSE_LEAD]), so
+     *  same-author avatars that only share a word are ignored instead of making it ambiguous.
+     *  Empty = nothing close enough (no button: a wrong clone is worse); 2+ = still a tie. */
+    private fun <T> closestByName(logName: String, cands: List<T>, name: (T) -> String): List<T> {
+        val scored = cands.map { it to nameCloseness(logName, name(it)) }
+            .filter { it.second >= NAME_CLOSE_MIN }.sortedByDescending { it.second }
+        if (scored.size <= 1) return scored.map { it.first }
+        return if (scored[0].second - scored[1].second >= NAME_CLOSE_LEAD) listOf(scored[0].first)
+        else scored.filter { scored[0].second - it.second < NAME_CLOSE_LEAD }.map { it.first }
+    }
+
+    private const val NAME_CLOSE_MIN = 1.0f
+    private const val NAME_CLOSE_LEAD = 0.1f
 
     private fun normalizeAvatarName(s: String): String =
         s.lowercase().replace(Regex("[^a-z0-9]"), "")

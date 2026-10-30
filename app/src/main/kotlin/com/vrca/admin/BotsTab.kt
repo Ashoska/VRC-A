@@ -149,6 +149,10 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
     val pending = health?.let { "${it.optInt("pendingBatches")} batches · ${it.optInt("reports")} reports" } ?: "—"
     val totals = health?.let { "＋${it.optInt("totalAdded")}  ·  －${it.optInt("totalRemoved")}" } ?: "—"
     val lastFlush = health?.optString("lastFlush", "—") ?: "—"
+    val fillsWaiting = health?.let { "%,d".format(it.optInt("unfilled")) } ?: "—"
+    val fontsWaiting = health?.let { "%,d".format(it.optInt("foldPending")) } ?: "—"
+    val backup = health?.optString("backup", "")?.ifBlank { "—" } ?: "—"
+    val indexQueue = health?.let { "%,d keys · %,d font keys".format(it.optInt("iqDepth"), it.optInt("iqpDepth")) } ?: "—"
     // Recount status — visible so you can watch the periodic reconcile correct a drifted "unfilled"
     // (phantom-backlog) count. "idle" = count is current; "running N/4096" = a recount lap is in progress.
     val recount = health?.let {
@@ -209,6 +213,10 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
             }
             AdminLabeledRow("Totals", totals)
             AdminLabeledRow("Pending", pending)
+            AdminLabeledRow("Fills waiting", fillsWaiting)
+            AdminLabeledRow("Fonts waiting", fontsWaiting)
+            AdminLabeledRow("Index queue", indexQueue)
+            AdminLabeledRow("Backup", backup)
             AdminLabeledRow("Last flush", lastFlush)
             AdminLabeledRow("Recount", recount)
             AdminLabeledRow("Admin key", adminKeySet)
@@ -542,7 +550,7 @@ private fun BotSection(
 @Composable
 private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
     fun n(x: Int) = "%,d".format(x)
-    val onWalk = v.curShard.isNotEmpty() && v.curShardTotal > 0
+    val onWalk = v.curShard.isNotEmpty()
     Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.fillMaxWidth()) {
         // Header: what this bot is DOING + its live shard position.
         Row(
@@ -550,9 +558,11 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            val fillBot = !v.isReportsBot && v.role == AvatarCatalogSweep.Role.FILL
             val label = when {
                 v.isReportsBot && v.helping == "walk" -> "Reports + walk"
                 v.isReportsBot -> "Reports"
+                fillBot -> "Fills + walk"
                 else -> "Shard walk"
             }
             Text(
@@ -567,7 +577,13 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             }
         }
         // LIVE progress through the CURRENT shard: avatar N / M + a bar.
-        if (onWalk) {
+        if (onWalk && v.curShardTotal == 0) {
+            Text(
+                "shard ${v.curShard.uppercase()}: nothing left to check",
+                style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else if (onWalk) {
             androidx.compose.material3.LinearProgressIndicator(
                 progress = (v.curShardDone.toFloat() / v.curShardTotal).coerceIn(0f, 1f),
                 modifier = Modifier.fillMaxWidth()
