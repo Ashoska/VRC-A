@@ -409,6 +409,48 @@ object AvatarSearch {
         return ResultPage(p.results.map { entryToResult(it) }, p.page, p.total, p.hasMore)
     }
 
+    // ---- v53: Search button → the server's D1 search, 500 results per batch (the UI shows 50 a page) ----
+    // One request per Search press. The last 20 searches stay in memory for 20 minutes (first batch only,
+    // ~150 KB each at most, never written to storage): Back / reopening a recent search shows them with no
+    // request, while pressing Search again fetches fresh once the remembered copy is over 2 minutes old.
+    // Falls back to the old sharded search files when D1 isn't live (older server / outage).
+    data class Batch(val results: List<Result>, val more: Boolean, val offset: Int)
+    const val BATCH_SIZE = 500
+    private class Remembered(val batch: Batch, val at: Long)
+    private const val REMEMBER_MAX = 20
+    private const val REMEMBER_MS = 20 * 60_000L
+    private const val FRESH_MS = 2 * 60_000L
+    private val remembered = object : LinkedHashMap<String, Remembered>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Remembered>): Boolean = size > REMEMBER_MAX
+    }
+    private fun rememberKey(q: String) = q.trim().lowercase()
+
+    /** A batch of results starting at [offset]. [reuse] = Back / a recent-search tap (any remembered copy
+     *  under 20 minutes); otherwise a remembered first batch is reused only if under 2 minutes old. */
+    suspend fun searchBatch(context: Context, query: String, offset: Int, reuse: Boolean = false): Batch {
+        val key = rememberKey(query)
+        val now = System.currentTimeMillis()
+        if (offset == 0) synchronized(remembered) { remembered[key] }?.let {
+            if (now - it.at < if (reuse) REMEMBER_MS else FRESH_MS) return it.batch
+        }
+        labBatches?.let { f -> return f(query, offset).also { if (offset == 0) synchronized(remembered) { remembered[key] = Remembered(it, now) } } }
+        val d1 = AvatarGlobalDb.searchD1(context, query, offset)
+        val batch = if (d1 != null) Batch(d1.results.map { entryToResult(it) }, d1.more, offset)
+            else if (offset == 0) { val p = searchAllMatches(context, query, 2000); Batch(p.results, false, 0) }
+            else Batch(emptyList(), false, offset)
+        if (offset == 0) synchronized(remembered) { remembered[key] = Remembered(batch, now) }
+        return batch
+    }
+
+    /** UI Lab only: answers searches with sample batches (never set in the app). */
+    @Volatile var labBatches: ((String, Int) -> Batch)? = null
+
+    /** Recent searches still remembered (newest first), for the search box's recent list. */
+    fun recentSearches(): List<String> {
+        val now = System.currentTimeMillis()
+        return synchronized(remembered) { remembered.entries.filter { now - it.value.at < REMEMBER_MS }.map { it.key } }.asReversed()
+    }
+
     /** Drop the per-query candidate + shard-search caches (tab-away / new search / close). */
     fun evictSearchCache() = AvatarGlobalDb.evictSearchCache()
 

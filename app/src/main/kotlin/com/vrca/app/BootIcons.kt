@@ -45,6 +45,17 @@ fun BootIconView(icon: BootIcon, lines: () -> Color, detail: () -> Color, modifi
  * Lab-style SVG paths of the approved sheet. Discord's comes from R.drawable.ic_discord.
  */
 object BootIcons {
+    /** Search: a magnifier whose lens wears the logo's cat ears; the glint is the state detail. */
+    val Search = BootIcon(
+        glyph("Search") {
+            line("M16 10.5a6 6 0 1 1-12 0a6 6 0 1 1 12 0")
+            line("M5.7 7.1l.2-3.3 2.6 1.9")
+            line("M14.3 7.1l-.2-3.3-2.6 1.9")
+            line("M14.6 15.1l5.4 5.4")
+        },
+        glyph("SearchDetail") { line("M7.6 10.4a2.5 2.5 0 0 1 2.4-2.4", width = 1.6f) }
+    )
+
     /** The device itself: the eared Quest on the headset build, an eared phone otherwise. */
     val DeviceSession: BootIcon get() = if (BuildConfig.IS_HEADSET_BUILD) Headset else Phone
 

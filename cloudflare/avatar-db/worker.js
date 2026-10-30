@@ -876,7 +876,7 @@ export default {
           // been failing for over 30 min (a stale CDN file is possible until it clears).
           search: await (async () => { try {
             const s = JSON.parse((await hubGet(env, "searchStat")) || "null"), f = JSON.parse((await hubGet(env, "searchFill")) || "null");
-            return { d1: !!env.SEARCH, last: s, fill: f, purgeStuck: !!(s && s.purgeOldestMs > PURGE_STUCK_MS) };
+            return { d1: !!env.SEARCH && !!(f && (f.done || f.phase === 2)), nmReady: !!(f && f.done), last: s, fill: f, purgeStuck: !!(s && s.purgeOldestMs > PURGE_STUCK_MS) };
           } catch (_) { return null; } })(),
           lastAdded: meta.lastAdded || 0,
           lastRemoved: meta.lastRemoved || 0,
@@ -921,6 +921,7 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
+          nmBuckets: 4096,   // v53: clone name files nm/<bucket>.json (the app reads the count here)
           foldVer: meta.foldVer || 0,   // fancy-Unicode fold re-index version (FOLD_VER when the one-time lap is done)
           foldLapV: meta.foldLapV || 0, // FOLD_VER the CURRENT fresh fold lap is dedicated to (== FOLD_VER while it runs)
           unconverted: (backupSt && typeof backupSt.unconverted === "number") ? backupSt.unconverted : (meta.unconverted || 0),   // distinct residual codepoints that don't fold to ASCII (GET /unconverted)

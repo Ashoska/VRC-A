@@ -2251,15 +2251,14 @@ object VrchatAuthManager {
             var totalCatalogHits = 0
             for (v in avatarNameVariants(avatarName)) {
                 // Search the catalog by NAME **plus** AUTHOR tokens together (both are indexed) so the
-                // author narrows the SEARCH itself, not just a post-filter. VRChat TRUNCATES the log
-                // avatar name (a long name arrives as e.g. "Meow M", whose only usable search token is
-                // "meow" → 40+ unrelated hits); the old code searched name-only, capped at 40, then
+                // author narrows the SEARCH itself, not just a post-filter. A short name such as "Meow M"
+                // (that IS the avatar's real name, user 2026-10-30) has one usable search token,
+                // "meow" → 40+ unrelated hits; the old code searched name-only, capped at 40, then
                 // post-filtered by author — so the real author-match, if it ranked past the cap, was
                 // never seen and it falsely reported "ambiguous (40 distinct)". AND-intersecting the
                 // author tokens collapses that to the one creator's avatar. When no author was logged,
                 // keep the plain name search + name-unique logic.
-                val query = if (authorNorm.isNotBlank()) "$v $author" else v
-                val hits = try { com.vrca.vrchat.AvatarGlobalDb.searchSharded(context, query, 40) } catch (e: Exception) { emptyList() }
+                val hits = catalogNameHits(context, v, author, authorNorm)
                 totalCatalogHits += hits.size
                 val nonSystem = hits.filter { !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.avatarId, it.fileId) }
                 // Candidate set: author-narrowed when the log gave an author, else all name-token hits.
@@ -2423,6 +2422,24 @@ object VrchatAuthManager {
     /** Query variants for a log avatar name: the raw name, the name with any
      *  (bracketed) descriptor stripped, and the part before a " - " / " | " / " / "
      *  separator — so a DB that stores the base name still matches. */
+    /** Catalog candidates for one log-name variant. v53: the free CDN name file (every catalog avatar
+     *  with exactly this folded name, author included, filled by the bots); with a log author and no
+     *  avatar of that name by them, the server's search narrowed to that author (one request, rare) so
+     *  the closest-name rule below still has that author's avatars to pick from. Before the name files
+     *  are ready (or if one can't be read), the old sharded search, exactly as before. */
+    private suspend fun catalogNameHits(context: Context, variant: String, author: String, authorNorm: String): List<com.vrca.vrchat.AvatarGlobalDb.Entry> {
+        if (com.vrca.vrchat.AvatarGlobalDb.nameFilesReady(context)) {
+            val byName = com.vrca.vrchat.AvatarGlobalDb.entriesByName(context, fancyFold(variant))
+            if (byName != null) {
+                if (authorNorm.isBlank() || byName.any { fancyFold(it.author) == authorNorm }) return byName
+                val byAuthor = com.vrca.vrchat.AvatarGlobalDb.searchD1(context, variant, 0, author)
+                if (byAuthor != null) return byName + byAuthor.results
+            }
+        }
+        val query = if (authorNorm.isNotBlank()) "$variant $author" else variant
+        return try { com.vrca.vrchat.AvatarGlobalDb.searchSharded(context, query, 40) } catch (e: Exception) { emptyList() }
+    }
+
     private fun avatarNameVariants(name: String): List<String> {
         val out = LinkedHashSet<String>()
         val n = name.trim()

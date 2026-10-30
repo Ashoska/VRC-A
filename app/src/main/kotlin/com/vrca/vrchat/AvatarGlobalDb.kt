@@ -516,6 +516,10 @@ object AvatarGlobalDb {
     private const val KEY_CATALOG_BASE = "catalog_base" // persisted for cold-start recovery
     private const val KEY_R2 = "r2_serving"
     private const val KEY_SHARDED_COUNT = "sharded_count" // last /health entry count (debug panel, cold-start)
+    private const val KEY_SHARD_DIGITS = "shard_hex_digits"  // v53: shard count from /health (4096 = 3 hex digits)
+    private const val KEY_NM_BUCKETS = "nm_buckets"          // v53: clone name-file bucket count from /health
+    private const val KEY_D1 = "d1_search"                   // v53: the server's D1 search is live
+    private const val KEY_NM_READY = "nm_ready"              // v53: every clone name file is built
     private const val HEALTH_TTL_MS = 5 * 60_000L
     private const val SHARD_LRU_MAX = 48                 // bounded; evicted on instance leave + overflow
 
@@ -560,7 +564,7 @@ object AvatarGlobalDb {
         ensureCatalogBase(context)
         if (!r2Serving) return ShardLookup(ShardStatus.MISS, null)     // dormant pre-cutover → fall through as before
         val base = catalogBase ?: return ShardLookup(ShardStatus.MISS, null)
-        val prefix = fileId.substring(5, 8).lowercase()
+        val prefix = shardPrefixOf(fileId)
         synchronized(shardLru) { shardLru[prefix] }?.let {
             val e = it[fileId]; return ShardLookup(if (e != null) ShardStatus.HIT else ShardStatus.MISS, e)
         }
@@ -587,7 +591,7 @@ object AvatarGlobalDb {
         if (need.isEmpty()) return@coroutineScope out
         val base = if (r2Serving) catalogBase else null
         if (base == null) { for (fid in need) out[fid] = null; return@coroutineScope out }
-        val byPrefix = need.groupBy { it.substring(5, 8).lowercase() }
+        val byPrefix = need.groupBy { shardPrefixOf(it) }
         // One parallel fetch per DISTINCT shard prefix (LRU hit → free; miss → single-flight GET).
         val shards = byPrefix.keys.map { pfx ->
             async {
@@ -607,7 +611,7 @@ object AvatarGlobalDb {
     /** Drop the in-memory shard cache — called on instance leave (presence-scoped
      *  eviction), alongside the roster's own cache clears. The persisted contribution
      *  queue + catalogBase are untouched (separate stores). */
-    fun evictShardCache() { synchronized(shardLru) { shardLru.clear() } }
+    fun evictShardCache() { synchronized(shardLru) { shardLru.clear() }; synchronized(nmLru) { nmLru.clear() } }
 
     /** Is this avatar id present in the SEARCH INDEX (its `fragments/<bucket>.json`)? An avatar can be
      *  in the clone shard (cloneable) yet MISSING from the search index (unsearchable) when its index
@@ -768,6 +772,100 @@ object AvatarGlobalDb {
      *  carry a Context). False until /health has been learned once, so it safely defaults
      *  to the whole-map path on a cold start. */
     fun isR2SearchLive(): Boolean = r2Serving
+
+    // ---- v53: split sizes from the server ------------------------------------------------------------
+    @Volatile private var shardHexDigits = 3       // 4096 shards = the first 3 hex digits of the file id
+    @Volatile private var nmBuckets = 4096         // clone name files nm/<bucket>.json
+    @Volatile private var d1Search = false         // the server's D1 search (GET /search) is live
+    @Volatile private var nmReady = false          // every nm/ file is built (the server's backfill finished)
+    fun nameFilesReady(context: Context): Boolean { ensureCatalogBase(context); return nmReady && r2Serving }
+    private fun hexDigitsFor(count: Int): Int {
+        var d = 1; while (d < 8 && (1 shl (4 * d)) < count) d++
+        return if ((1 shl (4 * d)) == count) d else 3
+    }
+    private fun shardPrefixOf(fileId: String): String = fileId.substring(5, 5 + shardHexDigits).lowercase()
+    fun d1SearchLive(context: Context): Boolean { ensureCatalogBase(context); return d1Search }
+
+    // ---- v53: clone name files (nm/<bucket>.json): every catalog avatar with this exact folded name ----
+    // Free for users (CDN, 7-day cache purged on every change). The key is the caller's fancyFold() of the
+    // name (the server folds identically). Memory LRU per bucket, dropped on instance leave with the shards.
+    private val nmLru = object : LinkedHashMap<String, Map<String, List<Entry>>>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Map<String, List<Entry>>>): Boolean = size > 48
+    }
+    private val nmFetches = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Deferred<Map<String, List<Entry>>?>>()
+    private fun nmBucketOf(key: String): String {
+        val digits = hexDigitsFor(nmBuckets)
+        return (key.hashCode() and (nmBuckets - 1)).toString(16).padStart(digits, '0')
+    }
+    /** Every catalog avatar named exactly [foldedName] (already folded by the caller). null = the file
+     *  couldn't be read right now (transient), empty = nobody has that name. */
+    suspend fun entriesByName(context: Context, foldedName: String): List<Entry>? {
+        if (foldedName.isBlank()) return emptyList()
+        ensureCatalogBase(context)
+        if (!r2Serving) return null
+        val base = catalogBase ?: return null
+        val b = nmBucketOf(foldedName)
+        synchronized(nmLru) { nmLru[b] }?.let { return it[foldedName] ?: emptyList() }
+        val d = nmFetches.computeIfAbsent(b) { scope.async { fetchNameFile(base, b) } }
+        val file = try { d.await() } finally { nmFetches.remove(b, d) } ?: return null
+        synchronized(nmLru) { nmLru[b] = file }
+        return file[foldedName] ?: emptyList()
+    }
+    private suspend fun fetchNameFile(base: String, bucket: String): Map<String, List<Entry>>? = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL("$base/nm/$bucket.json").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            when (conn.responseCode) {
+                200 -> {
+                    val e = JSONObject(conn.inputStream.bufferedReader().readText()).optJSONObject("e") ?: return@withContext emptyMap()
+                    val out = HashMap<String, List<Entry>>()
+                    val keys = e.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next(); val arr = e.optJSONArray(k) ?: continue
+                        out[k] = (0 until arr.length()).mapNotNull { i -> arr.optJSONObject(i)?.let { compactEntry(it, "a") } }
+                    }
+                    out
+                }
+                404 -> emptyMap()   // no file for this bucket yet = nobody has these names
+                else -> null
+            }
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    }
+    /** {a|id, f, n, au, ai, p (platform mask), pf (packed perf: pc | quest<<4 | ios<<8)} → Entry. */
+    private fun compactEntry(o: JSONObject, idKey: String): Entry? {
+        val id = o.optString(idKey, ""); if (!id.startsWith("avtr_")) return null
+        val mask = o.optInt("p", 0); val pf = o.optInt("pf", 0x555)
+        val plats = buildList { if (mask and 1 != 0) add("PC"); if (mask and 2 != 0) add("Quest"); if (mask and 4 != 0) add("iOS") }
+        return Entry(o.optString("f", ""), id, o.optString("n", ""), o.optString("au", ""), o.optString("ai", ""),
+            plats, 0L, "", pf and 0xf, (pf shr 4) and 0xf, (pf shr 8) and 0xf, filled = true)
+    }
+
+    // ---- v53: D1 search (GET /search on gremlininc.app): one request per Search press, 500 per batch ----
+    data class SearchBatch(val results: List<Entry>, val more: Boolean)
+    private const val SEARCH_URL = "https://gremlininc.app/search"
+    /** One batch from the server's D1 search, or null when it isn't available (the caller falls back). */
+    suspend fun searchD1(context: Context, query: String, offset: Int, author: String? = null): SearchBatch? {
+        if (!d1SearchLive(context)) return null
+        return kotlinx.coroutines.withContext(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                val q = java.net.URLEncoder.encode(query.trim(), "UTF-8")
+                val au = author?.takeIf { it.isNotBlank() }?.let { "&au=" + java.net.URLEncoder.encode(it.trim(), "UTF-8") } ?: ""
+                conn = (URL("$SEARCH_URL?q=$q&o=$offset$au").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    connectTimeout = 10_000; readTimeout = 15_000
+                }
+                if (conn.responseCode != 200) return@withContext null
+                val j = JSONObject(conn.inputStream.bufferedReader().readText())
+                if (!j.optBoolean("ok", false)) return@withContext null
+                val arr = j.optJSONArray("r") ?: return@withContext SearchBatch(emptyList(), false)
+                SearchBatch((0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.let { o -> compactEntry(o, "a") } }, j.optBoolean("more", false))
+            } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+        }
+    }
 
     private fun indexBucketOf(token: String): String = (token.hashCode() and 0xfff).toString(16).padStart(3, '0')
     private fun fragBucketOf(avatarId: String): String =
@@ -1060,6 +1158,10 @@ object AvatarGlobalDb {
             catalogBase = prefs.getString(KEY_CATALOG_BASE, null)
             r2Serving = prefs.getBoolean(KEY_R2, false)
             prefs.getInt(KEY_SHARDED_COUNT, -1).takeIf { it >= 0 }?.let { shardedCount = it }
+            shardHexDigits = prefs.getInt(KEY_SHARD_DIGITS, 3)
+            nmBuckets = prefs.getInt(KEY_NM_BUCKETS, 4096)
+            d1Search = prefs.getBoolean(KEY_D1, false)
+            nmReady = prefs.getBoolean(KEY_NM_READY, false)
         }
         val now = System.currentTimeMillis()
         if (now - lastHealthMs < HEALTH_TTL_MS) return
@@ -1083,8 +1185,15 @@ object AvatarGlobalDb {
             catalogBase = base
             r2Serving = r2
             val entries = j.optInt("entries", -1).also { if (it >= 0) shardedCount = it }   // real catalog size for the debug panel
+            // v53: the split sizes come from the server, so it can re-split later without an app update.
+            val digits = hexDigitsFor(j.optInt("shardCount", 4096))
+            val nmb = j.optInt("nmBuckets", 4096).takeIf { it > 0 && it and (it - 1) == 0 } ?: 4096
+            val d1 = j.optJSONObject("search")?.optBoolean("d1", false) == true
+            val nmr = j.optJSONObject("search")?.optBoolean("nmReady", false) == true
+            shardHexDigits = digits; nmBuckets = nmb; d1Search = d1; nmReady = nmr
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putString(KEY_CATALOG_BASE, base).putBoolean(KEY_R2, r2)
+                .putInt(KEY_SHARD_DIGITS, digits).putInt(KEY_NM_BUCKETS, nmb).putBoolean(KEY_D1, d1).putBoolean(KEY_NM_READY, nmr)
                 .apply { if (entries >= 0) putInt(KEY_SHARDED_COUNT, entries) }.apply()
         } catch (e: Exception) { /* keep last-known */ } finally { runCatching { conn?.disconnect() } }
     }
