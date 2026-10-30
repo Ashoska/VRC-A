@@ -11,6 +11,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -84,8 +85,9 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
     Box(modifier) {
         if (looping) {
             Crossfade(shown == Mark.Background, label = "catLoop") { calm ->
-                if (BootCatLab.drawLoops) LabLoop(calm, v, accent, Modifier.fillMaxSize())
-                else CatLoop(if (calm) CALM else THINK[v], accent, Modifier.fillMaxSize())
+                // AVDs on the RenderThread (no main-thread lag); the lab can't play them, so it draws their sources.
+                if (BootCatLab.drawLoops) { if (calm) BgLoop(v, accent, Modifier.fillMaxSize()) else LabLoop(v, accent, Modifier.fillMaxSize()) }
+                else CatLoop(if (calm) CALM[v] else THINK[v], accent, Modifier.fillMaxSize())
             }
         } else if (shown == Mark.Waiting) {
             // Asleep, waiting for its turn: breathing, nodding off, dreaming (BootCatSleep).
@@ -142,14 +144,13 @@ private fun CatLoop(res: Int, color: Color, modifier: Modifier) {
 
 /**
  * The UI Lab's JVM Android doesn't play AnimatedVectorDrawables, so the lab sets [drawLoops] and the
- * thinking / calm loops are drawn here instead: the thinking one from the same [BootCatEyes] the AVDs are sampled
- * from, the calm one frame for frame as boot_cat_avd.py's tracks.
+ * thinking / background loops are drawn here instead, from the same [BootCatEyes] / [BootCatBg] the AVDs are sampled from.
  * Never set by the app.
  */
 object BootCatLab { @JvmField var drawLoops = false }
 
 @Composable
-private fun LabLoop(calm: Boolean, v: Int, accent: Color, modifier: Modifier) {
+private fun LabLoop(v: Int, accent: Color, modifier: Modifier) {
     val head = remember { headPath() }
     val eyes = remember { FloatArray(10) }
     val ms = remember { mutableStateOf(0L) }
@@ -159,22 +160,25 @@ private fun LabLoop(calm: Boolean, v: Int, accent: Color, modifier: Modifier) {
         val s = size.minDimension / 24f
         withTransform({ scale(s, s, Offset.Zero) }) {
             val stroke = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-            if (calm) {
-                drawPath(head, accent.copy(alpha = 0.18f), style = stroke)
-                drawLight(head, accent.copy(alpha = 0.5f), (t / 2400f) % 1f, 0.28f)
-                val dx = 0.5f * sin(2 * PI.toFloat() * (t / 3200f))
-                val c = accent.copy(alpha = 0.7f)
-                for (x in floatArrayOf(9.3f + dx, 14.7f + dx)) {
-                    drawCircle(c, 1.05f, Offset(x, Y0 + 0.35f))
-                    drawLine(c, Offset(x - 1.5f, Y0 - 0.3f), Offset(x + 1.5f, Y0 - 0.3f), 1.5f, StrokeCap.Round)
-                }
-            } else {
-                drawPath(head, accent.copy(alpha = 0.25f), style = stroke)
-                val grow = (t / 400f).coerceIn(0f, 1f) // linear, like the AVD's grow-in
-                drawLight(head, accent.copy(alpha = grow), ((t / 1200f) + BootCatEyes.LIGHT_PHASE[v]) % 1f, 0.28f * grow)
-                BootCatEyes.pose(v, t, eyes)
-                with(BootCatEyes) { drawEyes(eyes, accent) }
-            }
+            drawPath(head, accent.copy(alpha = 0.25f), style = stroke)
+            val grow = (t / 400f).coerceIn(0f, 1f) // linear, like the AVD's grow-in
+            drawLight(head, accent.copy(alpha = grow), ((t / 1200f) + BootCatEyes.LIGHT_PHASE[v]) % 1f, 0.28f * grow)
+            BootCatEyes.pose(v, t, eyes)
+            with(BootCatEyes) { drawEyes(eyes, accent) }
+        }
+    }
+}
+
+/** The background cat drawn from [BootCatBg] (the lab's stand-in for its AVD), looping from when it appears. */
+@Composable
+private fun BgLoop(v: Int, accent: Color, modifier: Modifier) {
+    val head = remember { headPath() }
+    val ms = remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) { val t0 = androidx.compose.runtime.withFrameMillis { it }; while (true) androidx.compose.runtime.withFrameMillis { ms.longValue = it - t0 } }
+    Canvas(modifier) {
+        val s = size.minDimension / 24f
+        withTransform({ scale(s, s, Offset.Zero) }) {
+            with(BootCatBg) { drawBg(head, { at -> drawLight(head, accent.copy(alpha = 0.5f), at, 0.28f) }, accent, v, ms.longValue.toFloat()) }
         }
     }
 }
@@ -327,8 +331,9 @@ fun preloadBootCat(ctx: android.content.Context) {
     (THINK + CALM).forEach { runCatching { ctx.getDrawable(it) } }
 }
 
+/** The background cat's loops, sampled from [BootCatBg] by the UI Lab's `genavd`. */
+private val CALM = intArrayOf(com.vrca.R.drawable.boot_cat_calm_0, com.vrca.R.drawable.boot_cat_calm_1, com.vrca.R.drawable.boot_cat_calm_2, com.vrca.R.drawable.boot_cat_calm_3)
 private val THINK = intArrayOf(com.vrca.R.drawable.boot_cat_think_0, com.vrca.R.drawable.boot_cat_think_1, com.vrca.R.drawable.boot_cat_think_2, com.vrca.R.drawable.boot_cat_think_3)
-private val CALM = com.vrca.R.drawable.boot_cat_calm
 private const val HEAD = "M3.92,10.46 L4.3,3 L8.2,7.1 Q12,5.1 15.8,7.1 L19.9,2.6 L20.08,10.46 A8.6,8.6 0 1,1 3.92,10.46 Z"
 private const val Y0 = 13.6f
 private const val FRAME = 1000f / 30f
