@@ -11,7 +11,7 @@ checked in the UI Lab and merged before the next.
   ears as the recurring touch, one small detail that takes the state colour (`BootIcons`).
 - Status shown by the boot cats (`BootCat`: thinking / result faces / reactions) wherever the app shows
   the state of something; colour is never the only signal.
-- Motion read while drawing only; RenderThread loops (AVD) for anything that must move while the app
+- Motion read while drawing only; Compose loops (the user dropped AVDs, 2026-10-30) for anything that must move while the app
   is busy; every page passes the lab `perf` check.
 - Process per page: mock-up sheet (every state) → user approval → build → lab screenshots / recording →
   merge. Sheets for users come from the lab, not hand-made mocks.
@@ -60,6 +60,18 @@ revamped with that page. A page is DONE only when everything listed under it is 
     after it inherit it.
 11. **Admin**: all tabs, the admin UI kit, user detail; the Config tab's VRC-A servers maintenance
     switch is a placeholder for this.
+    User wish (2026-10-30): the states should feel live and reactive, not static text. Every bot,
+    queue and server state should move the moment it changes (counters ticking, bots shown working /
+    idle / rate-limited / stopped as it happens, the shard each one is on, pushes landing), using the
+    Boot Cat-style marks and the "everything shown is watched state" rule. The Bots tab also drops its
+    leftovers from before Worker v49 (the "Liveness queued" number, "✓ checked" wording); its push
+    readout is now "+new ~calm ✓font −removed". Data that is already free to watch: the local bot
+    progress (`AvatarCatalogSweep` RoleView), the flush readout, the Worker `/health` poll (also
+    `writesToday`, `calmWaiting`). Any faster polling or new listener needs a cost check first.
+    Numbers should RISE, not pop every 2 min (the Worker only changes them per flush): counters tick
+    up to each new value, and the bots' own local work (checked / filled / removed / waiting to push)
+    is added on top of the last server value so totals climb as it happens, then settle on the real
+    figure at the next flush. No extra polling needed for this.
 
 Leftovers to delete (no callers): `ButtonOverlay`, `AboutScreen`, `DependenciesScreen`,
 `SettingsScreen` (`ui/settings/`), `MainScreen` (`ui/conversation/`). Checked and removed when the

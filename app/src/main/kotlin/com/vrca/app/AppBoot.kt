@@ -170,9 +170,6 @@ internal fun AppBoot(
             startDiscordRpc(ctx)
             BootTimeline.discordStartedEarly = true
         }
-        // The rows' thinking cats (AnimatedVectorDrawables): their first load parses the XML and the
-        // animators, ~0.2 s on the Quest the first time a row starts working (third user video).
-        preloadBootCat(ctx)
         true
     }
     // The shared watched name (rule: everything shown is watched state, ui-kit.md): it fills in
