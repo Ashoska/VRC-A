@@ -1782,8 +1782,6 @@ async function flushR2(env) {
       // can EXPAND a row to see every avatar. Stored in a DEDICATED `recent` key, not meta, so the
       // frequently-polled /health stays tiny.
       names: fids.map((fid) => (batch[fid] && batch[fid].name) || "").filter(Boolean),
-      // v52 live page: name + avatar id, so each name links to its VRChat page (not kept in `recent`).
-      items: fids.filter((fid) => batch[fid] && batch[fid].name).map((fid) => ({ n: batch[fid].name, a: batch[fid].id || "" })),
     });
   }
   const admuKeys = [];
@@ -1879,6 +1877,7 @@ async function flushR2(env) {
 
   const nowChecked = Date.now();
   let added = 0, removed = 0, allShardsOk = true;
+  const addedItems = [], removedItems = [];   // v52 live feed: the avatars this run really added / removed
   let unfilledDelta = 0;      // incremental Fill-backlog delta (Worker owns the count now)
   const indexOps = [];        // search-index ops computed from the SAME shard read (no re-fetch)
   const fillHintAdd = new Set();   // touched shards that still have an unfilled avatar
@@ -1910,9 +1909,11 @@ async function flushR2(env) {
     // pacing) but NOT `contentDirty` (no clone/search reader consults `checked`), so it never wastes a
     // purge — the biggest recurring purge saving at the 30d recheck cadence.
     let dirty = false, contentDirty = false, sAdded = 0, sRemoved = 0, sUnfilled = 0;
+    const sAddItems = [], sRemItems = [];
+    const item = (x) => ({ n: (x && x.name) || "", a: (x && typeof x.id === "string" && /^avtr_[0-9a-f-]{36}$/.test(x.id)) ? x.id : "" });
     const sIndexOps = [];
     for (const fid of Object.keys(ops.adds)) if (!e[fid]) {
-      const ne = ops.adds[fid]; e[fid] = ne; sAdded++; dirty = true; contentDirty = true;
+      const ne = ops.adds[fid]; e[fid] = ne; sAdded++; sAddItems.push(item(ne)); dirty = true; contentDirty = true;
       const op = buildIndexOp(null, ne, fid); if (op) sIndexOps.push(op);
       if (needsFold(ne)) ne.fz = foldSig(ne);   // the ADD already carries the folded tokens
       if (hasNonAscii(ne)) ne.fv = FOLD_STAMP_V; // indexed under the current fold rules (bots won't flag it)
@@ -1927,7 +1928,7 @@ async function flushR2(env) {
       if (!prev && ops.calmOnly.has(fid)) continue;
       if (prev && typeof prev.mt === "number" && ts < prev.mt) continue;
       if (prev && typeof prev.added === "number") inc.added = prev.added; // `added` is immutable
-      else if (!prev) sAdded++;
+      else if (!prev) { sAdded++; sAddItems.push(item(inc)); }
       if (!prev) { if (inc.filled !== true) sUnfilled++; }
       else { const wasUnfilled = prev.filled !== true, nowUnfilled = inc.filled !== true;
         if (wasUnfilled && !nowUnfilled) sUnfilled--; else if (!wasUnfilled && nowUnfilled) sUnfilled++; }
@@ -1970,7 +1971,7 @@ async function flushR2(env) {
       if (hasNonAscii(ent) && ent.fv !== FOLD_STAMP_V) { ent.fv = FOLD_STAMP_V; dirty = true; }
     }
     for (const fid of ops.removes) if (e[fid]) {
-      const prev = e[fid]; delete e[fid]; sRemoved++; dirty = true; contentDirty = true;
+      const prev = e[fid]; delete e[fid]; sRemoved++; sRemItems.push(item(prev)); dirty = true; contentDirty = true;
       const op = buildIndexOp(prev, null, fid); if (op) sIndexOps.push(op);
       if (prev.filled !== true) sUnfilled--;
     }
@@ -1990,6 +1991,8 @@ async function flushR2(env) {
       dirtyPrefixes.push(sp);
       if (contentDirty) purgePrefixes.push(sp);   // checked-only writes persist but skip the purge
       added += sAdded; removed += sRemoved; unfilledDelta += sUnfilled;
+      for (const x of sAddItems) if (addedItems.length < 300) addedItems.push(x);
+      for (const x of sRemItems) if (removedItems.length < 300) removedItems.push(x);
       for (const op of sIndexOps) indexOps.push(op);
     }
   }
@@ -2256,10 +2259,8 @@ async function flushR2(env) {
   try {
     await emit(env, { t: "run", ok: allShardsOk, added, removed, entries, ms: Date.now() - runStart,
       shards: dirtyPrefixes.length, idx: idxWrites, calm: calmCleared,
-      // Every avatar name in this run's contributions (up to 300; nameCount says how many there were).
-      names: recentBatches.flatMap((b) => b.names || []).slice(0, 300),
-      ids: recentBatches.flatMap((b) => (b.items || []).map((x) => (/^avtr_[0-9a-f-]{36}$/.test(x.a) ? x.a : ""))).slice(0, 300),
-      nameCount: recentBatches.reduce((n, b) => n + (b.n || 0), 0),
+      // The avatars this run really added and removed (up to 300 each; `added`/`removed` are the full counts).
+      addedItems, removedItems,
       batchCount: recentBatches.length,
       pending: Math.max(0, pendNames.length - pendCleared), reports: Math.max(0, repNames.length - repCleared),
       calmWaiting: Math.max(0, admcNames.length - calmCleared) });
@@ -2280,7 +2281,7 @@ async function flushR2(env) {
     const sigOf = (b) => `${b.by || ""}|${b.n || 0}|${(b.names || []).join("")}`;
     const seen = new Set(prev.map(sigOf));
     const fresh = [];
-    for (const b of recentBatches) { const s = sigOf(b); if (!seen.has(s)) { seen.add(s); const { items, ...keep } = b; fresh.push(keep); } }
+    for (const b of recentBatches) { const s = sigOf(b); if (!seen.has(s)) { seen.add(s); fresh.push(b); } }
     if (fresh.length) {
       const next = [...fresh.reverse(), ...prev].slice(0, 20);
       await hubPut(env, "recent", JSON.stringify(next));
@@ -2508,8 +2509,10 @@ main{max-width:1240px;margin:0 auto;padding:12px 16px 20px}
 .feed .h{display:flex;gap:8px;align-items:center}.feed .h b{font-weight:500;display:flex;gap:6px;flex-wrap:wrap}
 .feed li.add{box-shadow:inset 3px 0 0 var(--ok);padding-left:12px}.feed li.rem{box-shadow:inset 3px 0 0 var(--err);padding-left:12px}
 .tag{font-size:12.5px;font-weight:500;padding:2px 9px;border-radius:999px}.tag.add{color:var(--ok);background:rgba(83,227,159,.12)}.tag.rem{color:var(--err);background:rgba(255,107,107,.12)}.feed .tm{color:var(--faint);font-size:12px;margin-left:auto;white-space:nowrap}
-.feed .m{color:var(--muted);font-size:12.5px;margin-top:2px}.feed .nm{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:7px}
-a.badge:hover{border-color:var(--accent);color:var(--accent-soft)}
+.feed .m{color:var(--muted);font-size:12.5px;margin-top:2px}.feed .nm{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:4px}
+.grp{margin-top:8px}.gl{font-size:11.5px;font-weight:500;letter-spacing:.3px}.gl.add{color:var(--ok)}.gl.rem{color:var(--err)}
+.badge.add{border-color:rgba(83,227,159,.35)}.badge.rem{border-color:rgba(255,107,107,.35);color:var(--muted);text-decoration:line-through;text-decoration-color:rgba(255,107,107,.7)}
+a.badge:hover{border-color:var(--ok);color:var(--ok)}
 .more{background:none;border:0;color:var(--accent-soft);font:500 12px Roboto,system-ui,sans-serif;cursor:pointer;padding:2px 4px}.more:hover{text-decoration:underline}
 .badge{text-decoration:none;display:inline-block;font-size:12.5px;line-height:1.35;font-weight:500;padding:4px 10px;border-radius:999px;background:var(--raised);border:1px solid var(--edge);color:var(--text);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @keyframes in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
@@ -2617,17 +2620,19 @@ function item(ev){var li=document.createElement('li'),h=document.createElement('
   if(ev.removed){var br=document.createElement('span');br.className='tag rem';br.textContent='−'+fmt(ev.removed)+' removed';b.appendChild(br)}
   h.appendChild(b);h.appendChild(tm);li.appendChild(h);
   var m=document.createElement('div');m.className='m';var nb=ev.batchCount!=null?ev.batchCount:(ev.batches||[]).length;var parts=[];if(ev.added)parts.push('from '+nb+' contribution batch'+(nb===1?'':'es'));if(ev.removed)parts.push(ev.removed+' no longer on VRChat');m.textContent=parts.join(' · ');li.appendChild(m);
-  var names=ev.names||[];if(!names.length)(ev.batches||[]).forEach(function(x){(x.names||[]).forEach(function(n){names.push(n)})});
-  var total=ev.nameCount||names.length;
-  if(names.length){var nm=document.createElement('div');nm.className='nm';
-   var ids=ev.ids||[];
-   function badges(from,to){for(var i=from;i<Math.min(to,names.length);i++){var id=ids[i],s=document.createElement(id?'a':'span');s.className='badge';s.textContent=names[i];
-     if(id){s.href='https://vrchat.com/home/avatar/'+id;s.target='_blank';s.rel='noopener';s.title=names[i]+' (opens on VRChat)'}else s.title=names[i];
-     if(more&&more.parentNode)nm.insertBefore(s,more);else nm.appendChild(s)}}var more=null;
+  function group(list,total,kind,label){if(!list||!list.length)return;var g=document.createElement('div');g.className='grp';
+   var hd=document.createElement('div');hd.className='gl '+kind;hd.textContent=label;g.appendChild(hd);
+   var nm=document.createElement('div');nm.className='nm';g.appendChild(nm);var more=null;
+   function badges(from,to){for(var i=from;i<Math.min(to,list.length);i++){var it=list[i],nmTxt=it.n||'(unnamed)',lnk=kind==='add'&&it.a;
+     var s=document.createElement(lnk?'a':'span');s.className='badge '+kind;s.textContent=nmTxt;
+     if(lnk){s.href='https://vrchat.com/home/avatar/'+it.a;s.target='_blank';s.rel='noopener';s.title=nmTxt+' (opens on VRChat)'}else s.title=nmTxt+(kind==='rem'?' (no longer on VRChat)':'');
+     if(more&&more.parentNode)nm.insertBefore(s,more);else nm.appendChild(s)}}
    badges(0,6);
-   if(names.length>6){more=document.createElement('button');more.className='more';more.textContent='Show all '+fmt(total);
-    more.onclick=function(){more.remove();badges(6,names.length);if(total>names.length){var x=document.createElement('span');x.className='tm';x.textContent='+'+fmt(total-names.length)+' more not listed';nm.appendChild(x)}};nm.appendChild(more)}
-   li.appendChild(nm)}
+   if(list.length>6){more=document.createElement('button');more.className='more';more.textContent='Show all '+fmt(total);
+    more.onclick=function(){more.remove();badges(6,list.length);if(total>list.length){var x=document.createElement('span');x.className='tm';x.textContent='+'+fmt(total-list.length)+' more (list shows the first 300)';nm.appendChild(x)}};nm.appendChild(more)}
+   li.appendChild(g)}
+  group(ev.addedItems,ev.added,'add','Added');
+  group(ev.removedItems,ev.removed,'rem','Removed');
   return li}
   return null}
 function add(ev,live){var li=item(ev);if(!li)return;if(empty){feed.textContent='';empty=false}feed.insertBefore(li,feed.firstChild);while(feed.children.length>60)feed.removeChild(feed.lastChild);
