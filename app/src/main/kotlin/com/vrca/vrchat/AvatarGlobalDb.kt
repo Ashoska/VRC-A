@@ -623,22 +623,12 @@ object AvatarGlobalDb {
      *  in the clone shard (cloneable) yet MISSING from the search index (unsearchable) when its index
      *  op was lost/lagged or the full rebuild is down. Returns true/false, or null on a read failure /
      *  R2 not live. Diagnostic only — one edge-cached GET. */
-    suspend fun isInSearchIndex(context: Context, avatarId: String): Boolean? = kotlinx.coroutines.withContext(Dispatchers.IO) {
-        if (avatarId.length < 8) return@withContext null
-        ensureCatalogBase(context)
-        val base = (if (r2Serving) catalogBase else null) ?: return@withContext null
-        val bucket = avatarId.substring(5, 8).lowercase()
-        var conn: HttpURLConnection? = null
-        try {
-            conn = (URL("$base/fragments/$bucket.json").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A"); setRequestProperty(CDN_APP_HEADER, CDN_APP_MARK); connectTimeout = 10_000; readTimeout = 10_000
-            }
-            when (conn.responseCode) {
-                200 -> JSONObject(conn.inputStream.bufferedReader().readText()).optJSONObject("e")?.has(avatarId) == true
-                404 -> false
-                else -> null
-            }
-        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    suspend fun isInSearchIndex(context: Context, avatarId: String, name: String = ""): Boolean? {
+        // v53: search and cloning read the D1 rows + nm/ name files, both written by the same server step, so
+        // the free name file answers "is it findable?". null until the server's name files are built.
+        if (avatarId.length < 8 || name.isBlank() || !nameFilesReady(context)) return null
+        val list = entriesByName(context, nfkcFold(name).trim().lowercase()) ?: return null
+        return list.any { it.avatarId == avatarId }
     }
 
     // ---- admin shard-walk source (memory-flat bots, no whole-master grab) -----
@@ -1896,7 +1886,7 @@ object AvatarGlobalDb {
                     // search index)? A "cloneable=Y searchable=N" avatar is the "in catalog but I can't
                     // find it in search" case — its index op was lost/lagged or the full rebuild is down.
                     val cloneable = lookupShardedResult(context, e.fileId).status == ShardStatus.HIT
-                    val searchable = isInSearchIndex(context, e.avatarId)
+                    val searchable = isInSearchIndex(context, e.avatarId, e.name)
                     detail.append("• ${e.name.ifBlank { e.avatarId }}\n    ${e.avatarId}\n    clone=")
                         .append(if (cloneable) "Y" else "N")
                         .append(" search=").append(when (searchable) { true -> "Y"; false -> "N"; null -> "?" })

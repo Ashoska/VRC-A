@@ -1070,12 +1070,6 @@ object AvatarCatalogSweep {
      *  re-folds just that one. Empty = not read yet → no flags. */
     @Volatile var manifestFoldV = ""; private set
     fun setManifestFoldV(v: String) { manifestFoldV = v }
-    /** Font flag: fancy text indexed under an older fold. Plain-ASCII avatars never need one. */
-    private fun needsFontCheck(e: AvatarGlobalDb.Entry): Boolean {
-        val v = manifestFoldV
-        if (v.isEmpty() || e.fv == v) return false
-        return e.name.any { it.code > 0x7F } || e.author.any { it.code > 0x7F } || e.description.any { it.code > 0x7F }
-    }
 
     /** WALK one shard (post-cutover): read it, fill the unfilled + recheck the stale, push ops.
      *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the
@@ -1190,8 +1184,7 @@ object AvatarCatalogSweep {
                         p.refreshed++
                     }
                     // Unchanged → nothing is sent (no "last checked" date any more: the walk never stops).
-                    // Only a fancy-text avatar indexed under an older fold is flagged, so search re-folds it.
-                    else if (needsFontCheck(e)) okChecked.add(e.fileId)
+                    // v53: no font flags either: search is D1, which folds every write itself.
                 }
                 delay(PACE_MS)
             }
