@@ -2505,7 +2505,9 @@ main{max-width:1240px;margin:0 auto;padding:12px 16px 20px}
 .q .n{color:var(--muted)}
 .feed{list-style:none;margin:4px 0 0;padding:0;flex:1 1 0;height:0;min-height:0;overflow:auto}
 .feed li{border-top:1px solid var(--edge);padding:10px 0;animation:in .45s ease-out}.feed li:first-child{border-top:0}
-.feed .h{display:flex;gap:8px;align-items:baseline}.feed .h b{font-weight:500}.feed .tm{color:var(--faint);font-size:12px;margin-left:auto;white-space:nowrap}
+.feed .h{display:flex;gap:8px;align-items:center}.feed .h b{font-weight:500;display:flex;gap:6px;flex-wrap:wrap}
+.feed li.add{box-shadow:inset 3px 0 0 var(--ok);padding-left:12px}.feed li.rem{box-shadow:inset 3px 0 0 var(--err);padding-left:12px}
+.tag{font-size:12.5px;font-weight:500;padding:2px 9px;border-radius:999px}.tag.add{color:var(--ok);background:rgba(83,227,159,.12)}.tag.rem{color:var(--err);background:rgba(255,107,107,.12)}.feed .tm{color:var(--faint);font-size:12px;margin-left:auto;white-space:nowrap}
 .feed .m{color:var(--muted);font-size:12.5px;margin-top:2px}.feed .nm{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:7px}
 a.badge:hover{border-color:var(--accent);color:var(--accent-soft)}
 .more{background:none;border:0;color:var(--accent-soft);font:500 12px Roboto,system-ui,sans-serif;cursor:pointer;padding:2px 4px}.more:hover{text-decoration:underline}
@@ -2536,7 +2538,7 @@ a.badge:hover{border-color:var(--accent);color:var(--accent-soft)}
    <div class="n">Updates to existing avatars</div><div data-n="calmWaiting">–</div>
    <div class="n">Last update</div><div id="last">–</div>
    <div class="n">Next update</div><div id="next">–</div></div></div>
-  <div class="card" id="aF"><div class="ch-h"><span class="ch-t">Live activity</span><span class="ch-s">times in UTC+0</span></div><ul class="feed" id="feed"><li class="m">Waiting for the next update…</li></ul></div>
+  <div class="card" id="aF"><div class="ch-h"><span class="ch-t">Live activity</span><span class="ch-s">UTC+0</span></div><ul class="feed" id="feed"><li class="m">Waiting for avatars to be added or removed…</li></ul></div>
 </section>
 </main>
 <div id="tip"></div>
@@ -2609,9 +2611,12 @@ setInterval(function(){if(lastAt)document.getElementById('last').textContent=ago
 var feed=document.getElementById('feed'),empty=true;
 function item(ev){var li=document.createElement('li'),h=document.createElement('div');h.className='h';var b=document.createElement('b'),tm=document.createElement('span');tm.className='tm';
  tm.textContent=utcTime(ev.at,true)+' UTC';
- if(ev.t==='run'){var p=[];if(ev.added)p.push('+'+fmt(ev.added)+' new');if(ev.removed)p.push('−'+fmt(ev.removed)+' removed');if(ev.calm)p.push(ev.calm+' updated');
-  b.textContent=p.length?p.join(' · '):'Catalog updated';h.appendChild(b);h.appendChild(tm);li.appendChild(h);
-  var m=document.createElement('div');m.className='m';var nb=ev.batchCount!=null?ev.batchCount:(ev.batches||[]).length;m.textContent=(nb?nb+' contribution batch'+(nb===1?'':'es')+' · ':'')+'applied in '+((ev.ms||0)/1000).toFixed(1)+' s';li.appendChild(m);
+ if(ev.t==='run'){if(!ev.added&&!ev.removed)return null;
+  li.className=ev.added?'add':'rem';
+  if(ev.added){var ba=document.createElement('span');ba.className='tag add';ba.textContent='+'+fmt(ev.added)+' new avatar'+(ev.added===1?'':'s');b.appendChild(ba)}
+  if(ev.removed){var br=document.createElement('span');br.className='tag rem';br.textContent='−'+fmt(ev.removed)+' removed';b.appendChild(br)}
+  h.appendChild(b);h.appendChild(tm);li.appendChild(h);
+  var m=document.createElement('div');m.className='m';var nb=ev.batchCount!=null?ev.batchCount:(ev.batches||[]).length;var parts=[];if(ev.added)parts.push('from '+nb+' contribution batch'+(nb===1?'':'es'));if(ev.removed)parts.push(ev.removed+' no longer on VRChat');m.textContent=parts.join(' · ');li.appendChild(m);
   var names=ev.names||[];if(!names.length)(ev.batches||[]).forEach(function(x){(x.names||[]).forEach(function(n){names.push(n)})});
   var total=ev.nameCount||names.length;
   if(names.length){var nm=document.createElement('div');nm.className='nm';
@@ -2624,8 +2629,7 @@ function item(ev){var li=document.createElement('li'),h=document.createElement('
     more.onclick=function(){more.remove();badges(6,names.length);if(total>names.length){var x=document.createElement('span');x.className='tm';x.textContent='+'+fmt(total-names.length)+' more not listed';nm.appendChild(x)}};nm.appendChild(more)}
    li.appendChild(nm)}
   return li}
- if(ev.t==='report'){b.textContent='Avatar reported '+(ev.status==='renamed'?'renamed':'unavailable');h.appendChild(b);h.appendChild(tm);li.appendChild(h);return li}
- return null}
+  return null}
 function add(ev,live){var li=item(ev);if(!li)return;if(empty){feed.textContent='';empty=false}feed.insertBefore(li,feed.firstChild);while(feed.children.length>60)feed.removeChild(feed.lastChild);
  if(live&&ev.t==='run'){lastAt=ev.at;if(ev.entries)setN('entries',ev.entries);setN('pendingBatches',ev.pending);setN('reports',ev.reports);setN('calmWaiting',ev.calmWaiting);setTimeout(refresh,1500)}}
 function connect(){var ws=new WebSocket(H.replace(/^http/,'ws')+'/live/ws'),dot=document.getElementById('dot'),c=document.getElementById('conn'),ping;
