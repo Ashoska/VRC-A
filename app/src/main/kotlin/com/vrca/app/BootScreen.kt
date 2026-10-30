@@ -262,6 +262,14 @@ fun BootScreen(
      */
     exit: Boolean = false,
     exitToTopBar: Boolean = true,
+    /**
+     * When the terms come next (user, 2026-10-25): where their header's logo is (window coordinates),
+     * read while drawing. The logo glides and shrinks onto it and hands over to it as it lands while the backdrop
+     * fades off the terms screen already built underneath, so there's never an empty frame.
+     */
+    exitToRect: (() -> androidx.compose.ui.geometry.Rect?)? = null,
+    /** The way out's progress (0..1), for the screen underneath to match (the terms' Boot Cat fades in). */
+    onExitProgress: (Float) -> Unit = {},
     onExited: () -> Unit = {},
     /** Non-null while VRChat needs signing in: shows a "Sign in to VRChat" pill under the panels. */
     onSignIn: (() -> Unit)? = null
@@ -337,13 +345,22 @@ fun BootScreen(
     }
     val exitP = remember { Animatable(0f) }
     val exitedCallback by rememberUpdatedState(onExited)
+    val exitProgressCallback by rememberUpdatedState(onExitProgress)
+    val density = LocalDensity.current
+    // Whether the logo glides somewhere (the top bar or the terms' Boot Cat) and the backdrop fades
+    // off the screen underneath, instead of the logo just fading out in place.
+    val glides = exitToTopBar || exitToRect != null
     LaunchedEffect(exit) {
         if (!exit) return@LaunchedEffect
         // Reverse of the opening: right panel first, then the left, folding back to their lines.
         launch { panelR.animateTo(0f, tween(EXIT_FOLD_MS, easing = FastOutSlowInEasing)) }
         launch { delay(90); panelL.animateTo(0f, tween(EXIT_FOLD_MS, easing = FastOutSlowInEasing)) }
-        delay(260)
+        // Onto the terms, the glide (and the terms showing through) starts with the fold: waiting for the
+        // panels to go first left the screen dipping darker for a few frames (user).
+        delay(if (exitToRect != null) 0L else 260L)
+        val progress = launch { snapshotFlow { exitP.value }.collect { exitProgressCallback(it) } }
         exitP.animateTo(1f, tween(EXIT_LOGO_MS, easing = FastOutSlowInEasing))
+        progress.cancel()
         exitedCallback()
     }
     val shownCallback by rememberUpdatedState(onShown)
@@ -372,7 +389,13 @@ fun BootScreen(
                 // that's already appearing instead of on an empty panel (user's recordings showed a
                 // ~0.3 s plain dark beat between the landing and the old reveal fade).
                 .drawBehind {
-                    val a = if (exitToTopBar) 1f - ((exitP.value - REVEAL_FROM) / (1f - REVEAL_FROM)).coerceIn(0f, 1f) else 1f
+                    // Onto the terms: the backdrop fades with the rest of the screen from the glide's start (holding
+                    // it to REVEAL_FROM left a few plain dark frames: the wall and panels had already faded, user).
+                    val a = when {
+                        exitToRect != null -> 1f - exitP.value
+                        glides -> 1f - ((exitP.value - REVEAL_FROM) / (1f - REVEAL_FROM)).coerceIn(0f, 1f)
+                        else -> 1f
+                    }
                     if (a > 0f) drawRect(GremlinColors.Backdrop.copy(alpha = a))
                 }
                 .onGloballyPositioned { coords[0] = it; notePlaced() }
@@ -389,12 +412,32 @@ fun BootScreen(
                 BootLogo(
                     height = height,
                     introScale = {
-                        val toBar = if (exitToTopBar) 1f + (TOP_BAR_LOGO_HEIGHT / height - 1f) * exitP.value else 1f
-                        (0.9f + 0.1f * logoIn.value) * toBar
+                        val r = exitToRect?.invoke()
+                        val toTarget = when {
+                            r != null -> {
+                                // The target's height in this screen's own pixels (window px differ on the scaled panel).
+                                val screen = coords[0]
+                                val h = if (screen != null && screen.isAttached) screen.windowToLocal(r.bottomCenter).y - screen.windowToLocal(r.topCenter).y else r.height
+                                1f + (h * TERMS_CAT_FIT / with(density) { height.toPx() } - 1f) * exitP.value
+                            }
+                            exitToTopBar -> 1f + (TOP_BAR_LOGO_HEIGHT / height - 1f) * exitP.value
+                            else -> 1f
+                        }
+                        (0.9f + 0.1f * logoIn.value) * toTarget
                     },
                     // A lambda, read while drawing: as a value it rebuilt the whole screen on every
                     // frame of the logo intro and the fold (UI Lab `perf`).
-                    fadeIn = { logoIn.value * (if (exitToTopBar) 1f else 1f - exitP.value) },
+                    // Landing on the terms header's logo (which has no drop shadow): the shadow fades out on
+                    // the way, so the two never show doubled.
+                    shadow = { if (exitToRect != null) 1f - exitP.value else 1f },
+                    fadeIn = {
+                        logoIn.value * when {
+                            // Onto the terms header's logo: hands over to it as it lands.
+                            exitToRect != null -> 1f - ((exitP.value - TERMS_LAND_FROM) / (1f - TERMS_LAND_FROM)).coerceIn(0f, 1f)
+                            exitToTopBar -> 1f
+                            else -> 1f - exitP.value
+                        }
+                    },
                     modifier = NoA11y
                         .onGloballyPositioned { coords[1] = it; notePlaced() }
                         .graphicsLayer {
@@ -402,7 +445,15 @@ fun BootScreen(
                             if (c != null) {
                                 translationX = (boxW / 2f - c.x) * (1f - settle.value)
                                 translationY = (boxH / 2f - c.y) * (1f - settle.value)
-                                if (exitToTopBar && exitP.value > 0f) {
+                                val r = exitToRect?.invoke()
+                                val screen = coords[0]
+                                if (r != null && screen != null && screen.isAttached && exitP.value > 0f) {
+                                    // To the terms header's logo: its window position in this screen's own
+                                    // coordinates (root coordinates were off on the scaled headset panel).
+                                    val t = screen.windowToLocal(r.center)
+                                    translationX += (t.x - c.x) * exitP.value
+                                    translationY += (t.y - c.y) * exitP.value
+                                } else if (exitToTopBar && exitP.value > 0f) {
                                     // To the top bar's logo: centred, half the 64dp bar down.
                                     translationX += (boxW / 2f - c.x) * exitP.value
                                     translationY += (TOP_BAR_CENTER_Y.toPx() - c.y) * exitP.value
@@ -531,6 +582,10 @@ private const val EXIT_FOLD_MS = 420
 private const val EXIT_LOGO_MS = 700
 /** Point of the logo's glide (0-1) where the backdrop starts fading to show the app. */
 private const val REVEAL_FROM = 0.35f
+/** The boot logo lands at exactly the size of the terms header's logo. */
+private const val TERMS_CAT_FIT = 1f
+/** From this point of the glide the boot logo hands over to the terms header's own logo underneath. */
+internal const val TERMS_LAND_FROM = 0.97f
 
 /**
  * The logo on its own (no tile: a speech bubble inside a box read oddly), with a flat
@@ -538,7 +593,7 @@ private const val REVEAL_FROM = 0.35f
  * was removed (it read as the logo blipping brighter and dimmer).
  */
 @Composable
-private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: () -> Float, modifier: Modifier = Modifier) {
+private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: () -> Float, modifier: Modifier = Modifier, shadow: () -> Float = { 1f }) {
     // The logo as a vector (vrca_logo_vector, traced by tools/symbol-lab/logo_trace.py): sharp at any size, which
     // matters on the headset where the whole panel zooms when its window is resized.
     val logo = com.vrca.ui.common.appLogoPainter()
@@ -553,7 +608,7 @@ private fun BootLogo(height: Dp, introScale: () -> Float, fadeIn: () -> Float, m
             Image(
                 painter = logo, contentDescription = null,
                 colorFilter = ColorFilter.tint(DropLayer.copy(alpha = 0.55f)),
-                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).offset(y = 5.dp).graphicsLayer { alpha = fadeIn() }
+                modifier = Modifier.fillMaxHeight().aspectRatio(aspect).offset(y = 5.dp).graphicsLayer { alpha = fadeIn() * shadow() }
             )
             Image(
                 painter = logo, contentDescription = "VRC-A",

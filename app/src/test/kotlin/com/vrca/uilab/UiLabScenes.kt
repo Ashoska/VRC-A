@@ -56,7 +56,6 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Cloud
 import com.vrca.app.CrashScreen
-import com.vrca.app.TosGate
 import com.vrca.app.UpdateDialog
 import com.vrca.app.VrcaApp
 import com.vrca.nowplaying.NowPlayingSnapshot
@@ -369,7 +368,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "cats", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "catframes", "thinkmock", "waitmock", "skipmock", "donemock", "warnmock", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -457,6 +456,74 @@ object UiLabScenes {
     }
 
     /** Each cell replays one of the boot cat's animations every 4 s: [from] for 1.3 s, then [to]. */
+    @Composable
+    private fun CatFrames(arg: String) {
+        val G = com.vrca.ui.theme.GremlinColors
+        val words = arg.split(' ').filter { it.isNotBlank() }
+        var t by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(0L) }
+        androidx.compose.runtime.LaunchedEffect(Unit) { val t0 = androidx.compose.runtime.withFrameMillis { it }; while (true) androidx.compose.runtime.withFrameMillis { t = it - t0 } }
+        androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().background(G.Backdrop), contentAlignment = Alignment.Center) {
+            val m = Modifier.size(240.dp)
+            when (words.firstOrNull()) {
+                "download" -> {
+                    val p = ((t - 1200L).coerceAtLeast(0L) / 3000f).coerceAtMost(1f)
+                    com.vrca.app.BootCatDownload(p, m, done = t > 4400L)
+                }
+                // Size unknown: the light runs round instead of a fill (then lands in Done at 4.4 s).
+                "downloadunknown" -> com.vrca.app.BootCatDownload(null, m, done = t > 4400L)
+                "countdown" -> {
+                    val left = (5 - ((t - 1200L).coerceAtLeast(0L) / 1000L).toInt()).coerceAtLeast(0)
+                    com.vrca.app.BootCatCountdown(left / 5f, m)
+                }
+                "hop" -> com.vrca.app.BootCat(com.vrca.app.Mark.Done, 0, m, celebrate = t > 1200L)
+                else -> {
+                    val from = com.vrca.app.Mark.valueOf(words.getOrElse(0) { "Working" })
+                    val to = com.vrca.app.Mark.valueOf(words.getOrElse(1) { "Done" })
+                    com.vrca.app.BootCat(if (t < 1200L) from else to, 0, m)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun SymbolSheet() {
+        val B = com.vrca.app.BootIcons
+        val G = com.vrca.ui.theme.GremlinColors
+        val icons = listOf(
+            "Internet" to B.Internet, "No internet" to B.NoInternet, "VRChat" to B.Vrchat, "VRC-A servers" to B.VrcaServers,
+            "Headset" to B.Headset, "Phone" to B.Phone, "Terms" to B.Terms, "Account" to B.Account,
+            "VRChat sign-in" to B.VrchatSignIn, "VRChat here" to B.VrchatHere, "Updates" to B.Updates, "Tutorial" to B.Tutorial,
+            "Start" to B.Start, "Stop" to B.Stop, "Pause" to B.Pause, "Privacy" to B.Privacy,
+            "Unlocked" to B.Unlocked, "Bug" to B.Bug,
+        )
+        androidx.compose.foundation.layout.Box(
+            Modifier.fillMaxSize().background(G.Backdrop), contentAlignment = androidx.compose.ui.Alignment.Center
+        ) {
+            androidx.compose.foundation.layout.FlowRow(
+                Modifier.padding(18.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, androidx.compose.ui.Alignment.CenterHorizontally),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                icons.forEach { (name, icon) ->
+                    androidx.compose.foundation.layout.Column(
+                        Modifier.width(104.dp).background(G.Card, androidx.compose.foundation.shape.RoundedCornerShape(14.dp)).padding(vertical = 10.dp),
+                        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
+                    ) {
+                        com.vrca.app.BootIconView(icon, { G.Text }, { G.Accent }, Modifier.size(56.dp))
+                        androidx.compose.foundation.layout.Spacer(Modifier.height(6.dp))
+                        androidx.compose.foundation.layout.Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            com.vrca.app.BootIconView(icon, { G.TextMuted }, { G.Accent }, Modifier.size(19.dp))
+                            androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
+                            com.vrca.app.BootIconView(icon, { G.Accent }, { G.Accent }, Modifier.size(22.dp))
+                        }
+                        androidx.compose.foundation.layout.Spacer(Modifier.height(4.dp))
+                        androidx.compose.material3.Text(name, color = G.TextMuted, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+    }
+
     @Composable
     private fun CatGallery() {
         val M = com.vrca.app.Mark.entries.associateBy { it.name }
@@ -687,6 +754,23 @@ object UiLabScenes {
             // The REAL headset boot runner (its checks run against the lab, so it shows what fails offline).
             // `show cats`: every boot cat animation on a loop, labelled (a sheet for testers).
             "cats" -> CatGallery()
+            // `show symbols`: every custom symbol (BootIcons), large in the boot's two tones and at the
+            // size the app uses them, plus the one-colour versions.
+            "symbols" -> SymbolSheet()
+            // `show catframes <From> <To>`: one big Boot Cat in From, switching to To after 1.2 s (record it
+            // every frame). `show catframes download` (0 -> 100% over 3 s, then lands in Done),
+            // `show catframes countdown` (5 s, as the boot Retry), `show catframes hop` (Done + the celebration).
+            "catframes" -> CatFrames(rest.trim())
+            // `show thinkmock`: three eye animations for the thinking Boot Cat beside the current one (ThinkMocks).
+            "thinkmock" -> ThinkMocks.Sheet()
+            // `show waitmock`: three idle animations for the waiting (asleep) Boot Cat beside the current one (WaitMocks).
+            "waitmock" -> WaitMocks.Sheet()
+            // `show skipmock`: the skipped Boot Cat made awake-but-unbothered, three idle beats (SkipMocks).
+            "skipmock" -> SkipMocks.Sheet()
+            // `show donemock`: three idle beats for the Done Boot Cat (DoneMocks).
+            "donemock" -> DoneMocks.Sheet()
+            // `show warnmock`: three idle beats for the Warn Boot Cat (WarnMocks).
+            "warnmock" -> WarnMocks.Sheet()
             // `show buttons`: the button sheet (GremlinButton): both looks, every kind and state.
             "buttons" -> ButtonSheet()
             // `show download`: the downloading Boot Cat, in buttons and where downloads happen; its
@@ -746,8 +830,15 @@ object UiLabScenes {
                     org.robolectric.Shadows.shadowOf(cm).setNetworkCapabilities(cm.activeNetwork, caps)
                     true
                 }
-                if (mode == "onboarded" || mode == "full") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
-                if (mode == "full") {
+                // `show headsetboot tos`: a returning user (tutorial done) with terms to accept: the normal
+                // boot, then the hand-off into the terms screen. `show headsetboot new`: a brand-new user:
+                // the welcome boot, then the hand-off into the tutorial (whose first step holds the terms).
+                // Both need the real backend (`--firestore`) to get past the device session.
+                if (mode == "onboarded" || mode == "full" || mode == "tos") androidx.compose.runtime.remember { com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx); true }
+                if (mode == "tos" || mode == "new") {
+                    androidx.compose.runtime.remember { com.vrca.app.VrcaApplication.openedFromSwipe = true; com.vrca.app.AppLab.noUpdatePopup = true; true }
+                    VrcaApp()
+                } else if (mode == "full") {
                     androidx.compose.runtime.remember {
                         com.vrca.app.TosPrefs.accept(ctx, 1_000)
                         com.vrca.app.VrcaApplication.openedFromSwipe = true
@@ -800,10 +891,9 @@ object UiLabScenes {
                 )
             }
             "banned" -> BannedScreen(reason = rest.ifBlank { "Repeated harassment after warnings." })
-            "tos" -> TosGate(3, SAMPLE_TOS, "https://example.com/tos", onOpenUrl = {}, onAccept = {})
+            "tos" -> com.vrca.app.TermsScreen(version = 4, updatedAtMs = 1_792_800_000_000L, onAccept = {})
             "onboarding" -> OnboardingFlow(
-                vm = d.vm, tosVersion = 3, tosText = SAMPLE_TOS, tosUrl = "https://example.com/tos",
-                tosAlreadyAccepted = true, phase1BanId = null, replay = false, onTosAccepted = {}, onFinish = {}
+                vm = d.vm, phase1BanId = null, replay = false, onFinish = {}
             )
             "login" -> VrchatLoginScreen(pendingBanId = null, onCancel = if (rest == "nocancel") null else ({})) { _, _ -> }
         }

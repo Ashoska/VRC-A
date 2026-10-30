@@ -226,6 +226,10 @@ object AvatarCatalogSweep {
     private val pendingRemoves = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val pendingClears = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val pendingChecked = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    // Calm lane: refreshes of avatars already in the catalog (same file id, already filled). Sent with
+    // `calm: true`; the Worker holds them ~30 min so one shard write carries many. Fills, removes and
+    // re-keys never go here (they must land on the next flush).
+    private val pendingCalm = java.util.concurrent.ConcurrentHashMap<String, AvatarGlobalDb.Entry>()
     // Bot-detected author display-name changes (authorId -> new name), flushed to /admin so the Worker
     // renames ALL of that creator's avatars catalog-wide. Authoritative (bot GET /avatars/{id}).
     private val pendingAuthorRenames = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -517,14 +521,13 @@ object AvatarCatalogSweep {
         lastPendingReports = pendingReports   // cached for the slot loop's Reports-bot loan decision
         var fill = 0; var liveness = 0
         if (AvatarGlobalDb.shardWalkLive()) {
-            // SHARD-WALK MODE: no whole-map to scan. Both backlogs come from the tiny manifest
-            // the rebuild Action writes (unfilled = Fill, staleCount = Liveness) — so the bots
-            // show real queued numbers instead of a confusing 0 while they're clearly working.
+            // SHARD-WALK MODE: no whole-map to scan. The fill backlog comes from the tiny manifest
+            // (unfilled) — so the bots show a real queued number instead of a confusing 0.
             // Subtract the work done since the last manifest read so the numbers drop LIVE
             // (the manifest itself only refreshes every ~20 min). Clamped ≥0; the next manifest
             // read resets the baseline to the truth.
             fill = (manifestUnfilled - filledSinceManifest.get()).coerceAtLeast(0)
-            liveness = (manifestStale - recheckedSinceManifest.get()).coerceAtLeast(0)
+            // No liveness backlog in walk mode: the bots walk every shard continuously (no "due" date).
         } else {
             val snap = AvatarGlobalDb.snapshot()
             val cutoff = livenessCutoff()
@@ -687,7 +690,7 @@ object AvatarCatalogSweep {
                     // the moment reports arrive. Fill/Liveness bots stay on their own field.
                     if (r == Role.REPORTS) progress.getValue(r).helping =
                         if (didReports || lastPendingReports > 0) ""
-                        else if (manifestUnfilled >= manifestStale) "Fill" else "Liveness"
+                        else if (manifestUnfilled > 0) "Fill" else "Liveness"
                     did = walkPass(context, adminKey, slot, r, fillDedicated) || did
                 } else {
                     for (role in roles) {
@@ -853,11 +856,6 @@ object AvatarCatalogSweep {
     private const val FILL_DONE_HOLD_MS = 30 * 60_000L
     // Per fill shard: not due again before this time (shared by all bots in this app).
     private val fillWalkedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    // `checked` is pushed for an unchanged avatar only once it's this old (see walkPass): the
-    // continuous lap re-verifies everything every day or two, and rewriting every shard per lap
-    // just to move a timestamp was most of the Worker's shard writes. Well inside the 30-day
-    // staleness window, so the liveness count stays ~0.
-    private const val CHECKED_PUSH_MIN_AGE_MS = 20L * 24 * 60 * 60 * 1000
 
     /** Next due shard from the Worker's fill worklist (see [FILL_REWALK_MS] / [FILL_DONE_HOLD_MS]), or null.
      *  The shared queue is refilled at most once per [WORKLIST_TTL_MS] (single-flight), so all bots
@@ -1056,7 +1054,6 @@ object AvatarCatalogSweep {
     // These count work done SINCE the last manifest read and are subtracted from the displayed
     // backlog, so "queued"/"to process" drop live; each manifest refresh resets them to the truth.
     private val filledSinceManifest = java.util.concurrent.atomic.AtomicInteger(0)
-    private val recheckedSinceManifest = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile var manifestUnfilled = -1; private set
     // Reset the optimistic decrement ONLY when the value actually CHANGES (a fresh Action rebuild),
     // not on every 30s poll of the same value — otherwise each poll snapped the live-decremented
@@ -1068,10 +1065,17 @@ object AvatarCatalogSweep {
         manifestUnfilled = n
         filledSinceManifest.set(0)
     }
-    /** Liveness backlog (entries due a recheck) from the manifest — so the Liveness bots show a
-     *  real "queued" number in shard-walk mode instead of a confusing 0 while they're working. */
-    @Volatile var manifestStale = -1; private set
-    fun setManifestStale(n: Int) { if (n != manifestStale) { manifestStale = n; recheckedSinceManifest.set(0) } }
+    /** The Worker's current search-fold version (manifest `foldV`). An avatar with non-ASCII text whose
+     *  `fv` differs was indexed under an older fold → the walk flags it (a `checked` op) and the Worker
+     *  re-folds just that one. Empty = not read yet → no flags. */
+    @Volatile var manifestFoldV = ""; private set
+    fun setManifestFoldV(v: String) { manifestFoldV = v }
+    /** Font flag: fancy text indexed under an older fold. Plain-ASCII avatars never need one. */
+    private fun needsFontCheck(e: AvatarGlobalDb.Entry): Boolean {
+        val v = manifestFoldV
+        if (v.isEmpty() || e.fv == v) return false
+        return e.name.any { it.code > 0x7F } || e.author.any { it.code > 0x7F } || e.description.any { it.code > 0x7F }
+    }
 
     /** WALK one shard (post-cutover): read it, fill the unfilled + recheck the stale, push ops.
      *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the
@@ -1100,7 +1104,6 @@ object AvatarCatalogSweep {
             if (blitzActive()) blitzWalked.add(prefix)   // count coverage only for shards actually READ
         }
         p.shards++                    // shard-walk throughput (one shard = one cheap grouped R2 write)
-        val cutoff = livenessCutoff()
         // Check EVERY avatar in the shard (per the user's design) — dead/rename/desc/perf are all
         // caught in the ONE continuous pass, not gated on a 30-day "due" cutoff. The only skip is the
         // short-TTL recent-process guard (another bot / a just-done re-walk). WHOLE shard in one pass →
@@ -1121,6 +1124,7 @@ object AvatarCatalogSweep {
         val upserts = mutableListOf<AvatarGlobalDb.Entry>()
         val removes = mutableListOf<String>()
         val okChecked = mutableListOf<String>()
+        val calmUpserts = mutableListOf<AvatarGlobalDb.Entry>()
         var yieldedToReports = false
         var yieldedToFills = false
         var lastFillCheck = System.currentTimeMillis()
@@ -1170,29 +1174,30 @@ object AvatarCatalogSweep {
                 }
                 if (!chk.alive) {
                     if (canRemove()) { removes.add(e.fileId); p.removed++
-                        // L7: an entry can be BOTH unfilled and stale — decrement whichever backlog(s)
-                        // it counted against, not just one, so the liveness "queued" can reach 0.
-                        if (needsFill(e)) filledSinceManifest.incrementAndGet()
-                        if (e.checked < cutoff) recheckedSinceManifest.incrementAndGet() }
+                        // An unfilled avatar that turned out dead also leaves the fill backlog.
+                        if (needsFill(e)) filledSinceManifest.incrementAndGet() }
                     // else: suspected VRChat outage — defer the removal, next walk retries
                 } else if (needsFill(e)) {
                     val upd = fillRefresh(e, chk)
                     if (upd.fileId != e.fileId) removes.add(e.fileId)   // re-key on image change
                     upserts.add(upd); p.filled++; filledSinceManifest.incrementAndGet()
-                    if (e.checked < cutoff) recheckedSinceManifest.incrementAndGet()   // L7: also cleared a stale entry
                 } else {
                     val upd = liveRefresh(e, chk)
-                    if (upd != null) { if (upd.fileId != e.fileId) removes.add(e.fileId); upserts.add(upd); p.refreshed++ }
-                    // Unchanged + verified recently enough → no `checked` push. Each push rewrites the
-                    // shard (an R2 Class A write per shard per lap); the timestamp only matters for the
-                    // 30-day staleness count, so it's refreshed once it's CHECKED_PUSH_MIN_AGE_MS old.
-                    else if (System.currentTimeMillis() - e.checked >= CHECKED_PUSH_MIN_AGE_MS) okChecked.add(e.fileId)
-                    recheckedSinceManifest.incrementAndGet()   // a stale entry got re-verified either way
+                    if (upd != null) {
+                        // A re-key (new image = new file id) is fast: the new id must become clonable now.
+                        // A plain refresh of an avatar already in the catalog goes in the calm lane.
+                        if (upd.fileId != e.fileId) { removes.add(e.fileId); upserts.add(upd) } else calmUpserts.add(upd)
+                        p.refreshed++
+                    }
+                    // Unchanged → nothing is sent (no "last checked" date any more: the walk never stops).
+                    // Only a fancy-text avatar indexed under an older fold is flagged, so search re-folds it.
+                    else if (needsFontCheck(e)) okChecked.add(e.fileId)
                 }
                 delay(PACE_MS)
             }
             if (upserts.isNotEmpty() || removes.isNotEmpty() || okChecked.isNotEmpty())
                 pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
+            if (calmUpserts.isNotEmpty()) enqueueCalm(calmUpserts)
             if (yieldedToReports || yieldedToFills) {
                 // Not fully re-verified → the next free bot carries it on (droppedShards, taken right
                 // after fills); the old stamp is restored and SAVED now, so a restart before then still
@@ -1243,8 +1248,8 @@ object AvatarCatalogSweep {
     ) {
         // Also drop any queued `checked` for the same fileId — an upsert already persists (and bumps
         // checked server-side), so a separate checked op for it in the same flush is redundant (L4).
-        for (e in upserts) { pendingRemoves.remove(e.fileId); pendingChecked.remove(e.fileId); pendingUpserts[e.fileId] = e }
-        for (fid in removes) { pendingUpserts.remove(fid); pendingChecked.remove(fid); pendingRemoves.add(fid) }
+        for (e in upserts) { pendingRemoves.remove(e.fileId); pendingChecked.remove(e.fileId); pendingCalm.remove(e.fileId); pendingUpserts[e.fileId] = e }
+        for (fid in removes) { pendingUpserts.remove(fid); pendingChecked.remove(fid); pendingCalm.remove(fid); pendingRemoves.add(fid) }
         for (fid in clears) pendingClears.add(fid)
         for (fid in checked) if (!pendingUpserts.containsKey(fid) && !pendingRemoves.contains(fid)) pendingChecked.add(fid)
         // Hit the 1k buffer cap → flush NOW instead of waiting out FLUSH_MS (bounds buffer + latency).
@@ -1252,6 +1257,14 @@ object AvatarCatalogSweep {
         val total = pendingUpserts.size + pendingRemoves.size + pendingChecked.size + pendingClears.size
         if (total >= BOT_FLUSH_MAX_BATCH && capFlushing.compareAndSet(false, true)) {
             scope.launch { try { flushPending() } catch (_: Throwable) {} finally { capFlushing.set(false) } }
+        }
+    }
+
+    /** Queue calm-lane refreshes. A fast op already buffered for the same id wins (it's newer or a
+     *  removal); the Worker also keeps the newest by time, so ordering can't bring back stale data. */
+    private fun enqueueCalm(upserts: List<AvatarGlobalDb.Entry>) {
+        for (e in upserts) if (!pendingUpserts.containsKey(e.fileId) && !pendingRemoves.contains(e.fileId)) {
+            pendingChecked.remove(e.fileId); pendingCalm[e.fileId] = e
         }
     }
 
@@ -1277,10 +1290,12 @@ object AvatarCatalogSweep {
             val renameKeys = pendingAuthorRenames.keys.toList()
             val renames = HashMap<String, String>().apply { renameKeys.forEach { k -> pendingAuthorRenames.remove(k)?.let { put(k, it) } } }
             var renamesSent = renames.isEmpty()
-            if (upserts.isEmpty() && removes.isEmpty() && clears.isEmpty() && checked.isEmpty() && renames.isEmpty()) { pushError = ""; return }
+            val calmKeys = pendingCalm.keys.toList()
+            val calm = ArrayDeque(calmKeys.mapNotNull { pendingCalm.remove(it) })
+            if (upserts.isEmpty() && removes.isEmpty() && clears.isEmpty() && checked.isEmpty() && renames.isEmpty() && calm.isEmpty()) { pushError = ""; return }
             // FREE batch-contents readout: capture the counts + a few names BEFORE the deques are
             // drained, so the admin can see what just went up (no network — it's already in hand).
-            val flAdd = upserts.size; val flRem = removes.size; val flChk = checked.size
+            val flAdd = upserts.size; val flRem = removes.size; val flChk = checked.size; val flCalm = calm.size
             // Cap each name — some avatars are literally named with a wall of shader code
             // (a real avatar, not corruption); without a per-name cap ONE such name floods the readout.
             val flNames = upserts.mapNotNull { it.name.takeIf { n -> n.isNotBlank() } }
@@ -1313,11 +1328,20 @@ object AvatarCatalogSweep {
                     failed = true
                 }
             }
+            // Calm refreshes: their own pushes (`calm: true`), after the fast ops.
+            while (!failed && calm.isNotEmpty()) {
+                val u = ArrayList<AvatarGlobalDb.Entry>(); repeat(FLUSH_CHUNK) { calm.removeFirstOrNull()?.let(u::add) }
+                if (!AvatarGlobalDb.adminPush(ctx, flushKey, u, emptyList(), calm = true)) {
+                    (u + calm).forEach { if (!pendingUpserts.containsKey(it.fileId) && !pendingRemoves.contains(it.fileId)) pendingCalm.putIfAbsent(it.fileId, it) }
+                    calm.clear(); failed = true
+                }
+            }
+            if (failed && calm.isNotEmpty()) calm.forEach { if (!pendingUpserts.containsKey(it.fileId) && !pendingRemoves.contains(it.fileId)) pendingCalm.putIfAbsent(it.fileId, it) }
             pushError = if (failed) "PUSH REJECTED — set ADMIN_KEY as a Secret on Cloudflare matching the app key" else ""
             if (!failed) {
                 val names = if (flNames.isEmpty()) "" else " · " + flNames.joinToString(", ") +
                     (if (flAdd > flNames.size) " +${flAdd - flNames.size} more" else "")
-                lastFlushInfo = "+$flAdd new  ✓$flChk checked  −$flRem removed$names"
+                lastFlushInfo = "+$flAdd new  ~$flCalm calm  ✓$flChk font  −$flRem removed$names"
                 lastFlushAtMs = System.currentTimeMillis()
             }
         }
