@@ -368,7 +368,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "cats", "catframes", "thinkmock", "waitmock", "skipmock", "donemock", "warnmock", "maintmock", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "catframes", "thinkmock", "waitmock", "skipmock", "donemock", "warnmock", "maintmock", "failmock", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -773,6 +773,8 @@ object UiLabScenes {
             "warnmock" -> WarnMocks.Sheet()
             // `show maintmock`: three idle beats for the Maintenance Boot Cat (MaintMocks).
             "maintmock" -> MaintMocks.Sheet()
+            // `show failmock`: three idle beats for the Failed Boot Cat (FailMocks).
+            "failmock" -> FailMocks.Sheet()
             // `show buttons`: the button sheet (GremlinButton): both looks, every kind and state.
             "buttons" -> ButtonSheet()
             // `show download`: the downloading Boot Cat, in buttons and where downloads happen; its
