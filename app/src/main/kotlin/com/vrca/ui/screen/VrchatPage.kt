@@ -13,6 +13,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -756,220 +758,10 @@ private fun alertMatchesFilter(groupId: String, filter: String): Boolean = when 
  *  (avtrdb) + avatar-size control (OSC /avatar/eyeheight). */
 @Composable
 private fun AvatarToolsCard(vm: VrcaViewModel) {
-    val ctx = LocalContext.current
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var query by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<com.vrca.vrchat.AvatarSearch.Result>>(emptyList()) }
-    var searching by remember { mutableStateOf(false) }
-    var loadingMore by remember { mutableStateOf(false) }
-    var searched by remember { mutableStateOf(false) }
-    var shown by remember { mutableStateOf(12) }
-    var searchSeq by remember { mutableStateOf(0) }
-    // Avatar ids confirmed dead (image 404 + existence check) — hidden from results.
-    val deadIds = remember { androidx.compose.runtime.mutableStateListOf<String>() }
-    // Platform filter (null = all). Filters the SHOWN results by compatibility — CLIENT-side over the
-    // whole grabbed match set, so toggling it never re-searches. `searchCapped` = the match set hit the
-    // grab-all cap (very broad term), so there may be more beyond what was fetched.
-    var platFilter by remember { mutableStateOf<String?>(null) }
-    var searchCapped by remember { mutableStateOf(false) }
-
-    // Paged (Google-style) search over the sharded catalog. `pageCache` holds each fetched
-    // page's rows for this query; `pageTotal` is the exact candidate count (so Next is exact
-    // and we always know when to stop). Page 0 fetches page 0 AND prefetches page 1 (the "40
-    // on the first search"); each Next shows the prefetched page and prefetches the next.
-    val paged = com.vrca.vrchat.AvatarSearch.pagedSearchLive()
-    val pageSize = 20
-    var pageIndex by remember { mutableStateOf(0) }
-    val pageCache = remember { androidx.compose.runtime.mutableStateMapOf<Int, List<com.vrca.vrchat.AvatarSearch.Result>>() }
-    var pageTotal by remember { mutableStateOf(0) }
-
-    // INSTA-UPDATE a shown search row when the harvest finds its live metadata changed (name/author/
-    // platform) — mirrors the dead-hiding, but for a changed avatar. Patches the flat list AND any
-    // cached page holding it. Dispatched to the composable (main) scope for safe Compose state writes.
-    fun refreshResult(u: com.vrca.vrchat.AvatarSearch.Result) {
-        scope.launch {
-            results = results.map { if (it.id == u.id) u else it }
-            pageCache.keys.toList().forEach { p ->
-                pageCache[p]?.let { list -> if (list.any { it.id == u.id }) pageCache[p] = list.map { if (it.id == u.id) u else it } }
-            }
-        }
-    }
-
-    // Silently absorb avatars from the external sources (avtrdb/mirrors) so the sharded
-    // catalog fills over time — NOT shown inline (the paged view is our catalog only, to keep
-    // pages stable). No UI gating; contribute-back happens in the background.
-    fun backgroundContribute(seq: Int, q: String) {
-        scope.launch {
-            val remote = com.vrca.vrchat.AvatarSearch.remoteFill(ctx, q)
-            if (seq != searchSeq) return@launch
-            com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, remote, ::refreshResult)
-        }
-    }
-
-    // Count of currently-LOADED results that pass the dead + platform filter (for the fetch-until-enough
-    // loop below, so a filtered "See more" reveals a real batch instead of 0 new rows).
-    fun visibleLoaded(): Int = results.count {
-        it.id !in deadIds && (platFilter == null || it.platforms.any { p -> p.equals(platFilter, true) })
-    }
-
-    // PROGRESSIVE load: fetch the NEXT page of the (unbounded) match set and APPEND it — so browsing is
-    // infinite with a constant per-page cost + load time, no cap. All matching IDs were found by one
-    // cheap index lookup; only these ~20 avatars' details are fetched per tap. With a platform filter on,
-    // keep pulling pages until ~a dozen NEW matching rows appear (bounded), so the filter fills in without
-    // a re-search and without fetching the whole catalog up front.
-    fun loadMore() {
-        if (loadingMore) return
-        val seq = searchSeq; val q = query
-        scope.launch {
-            loadingMore = true
-            val filtered = platFilter != null
-            val startCount = results.size; val startVisible = visibleLoaded()
-            // Load the next CHUNK, streaming a page (~20) at a time so rows appear immediately.
-            // Unfiltered: ~1000 more. Filtered: keep going until ~12 new matching rows show.
-            while ((pageIndex + 1) * pageSize < pageTotal) {
-                pageIndex++
-                val rp = com.vrca.vrchat.AvatarSearch.searchPage(ctx, q, pageIndex, pageSize)
-                if (seq != searchSeq) { loadingMore = false; return@launch }
-                results = results + rp.results
-                pageTotal = rp.total
-                if (filtered) { if (visibleLoaded() - startVisible >= 12) break }
-                else { if (results.size - startCount >= 1000) break }
-            }
-            loadingMore = false
-        }
-    }
-
-    fun runSearch() {
-        if (query.isBlank()) return
-        searched = true; shown = 12; deadIds.clear()
-        searchSeq += 1
-        val seq = searchSeq
-        val q = query
-        // New search ⇒ drop the previous query's shard/candidate caches from the app.
-        com.vrca.vrchat.AvatarSearch.evictSearchCache()
-        pageCache.clear(); pageIndex = 0; pageTotal = 0
-
-        if (paged) {
-            scope.launch {
-                searching = true; results = emptyList(); pageIndex = 0; pageTotal = 0
-                // Load page 0 for an instant first paint; the rest streams in on "See more" (loadMore) —
-                // infinite, no cap, cost only when the user asks for more. All matching IDs are known
-                // up-front (one cheap index lookup = `pageTotal`), so the count is exact and the filter
-                // never re-searches.
-                val rp = com.vrca.vrchat.AvatarSearch.searchPage(ctx, q, 0, pageSize)
-                if (seq != searchSeq) return@launch
-                results = rp.results; pageTotal = rp.total; pageIndex = 0
-                searching = false
-                backgroundContribute(seq, q)               // absorb avtrdb extras + insta-update rows
-            }
-            return
-        }
-
-        scope.launch {
-            // LEGACY (pre-cutover) path: LOCAL FIRST from the in-memory whole-map, then fold
-            // in the external sources, single list with a "See more" button.
-            val local = com.vrca.vrchat.AvatarSearch.localResults(q)
-            if (seq != searchSeq) return@launch
-            results = local
-            val enough = local.size >= 12
-            searching = local.isEmpty()
-            loadingMore = local.isNotEmpty() && !enough
-            val remote = com.vrca.vrchat.AvatarSearch.remoteFill(ctx, q)
-            if (seq != searchSeq) return@launch
-            val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Result>()
-            for (r in local + remote) {
-                val k = r.id.trim().lowercase()
-                if (k.startsWith("avtr_")) merged.putIfAbsent(k, r)
-            }
-            results = merged.values.toList()
-            searching = false; loadingMore = false
-            com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, results, ::refreshResult)
-        }
-    }
-
-    // Evict the sharded-search caches when the card leaves composition (tab-away / close).
-    androidx.compose.runtime.DisposableEffect(Unit) {
-        onDispose { com.vrca.vrchat.AvatarSearch.evictSearchCache() }
-    }
-
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Avatar tools", style = MaterialTheme.typography.titleMedium)
-
-            // --- avatar search (avtrdb) ---
-            androidx.compose.material3.OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Search avatars") },
-                singleLine = true,
-                trailingIcon = {
-                    androidx.compose.material3.IconButton(onClick = { runSearch() }) {
-                        Icon(Icons.Filled.Search, contentDescription = "Search")
-                    }
-                },
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                    imeAction = androidx.compose.ui.text.input.ImeAction.Search
-                ),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { runSearch() })
-            )
-            // Platform filter — narrow the shown results by PC / Quest / iOS compatibility.
-            if (searched) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    FilterChip(selected = platFilter == null, onClick = { platFilter = null }, label = { Text("All") })
-                    listOf("PC", "Quest", "iOS").forEach { plat ->
-                        FilterChip(
-                            selected = platFilter == plat,
-                            onClick = { platFilter = if (platFilter == plat) null else plat },
-                            label = { Text(plat) },
-                            leadingIcon = { PlatformSymbol(plat) }
-                        )
-                    }
-                }
-            }
-            if (searching) androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
-            else if (searched && results.isEmpty() && !loadingMore) Text(
-                "No results.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            // The platform filter is CLIENT-side over the LOADED results, so toggling it re-slices
-            // instantly with no re-search. More load progressively via "See more" (loadMore).
-            val visible = results.filter {
-                it.id !in deadIds && (platFilter == null || it.platforms.any { p -> p.equals(platFilter, true) })
-            }
-            val shownList = if (paged) visible else visible.take(shown)
-            shownList.forEach { r ->
-                AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) })
-            }
-            val moreToLoad = if (paged) (pageIndex + 1) * pageSize < pageTotal else visible.size > shown
-            if (moreToLoad) {
-                com.vrca.ui.common.GremlinSmallButton(
-                    onClick = { if (paged) loadMore() else shown += 12 },
-                    enabled = !loadingMore,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    if (loadingMore) androidx.compose.material3.CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    else Text("See more" + if (platFilter != null) " ($platFilter)" else "")
-                }
-            }
-            // Exact total match count (from the one index lookup) + how many are loaded/shown.
-            if (searched && paged && pageTotal > 0) {
-                Text(
-                    "${visible.size} shown · $pageTotal ${if (platFilter != null) "total matches" else "matches"}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            // Filtered but nothing of this platform in what's LOADED and nothing left to load → tell them.
-            if (searched && !searching && !loadingMore && results.isNotEmpty() && visible.isEmpty() && platFilter != null && !moreToLoad) {
-                Text(
-                    "No $platFilter avatars in these matches — tap All to see the rest.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
+            AvatarSearchPanel()
             androidx.compose.material3.Divider()
 
             // --- avatar size (OSC /avatar/eyeheight, live read via OSCQuery) ---
@@ -1060,6 +852,147 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
     }
 }
 
+/**
+ * Avatar search (v53). One request per Search press to the server's search (500 results a batch), shown
+ * 50 a page with a Google-style page bar; the next 500 load in the background once the user reaches the
+ * second-to-last loaded page, so Next never waits. The last 20 searches are remembered for 20 minutes
+ * (tap one to reopen it with no request); pressing Search again re-fetches once the copy is 2 minutes old.
+ * The platform filter works over what's loaded (no re-search). Found avatars from the public databases
+ * are still contributed back to our catalog in the background.
+ */
+@Composable
+private fun AvatarSearchPanel() {
+    val ctx = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val pageSize = 50
+    var query by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
+    var shownQuery by remember { mutableStateOf("") }
+    val loaded = remember { androidx.compose.runtime.mutableStateListOf<com.vrca.vrchat.AvatarSearch.Result>() }
+    var more by remember { mutableStateOf(false) }
+    var page by remember { mutableStateOf(0) }
+    var searching by remember { mutableStateOf(false) }
+    var loadingNext by remember { mutableStateOf(false) }
+    var searched by remember { mutableStateOf(false) }
+    var seq by remember { mutableStateOf(0) }
+    var platFilter by remember { mutableStateOf<String?>(null) }
+    val deadIds = remember { androidx.compose.runtime.mutableStateListOf<String>() }
+    var recent by remember { mutableStateOf(com.vrca.vrchat.AvatarSearch.recentSearches()) }
+
+    fun refreshResult(u: com.vrca.vrchat.AvatarSearch.Result) {
+        scope.launch { val i = loaded.indexOfFirst { it.id == u.id }; if (i >= 0) loaded[i] = u }
+    }
+    fun run(term: String, reuse: Boolean) {
+        val q = term.trim(); if (q.isEmpty()) return
+        query = q; shownQuery = q; searched = true; page = 0; more = false; platFilter = null
+        deadIds.clear(); loaded.clear()
+        val s = ++seq
+        scope.launch {
+            searching = true
+            val b = com.vrca.vrchat.AvatarSearch.searchBatch(ctx, q, 0, reuse)
+            if (s != seq) return@launch
+            loaded.addAll(b.results); more = b.more; searching = false
+            recent = com.vrca.vrchat.AvatarSearch.recentSearches()
+            // Grow our catalog from the public databases in the background (not shown inline).
+            val remote = com.vrca.vrchat.AvatarSearch.remoteFill(ctx, q)
+            if (s == seq) com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, remote, ::refreshResult)
+        }
+    }
+    fun loadNext() {
+        if (loadingNext || !more || loaded.size >= 5000) return
+        val s = seq; val q = shownQuery; val offset = loaded.size
+        scope.launch {
+            loadingNext = true
+            val b = com.vrca.vrchat.AvatarSearch.searchBatch(ctx, q, offset)
+            if (s == seq) { loaded.addAll(b.results); more = b.more && loaded.size < 5000 }
+            loadingNext = false
+        }
+    }
+
+    // Search box + button. Enter on the keyboard is the same as the button.
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        com.vrca.ui.common.GremlinSearchField(
+            value = query, onValueChange = { query = it }, onSearch = { run(query, reuse = false) },
+            placeholder = "Avatar name or creator", modifier = Modifier.weight(1f)
+        )
+        com.vrca.ui.common.GremlinButton("Search", onClick = { run(query, reuse = false) }, enabled = query.isNotBlank(), loading = searching)
+    }
+    // Recent searches (remembered for 20 minutes): tap to reopen with no request.
+    if (recent.isNotEmpty() && !searching) {
+        Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Recent", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            recent.take(8).forEach { term ->
+                FilterChip(selected = searched && term == shownQuery.trim().lowercase(), onClick = { run(term, reuse = true) }, label = { Text(term, maxLines = 1) })
+            }
+        }
+    }
+    if (!searched) return
+
+    val visible by remember { androidx.compose.runtime.derivedStateOf { loaded.filter { it.id !in deadIds && (platFilter == null || it.platforms.any { p -> p.equals(platFilter, true) }) } } }
+    val pageCount = (visible.size + pageSize - 1) / pageSize
+    if (page > 0 && page >= pageCount && !loadingNext) page = (pageCount - 1).coerceAtLeast(0)
+    // Prefetch: on the second-to-last loaded page, quietly fetch the next 500.
+    androidx.compose.runtime.LaunchedEffect(page, pageCount, more) { if (more && page >= pageCount - 2) loadNext() }
+
+    // A page change brings the top of the results back into view (the list sits inside the tab's scroll).
+    val resultsTop = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    var pageShown by remember { mutableStateOf(page) }
+    androidx.compose.runtime.LaunchedEffect(page) { if (page != pageShown) { pageShown = page; resultsTop.bringIntoView() } }
+
+    // Platform filter over what's loaded (no re-search).
+    Row(Modifier.bringIntoViewRequester(resultsTop), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        FilterChip(selected = platFilter == null, onClick = { platFilter = null; page = 0 }, label = { Text("All") })
+        listOf("PC", "Quest", "iOS").forEach { plat ->
+            FilterChip(selected = platFilter == plat, onClick = { platFilter = if (platFilter == plat) null else plat; page = 0 },
+                label = { Text(plat) }, leadingIcon = { PlatformSymbol(plat) })
+        }
+    }
+    when {
+        searching -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            com.vrca.app.BootCat(com.vrca.app.Mark.Working, 0, Modifier.size(28.dp))
+            Text("Searching", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        visible.isEmpty() && !loadingNext -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            com.vrca.app.BootCat(com.vrca.app.Mark.Skipped, 0, Modifier.size(28.dp))
+            Text(if (platFilter != null && loaded.isNotEmpty()) "No $platFilter avatars in these results." else "No avatars found for \"$shownQuery\".",
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        else -> {
+            val from = page * pageSize
+            visible.subList(from.coerceAtMost(visible.size), (from + pageSize).coerceAtMost(visible.size)).forEach { r ->
+                androidx.compose.runtime.key(r.id) { AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) }) }
+            }
+            SearchPageBar(page = page, pageCount = pageCount, more = more, loadingNext = loadingNext,
+                onPage = { p -> if (p < pageCount) page = p else if (more) { loadNext(); page = p } })
+            Text(
+                "${visible.size}${if (more) "+" else ""} avatars" + if (platFilter != null) " ($platFilter)" else "",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/** Google-style page bar: Previous, up to 10 page numbers (the block holding [page]), Next. Next stays
+ *  available while the server has more results beyond what's loaded. */
+@Composable
+private fun SearchPageBar(page: Int, pageCount: Int, more: Boolean, loadingNext: Boolean, onPage: (Int) -> Unit) {
+    if (pageCount <= 1 && !more) return
+    val blockStart = (page / 10) * 10
+    val blockEnd = minOf(blockStart + 9, pageCount - 1)
+    Row(Modifier.fillMaxWidth().horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically) {
+        com.vrca.ui.common.GremlinButton("Previous", onClick = { onPage(page - 1) }, enabled = page > 0,
+            kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = com.vrca.ui.common.GremlinButtonSize.Small)
+        for (p in blockStart..blockEnd) {
+            com.vrca.ui.common.GremlinButton("${p + 1}", onClick = { onPage(p) },
+                kind = if (p == page) com.vrca.ui.common.GremlinButtonKind.Primary else com.vrca.ui.common.GremlinButtonKind.Secondary,
+                size = com.vrca.ui.common.GremlinButtonSize.Small)
+        }
+        com.vrca.ui.common.GremlinButton("Next", onClick = { onPage(page + 1) }, enabled = page < pageCount - 1 || more,
+            loading = loadingNext && page >= pageCount - 1,
+            kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = com.vrca.ui.common.GremlinButtonSize.Small)
+    }
+}
+
 /** VRChat avatar performance rank badge (Excellent…Very Poor). Shows the rank for the user's own
  *  platform (Quest on the headset build, else PC), falling back to any known one. Hidden when unknown. */
 @Composable
@@ -1099,8 +1032,14 @@ private fun AvatarResultRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        // While the thumbnail loads, Boot Cat thinks in its place (revamp 2: status shown by the cats).
+        var imgLoading by remember(r.imageUrl) { mutableStateOf(true) }
+        Box(Modifier.size(width = 56.dp, height = 42.dp), contentAlignment = Alignment.Center) {
+        if (imgLoading) com.vrca.app.BootCat(com.vrca.app.Mark.Working, 0, Modifier.size(24.dp))
         coil.compose.AsyncImage(
             model = r.imageUrl,
+            onLoading = { imgLoading = true },
+            onSuccess = { imgLoading = false },
             imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
             contentDescription = null,
             contentScale = ContentScale.Crop,
@@ -1108,7 +1047,9 @@ private fun AvatarResultRow(
             // gone (avoids hiding a valid one on a network blip), then hide it + report
             // it dead so the admin bot removes it from the catalog.
             onError = {
+                imgLoading = false
                 scope.launch {
+                    if (com.vrca.vrchat.AvatarSearch.labBatches != null) return@launch   // UI Lab sample rows have no real avatar
                     if (com.vrca.vrchat.VrchatAuthManager.avatarExists(ctx, r.id) == false) {
                         onDead(r.id)
                         val fid = r.imageFileId
@@ -1120,6 +1061,7 @@ private fun AvatarResultRow(
                 .size(width = 56.dp, height = 42.dp)
                 .clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
         )
+        }
         Column(Modifier.weight(1f)) {
             Text(
                 r.name.ifBlank { "(unnamed)" },
