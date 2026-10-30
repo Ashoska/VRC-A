@@ -2390,7 +2390,11 @@ async function emit(env, ev) {
 }
 
 export class Hub {
-  constructor(ctx, env) { this.ctx = ctx; this.env = env; }
+  constructor(ctx, env) {
+    this.ctx = ctx; this.env = env;
+    // Viewers' keep-alive pings are answered by Cloudflare without waking the hub (no request, no duration).
+    try { ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", '{"t":"pong"}')); } catch (_) {}
+  }
   async fetch(req) {
     const url = new URL(req.url);
     const p = url.pathname;
@@ -2416,6 +2420,7 @@ export class Hub {
     }
     if (p === "/event" && req.method === "POST") {
       const ev = await req.text();
+      let out = ev;
       const hist = (await this.ctx.storage.get("history")) || [];
       hist.push(ev);
       while (hist.length > HUB_HISTORY) hist.shift();
@@ -2437,9 +2442,11 @@ export class Hub {
           d.a += e.added || 0; d.r += e.removed || 0; d.w += w; d.c = (d.c || 0) + (e.batchCount != null ? e.batchCount : (e.batches || []).length); if (e.entries) d.e = e.entries;
           while (days.length > 60) days.shift();
           await this.ctx.storage.put({ hours, days });
+          // Viewers get this hour's and today's totals pushed with the run, so the page never polls.
+          out = JSON.stringify({ ...e, hour: h, day: d });
         }
       } catch (_) {}
-      for (const ws of this.ctx.getWebSockets()) { try { ws.send(ev); } catch (_) {} }
+      for (const ws of this.ctx.getWebSockets()) { try { ws.send(out); } catch (_) {} }
       return new Response("ok");
     }
     if (p === "/stats") {
@@ -2459,8 +2466,9 @@ export class Hub {
   async webSocketMessage(ws, msg) {
     if (msg === "ping") { try { ws.send('{"t":"pong"}'); } catch (_) {} return; }
     if (msg === "hello") {
-      const hist = (await this.ctx.storage.get("history")) || [];
-      try { ws.send(JSON.stringify({ t: "history", events: hist.map((e) => JSON.parse(e)) })); } catch (_) {}
+      const got = await this.ctx.storage.get(["history", "hours", "days"]);
+      const hist = got.get("history") || [];
+      try { ws.send(JSON.stringify({ t: "history", events: hist.map((e) => JSON.parse(e)), hours: got.get("hours") || [], days: got.get("days") || [] })); } catch (_) {}
     }
   }
   async webSocketClose(ws, code) { try { ws.close(code, "bye"); } catch (_) {} }
@@ -2607,8 +2615,8 @@ function today(){var d=new Date().toISOString().slice(0,10),t=stats.days.filter(
  var hk=new Date().toISOString().slice(0,13),hh=stats.hours.filter(function(x){return x.h===hk})[0]||{a:0,r:0};
  setN('addedToday',t.a);setN('removedToday',t.r);setN('contribToday',t.c||0);setN('addedHour',hh.a);setN('removedHour',hh.r);var net=t.a-t.r,e=document.getElementById('todayNet');e.textContent=(net>=0?'+':'−')+fmt(Math.abs(net));e.className=net>=0?'up':'dn'}
 function snap(h){snapH=h;setN('entries',h.entries);setN('pendingBatches',h.pendingBatches);setN('reports',h.reports);setN('calmWaiting',h.calmWaiting);if(h.lastFlush)lastAt=Date.parse(h.lastFlush)}
-function refresh(){fetch(H+'/health',{cache:'no-store'}).then(function(r){return r.json()}).then(snap).catch(function(){});
- fetch(H+'/live/stats',{cache:'no-store'}).then(function(r){return r.json()}).then(function(s){stats=s;today();draw()}).catch(function(){})}
+function refresh(){fetch(H+'/health',{cache:'no-store'}).then(function(r){return r.json()}).then(snap).catch(function(){})}
+function bucket(arr,b,key,cap){if(!b)return;var l=arr[arr.length-1];if(l&&l[key]===b[key])arr[arr.length-1]=b;else arr.push(b);while(arr.length>cap)arr.shift()}
 function ago(ms){var s=Math.max(0,Math.round(ms/1000));return s<60?s+' s ago':Math.round(s/60)+' min ago'}
 setInterval(function(){if(lastAt)document.getElementById('last').textContent=ago(Date.now()-lastAt);document.getElementById('next').textContent='in '+(60-new Date().getUTCSeconds())+' s';document.getElementById('clock').textContent=utcTime(Date.now(),true)},1000);
 var feed=document.getElementById('feed'),empty=true;
@@ -2633,13 +2641,16 @@ function item(ev){var li=document.createElement('li'),h=document.createElement('
      else{box.hidden=!box.hidden;more.textContent=box.hidden?'Show names':'Hide names'}}}
   return li}
   return null}
-function add(ev,live){var li=item(ev);if(!li)return;if(empty){feed.textContent='';empty=false}feed.insertBefore(li,feed.firstChild);while(feed.children.length>60)feed.removeChild(feed.lastChild);
- if(live&&ev.t==='run'){lastAt=ev.at;if(ev.entries)setN('entries',ev.entries);setN('pendingBatches',ev.pending);setN('reports',ev.reports);setN('calmWaiting',ev.calmWaiting);setTimeout(refresh,1500)}}
+function add(ev,live){
+ if(live&&ev.t==='run'){lastAt=ev.at;if(ev.entries)setN('entries',ev.entries);setN('pendingBatches',ev.pending);setN('reports',ev.reports);setN('calmWaiting',ev.calmWaiting);
+  if(ev.hour||ev.day){bucket(stats.hours,ev.hour,'h',48);bucket(stats.days,ev.day,'d',60);today();draw()}}
+ var li=item(ev);if(!li)return;if(empty){feed.textContent='';empty=false}feed.insertBefore(li,feed.firstChild);while(feed.children.length>60)feed.removeChild(feed.lastChild)}
+var tries=0;
 function connect(){var ws=new WebSocket(H.replace(/^http/,'ws')+'/live/ws'),dot=document.getElementById('dot'),c=document.getElementById('conn'),ping;
- ws.onopen=function(){ws.send('hello');feed.textContent='';empty=true;dot.className='dot on';c.textContent='Live';ping=setInterval(function(){try{ws.send('ping')}catch(e){}},30000)};
- ws.onmessage=function(m){var ev=JSON.parse(m.data);if(ev.t==='history')(ev.events||[]).forEach(function(e){add(e,false)});else add(ev,true)};
- ws.onclose=function(){clearInterval(ping);dot.className='dot off';c.textContent='Reconnecting';setTimeout(connect,3000)}}
+ ws.onopen=function(){tries=0;ws.send('hello');refresh();feed.textContent='';empty=true;dot.className='dot on';c.textContent='Live';ping=setInterval(function(){try{ws.send('ping')}catch(e){}},30000)};
+ ws.onmessage=function(m){var ev=JSON.parse(m.data);if(ev.t==='history'){if(ev.hours){stats={hours:ev.hours,days:ev.days||[]};today();draw()}(ev.events||[]).forEach(function(e){add(e,false)})}else if(ev.t!=='pong')add(ev,true)};
+ ws.onclose=function(){clearInterval(ping);dot.className='dot off';c.textContent='Reconnecting';var w=Math.min(60000,3000*Math.pow(2,tries++));setTimeout(connect,w/2+Math.random()*w/2)}}
 var rz;addEventListener('resize',function(){clearTimeout(rz);rz=setTimeout(draw,150)});
-refresh();setInterval(refresh,60000);connect();
+connect();
 </script></body></html>
 `;
