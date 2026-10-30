@@ -112,6 +112,9 @@ internal fun BootCat(mark: Mark, variant: Int, modifier: Modifier, celebrate: Bo
             } else if (idle && shown == Mark.Maintenance) {
                 // Maintenance, busy fixing: hammering, inspecting, puzzled then aha (BootCatMaint).
                 MaintLoop(v, { markColor(Mark.Maintenance, accent) }, Modifier.fillMaxSize())
+            } else if (idle && shown == Mark.Failed) {
+                // Failed, knocked out: dizzy, a sniffle, peeking while playing dead (BootCatFail).
+                FailLoop(v, { markColor(Mark.Failed, accent) }, Modifier.fillMaxSize())
             } else {
                 val head = remember { headPath() }
                 Canvas(hopLayer) { drawCat(head, from, shown, t.value, accent) }
@@ -334,7 +337,7 @@ private const val HOP_MS = 540f
 private fun headPath(): Path = PathParser().parsePathString(HEAD).toPath()
 
 /** Marks that idle with their own loop once their landing has finished. */
-private fun idles(m: Mark) = m == Mark.Skipped || m == Mark.Done || m == Mark.Warn || m == Mark.Maintenance
+private fun idles(m: Mark) = m == Mark.Skipped || m == Mark.Done || m == Mark.Warn || m == Mark.Maintenance || m == Mark.Failed
 
 /** The skipped landing's face paths (drawing is single-threaded, so one reused set is enough). */
 private val skipPaths = BootCatSkip.Paths()
