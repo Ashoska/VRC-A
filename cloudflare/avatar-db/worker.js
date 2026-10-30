@@ -1912,7 +1912,10 @@ async function flushR2(env) {
     const sAddItems = [], sRemItems = [];
     const item = (x) => ({ n: (x && x.name) || "", a: (x && typeof x.id === "string" && /^avtr_[0-9a-f-]{36}$/.test(x.id)) ? x.id : "" });
     const sIndexOps = [];
-    for (const fid of Object.keys(ops.adds)) if (!e[fid]) {
+    // v52: a remove in the same run wins over an add/update of the same avatar (e.g. a fill update queued
+    // before the liveness bot found it gone). Without this the avatar was re-created and then deleted in
+    // one flush: the catalog ended right, but the live feed and today's totals counted it +1 and -1.
+    for (const fid of Object.keys(ops.adds)) if (!e[fid] && !ops.removes.has(fid)) {
       const ne = ops.adds[fid]; e[fid] = ne; sAdded++; sAddItems.push(item(ne)); dirty = true; contentDirty = true;
       const op = buildIndexOp(null, ne, fid); if (op) sIndexOps.push(op);
       if (needsFold(ne)) ne.fz = foldSig(ne);   // the ADD already carries the folded tokens
@@ -1920,6 +1923,7 @@ async function flushR2(env) {
       if (ne.filled !== true) sUnfilled++;
     }
     for (const fid of Object.keys(ops.upserts)) {
+      if (ops.removes.has(fid)) continue;
       const inc = ops.upserts[fid];
       const prev = e[fid];
       const ts = ops.upTs[fid] !== undefined ? ops.upTs[fid] : nowMs;
@@ -1943,7 +1947,7 @@ async function flushR2(env) {
         e[fid] = inc; dirty = true; contentDirty = true;
       }
     }
-    for (const fid of Object.keys(ops.renames)) if (e[fid] && e[fid].name !== ops.renames[fid]) {
+    for (const fid of Object.keys(ops.renames)) if (e[fid] && !ops.removes.has(fid) && e[fid].name !== ops.renames[fid]) {
       const prev = { ...e[fid] }; e[fid].name = ops.renames[fid]; dirty = true; contentDirty = true;
       const op = buildIndexOp(prev, e[fid], fid); if (op) sIndexOps.push(op);
     }
@@ -2628,7 +2632,7 @@ function item(ev){var li=document.createElement('li'),h=document.createElement('
   if(ev.removed){var br=document.createElement('span');br.className='tag rem';br.textContent='−'+fmt(ev.removed)+' removed';br.title='No longer on VRChat';b.appendChild(br)}
   h.appendChild(b);h.appendChild(tm);li.appendChild(h);
   var m=document.createElement('div');m.className='m row';var nb=ev.batchCount!=null?ev.batchCount:(ev.batches||[]).length;
-  if(ev.added){var src=document.createElement('span');src.textContent='from '+nb+' contribution batch'+(nb===1?'':'es');m.appendChild(src)}li.appendChild(m);
+  if(ev.added&&nb>0){var src=document.createElement('span');src.textContent='from '+nb+' contribution batch'+(nb===1?'':'es');m.appendChild(src)}li.appendChild(m);
   var lists=[[ev.addedItems,ev.added,'add','Added'],[ev.removedItems,ev.removed,'rem','Removed']].filter(function(x){return x[0]&&x[0].length});
   if(lists.length){var box=null,more=document.createElement('button');more.className='more';more.textContent='Show names';m.appendChild(more);
    more.onclick=function(){if(!box){box=document.createElement('div');lists.forEach(function(x){var list=x[0],total=x[1],kind=x[2];
