@@ -54,10 +54,19 @@ GH_OWNER = "Ashoska"
 GH_REPO = "VRC-A"
 GH_REF = "VRC-A-Official"
 
+# v52 hub: one Durable Object (strongly consistent) for the run lock, the records (`meta`, `recent`)
+# and the live feed (/live page + /live/ws). SQLite-backed (Workers Paid includes its requests/storage).
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
+
 [triggers]
-# Every 2 minutes. v50 tried every minute (2026-10-30) and it can't work on KV: KV shows other
-# machines a value up to ~60 s old, so the next run still saw the finished run's `flushlock`
-# (skipped every other minute) and could read the `meta` record from before the previous run and
-# overwrite it (lost counts). 2 min keeps every run past that window. 1 min needs the lock + meta
-# moved to a strongly consistent Durable Object (planned with the live feed, avatar-catalog-worker.md).
-crons = ["*/2 * * * *"]
+# Every minute (v52). v50 tried this on KV alone and runs skipped each other (KV can show another
+# machine a value ~60 s old: the finished run's lock, or `meta` from before the previous run). Since v52
+# the lock, `meta` and `recent` live in the HUB Durable Object above, which every run reads fresh.
+# Backup steps still fire only on even minutes (their state stays in KV); maintenance keeps ~2 min.
+crons = ["* * * * *"]
