@@ -49,8 +49,8 @@ object BootIcons {
     val Search = BootIcon(
         glyph("Search") {
             line("M16 10.5a6 6 0 1 1-12 0a6 6 0 1 1 12 0")
-            line("M5.7 7.1l.2-3.3 2.6 1.9")
-            line("M14.3 7.1l-.2-3.3-2.6 1.9")
+            line("M5.09 7.06L5.2 3.6L7.46 5.06")
+            line("M14.91 7.06L14.8 3.6L12.54 5.06")
             line("M14.6 15.1l5.4 5.4")
         },
         glyph("SearchDetail") { line("M7.6 10.4a2.5 2.5 0 0 1 2.4-2.4", width = 1.6f) }
