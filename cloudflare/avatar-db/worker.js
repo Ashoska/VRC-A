@@ -599,6 +599,8 @@ export default {
         if (!env.CATALOG) return json({ ok: false, error: "R2 not configured" }, 503);
         const key = url.pathname.slice("/catalog/".length);
         if (!key || key.includes("..")) return json({ ok: false, error: "bad key" }, 400);
+        // Only what the apps read (never the full backup).
+        if (!/^(shard|nm|avtr|index|fragments)\/[0-9a-f]{3}\.json$|^_(manifest|worklist)\.json$/.test(key)) return json({ ok: false, error: "not found" }, 404);
         const cache = caches.default;
         const hit = await cache.match(req);
         if (hit) return hit;
@@ -816,7 +818,8 @@ export default {
         // The R2 master snapshot (written by the rebuild Action) — download/backup. Served
         // straight from R2, no-store so it's always the latest committed master.
         if (!env.CATALOG) return json({ ok: false, error: "R2 not configured" }, 503);
-        const obj = await env.CATALOG.get("db.json");
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) return json({ ok: false, error: "unauthorized" }, 401);
+        const obj = (env.PRIVATE && await env.PRIVATE.get("db.json")) || await env.CATALOG.get("db.json");
         return new Response(obj ? obj.body : '{"avatars":{}}', {
           status: 200,
           headers: { "content-type": "application/json", "cache-control": "no-store",
@@ -829,8 +832,9 @@ export default {
       // reconcile lap; this just serves the R2 file (edge-cached).
       if (req.method === "GET" && url.pathname === "/unconverted") {
         if (!env.CATALOG) return json({ ok: false, error: "R2 not configured" }, 503);
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) return json({ ok: false, error: "unauthorized" }, 401);
         try {
-          const o = await env.CATALOG.get("unconverted.json");
+          const o = (env.PRIVATE && await env.PRIVATE.get("unconverted.json")) || await env.CATALOG.get("unconverted.json");
           if (!o) return json({ ok: true, pending: true, note: "no lap has completed since the registry shipped" });
           return new Response(o.body, { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
         } catch (e) { return json({ ok: false, error: String(e) }, 500); }
@@ -1554,31 +1558,36 @@ async function maybeFireBackupStep(env, ctx) {
   if (env.SELF && typeof env.SELF.fetch === "function") ctx.waitUntil(env.SELF.fetch("https://self" + path).catch(() => {}));
   else ctx.waitUntil(fetch(selfBase(env) + path).catch(() => {}));
 }
+// v53 (user, 2026-10-30: "we don't want people ripping our stuff"): the full backup lives in the PRIVATE
+// bucket (vrca-avatar-private, no public domain), never on cdn.gremlininc.app. The first private backup
+// deletes the old public db.json + unconverted.json. /db needs the admin key.
+function backupBucket(env) { return env.PRIVATE || env.CATALOG; }
 async function backupStep(env) {
   const KV = env.AVATAR_KV;
   let st = JSON.parse((await KV.get("backup")) || "{}");
   const now = Date.now();
-  if (st.uploadId && now - (st.startedAt || 0) > BACKUP_STALE_MS) {
-    try { await env.CATALOG.resumeMultipartUpload("db.json", st.uploadId).abort(); } catch (_) {}
-    st = { doneAt: st.doneAt, lastCount: st.lastCount, lastBytes: st.lastBytes, lastErr: "stale upload restarted" };
+  const where = env.PRIVATE ? "private" : "catalog";
+  if (st.uploadId && (now - (st.startedAt || 0) > BACKUP_STALE_MS || (st.bucket || "catalog") !== where)) {
+    try { await (st.bucket === "private" && env.PRIVATE ? env.PRIVATE : env.CATALOG).resumeMultipartUpload("db.json", st.uploadId).abort(); } catch (_) {}
+    st = { doneAt: (st.bucket || "catalog") !== where ? 0 : st.doneAt, lastCount: st.lastCount, lastBytes: st.lastBytes, lastErr: "upload restarted" };
   }
   const enc = new TextEncoder();
   let carry;
   if (!st.uploadId) {
     if (st.doneAt && now - st.doneAt < BACKUP_EVERY_MS) return { skipped: "not due" };
-    const up = await env.CATALOG.createMultipartUpload("db.json", {
-      httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=3600" },
+    const up = await backupBucket(env).createMultipartUpload("db.json", {
+      httpMetadata: { contentType: "application/json", cacheControl: "private, no-store" },
     });
     // v49: uf/fill/hist/sample = the old monthly recount's jobs, done here (the backup reads every shard):
     // exact unfilled count, shards holding unfilled avatars (fill worklist), "unconverted" font registry.
-    st = { ...st, uploadId: up.uploadId, next: 0, parts: [], count: 0, bytes: 0, startedAt: now,
+    st = { ...st, uploadId: up.uploadId, bucket: where, next: 0, parts: [], count: 0, bytes: 0, startedAt: now,
       uf: 0, fill: [], hist: {}, sample: [] };
     carry = enc.encode('{"name":"VRC-A Avatar Store","version":1,"avatars":{\n');
   } else {
     const b = await KV.get("backup:buf", "arrayBuffer");
     carry = b ? new Uint8Array(b) : new Uint8Array(0);
   }
-  const upload = env.CATALOG.resumeMultipartUpload("db.json", st.uploadId);
+  const upload = backupBucket(env).resumeMultipartUpload("db.json", st.uploadId);
   // Read this step's shards (a failed read aborts the step WITHOUT saving, so it's retried).
   const chunks = [];
   let count = st.count;
@@ -1644,11 +1653,15 @@ async function backupStep(env) {
       let total = 0; for (const k in hist) total += hist[k];
       const top = Object.entries(hist).map(([cp, k]) => ({ cp: +cp, ch: String.fromCodePoint(+cp), n: k })).sort((a, b) => b.n - a.n);
       done.unconverted = top.length;
-      await env.CATALOG.put("unconverted.json",
+      await backupBucket(env).put("unconverted.json",
         JSON.stringify({ v: 1, ts: new Date().toISOString(), distinctCodepoints: top.length, totalHits: total, codepoints: top, sample }),
-        { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=60" } });
-      if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/unconverted.json"]);
+        { httpMetadata: { contentType: "application/json", cacheControl: "private, no-store" } });
     } catch (_) {}
+    // The first private backup removes the old public copies (and clears them from the CDN).
+    if (env.PRIVATE) {
+      try { await env.CATALOG.delete(["db.json", "unconverted.json"]); } catch (_) {}
+      if (env.CATALOG_BASE) await hubQueuePush(env, "pq", ["db.json", "unconverted.json"].map((k) => ({ u: catalogUrl(env, k), etag: "", t0: Date.now() })));
+    }
     await KV.put("backup", JSON.stringify(done));
     try { await KV.delete("backup:buf"); } catch (_) {}
     return { done: true, count, parts: parts.length, bytes };
@@ -2653,9 +2666,37 @@ function ftsQuery(q) {
   if (!words.length) return "";
   return words.map((w, i) => `"${w.replace(/"/g, "")}"${i === words.length - 1 ? "*" : ""}`).join(" ");
 }
+// Search speed limit (user, 2026-10-30: one search per 3 s, enforced by the server so a modified app can't
+// skip it). Remembered in Cloudflare's free per-datacenter cache (no D1/hub request per search):
+//   - a NEW search (o = 0): one per 3 s per IP + device (the app sends X-VRCA-Device, a random install id),
+//   - a further batch of the same search (o > 0, the app's prefetch): one per 1.5 s per IP + device,
+//   - per IP overall: 12 per 10 s, so people sharing one Wi-Fi are fine but faking device ids doesn't help.
+// Over the limit → 429 { retryAfterMs }; the app waits and retries by itself.
+const SEARCH_GAP_MS = 3000, SEARCH_PAGE_GAP_MS = 1500, SEARCH_IP_WINDOW_MS = 10_000, SEARCH_IP_MAX = 12;
+async function searchRateLimit(req, url) {
+  const ip = req.headers.get("cf-connecting-ip") || "0";
+  const dev = (req.headers.get("x-vrca-device") || "none").slice(0, 64).replace(/[^A-Za-z0-9_-]/g, "");
+  const o = parseInt(url.searchParams.get("o") || "0", 10) || 0;
+  const cache = caches.default, now = Date.now();
+  const k = (s) => new Request("https://rl.vrca.internal/" + encodeURIComponent(s));
+  const gap = o > 0 ? SEARCH_PAGE_GAP_MS : SEARCH_GAP_MS;
+  const devKey = k(`d:${o > 0 ? "p" : "n"}:${ip}:${dev}`), ipKey = k(`i:${ip}`);
+  let last = 0, win = { s: now, n: 0 };
+  try { const r = await cache.match(devKey); if (r) last = parseInt(await r.text(), 10) || 0; } catch (_) {}
+  try { const r = await cache.match(ipKey); if (r) { const w = JSON.parse(await r.text()); if (now - w.s < SEARCH_IP_WINDOW_MS) win = w; } } catch (_) {}
+  if (now - last < gap) return gap - (now - last);
+  if (win.n >= SEARCH_IP_MAX) return SEARCH_IP_WINDOW_MS - (now - win.s);
+  win.n++;
+  const put = (key, body, ms) => cache.put(key, new Response(body, { headers: { "cache-control": "max-age=" + Math.ceil(ms / 1000) } })).catch(() => {});
+  await Promise.all([put(devKey, String(now), gap + 1000), put(ipKey, JSON.stringify(win), SEARCH_IP_WINDOW_MS + 1000)]);
+  return 0;
+}
 async function handleSearch(req, env, ctx, url) {
   const cors = { "access-control-allow-origin": "*" };
   if (!env.SEARCH) return json({ ok: false, error: "search not configured" }, 503);
+  const wait = await searchRateLimit(req, url);
+  if (wait > 0) return new Response(JSON.stringify({ ok: false, error: "slow down", retryAfterMs: wait }),
+    { status: 429, headers: { "content-type": "application/json", "retry-after": String(Math.ceil(wait / 1000)), ...cors } });
   const q = (url.searchParams.get("q") || "").slice(0, 120), au = (url.searchParams.get("au") || "").slice(0, 120);
   const o = Math.max(0, Math.min(100000, parseInt(url.searchParams.get("o") || "0", 10) || 0));
   const fq = ftsQuery(au ? q + " " + au : q);
@@ -2683,7 +2724,7 @@ async function handleSearch(req, env, ctx, url) {
 // Line-parses the master (never a whole-file JSON.parse) and writes only the [loN..endN] span's
 // shards, so Worker memory + subrequests stay bounded. Returns { written, entries } or null.
 async function reshardFromMaster(env, loN, endN) {
-  const obj = await env.CATALOG.get("db.json");
+  const obj = (env.PRIVATE && await env.PRIVATE.get("db.json")) || await env.CATALOG.get("db.json");
   if (!obj) return null;
   const text = await obj.text();
   if (!text) return null;
