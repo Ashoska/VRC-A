@@ -48,7 +48,8 @@ const REMOVE_QUORUM = 2; // independent "dead" reports needed before a hard remo
 // served free to EVERYONE who encounters that avatar until it changes. 6h balances max cache warmth
 // against the worst case if a purge ever fails (a stale shard = slightly-old name/author; the
 // file->avatar id mapping is stable, so cloning is unaffected).
-const SHARD_TTL = 21600; // 6h (was 5 min); purge-on-write keeps it fresh — for the rarely-changing CLONE shards only
+const SHARD_TTL = 7 * 24 * 3600; // v53: 7 days (was 6 h). Every content write queues a guaranteed purge (purge queue: retried
+// until Cloudflare confirms AND the CDN serves the new ETag), so the TTL is only a safety net (user, 2026-10-30).
 // The SEARCH-INDEX buckets (fragments/ avtr/ index/) change constantly (every contribution, fold ADD,
 // rename) and are read for search freshness, so they get a SHORT TTL — NOT the 6h SHARD_TTL. With 6h,
 // a CDN purge that missed an edge (or a stale re-cache between write and purge) served a stale bucket
@@ -834,6 +835,22 @@ export default {
           return new Response(o.body, { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
         } catch (e) { return json({ ok: false, error: String(e) }, 500); }
       }
+      // v53 search (D1). Public; served on gremlininc.app so the edge cache works (and on workers.dev).
+      if (req.method === "GET" && url.pathname === "/search") return handleSearch(req, env, ctx, url);
+      // v53 search step: internal (token), fired by the cron after each flush as its own invocation.
+      if (req.method === "GET" && url.pathname === "/searchstep") {
+        const cont = url.searchParams.get("cont");
+        if (!cont || !env.ADMIN_KEY || cont !== env.ADMIN_KEY) return json({ ok: false }, 403);
+        return json({ ok: true, ...(await searchStep(env)) });
+      }
+      // v53 backfill: copy the catalog into D1 then build every nm/ file (rides the search step, 1/min).
+      if (req.method === "POST" && url.pathname === "/admin/searchfill") {
+        let body = {}; try { body = await req.json(); } catch (_) {}
+        if (!env.ADMIN_KEY || body.key !== env.ADMIN_KEY) return json({ ok: false, error: "unauthorized" }, 401);
+        const st = body.phase === 2 ? { phase: 2, next: 0, startedAt: new Date().toISOString() } : { phase: 1, next: 0, startedAt: new Date().toISOString() };
+        await hubPut(env, "searchFill", JSON.stringify(st));
+        return json({ ok: true, ...st });
+      }
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
         // ONE cheap KV read (no list ops — those have a tight free-tier limit and this is
         // polled every 15s). Counts come from meta (set at flush).
@@ -855,6 +872,12 @@ export default {
           lastDrain: meta.lastDrain || "",    // v43 last index-drain report (applied/ops/buckets/keys/err)
           iqDropped: meta.iqDropped || 0, // v40 pre-v40 every-check re-asserts dropped from the backlog
           lastFlush: meta.lastFlush || null,
+          // v53 search step (D1 + nm/ + purge queue) and backfill progress. purgeStuck = a cache purge has
+          // been failing for over 30 min (a stale CDN file is possible until it clears).
+          search: await (async () => { try {
+            const s = JSON.parse((await hubGet(env, "searchStat")) || "null"), f = JSON.parse((await hubGet(env, "searchFill")) || "null");
+            return { d1: !!env.SEARCH, last: s, fill: f, purgeStuck: !!(s && s.purgeOldestMs > PURGE_STUCK_MS) };
+          } catch (_) { return null; } })(),
           lastAdded: meta.lastAdded || 0,
           lastRemoved: meta.lastRemoved || 0,
           totalAdded: meta.totalAdded || 0,
@@ -906,7 +929,7 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 52,   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 53,   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -1005,7 +1028,7 @@ export default {
       if (new Date(event.scheduledTime || Date.now()).getUTCMinutes() % 2 === 0) {
         try { await maybeFireBackupStep(env, ctx); } catch (_) {}
       }
-      if (await chainBusy(env)) return;
+      if (await chainBusy(env)) { await fireSearchStep(env); return; }
       // Maintenance only when ~2 min have passed (it's every cron at the 2-min cadence; kept in case the
       // cadence ever speeds up, see wrangler.toml for why 1 min needs a Durable Object first).
       await cronTasksIfDue(env);
@@ -1020,6 +1043,7 @@ export default {
       } else {
         await chainLockDel(env);
       }
+      await fireSearchStep(env);   // v53: D1 + nm/ + purge queue, its own invocation (own subrequest budget)
     })());
   },
 };
@@ -1239,7 +1263,7 @@ async function reconcileIndex(env) {
       try {
         let man = {}; const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json();
         man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
-          entryCount: meta.entries, unfilled: meta.unfilled, staleCount: 0, foldV: FOLD_STAMP_V, searchReady: true, lastUpdate: new Date().toISOString() };
+          entryCount: meta.entries, unfilled: meta.unfilled, staleCount: 0, foldV: FOLD_STAMP_V, searchReady: true, nmBuckets: 4096, lastUpdate: new Date().toISOString() };
         await env.CATALOG.put("_manifest.json", JSON.stringify(man),
           { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
         if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
@@ -1642,6 +1666,12 @@ function backupLine(st) {
   return "";
 }
 
+async function fireSearchStep(env) {
+  try {
+    if (env.SELF && typeof env.SELF.fetch === "function" && env.ADMIN_KEY) await env.SELF.fetch("https://self/searchstep?cont=" + encodeURIComponent(env.ADMIN_KEY));
+    else await searchStep(env);
+  } catch (e) { console.log("searchstep err", e); }
+}
 async function cronTasksIfDue(env) {
   let last = 0;
   try { last = parseInt((await env.AVATAR_KV.get("crontasks")) || "0", 10) || 0; } catch (_) {}
@@ -1884,6 +1914,7 @@ async function flushR2(env) {
   const runUpIds = new Set();
   for (const o of Object.values(shardOps)) for (const x of [...Object.values(o.adds), ...Object.values(o.upserts)]) if (x && x.id) runUpIds.add(x.id);
   const allAdd = [], allRem = [];
+  const purgeJobs = [], searchRecs = [];   // v53: guaranteed purge queue + D1/nm search changes
   let unfilledDelta = 0;      // incremental Fill-backlog delta (Worker owns the count now)
   const indexOps = [];        // search-index ops computed from the SAME shard read (no re-fetch)
   const fillHintAdd = new Set();   // touched shards that still have an unfilled avatar
@@ -1918,6 +1949,9 @@ async function flushR2(env) {
     const sAddItems = [], sRemItems = [];
     const item = (x) => ({ n: (x && x.name) || "", a: (x && typeof x.id === "string" && /^avtr_[0-9a-f-]{36}$/.test(x.id)) ? x.id : "" });
     const sIndexOps = [];
+    // v53: before/after of every avatar this shard's ops touch, for the D1 search + nm/ name files (search step).
+    const sTouched = new Set([...Object.keys(ops.adds), ...Object.keys(ops.upserts), ...Object.keys(ops.renames), ...ops.removes]);
+    const sBefore = new Map(); for (const fid of sTouched) sBefore.set(fid, e[fid] ? { ...e[fid] } : null);
     // v52: a remove in the same run wins over an add/update of the same avatar (e.g. a fill update queued
     // before the liveness bot found it gone). Without this the avatar was re-created and then deleted in
     // one flush: the catalog ended right, but the live feed and today's totals counted it +1 and -1.
@@ -1990,11 +2024,12 @@ async function flushR2(env) {
     if (Object.values(e).some((x) => x && x.filled !== true)) fillHintAdd.add(sp);
     else fillHintDone.add(sp);
     if (!dirty) continue;   // nothing changed → skip the R2 write (and the purge below)
-    let wrote = false;
+    let wrote = false, shardEtag = "";
     try {
-      await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e }), {
+      const put = await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e }), {
         httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
       });
+      shardEtag = (put && put.etag) || "";
       wrote = true;
     } catch (_) { allShardsOk = false; failedShards.add(sp); }  // write failed → KEEP this shard's batches (per-key clear below)
     if (wrote) {   // fold the count deltas + index ops ONLY now that the shard actually persisted
@@ -2003,6 +2038,8 @@ async function flushR2(env) {
       added += sAdded; removed += sRemoved; unfilledDelta += sUnfilled;
       allAdd.push(...sAddItems); allRem.push(...sRemItems);
       for (const op of sIndexOps) indexOps.push(op);
+      if (contentDirty) purgeJobs.push({ u: catalogUrl(env, `shard/${sp}.json`), etag: shardEtag });
+      for (const fid of sTouched) { const r = searchChange(fid, sBefore.get(fid), e[fid] || null); if (r) searchRecs.push(...r); }
     }
   }
 
@@ -2010,7 +2047,10 @@ async function flushR2(env) {
   // goes live within ~seconds instead of the TTL. A `checked`-only rewrite is skipped — a stale cached
   // copy is functionally identical for clone/search (no reader consults `checked`). No-op unless a
   // purge token is configured.
-  if (allShardsOk && purgePrefixes.length > 0) await purgeShards(env, purgePrefixes);
+  // v53: purges go through the guaranteed purge queue (retried until confirmed); search changes go to the
+  // search step (its own invocation, fired by the cron right after this flush). Both durable in the hub.
+  if (purgeJobs.length) await hubQueuePush(env, "pq", purgeJobs.filter((j) => j.u).map((j) => ({ ...j, t0: Date.now() })));
+  if (searchRecs.length) await hubQueuePush(env, "srq", searchRecs);
 
   // Clear the drained KV keys FIRST — BEFORE the (expensive) index drain. Clearing depends ONLY on the
   // shard-loop result (allShardsOk / failedShards), so doing it first guarantees a batch whose shards
@@ -2186,7 +2226,7 @@ async function flushR2(env) {
       man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
         // staleCount stays 0 (v49: no per-avatar "last checked" any more; older admin apps read it).
         // foldV = the font rules version the bots compare each avatar's `fv` stamp against.
-        entryCount: entries, unfilled, staleCount: 0, foldV: FOLD_STAMP_V, searchReady: true, lastUpdate: new Date().toISOString() };
+        entryCount: entries, unfilled, staleCount: 0, foldV: FOLD_STAMP_V, searchReady: true, nmBuckets: 4096, lastUpdate: new Date().toISOString() };
       try {
         await env.CATALOG.put("_manifest.json", JSON.stringify(man), {
           httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" },
@@ -2333,6 +2373,309 @@ async function purgeShards(env, prefixes) {
   await purgeCatalogUrls(env, prefixes.map((p) => `${base}/shard/${p}.json`));
 }
 
+// ---- v53: search in D1 + clone name files (nm/) + guaranteed purge queue ---------------------------------
+// Search (the app's Search button) is D1: one row per avatar (`av`, keyed by a 60-bit number taken from the
+// avatar id, so no extra index rows), authors in `au` (keyed by user id, so a rename is one row), and a lean
+// contentless FTS5 index (`avx`: name + author + bio, raw AND font-folded words, prefix search). Clone resolve
+// (roster, constant and automatic) must stay free, so it reads CDN name files instead: nm/<bucket>.json maps a
+// folded exact name to every avatar with that name (the app keeps the existing unique-exact-name and author
+// rules on top). Both are fed by the search step (its own invocation after each flush) from the durable `srq`
+// queue in the hub, and every CDN file write is followed by a queued purge that is retried until Cloudflare
+// confirms it AND the CDN serves the new ETag (alert on /health after 30 min). index/ + fragments/ keep being
+// written for older apps until they are switched off.
+const NAME_TTL = 7 * 24 * 3600;           // nm/ files: purge-on-write, the TTL is only a safety net
+const SEARCH_RECS_PER_STEP = 1500;        // queued change records applied per search step
+const NM_BUCKETS_PER_STEP = 150;          // nm/ read+write pairs per step (the rest stays queued)
+const PURGE_PER_STEP = 150;               // purge jobs (+1 verify fetch each) per step
+const PURGE_STUCK_MS = 30 * 60_000;       // a purge still failing after this is flagged on /health
+const SEARCH_PAGE = 500;                  // results per /search batch (the app shows 50 a page)
+const FILL_SHARDS_PER_STEP = 24;          // backfill: shards read per step (~2k avatars)
+const NMFILL_BUCKETS_PER_STEP = 256;      // backfill: nm/ files written per step (one D1 scan each step)
+
+function catalogUrl(env, key) { return env.CATALOG_BASE ? env.CATALOG_BASE.replace(/\/$/, "") + "/" + key : ""; }
+function nameKey(s) { return foldFancy(s || "").trim().toLowerCase(); }   // == the app's fancyFold()
+function nameBucketOf(k) { return ((hashCode(k) & 0xfff) >>> 0).toString(16).padStart(3, "0"); }
+// 60 bits of the avatar uuid (hex), as a decimal string: SQLite stores it as an INTEGER PRIMARY KEY.
+function avKey(id) { return BigInt("0x" + String(id).slice(5).replace(/-/g, "").slice(0, 15)).toString(); }
+function perfPack(e) { return (e.perfPc ?? 5) | ((e.perfQuest ?? 5) << 4) | ((e.perfIos ?? 5) << 8); }
+function searchText(s) {
+  const raw = [s.n, s.au, s.d].filter(Boolean).join(" ");
+  const f = foldFancy(raw);
+  return f === raw ? raw : raw + " " + f;
+}
+// A searchable avatar: has an id and a name, and has been filled (an unfilled stub has no name yet).
+function searchable(x) { return !!(x && typeof x.id === "string" && x.id.startsWith("avtr_") && x.filled === true && x.name); }
+function slim(x, fid) {
+  return { id: x.id, f: fid, n: x.name || "", au: x.author || "", ai: x.authorId || "", d: String(x.desc || "").slice(0, 1000),
+    p: platMask(x.platforms), pf: perfPack(x), ad: x.added || 0 };
+}
+function searchFieldsDiffer(a, b) {
+  return a.id !== b.id || (a.name || "") !== (b.name || "") || (a.author || "") !== (b.author || "") ||
+    (a.authorId || "") !== (b.authorId || "") || (a.desc || "") !== (b.desc || "") ||
+    platMask(a.platforms) !== platMask(b.platforms) || perfPack(a) !== perfPack(b);
+}
+// Change records for one fileId: { id, f, nw: slim | null, old: { n, f } | null }. A record with nw = null
+// removes the avatar from search ONLY where search still points at this fileId (a re-filed avatar whose
+// search row already moved to its new image is never deleted by the old image's removal).
+function searchChange(fid, before, after) {
+  const b = searchable(before) ? before : null, a = searchable(after) ? after : null;
+  if (!b && !a) return null;
+  if (b && a && b.id === a.id && !searchFieldsDiffer(b, a)) return null;
+  const out = [];
+  if (b && (!a || a.id !== b.id)) out.push({ id: b.id, f: fid, nw: null, old: { n: b.name, f: fid } });
+  if (a) out.push({ id: a.id, f: fid, nw: slim(a, fid), old: b && b.id === a.id ? { n: b.name, f: fid } : null });
+  return out;
+}
+
+// ---- hub queues (durable, strongly consistent) ----
+async function hubQueuePush(env, name, items) {
+  if (!items || !items.length) return true;
+  const h = hubStub(env); if (!h) return false;
+  try { const r = await h.fetch("https://hub/q/push", { method: "POST", body: JSON.stringify({ name, items }) }); return r.ok; }
+  catch (_) { return false; }
+}
+async function hubQueueTake(env, name, max) {
+  const h = hubStub(env); if (!h) return { keys: [], items: [], depth: 0 };
+  try { const r = await h.fetch("https://hub/q/take", { method: "POST", body: JSON.stringify({ name, max }) }); return await r.json(); }
+  catch (_) { return { keys: [], items: [], depth: 0 }; }
+}
+async function hubQueueAck(env, keys) {
+  if (!keys || !keys.length) return;
+  const h = hubStub(env); if (!h) return;
+  try { await h.fetch("https://hub/q/ack", { method: "POST", body: JSON.stringify({ keys }) }); } catch (_) {}
+}
+async function hubLock(env, name, ttlMs) {
+  const h = hubStub(env); if (!h) return true;
+  try { const r = await h.fetch("https://hub/lock", { method: "POST", body: JSON.stringify({ name, ttlMs }) }); return (await r.json()).ok === true; }
+  catch (_) { return false; }
+}
+async function hubUnlock(env, name) {
+  const h = hubStub(env); if (!h) return;
+  try { await h.fetch("https://hub/unlock", { method: "POST", body: JSON.stringify({ name }) }); } catch (_) {}
+}
+
+// ---- D1 ----
+let _schemaOk = false;
+async function ensureSearchSchema(db) {
+  if (_schemaOk) return;
+  await db.batch([
+    db.prepare("CREATE TABLE IF NOT EXISTS av (k INTEGER PRIMARY KEY, id TEXT NOT NULL, f TEXT NOT NULL, n TEXT NOT NULL, nk TEXT NOT NULL, nb INTEGER NOT NULL, ai TEXT NOT NULL, p INTEGER NOT NULL, pf INTEGER NOT NULL, ad INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS au (id TEXT PRIMARY KEY, n TEXT NOT NULL, k TEXT NOT NULL) WITHOUT ROWID"),
+    db.prepare("CREATE VIRTUAL TABLE IF NOT EXISTS avx USING fts5(t, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2', prefix='2 3')"),
+  ]);
+  _schemaOk = true;
+}
+const qs = (n, g) => Array.from({ length: n }, () => g).join(",");
+// Apply resolved puts/dels to D1 in ONE batch (one transaction): dels first (conditional on fileId), then puts.
+async function d1Apply(db, puts, dels) {
+  const st = [];
+  for (let i = 0; i < dels.length; i += 45) {
+    const c = dels.slice(i, i + 45), b = c.flatMap((r) => [avKey(r.id), r.f]);
+    st.push(db.prepare(`DELETE FROM avx WHERE rowid IN (SELECT k FROM av WHERE (k,f) IN (VALUES ${qs(c.length, "(?,?)")}))`).bind(...b));
+    st.push(db.prepare(`DELETE FROM av WHERE (k,f) IN (VALUES ${qs(c.length, "(?,?)")})`).bind(...b));
+  }
+  for (let i = 0; i < puts.length; i += 90) {
+    const c = puts.slice(i, i + 90);
+    st.push(db.prepare(`DELETE FROM avx WHERE rowid IN (${qs(c.length, "?")})`).bind(...c.map((s) => avKey(s.id))));
+  }
+  for (let i = 0; i < puts.length; i += 9) {
+    const c = puts.slice(i, i + 9);
+    st.push(db.prepare(`INSERT INTO av(k,id,f,n,nk,nb,ai,p,pf,ad) VALUES ${qs(c.length, "(?,?,?,?,?,?,?,?,?,?)")} ON CONFLICT(k) DO UPDATE SET id=excluded.id,f=excluded.f,n=excluded.n,nk=excluded.nk,nb=excluded.nb,ai=excluded.ai,p=excluded.p,pf=excluded.pf`)
+      .bind(...c.flatMap((s) => { const k = nameKey(s.n); return [avKey(s.id), s.id, s.f, s.n, k, parseInt(nameBucketOf(k), 16), s.ai, s.p, s.pf, s.ad]; })));
+  }
+  for (let i = 0; i < puts.length; i += 45) {
+    const c = puts.slice(i, i + 45);
+    st.push(db.prepare(`INSERT INTO avx(rowid,t) VALUES ${qs(c.length, "(?,?)")}`).bind(...c.flatMap((s) => [avKey(s.id), searchText(s)])));
+  }
+  const authors = new Map(); for (const s of puts) if (s.ai) authors.set(s.ai, s.au);
+  const al = [...authors];
+  for (let i = 0; i < al.length; i += 30) {
+    const c = al.slice(i, i + 30);
+    st.push(db.prepare(`INSERT INTO au(id,n,k) VALUES ${qs(c.length, "(?,?,?)")} ON CONFLICT(id) DO UPDATE SET n=excluded.n,k=excluded.k WHERE au.n<>excluded.n`)
+      .bind(...c.flatMap(([id, n]) => [id, n, nameKey(n)])));
+  }
+  if (!st.length) return { written: 0 };
+  let written = 0;
+  for (const r of await db.batch(st)) written += (r.meta && r.meta.rows_written) || 0;
+  return { written };
+}
+
+// ---- nm/ name files: { v, e: { "<folded name>": [ {a,f,n,au,ai,p,pf}, … ] } } ----
+async function nmApply(env, puts, removes, maxBuckets) {
+  // removes: [{ k, id, f }] (old names), puts: slim entries (new state). Grouped per bucket: one read + one write.
+  const byB = new Map();
+  const touch = (b) => { if (!byB.has(b)) byB.set(b, { rem: [], add: [] }); return byB.get(b); };
+  for (const r of removes) touch(nameBucketOf(r.k)).rem.push(r);
+  for (const s of puts) { const k = nameKey(s.n); touch(nameBucketOf(k)).add.push({ k, s }); }
+  const done = new Set(), failed = new Set(), jobs = [];
+  const buckets = [...byB.keys()];
+  await runPool(buckets.slice(0, maxBuckets), 6, async (b) => {
+    const w = byB.get(b);
+    let cur;
+    try { const o = await env.CATALOG.get(`nm/${b}.json`); cur = o ? await o.json() : { v: 1, e: {} }; if (!cur || typeof cur.e !== "object") cur = { v: 1, e: {} }; }
+    catch (_) { failed.add(b); return; }   // a failed READ never writes (would wipe the bucket)
+    const e = cur.e;
+    for (const r of w.rem) { const l = e[r.k]; if (!l) continue; const n = l.filter((x) => !(x.a === r.id && x.f === r.f)); if (n.length) e[r.k] = n; else delete e[r.k]; }
+    for (const { k, s } of w.add) {
+      const l = (e[k] || []).filter((x) => x.a !== s.id);
+      l.push({ a: s.id, f: s.f, n: s.n, au: s.au, ai: s.ai, p: s.p, pf: s.pf });
+      e[k] = l;
+    }
+    try {
+      const put = await env.CATALOG.put(`nm/${b}.json`, JSON.stringify(cur), { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + NAME_TTL } });
+      done.add(b); jobs.push({ u: catalogUrl(env, `nm/${b}.json`), etag: (put && put.etag) || "", t0: Date.now() });
+    } catch (_) { failed.add(b); }
+  });
+  const pending = new Set(buckets.filter((b) => !done.has(b)));   // failed + over budget
+  return { done: done.size, pending, jobs };
+}
+
+// One search step: apply queued change records to D1 + nm/, then work the purge queue. Single-flight.
+async function searchStep(env) {
+  const out = { applied: 0, d1Written: 0, nm: 0, requeued: 0, purged: 0, purgeFailed: 0 };
+  if (!(await hubLock(env, "search", 120_000))) return { ...out, busy: true };
+  try {
+    const got = await hubQueueTake(env, "srq", SEARCH_RECS_PER_STEP);
+    if (got.items.length) {
+      // Resolve per avatar: any put wins (latest); a del only where no put for that avatar in this step.
+      const puts = new Map(), dels = new Map(), rem = [];
+      for (const r of got.items) {
+        if (r.old && r.old.n) rem.push({ k: nameKey(r.old.n), id: r.id, f: r.old.f });
+        if (r.nw) { puts.set(r.id, r.nw); dels.delete(r.id); } else if (!puts.has(r.id)) dels.set(r.id, r);
+      }
+      const putList = [...puts.values()], delList = [...dels.values()].map((r) => ({ id: r.id, f: r.f }));
+      let d1ok = true;
+      if (env.SEARCH) {
+        try { await ensureSearchSchema(env.SEARCH); const w = await d1Apply(env.SEARCH, putList, delList); out.d1Written = w.written; }
+        catch (e) { d1ok = false; out.d1Err = String(e && e.message || e).slice(0, 200); }
+      }
+      // nm/ for dels: drop (id, f) under the old name; rem covers renames and removals.
+      const nm = await nmApply(env, putList, rem, NM_BUCKETS_PER_STEP);
+      out.nm = nm.done;
+      if (nm.jobs.length) await hubQueuePush(env, "pq", nm.jobs);
+      // Requeue: everything if D1 failed, else only records whose nm/ bucket wasn't written (idempotent).
+      const again = got.items.filter((r) => !d1ok ||
+        (r.nw && nm.pending.has(nameBucketOf(nameKey(r.nw.n)))) || (r.old && r.old.n && nm.pending.has(nameBucketOf(nameKey(r.old.n)))));
+      if (again.length) { await hubQueuePush(env, "srq", again); out.requeued = again.length; }
+      await hubQueueAck(env, got.keys);
+      out.applied = got.items.length;
+    }
+    Object.assign(out, await purgeStep(env));
+    if (env.SEARCH && got.items.length < 100) Object.assign(out, await searchFillStep(env));
+  } finally { await hubUnlock(env, "search"); }
+  try { await hubPut(env, "searchStat", JSON.stringify({ at: Date.now(), ...out })); } catch (_) {}
+  return out;
+}
+
+// Guaranteed purge: a job leaves the queue only when Cloudflare confirmed the purge AND the CDN serves the
+// ETag we wrote (or a newer write superseded it). Anything else is retried every step; /health flags a job
+// older than 30 min.
+async function purgeStep(env) {
+  const res = { purged: 0, purgeFailed: 0 };
+  if (!env.CF_PURGE_TOKEN || !env.CF_ZONE_ID) return res;
+  const got = await hubQueueTake(env, "pq", PURGE_PER_STEP);
+  if (!got.items.length) return res;
+  const by = new Map();   // newest etag per URL, oldest t0
+  for (const j of got.items) { const c = by.get(j.u); by.set(j.u, { u: j.u, etag: j.etag, t0: c ? Math.min(c.t0, j.t0) : j.t0 }); }
+  const jobs = [...by.values()], bad = new Set();
+  const api = `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/purge_cache`;
+  for (let i = 0; i < jobs.length; i += 30) {
+    const c = jobs.slice(i, i + 30);
+    try {
+      const r = await fetch(api, { method: "POST", headers: { authorization: `Bearer ${env.CF_PURGE_TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ files: c.map((j) => j.u) }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.success) for (const x of c) bad.add(x.u);
+    } catch (_) { for (const x of c) bad.add(x.u); }
+  }
+  // Verify: the CDN must now serve our write (the ETag R2 returned on put). A newer write elsewhere changes
+  // the ETag too; that write queued its own job, so a mismatch here just retries once more.
+  const norm = (s) => String(s || "").replace(/^W\//, "").replace(/"/g, "");
+  await runPool(jobs.filter((j) => !bad.has(j.u) && j.etag), 6, async (j) => {
+    try { const r = await fetch(j.u, { headers: { "user-agent": "VRC-A purge-verify" } }); await r.body?.cancel(); if (norm(r.headers.get("etag")) !== norm(j.etag)) bad.add(j.u); }
+    catch (_) { bad.add(j.u); }
+  });
+  const retry = jobs.filter((j) => bad.has(j.u));
+  if (retry.length) await hubQueuePush(env, "pq", retry);
+  await hubQueueAck(env, got.keys);
+  res.purged = jobs.length - retry.length; res.purgeFailed = retry.length;
+  res.purgeOldestMs = retry.length ? Date.now() - Math.min(...retry.map((j) => j.t0)) : 0;
+  return res;
+}
+
+// Backfill (admin: POST /admin/searchfill {key}): phase 1 copies every shard into D1 (FILL_SHARDS_PER_STEP a
+// step), phase 2 builds every nm/ file from D1 (one D1 scan per NMFILL_BUCKETS_PER_STEP buckets). Steps ride
+// the search step, so they run once a minute and never overlap. Progress in the hub (`searchFill`).
+async function searchFillStep(env) {
+  const st = JSON.parse((await hubGet(env, "searchFill")) || "null");
+  if (!st || st.done) return {};
+  const db = env.SEARCH; await ensureSearchSchema(db);
+  if (st.phase === 1) {
+    const from = st.next || 0, to = Math.min(4096, from + FILL_SHARDS_PER_STEP);
+    const puts = [];
+    for (let n = from; n < to; n++) {
+      const sp = n.toString(16).padStart(3, "0");
+      try { const o = await env.CATALOG.get(`shard/${sp}.json`); if (!o) continue; const j = await o.json();
+        for (const [fid, x] of Object.entries(j.e || {})) if (searchable(x)) puts.push(slim(x, fid)); }
+      catch (e) { return { fillErr: "read " + sp }; }   // retry this step next minute
+    }
+    const seen = new Map(); for (const s of puts) seen.set(s.id, s);   // one row per avatar id
+    const w = await d1Apply(db, [...seen.values()], []);
+    st.next = to; st.rows = (st.rows || 0) + w.written; st.avatars = (st.avatars || 0) + seen.size;
+    if (to >= 4096) { st.phase = 2; st.next = 0; }
+  } else if (st.phase === 2) {
+    const from = st.next || 0, to = Math.min(4096, from + NMFILL_BUCKETS_PER_STEP);
+    const r = await db.prepare("SELECT av.id a, av.f f, av.n n, av.nk k, av.nb b, av.ai ai, av.p p, av.pf pf, au.n au FROM av LEFT JOIN au ON au.id = av.ai WHERE av.nb >= ? AND av.nb < ?").bind(from, to).all();
+    const files = new Map();
+    for (const x of r.results) { const b = x.b; if (!files.has(b)) files.set(b, {}); const e = files.get(b); (e[x.k] ||= []).push({ a: x.a, f: x.f, n: x.n, au: x.au || "", ai: x.ai, p: x.p, pf: x.pf }); }
+    const jobs = [];
+    await runPool([...files.keys()], 6, async (b) => {
+      const key = `nm/${b.toString(16).padStart(3, "0")}.json`;
+      const put = await env.CATALOG.put(key, JSON.stringify({ v: 1, e: files.get(b) }), { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + NAME_TTL } });
+      jobs.push({ u: catalogUrl(env, key), etag: (put && put.etag) || "", t0: Date.now() });
+    });
+    if (jobs.length) await hubQueuePush(env, "pq", jobs);
+    st.next = to; st.nmFiles = (st.nmFiles || 0) + files.size; st.readRows = (st.readRows || 0) + ((r.meta && r.meta.rows_read) || 0);
+    if (to >= 4096) { st.done = true; st.doneAt = new Date().toISOString(); }
+  }
+  await hubPut(env, "searchFill", JSON.stringify(st));
+  return { fill: st };
+}
+
+// GET /search?q=<text>&o=<offset>[&au=<author>] → { r: [ {a,f,n,au,ai,p,pf} ], more }. Every query word must
+// match (raw or font-folded form, across name, author and bio); the last word also matches as a prefix.
+// Exact folded-name matches first, then FTS rank. With `au`, only that author's avatars (folded name).
+// Results are edge-cached for 60 s (saves D1 reads for repeat searches; the request itself still counts).
+function ftsQuery(q) {
+  const words = foldFancy(q).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).slice(0, 8);
+  if (!words.length) return "";
+  return words.map((w, i) => `"${w.replace(/"/g, "")}"${i === words.length - 1 ? "*" : ""}`).join(" ");
+}
+async function handleSearch(req, env, ctx, url) {
+  const cors = { "access-control-allow-origin": "*" };
+  if (!env.SEARCH) return json({ ok: false, error: "search not configured" }, 503);
+  const q = (url.searchParams.get("q") || "").slice(0, 120), au = (url.searchParams.get("au") || "").slice(0, 120);
+  const o = Math.max(0, Math.min(100000, parseInt(url.searchParams.get("o") || "0", 10) || 0));
+  const fq = ftsQuery(au ? q + " " + au : q);
+  if (!fq) return json({ ok: true, r: [], more: false });
+  const cacheKey = new Request(`https://gremlininc.app/search?q=${encodeURIComponent(q.trim().toLowerCase())}&o=${o}&au=${encodeURIComponent(au.trim().toLowerCase())}`);
+  const cache = caches.default;
+  try { const hit = await cache.match(cacheKey); if (hit) return hit; } catch (_) {}
+  await ensureSearchSchema(env.SEARCH);
+  const nk = nameKey(q);
+  const sql = "SELECT av.id a, av.f f, av.n n, au.n au, av.ai ai, av.p p, av.pf pf FROM avx JOIN av ON av.k = avx.rowid LEFT JOIN au ON au.id = av.ai " +
+    "WHERE avx MATCH ?" + (au ? " AND au.k = ?" : "") + " ORDER BY (av.nk = ?) DESC, rank LIMIT ? OFFSET ?";
+  const b = au ? [fq, nameKey(au), nk, SEARCH_PAGE + 1, o] : [fq, nk, SEARCH_PAGE + 1, o];
+  let rows;
+  try { rows = (await env.SEARCH.prepare(sql).bind(...b).all()).results || []; }
+  catch (e) { return json({ ok: false, error: "search failed" }, 500); }
+  const more = rows.length > SEARCH_PAGE;
+  const res = new Response(JSON.stringify({ ok: true, r: rows.slice(0, SEARCH_PAGE).map((x) => ({ ...x, au: x.au || "" })), more }), {
+    headers: { "content-type": "application/json", "cache-control": "public, max-age=60", ...cors },
+  });
+  try { ctx.waitUntil(cache.put(cacheKey, res.clone())); } catch (_) {}
+  return res;
+}
+
 // ---- recovery: re-shard from the R2 db.json master --------------------------
 // Line-parses the master (never a whole-file JSON.parse) and writes only the [loN..endN] span's
 // shards, so Worker memory + subrequests stay bounded. Returns { written, entries } or null.
@@ -2462,6 +2805,39 @@ export class Hub {
         }
       } catch (_) {}
       for (const ws of this.ctx.getWebSockets()) { try { ws.send(out); } catch (_) {} }
+      return new Response("ok");
+    }
+    // v53 durable queues (search changes `srq`, purge jobs `pq`): items stored in chunks of <100 KB under
+    // q:<name>:<seq>, taken oldest first and deleted only on ack (so a crashed step just retakes them).
+    if (p === "/q/push" && req.method === "POST") {
+      const { name, items } = await req.json();
+      let seq = (await this.ctx.storage.get("qseq")) || 0, chunk = [], size = 0;
+      const flush = async () => { if (!chunk.length) return; seq++; await this.ctx.storage.put(`q:${name}:${String(seq).padStart(12, "0")}`, chunk); chunk = []; size = 0; };
+      for (const it of items || []) { const s = JSON.stringify(it).length; if (size + s > 90_000) await flush(); chunk.push(it); size += s; }
+      await flush(); await this.ctx.storage.put("qseq", seq);
+      return new Response("ok");
+    }
+    if (p === "/q/take" && req.method === "POST") {
+      const { name, max } = await req.json();
+      const m = await this.ctx.storage.list({ prefix: `q:${name}:`, limit: 200 });
+      const keys = [], items = [];
+      for (const [k, v] of m) { if (items.length && items.length + v.length > max) break; keys.push(k); items.push(...v); }
+      return new Response(JSON.stringify({ keys, items, depth: m.size }), { headers: { "content-type": "application/json" } });
+    }
+    if (p === "/q/ack" && req.method === "POST") {
+      const { keys } = await req.json();
+      for (let i = 0; i < (keys || []).length; i += 100) await this.ctx.storage.delete(keys.slice(i, i + 100));
+      return new Response("ok");
+    }
+    if (p === "/lock" && req.method === "POST") {
+      const { name, ttlMs } = await req.json();
+      const until = (await this.ctx.storage.get("lock:" + name)) || 0;
+      if (until > Date.now()) return new Response(JSON.stringify({ ok: false }));
+      await this.ctx.storage.put("lock:" + name, Date.now() + (ttlMs || 60_000));
+      return new Response(JSON.stringify({ ok: true }));
+    }
+    if (p === "/unlock" && req.method === "POST") {
+      const { name } = await req.json(); await this.ctx.storage.delete("lock:" + name);
       return new Response("ok");
     }
     if (p === "/stats") {
