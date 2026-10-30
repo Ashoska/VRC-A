@@ -278,9 +278,15 @@ function isLegacyReassert(o) {
 // Distinct R2 objects one op touches (fragment / avtr / index buckets). Each costs ~1 read + <=1 write,
 // so the drain budgets BUCKETS, not ops: 142 ops x ~10 tokens needed ~1,400 reads, over the ~1000
 // subrequest ceiling, and every read/write past it failed silently while the batch was cleared as done.
+// v53: the old search files (index/ + fragments/) are switched off (user, 2026-10-30: search is D1 now,
+// cloning reads nm/; older apps may lose search until they update). The index pipeline below now only
+// keeps avtr/ (the free "do we already have this avatar id?" check apps and the crawler use). Set true to
+// bring the old files back.
+const LEGACY_SEARCH_FILES = false;
 function opBuckets(o, into) {
   const id = o && o.id; if (!id || !String(id).startsWith("avtr_")) return;
   const fp = fragBucketFor(id);
+  if (!LEGACY_SEARCH_FILES) { if (o.avtr) into.add("a" + fp); return; }
   if (o.del || o.frag) into.add("f" + fp);
   if (o.avtr) into.add("a" + fp);
   for (const t of (o.add || [])) into.add("i" + indexBucketFor(t));
@@ -470,12 +476,13 @@ async function applyIndexOps(env, ops) {
     // Collect del + set INDEPENDENTLY (do NOT let one cancel the other here); the apply step below
     // resolves a same-id conflict as SET-wins, so a re-key (remove old fileId + add new fileId, SAME
     // avatarId, one flush) keeps the fragment instead of dropping it on op order.
-    if (o.del) fw.del.add(id);
-    if (o.frag) fw.set[id] = o.frag;
+    if (LEGACY_SEARCH_FILES && o.del) fw.del.add(id);
+    if (LEGACY_SEARCH_FILES && o.frag) fw.set[id] = o.frag;
     if (o.avtr === "a") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).add.add(id);
     else if (o.avtr === "r") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).rem.add(id);
     // Token maps have NO prototype: a plain {} hands the token "constructor" Object's inherited
     // function, so `.add.add` threw, the whole drain failed and requeued, every flush (poison op).
+    if (!LEGACY_SEARCH_FILES) continue;
     for (const t of (o.add || [])) ((idxWork[indexBucketFor(t)] ||= Object.create(null))[t] ||= { add: new Set(), rem: new Set() }).add.add(id);
     for (const t of (o.rem || [])) ((idxWork[indexBucketFor(t)] ||= Object.create(null))[t] ||= { add: new Set(), rem: new Set() }).rem.add(id);
   }
