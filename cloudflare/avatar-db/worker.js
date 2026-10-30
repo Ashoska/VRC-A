@@ -1878,6 +1878,12 @@ async function flushR2(env) {
   const nowChecked = Date.now();
   let added = 0, removed = 0, allShardsOk = true;
   const addedItems = [], removedItems = [];   // v52 live feed: the avatars this run really added / removed
+  // A re-key (the bot saw a new image: remove the old fileId + upsert the new one, SAME avatar id) is not an
+  // avatar leaving or joining the catalog. Every avatar id this run adds or updates, in any shard, so the
+  // live feed can tell a re-key from a real removal (seen live: Moontail avatars shown as removed).
+  const runUpIds = new Set();
+  for (const o of Object.values(shardOps)) for (const x of [...Object.values(o.adds), ...Object.values(o.upserts)]) if (x && x.id) runUpIds.add(x.id);
+  const allAdd = [], allRem = [];
   let unfilledDelta = 0;      // incremental Fill-backlog delta (Worker owns the count now)
   const indexOps = [];        // search-index ops computed from the SAME shard read (no re-fetch)
   const fillHintAdd = new Set();   // touched shards that still have an unfilled avatar
@@ -1995,8 +2001,7 @@ async function flushR2(env) {
       dirtyPrefixes.push(sp);
       if (contentDirty) purgePrefixes.push(sp);   // checked-only writes persist but skip the purge
       added += sAdded; removed += sRemoved; unfilledDelta += sUnfilled;
-      for (const x of sAddItems) if (addedItems.length < 300) addedItems.push(x);
-      for (const x of sRemItems) if (removedItems.length < 300) removedItems.push(x);
+      allAdd.push(...sAddItems); allRem.push(...sRemItems);
       for (const op of sIndexOps) indexOps.push(op);
     }
   }
@@ -2259,9 +2264,15 @@ async function flushR2(env) {
     wrPrev: prevMeta.wr && prevMeta.wr.d !== new Date().toISOString().slice(0, 10) ? prevMeta.wr : (prevMeta.wrPrev || null),
   })); } catch (_) { /* ceiling: meta stale ONE cycle (self-corrects next flush); the return below is computed from in-memory state so the chain still gets the right pendRemaining */ }
 
-  // v52 live event for this run (public view: counts + avatar names, never who sent them).
+  // v52 live event for this run (public view: counts + avatar names, never who sent them). Re-keys are
+  // left out of the feed and its totals (`rekeyed` counts them); `added`/`removed` above stay exact for meta.
+  const remIds = new Set(allRem.map((x) => x.a).filter(Boolean));
+  const feedRem = allRem.filter((x) => !(x.a && runUpIds.has(x.a)));
+  const feedAdd = allAdd.filter((x) => !(x.a && remIds.has(x.a)));
+  for (const x of feedAdd) if (addedItems.length < 300) addedItems.push(x);
+  for (const x of feedRem) if (removedItems.length < 300) removedItems.push(x);
   try {
-    await emit(env, { t: "run", ok: allShardsOk, added, removed, entries, ms: Date.now() - runStart,
+    await emit(env, { t: "run", ok: allShardsOk, added: feedAdd.length, removed: feedRem.length, rekeyed: allRem.length - feedRem.length, entries, ms: Date.now() - runStart,
       shards: dirtyPrefixes.length, idx: idxWrites, calm: calmCleared,
       // The avatars this run really added and removed (up to 300 each; `added`/`removed` are the full counts).
       addedItems, removedItems,
