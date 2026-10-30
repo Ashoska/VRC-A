@@ -222,9 +222,9 @@ internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color 
 /**
  * Boot Cat counting down (the boot's Retry button, the terms' Accept wait; user, 2026-10-24: like the
  * download cat, instead of a plain timer circle): his head outline is the time left, draining back to the
- * top middle as the seconds pass ([left], 0..1, eased between whole seconds). His eyes do what the thinking
- * cat's do (user: not a blink per second): they look around and now and then squint into the "hmm" line,
- * on the thinking loop's own timing. Everything is read while drawing.
+ * top middle as the seconds pass ([left], 0..1, eased between whole seconds). His eyes play their own beats
+ * (checking the clock, tapping along, a deep breath; [BootCatCd]) on their own clock, whatever the countdown's
+ * length. Everything is read while drawing.
  */
 @Composable
 internal fun BootCatCountdown(left: Float, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary) {
@@ -240,28 +240,24 @@ internal fun BootCatCountdown(left: Float, modifier: Modifier, color: Color = Ma
     LaunchedEffect(Unit) { val t0 = androidx.compose.runtime.withFrameMillis { it }; while (true) androidx.compose.runtime.withFrameMillis { ms.value = it - t0 } }
     Canvas(modifier) {
         val s = size.minDimension / 24f
+        val m = androidx.compose.ui.graphics.PathMeasure().apply { setPath(head, false) }
+        val total = m.length
+        val len = shown.value * total
+        // Where the time is running out (the outline's end), where the eyes glance in their "checking the clock" beat.
+        val endAt = ((start + len) / total) % 1f
         withTransform({ scale(s, s, Offset.Zero) }) {
-            drawPath(head, color.copy(alpha = 0.25f), style = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round))
-            val m = androidx.compose.ui.graphics.PathMeasure().apply { setPath(head, false) }
-            val total = m.length
-            val len = shown.value * total
-            if (len > 0.01f) {
-                // From the top middle clockwise, as long as the time left (its end runs back toward the top).
-                val seg = Path()
-                val b = start + len
-                m.getSegment(start, min(b, total), seg, true)
-                if (b > total) m.getSegment(0f, b - total, seg, true)
-                drawPath(seg, color, style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
-            }
-            // A sway while looking around, squinting into the line and back once every 2.4 s cycle (the countdown's
-            // own eyes; it gets its own polish pass later).
-            val cyc = (ms.value.toFloat() / 2400f) % 1f
-            val p = cyc * 72f
-            val dx = 0.9f * sin(2 * PI.toFloat() * ((2 * cyc) % 1f))
-            if (p in 42f..60f) face(Face.Line, color, dx)
-            else {
-                val sq = if (p in 36f..42f) 1f - 0.7f * sm((p - 36f) / 6f) else if (p in 60f..66f) 0.3f + 0.7f * sm((p - 60f) / 6f) else 1f
-                squash(sq) { face(Face.Look, color, dx) }
+            with(BootCatCd) {
+                drawCountdownCat(color, ms.value.toFloat(), m, endAt) {
+                    drawPath(head, color.copy(alpha = 0.25f), style = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    if (len > 0.01f) {
+                        // From the top middle clockwise, as long as the time left (its end runs back toward the top).
+                        val seg = Path()
+                        val b = start + len
+                        m.getSegment(start, min(b, total), seg, true)
+                        if (b > total) m.getSegment(0f, b - total, seg, true)
+                        drawPath(seg, color, style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    }
+                }
             }
         }
     }
