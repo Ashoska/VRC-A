@@ -159,9 +159,8 @@ private fun BgLoop(v: Int, accent: Color, modifier: Modifier) {
 /**
  * Boot Cat downloading (user, 2026-10-23): his outline is the progress bar, filling clockwise from
  * the top of his head ([progress] 0..1, eased toward each new value), and his eyes are two little
- * down-arrows that bob downward, watching it come in. [progress] null = size unknown: the thinking
- * light runs round instead. Drawn in Compose (the progress changes, so no AVD), every animation read
- * while drawing.
+ * v's playing their own beats (nod, watching the bar, excited; [BootCatDl]). [progress] null = size unknown:
+ * the thinking light runs round instead. Drawn in Compose, every animation read while drawing.
  */
 @Composable
 internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary, done: Boolean = false) {
@@ -184,52 +183,37 @@ internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color 
     Canvas(modifier) {
         val t = ms.value.toFloat()
         val s = size.minDimension / 24f
+        val m = androidx.compose.ui.graphics.PathMeasure().apply { setPath(head, false) }
+        val total = m.length
+        // Where the eyes look in their "watching the bar" beat: the bar's growing end, or the running light's.
+        val tipAt = if (progress == null) ((t / 1200f) % 1f + 0.28f) % 1f else ((start + shown.value * total) / total) % 1f
         withTransform({ scale(s, s, Offset.Zero) }) {
-            drawPath(head, color.copy(alpha = 0.25f), style = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round))
-            if (progress == null) {
-                drawLight(head, color, (t / 1200f) % 1f, 0.28f)
-            } else if (shown.value > 0.001f) {
-                val m = androidx.compose.ui.graphics.PathMeasure().apply { setPath(head, false) }
-                val total = m.length
-                val a = start; val b = start + shown.value * total
-                val seg = Path()
-                m.getSegment(a, min(b, total), seg, true)
-                if (b > total) m.getSegment(0f, b - total, seg, true)
-                drawPath(seg, color, style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
-                // A glint runs along the filled part every 1.4 s, so a slow or paused download never looks frozen.
-                val fill = b - a
-                if (fill > total * 0.04f) {
-                    val gl = min(total * 0.1f, fill)
-                    val g0 = a + ((t / 1400f) % 1f) * (fill + gl) - gl
-                    val glint = Path()
-                    val from = max(g0, a); val to = min(g0 + gl, b)
-                    if (to > from) {
-                        if (from < total) m.getSegment(from, min(to, total), glint, true)
-                        if (to > total) m.getSegment(max(from, total) - total, to - total, glint, true)
-                        drawPath(glint, androidx.compose.ui.graphics.lerp(color, GremlinColors.Text, 0.6f), style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+            with(BootCatDl) {
+                drawDownloadCat(color, t, m, tipAt) {
+                    drawPath(head, color.copy(alpha = 0.25f), style = Stroke(1.9f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    if (progress == null) {
+                        drawLight(head, color, (t / 1200f) % 1f, 0.28f)
+                    } else if (shown.value > 0.001f) {
+                        val a = start; val b = start + shown.value * total
+                        val seg = Path()
+                        m.getSegment(a, min(b, total), seg, true)
+                        if (b > total) m.getSegment(0f, b - total, seg, true)
+                        drawPath(seg, color, style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                        // A glint runs along the filled part every 1.4 s, so a slow or paused download never looks frozen.
+                        val fill = b - a
+                        if (fill > total * 0.04f) {
+                            val gl = min(total * 0.1f, fill)
+                            val g0 = a + ((t / 1400f) % 1f) * (fill + gl) - gl
+                            val glint = Path()
+                            val from = max(g0, a); val to = min(g0 + gl, b)
+                            if (to > from) {
+                                if (from < total) m.getSegment(from, min(to, total), glint, true)
+                                if (to > total) m.getSegment(max(from, total) - total, to - total, glint, true)
+                                drawPath(glint, androidx.compose.ui.graphics.lerp(color, GremlinColors.Text, 0.6f), style = Stroke(2.3f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                            }
+                        }
                     }
                 }
-            }
-            // The eyes: small v's (user's pick over full arrows), in a 4.8 s loop of three 1.6 s beats.
-            // Beats 1-2, the download beat: rest, glide down and fade out, drop back in from above and settle.
-            // Beat 3, the second state (like the thinking cat's "hmm"): the v's squint flat, hold, and open.
-            val st = Stroke(1.3f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-            val c = (t % 1600f) / 1600f
-            var dy = 0f; var a = 1f; var open = 1f
-            if ((t / 1600f).toInt() % 3 == 2) {
-                open = when {
-                    c < 0.25f -> 1f - 0.85f * sm(c / 0.25f)
-                    c < 0.7f -> 0.15f
-                    else -> 0.15f + 0.85f * sm((c - 0.7f) / 0.3f)
-                }
-            } else when {
-                c < 0.35f -> {}
-                c < 0.65f -> { val k = sm((c - 0.35f) / 0.3f); dy = 1.6f * k; a = 1f - k }
-                else -> { val k = sm((c - 0.65f) / 0.35f); dy = -1.6f * (1f - k); a = k }
-            }
-            for (x in floatArrayOf(9.3f, 14.7f)) {
-                val y = Y0 - 0.1f + dy
-                drawPath(Path().apply { moveTo(x - 1.25f, y - 0.6f * open); lineTo(x, y + 0.65f * open); lineTo(x + 1.25f, y - 0.6f * open) }, color.copy(alpha = color.alpha * a), style = st)
             }
         }
     }
