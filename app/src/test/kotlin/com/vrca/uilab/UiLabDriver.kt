@@ -274,8 +274,6 @@ class UiLabDriver(
             // The app's debug log (Settings > Debug: main-thread stalls + notes such as the boot timeline).
             "debuglog" -> "debug log:\n" + com.vrca.app.MainThreadWatch.read(app).ifBlank { "(empty)" }
             "perf" -> perf(arg)
-            // Regenerates the thinking Boot Cat AVDs from BootCatEyes (see BootCatAvdGen).
-            "genavd" -> "wrote " + BootCatAvdGen.write(File(outDir.absoluteFile.parentFile, "app/src/main/res/drawable"))
             "touch" -> touch(arg, TAP_HOLD_MS, "touch")
             "press" -> touch(arg, PRESS_HOLD_MS, "press")
             "drag" -> drag(arg)

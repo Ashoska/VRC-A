@@ -36,8 +36,6 @@ class UiLabApp : VrcaApplication() {
         org.robolectric.shadows.ShadowEnvironment.addExternalDir("sdcard")
         // EncryptedSharedPreferences (VRChat session store) needs an AndroidKeyStore.
         com.vrca.discordbot.lab.FakeAndroidKeyStore.install()
-        // The JVM doesn't play AnimatedVectorDrawables: draw the boot cat's thinking loop in Compose.
-        com.vrca.app.BootCatLab.drawLoops = true
         val root = System.getProperty("ui.lab.root") ?: "."
         val realFirestore = System.getProperty("uilab.ui.firestore") == "real"
         if (realFirestore) {

@@ -19,8 +19,7 @@ import kotlin.math.sin
  * The blink (the eye flattens into a short soft line that sinks a little: shuts fast, holds, opens slower) sits at a
  * different point in each beat, and some beats have none, so it never lands on a fixed rhythm.
  *
- * This is the one source of the eyes: the thinking AVDs (`boot_cat_think_*.xml`) are SAMPLED from it by the UI Lab
- * (`genavd`, see BootCatAvdGen), and the lab's loop draws it directly.
+ * This is the one source of the eyes: the thinking loop (`ThinkLoop` in BootCat) and the countdown cat draw it.
  */
 internal object BootCatEyes {
     const val BEAT_MS = 2400f
