@@ -72,6 +72,12 @@ revamped with that page. A page is DONE only when everything listed under it is 
     up to each new value, and the bots' own local work (checked / filled / removed / waiting to push)
     is added on top of the last server value so totals climb as it happens, then settle on the real
     figure at the next flush. No extra polling needed for this.
+    Scraper watch (user, 2026-10-30, for later): show who is hammering the catalog and act on it. Signals
+    the Worker can log cheaply: search 429s per IP / install id (`searchRateLimit`), Cloudflare firewall
+    and rate-limit blocks on cdn.gremlininc.app (WAF events), unusual shard/name-file pull rates. Admin
+    sees a list (IP / install id / linked user if known, counts, first/last seen) with Warn, Temp-block
+    and Ban actions; an optional auto rule (e.g. N blocks in an hour → temp block, repeat → ban, tied into
+    `moderation-accounts.md` bans). Needs a cost check before any new storage or polling.
 
 Leftovers to delete (no callers): `ButtonOverlay`, `AboutScreen`, `DependenciesScreen`,
 `SettingsScreen` (`ui/settings/`), `MainScreen` (`ui/conversation/`). Checked and removed when the

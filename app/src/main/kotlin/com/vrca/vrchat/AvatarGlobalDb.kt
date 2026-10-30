@@ -516,6 +516,12 @@ object AvatarGlobalDb {
     private const val KEY_CATALOG_BASE = "catalog_base" // persisted for cold-start recovery
     private const val KEY_R2 = "r2_serving"
     private const val KEY_SHARDED_COUNT = "sharded_count" // last /health entry count (debug panel, cold-start)
+    // App-only marker on every cdn.gremlininc.app read (catalog shards, name files, search files): a Cloudflare
+    // firewall rule blocks requests without it, so browsers, other sites and simple scripts can't pull the
+    // catalog (user, 2026-10-30). Not a credential: anyone with the APK can see it; it raises the bar, the
+    // per-IP rate-limit rule and the server's search limit do the rest. Rotate with an app update if abused.
+    const val CDN_APP_HEADER = "X-VRCA-App"
+    const val CDN_APP_MARK = "bb9e10a51fdf92c1bebf5b24"
     private const val KEY_SHARD_DIGITS = "shard_hex_digits"  // v53: shard count from /health (4096 = 3 hex digits)
     private const val KEY_NM_BUCKETS = "nm_buckets"          // v53: clone name-file bucket count from /health
     private const val KEY_D1 = "d1_search"                   // v53: the server's D1 search is live
@@ -625,7 +631,7 @@ object AvatarGlobalDb {
         var conn: HttpURLConnection? = null
         try {
             conn = (URL("$base/fragments/$bucket.json").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A"); connectTimeout = 10_000; readTimeout = 10_000
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A"); setRequestProperty(CDN_APP_HEADER, CDN_APP_MARK); connectTimeout = 10_000; readTimeout = 10_000
             }
             when (conn.responseCode) {
                 200 -> JSONObject(conn.inputStream.bufferedReader().readText()).optJSONObject("e")?.has(avatarId) == true
@@ -655,7 +661,7 @@ object AvatarGlobalDb {
             var conn: HttpURLConnection? = null
             try {
                 conn = (URL("$base/_manifest.json").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A"); setRequestProperty(CDN_APP_HEADER, CDN_APP_MARK)
                     // NEVER serve a stale manifest: the bots' unfilled/stale backlog is driven by this,
                     // and a stale copy pins a phantom "queued N" + an endless fill re-cover. The CDN sets
                     // max-age=30, so bypass any Android HttpURLConnection cache to always read fresh.
@@ -677,7 +683,7 @@ object AvatarGlobalDb {
             var conn: HttpURLConnection? = null
             try {
                 conn = (URL("$base/_worklist.json").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A"); setRequestProperty(CDN_APP_HEADER, CDN_APP_MARK)
                     useCaches = false; setRequestProperty("Cache-Control", "no-cache")   // always fresh work shards
                     connectTimeout = 10_000; readTimeout = 10_000
                 }
@@ -815,7 +821,7 @@ object AvatarGlobalDb {
         var conn: HttpURLConnection? = null
         try {
             conn = (URL("$base/nm/$bucket.json").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A"); setRequestProperty(CDN_APP_HEADER, CDN_APP_MARK)
                 connectTimeout = 10_000; readTimeout = 10_000
             }
             when (conn.responseCode) {
@@ -1111,7 +1117,7 @@ object AvatarGlobalDb {
             var conn: HttpURLConnection? = null
             try {
                 conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A"); setRequestProperty(CDN_APP_HEADER, CDN_APP_MARK)
                     connectTimeout = 10_000; readTimeout = 10_000
                 }
                 if (conn.responseCode != 200) null else JSONObject(conn.inputStream.bufferedReader().readText())
@@ -1141,7 +1147,7 @@ object AvatarGlobalDb {
             var conn: HttpURLConnection? = null
             val transient: Boolean = try {
                 conn = (URL("$base/shard/$prefix.json").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A"); setRequestProperty(CDN_APP_HEADER, CDN_APP_MARK)
                     connectTimeout = 10_000; readTimeout = 10_000
                 }
                 when (conn.responseCode) {

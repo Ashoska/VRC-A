@@ -60,6 +60,9 @@ service = "vrca-avatar-db"
 # /fragments/..., /_manifest.json, /_worklist.json). /health echoes this so a serving change
 # (e.g. a new domain) needs no app update. Points at the R2 bucket's custom domain.
 CATALOG_BASE = "https://cdn.gremlininc.app"
+# App-only marker for cdn.gremlininc.app (the firewall rule blocks reads without it; same value as
+# AvatarGlobalDb.CDN_APP_MARK). Not a credential, see the note there.
+CDN_APP_MARK = "bb9e10a51fdf92c1bebf5b24"
 
 # The Worker's OWN routable URL — used by the self-chaining flush continuation to spawn a fresh
 # invocation (fresh subrequest budget) per drain step. Must be a URL that re-enters THIS worker's
