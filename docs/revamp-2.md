@@ -68,6 +68,10 @@ revamped with that page. A page is DONE only when everything listed under it is 
     readout is now "+new ~calm ✓font −removed". Data that is already free to watch: the local bot
     progress (`AvatarCatalogSweep` RoleView), the flush readout, the Worker `/health` poll (also
     `writesToday`, `calmWaiting`). Any faster polling or new listener needs a cost check first.
+    Numbers should RISE, not pop every 2 min (the Worker only changes them per flush): counters tick
+    up to each new value, and the bots' own local work (checked / filled / removed / waiting to push)
+    is added on top of the last server value so totals climb as it happens, then settle on the real
+    figure at the next flush. No extra polling needed for this.
 
 Leftovers to delete (no callers): `ButtonOverlay`, `AboutScreen`, `DependenciesScreen`,
 `SettingsScreen` (`ui/settings/`), `MainScreen` (`ui/conversation/`). Checked and removed when the
