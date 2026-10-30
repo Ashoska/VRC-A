@@ -2609,7 +2609,7 @@ async function purgeStep(env) {
   // the ETag too; that write queued its own job, so a mismatch here just retries once more.
   const norm = (s) => String(s || "").replace(/^W\//, "").replace(/"/g, "");
   await runPool(jobs.filter((j) => !bad.has(j.u) && j.etag), 6, async (j) => {
-    try { const r = await fetch(j.u, { headers: { "user-agent": "VRC-A purge-verify" } }); await r.body?.cancel(); if (norm(r.headers.get("etag")) !== norm(j.etag)) bad.add(j.u); }
+    try { const r = await fetch(j.u, { headers: { "user-agent": "VRC-A purge-verify", ...(env.CDN_APP_MARK ? { "x-vrca-app": env.CDN_APP_MARK } : {}) } }); await r.body?.cancel(); if (norm(r.headers.get("etag")) !== norm(j.etag)) bad.add(j.u); }
     catch (_) { bad.add(j.u); }
   });
   const retry = jobs.filter((j) => bad.has(j.u));
