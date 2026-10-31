@@ -593,3 +593,13 @@ calls/hr ≈ 300/sec**, 24/7.
   throughout.
 
 *(Modeled estimate — validate against real telemetry before quoting externally.)*
+
+---
+
+## 13. Catalog access + ban linking on the Cloudflare account (✅ decided 2026-10-31, builds with the Cloudflare move)
+Why: the CDN app header + rate limit (`avatar-catalog-worker.md`) only slow a ripper who pulled the header from the APK (all ~8k files in minutes). Real protection needs every catalog read tied to an account we can see and ban.
+- **Account = the VRChat account.** On first launch the app creates (or joins) a VRC-A account on the Cloudflare backend keyed by the VRChat user id, with the device id attached; one account, many devices. No sign-up step for users.
+- **Signed pass.** The Worker signs a short-lived pass (account + device, HMAC with a Worker-only secret, no storage lookup to check). Every catalog request (search, shard/name files, served through the Worker with the edge cache, ~$0 at current size) carries it; usage is counted per account and per device, with a daily allowance and admin ban.
+- **Every login is a link ("trap").** Each identity the app sees is attached to the account: VRChat id, device id, Discord id (RPC login), Spotify id (Now Playing), and any later login. A banned person must change all of them at once; any one match flags the new account for ban evasion. Store only one-way hashes of the ids, never tokens or credentials. Disclose it in the terms/privacy text ("linked account ids are used to enforce bans").
+- **The VRChat id is a claim, not proof** (VRChat has no third-party sign-in; the server never sees the login). The Worker checks once (bot lookup, cached) that the id exists. Automatic bans for scraping hit the device id + pass, never the VRChat id alone, so a ripper borrowing a real user's public id can't get that user banned. A VRChat-id ban needs proof first: the user joins the VRC-A VRChat group from the app and a bot (group admin) sees them in the member list. Used only when a ban is in question, never as a normal sign-up step. Rejected: bio codes, silent friend/invite requests, sending us the VRChat cookie, hardware key attestation (Quest support unconfirmed).
+- **Admin:** the scraper watch from `revamp-2.md` (Admin) becomes per account/device usage with Warn / Temp-block / Ban, plus the linked-id matches.
