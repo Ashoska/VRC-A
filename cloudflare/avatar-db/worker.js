@@ -278,19 +278,10 @@ function isLegacyReassert(o) {
 // Distinct R2 objects one op touches (fragment / avtr / index buckets). Each costs ~1 read + <=1 write,
 // so the drain budgets BUCKETS, not ops: 142 ops x ~10 tokens needed ~1,400 reads, over the ~1000
 // subrequest ceiling, and every read/write past it failed silently while the batch was cleared as done.
-// v53: the old search files (index/ + fragments/) are switched off (user, 2026-10-30: search is D1 now,
-// cloning reads nm/; older apps may lose search until they update). The index pipeline below now only
-// keeps avtr/ (the free "do we already have this avatar id?" check apps and the crawler use). Set true to
-// bring the old files back.
-const LEGACY_SEARCH_FILES = false;
 function opBuckets(o, into) {
+  // v53: only avtr/ is written now (see applyIndexOps).
   const id = o && o.id; if (!id || !String(id).startsWith("avtr_")) return;
-  const fp = fragBucketFor(id);
-  if (!LEGACY_SEARCH_FILES) { if (o.avtr) into.add("a" + fp); return; }
-  if (o.del || o.frag) into.add("f" + fp);
-  if (o.avtr) into.add("a" + fp);
-  for (const t of (o.add || [])) into.add("i" + indexBucketFor(t));
-  for (const t of (o.rem || [])) into.add("i" + indexBucketFor(t));
+  if (o.avtr) into.add("a" + fragBucketFor(id));
 }
 const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
 // Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The index-op backlog beyond this cap
@@ -460,117 +451,40 @@ async function runPool(items, n, fn) {
   await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
 }
 async function applyIndexOps(env, ops) {
+  // v53 cleanup: search is D1 + nm/ now, so the index pipeline only keeps avtr/ (the free "do we already have
+  // this avatar id?" presence files apps and the crawler read). The old fragments/ + index/ writers are gone.
   if (!ops.length) return [];
-  // v40: a read that THROWS (vs an absent object) must never be treated as empty — writing back
-  // "empty + this batch" would wipe the bucket's other entries. Skip that bucket and throw at the end,
-  // so the caller requeues the whole batch (idempotent).
+  // A read that THROWS (vs an absent object) must never be treated as empty (writing back "empty + this batch"
+  // would wipe the bucket); skip it and throw at the end so the caller requeues the batch (idempotent).
   let readFailed = false, firstErr = "";
   const fail = (what, e) => { readFailed = true; if (!firstErr) firstErr = what + ": " + String(e && e.message || e).slice(0, 100); };
-  const fragWork = {};   // prefix -> { set:{id:summary}, del:Set(id) }
   const avtrWork = {};   // prefix -> { add:Set, rem:Set }
-  const idxWork = {};    // indexBucket -> { token -> {add:Set, rem:Set} }
   for (const o of ops) {
     const id = o.id; if (!id || !String(id).startsWith("avtr_")) continue;
     const fp = fragBucketFor(id);
-    const fw = (fragWork[fp] ||= { set: {}, del: new Set() });
-    // Collect del + set INDEPENDENTLY (do NOT let one cancel the other here); the apply step below
-    // resolves a same-id conflict as SET-wins, so a re-key (remove old fileId + add new fileId, SAME
-    // avatarId, one flush) keeps the fragment instead of dropping it on op order.
-    if (LEGACY_SEARCH_FILES && o.del) fw.del.add(id);
-    if (LEGACY_SEARCH_FILES && o.frag) fw.set[id] = o.frag;
     if (o.avtr === "a") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).add.add(id);
     else if (o.avtr === "r") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).rem.add(id);
-    // Token maps have NO prototype: a plain {} hands the token "constructor" Object's inherited
-    // function, so `.add.add` threw, the whole drain failed and requeued, every flush (poison op).
-    if (!LEGACY_SEARCH_FILES) continue;
-    for (const t of (o.add || [])) ((idxWork[indexBucketFor(t)] ||= Object.create(null))[t] ||= { add: new Set(), rem: new Set() }).add.add(id);
-    for (const t of (o.rem || [])) ((idxWork[indexBucketFor(t)] ||= Object.create(null))[t] ||= { add: new Set(), rem: new Set() }).rem.add(id);
   }
   const changed = [];
   const base = env.CATALOG_BASE ? env.CATALOG_BASE.replace(/\/$/, "") : null;
   const ttl = { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + INDEX_TTL } };
-  // v41: buckets are independent objects, so they're processed INDEX_IO_CONCURRENCY at a time
-  // instead of one by one (same subrequest count; a ~300-bucket drain took ~100 s of wall time
-  // sequentially, which also held the chain lock and starved the cron's reconcile).
-  // Fragments + avtr share the avatarId prefix.
-  const fragAvtr = async (p) => {
-    const fw = fragWork[p], aw = avtrWork[p];
-    if (fw && (Object.keys(fw.set).length || fw.del.size)) await (async () => {
-      let cur = { v: 1, e: {} }, rf = false;
-      try { const o = await env.CATALOG.get(`fragments/${p}.json`); if (o) cur = await o.json(); } catch (e) { rf = true; fail(`get fragments/${p}`, e); }
-      if (rf) return;
-      if (!cur || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
-      // NO-OP GUARD: only rewrite when a summary actually CHANGES (re-adding an already-indexed
-      // avatar whose summary is identical, or a delete of an absent id, must not rewrite the bucket).
-      // This is the frag/avtr/index equivalent of the shard `dirty` flag — the biggest wasted Class A.
-      let dirty = false;
-      // DEL before SET so SET wins a same-id conflict: a re-key's remove(old fileId) + add(new fileId)
-      // for the SAME avatarId both land here; deleting first then setting keeps the fragment. A del whose
-      // id is also being set is skipped entirely (the avatar is alive under the new key).
-      for (const id of fw.del) { if (!(id in fw.set) && id in cur.e) { delete cur.e[id]; dirty = true; } }
-      for (const [id, summary] of Object.entries(fw.set)) {
-        if (JSON.stringify(cur.e[id]) !== JSON.stringify(summary)) { cur.e[id] = summary; dirty = true; }
-      }
-      if (dirty) {
-        try { await env.CATALOG.put(`fragments/${p}.json`, JSON.stringify({ v: 1, e: cur.e }), ttl);
-          if (base) changed.push(base + `/fragments/${p}.json`); } catch (e) { fail(`put fragments/${p}`, e); }
-      }
-    })();
-    if (aw && (aw.add.size || aw.rem.size)) await (async () => {
-      let cur = { v: 1, ids: [] }, rf = false;
-      try { const o = await env.CATALOG.get(`avtr/${p}.json`); if (o) cur = await o.json(); } catch (e) { rf = true; fail(`get avtr/${p}`, e); }
-      if (rf) return;
-      if (!cur || !Array.isArray(cur.ids)) cur = { v: 1, ids: [] };
-      const s = new Set(cur.ids);
-      // NO-OP GUARD: only dirty when a membership actually changes (add of an id already present /
-      // remove of an absent id rewrote the bucket identically — the reconcile re-add + requeue waste).
-      // REM before ADD so ADD wins a same-id conflict (see the index-token loop below for the full
-      // re-key rationale): a re-keyed avatar stays in the avtr/ presence set.
-      let dirty = false;
-      for (const id of aw.rem) { if (s.has(id)) { s.delete(id); dirty = true; } }
-      for (const id of aw.add) { if (!s.has(id)) { s.add(id); dirty = true; } }
-      if (dirty) {
-        try { await env.CATALOG.put(`avtr/${p}.json`, JSON.stringify({ v: 1, ids: Array.from(s) }), ttl);
-          if (base) changed.push(base + `/avtr/${p}.json`); } catch (e) { fail(`put avtr/${p}`, e); }
-      }
-    })();
-  };
-  await runPool([...new Set([...Object.keys(fragWork), ...Object.keys(avtrWork)])], INDEX_IO_CONCURRENCY, fragAvtr);
-  // Index token lists.
-  await runPool(Object.entries(idxWork), INDEX_IO_CONCURRENCY, async ([b, toks]) => {
-    let cur = { v: 1, t: {} }, rf = false;
-    try { const o = await env.CATALOG.get(`index/${b}.json`); if (o) cur = await o.json(); } catch (e) { rf = true; fail(`get index/${b}`, e); }
-    if (rf) return;
-    if (!cur || typeof cur.t !== "object" || cur.t === null) cur = { v: 1, t: {} };
-    // NO-OP GUARD per token: only rewrite the bucket when at least one token's posting list actually
-    // changed (a re-emitted ADD for an already-listed id, common after reconcile/requeue, was
-    // rewriting the whole bucket identically).
+  await runPool(Object.keys(avtrWork), INDEX_IO_CONCURRENCY, async (p) => {
+    const aw = avtrWork[p];
+    let cur = { v: 1, ids: [] };
+    try { const o = await env.CATALOG.get(`avtr/${p}.json`); if (o) cur = await o.json(); } catch (e) { fail(`get avtr/${p}`, e); return; }
+    if (!cur || !Array.isArray(cur.ids)) cur = { v: 1, ids: [] };
+    const s = new Set(cur.ids);
+    // Only dirty when membership changes. REM before ADD so ADD wins a same-id conflict: a re-keyed avatar
+    // (remove old fileId + add new fileId, same avatar id, one flush) stays present.
     let dirty = false;
-    for (const [tok, ch] of Object.entries(toks)) {
-      const s = new Set(Array.isArray(cur.t[tok]) ? cur.t[tok] : []);
-      // REM before ADD so ADD wins a same-id conflict. On a RE-KEY (an avatar whose image changed:
-      // remove under the OLD fileId + add under the NEW fileId, SAME avatarId, ONE flush) both a rem and
-      // an add for this avatarId land in this token's posting list. The old add-then-rem order let the
-      // stale rem delete the id the add just inserted, so the (still-alive) avatar VANISHED from search
-      // until the next fold lap re-added it — then the next re-key stripped it again ("appeared then
-      // disappeared"). Applying rem first then add keeps a re-keyed avatar searchable; a genuine delete
-      // (rem only, no add) still removes it.
-      let tdirty = false;
-      for (const id of ch.rem) { if (s.has(id)) { s.delete(id); tdirty = true; } }
-      for (const id of ch.add) { if (!s.has(id)) { s.add(id); tdirty = true; } }
-      if (!tdirty) continue;
-      let ids = Array.from(s);
-      if (ids.length > INDEX_HOT_TOKEN_CAP) ids = ids.slice(0, INDEX_HOT_TOKEN_CAP);
-      if (ids.length) cur.t[tok] = ids; else delete cur.t[tok];
-      dirty = true;
-    }
+    for (const id of aw.rem) { if (s.has(id)) { s.delete(id); dirty = true; } }
+    for (const id of aw.add) { if (!s.has(id)) { s.add(id); dirty = true; } }
     if (dirty) {
-      try { await env.CATALOG.put(`index/${b}.json`, JSON.stringify({ v: 1, t: cur.t }), ttl);
-        if (base) changed.push(base + `/index/${b}.json`); } catch (e) { fail(`put index/${b}`, e); }
+      try { await env.CATALOG.put(`avtr/${p}.json`, JSON.stringify({ v: 1, ids: Array.from(s) }), ttl);
+        if (base) changed.push(base + `/avtr/${p}.json`); } catch (e) { fail(`put avtr/${p}`, e); }
     }
   });
-  // Any failed read or write → the caller requeues the whole batch (re-applying is idempotent).
-  if (readFailed) throw new Error(firstErr || "index bucket read/write failed");
+  if (readFailed) throw new Error(firstErr || "avtr bucket read/write failed");
   return changed;
 }
 
@@ -2027,20 +1941,7 @@ async function flushR2(env) {
     // re-folds the entry if its plain-text tokens are out of date and stamps `fv`, so it's flagged
     // once per rules change. Nothing to fix → no write. (Older admin apps still send every unchanged
     // avatar here: ASCII ones are a no-op, fancy ones get the same one-time stamp.)
-    // v53: font checks only re-fold the OLD search files' tokens; with those off (D1 folds every write itself)
-    // a font flag must not rewrite the shard (it was pure wasted writes).
-    if (LEGACY_SEARCH_FILES) for (const fid of ops.checked) if (e[fid]) {
-      const ent = e[fid];
-      if (needsFold(ent)) {
-        const sig = foldSig(ent);
-        if (ent.fz !== sig) {
-          const op = foldOp(ent);
-          if (op.add.length) sIndexOps.push(op);
-          ent.fz = sig; dirty = true;
-        }
-      }
-      if (hasNonAscii(ent) && ent.fv !== FOLD_STAMP_V) { ent.fv = FOLD_STAMP_V; dirty = true; }
-    }
+    // v53: bot font flags (`checked` ids) are ignored: they only re-folded the old search files' tokens.
     for (const fid of ops.removes) if (e[fid]) {
       const prev = e[fid]; delete e[fid]; sRemoved++; sRemItems.push(item(prev)); dirty = true; contentDirty = true;
       const op = buildIndexOp(prev, null, fid); if (op) sIndexOps.push(op);
@@ -2588,10 +2489,25 @@ async function searchStep(env) {
       out.applied = got.items.length;
     }
     Object.assign(out, await purgeStep(env));
+    Object.assign(out, await legacyFilesCleanup(env));
     if (env.SEARCH && got.items.length < 100) Object.assign(out, await searchFillStep(env));
   } finally { await hubUnlock(env, "search"); }
   try { await hubPut(env, "searchStat", JSON.stringify({ at: Date.now(), ...out })); } catch (_) {}
   return out;
+}
+
+// One-time cleanup (v53): delete the old search files (index/ + fragments/, ~8,200 objects) in bulk, 1,000 per
+// step, until none are left; then it's a no-op (a hub flag). R2 deletes are free; each list is one Class A op.
+async function legacyFilesCleanup(env) {
+  if ((await hubGet(env, "legacyGone")) === "1") return {};
+  let deleted = 0;
+  for (const prefix of ["index/", "fragments/"]) {
+    const l = await env.CATALOG.list({ prefix, limit: 1000 });
+    const keys = (l.objects || []).map((o) => o.key);
+    if (keys.length) { await env.CATALOG.delete(keys); deleted += keys.length; break; }
+  }
+  if (!deleted) await hubPut(env, "legacyGone", "1");
+  return { legacyDeleted: deleted };
 }
 
 // Guaranteed purge: a job leaves the queue only when Cloudflare confirmed the purge AND the CDN serves the
