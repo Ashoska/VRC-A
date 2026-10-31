@@ -206,7 +206,9 @@ object CrashReport {
      */
     fun holdService(s: android.app.Service): Boolean {
         if (!safeStart) return false
-        runCatching { s.stopSelf() }
+        // Not a plain stopSelf: a sticky/watchdog restart comes through startForegroundService, and stopping without
+        // startForeground made Android kill the app again with no report (a crash loop behind the crash screen).
+        s.stopWithoutForegroundCrash()
         return true
     }
 

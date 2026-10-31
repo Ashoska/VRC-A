@@ -2,6 +2,7 @@ package com.vrca.discord
 
 import android.annotation.SuppressLint
 import com.vrca.app.startForegroundSafely
+import com.vrca.app.stopWithoutForegroundCrash
 import android.app.Notification
 import android.graphics.Bitmap
 import android.app.NotificationChannel
@@ -284,6 +285,9 @@ class DiscordRpcService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /** A START this service won't serve (Discord status disabled, or a safe start): see [stopWithoutForegroundCrash]. */
+    private fun stopWithoutCrash() = stopWithoutForegroundCrash()
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // A safe start after a crash (CrashReport): stay down until "Start VRC-A".
         if (com.vrca.app.CrashReport.holdService(this)) return START_NOT_STICKY
@@ -297,7 +301,7 @@ class DiscordRpcService : Service() {
         }
         // Account standing: Discord status disabled by an admin (or banned) → don't run. The login is kept.
         if (com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.Discord)) {
-            teardown(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); return START_NOT_STICKY
+            teardown(); stopWithoutCrash(); return START_NOT_STICKY
         }
         // A null intent is a START_STICKY restart. If the user swiped the app away,
         // honour the deliberate kill so this WebView-backed service doesn't resurrect

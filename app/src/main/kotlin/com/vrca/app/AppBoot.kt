@@ -567,6 +567,7 @@ private object BootDiscordStart { @Volatile var sent = false }
 
 private fun startDiscordRpc(ctx: Context) {
     if (BootDiscordStart.sent) return
+    if (Standing.isOff(Standing.Feature.Discord)) return   // disabled by an admin: don't start it just to stop
     BootDiscordStart.sent = true
     runCatching {
         androidx.core.content.ContextCompat.startForegroundService(
