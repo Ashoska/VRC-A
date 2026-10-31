@@ -154,8 +154,9 @@ object AdminStandingStore {
         return manual?.let { Standing.Level.of(it.level) } ?: autoLevel(acts, now)
     }
 
-    /** Saves [a] (or removes it when [remove]) and rebuilds what the user sees, account-wide. */
-    suspend fun save(ctx: Context, db: FirebaseFirestore, a: Act, remove: Boolean = false) {
+    /** Saves [a] (or removes it when [remove]) and rebuilds what the user sees, account-wide. Returns false when
+     *  the record saved but the Worker's server blocks (search / contributing) couldn't be updated. */
+    suspend fun save(ctx: Context, db: FirebaseFirestore, a: Act, remove: Boolean = false): Boolean {
         val now = System.currentTimeMillis()
         // The account's device docs (the same set applyAccountWide writes).
         val target = db.collection("users").document(a.docId).get().await()
@@ -201,6 +202,26 @@ object AdminStandingStore {
             "banned" to (ban != null), "banReason" to (ban?.title ?: ""),
             "updatedAt" to FieldValue.serverTimestamp()
         ))
+        // Server blocks (Worker v58): search and contributing for every id of the account; a live ban blocks both.
+        val liveActs = all.filter { isLive(it, now) }
+        fun until(feature: String): Long {
+            val ends = liveActs.mapNotNull { x -> if (x.kind == "ban") x.banUntil else x.off[feature] }.filter { it == -1L || it > now }
+            return if (ends.isEmpty()) 0L else if (-1L in ends) -1L else ends.max()
+        }
+        val ids = (hashes + vid).filter { it.length >= 8 }
+        return pushBlocks(ctx, ids, until(Standing.Feature.AvatarSearch.key), until(Standing.Feature.AvatarContribute.key))
+    }
+
+    private suspend fun pushBlocks(ctx: Context, ids: List<String>, s: Long, c: Long): Boolean = withContext(Dispatchers.IO) {
+        val k = key(ctx).ifBlank { return@withContext false }
+        runCatching {
+            val body = org.json.JSONObject().put("key", k).put("ids", org.json.JSONArray(ids)).put("s", s).put("c", c).toString().toByteArray()
+            val conn = (java.net.URL("$BASE/admin/standing").openConnection() as java.net.HttpURLConnection).apply {
+                requestMethod = "POST"; doOutput = true; setRequestProperty("Content-Type", "application/json"); connectTimeout = 10_000; readTimeout = 15_000
+            }
+            conn.outputStream.use { it.write(body) }
+            (conn.responseCode == 200).also { conn.disconnect() }
+        }.getOrDefault(false)
     }
 
     // ---- evidence (Worker v57, admin key from the Bots tab) ----
@@ -348,7 +369,10 @@ private fun ActionEditor(target: StandingTarget, start: AdminStandingStore.Act, 
             runCatching {
                 if (remove) start.evidence.forEach { AdminStandingStore.delete(ctx, it.id) }
                 AdminStandingStore.save(ctx, db, current(), remove)
-            }.onSuccess { if (close) onSaved() }.onFailure { error = it.message?.take(200) }
+            }.onSuccess { serverOk ->
+                if (!serverOk) error = "Saved. Server blocks not updated: check the admin key in the Bots tab, then save again."
+                else if (close) onSaved()
+            }.onFailure { error = it.message?.take(200) }
             busy = false
         }
     }

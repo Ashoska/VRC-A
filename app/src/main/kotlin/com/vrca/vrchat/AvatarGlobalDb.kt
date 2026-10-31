@@ -875,6 +875,7 @@ object AvatarGlobalDb {
     }
     private suspend fun searchD1Once(context: Context, query: String, offset: Int, author: String?, filt: String = ""): D1Result {
         val device = installId(context)
+        val whoValue = whoHeader(context)
         return kotlinx.coroutines.withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
@@ -883,6 +884,7 @@ object AvatarGlobalDb {
                 conn = (URL("$SEARCH_URL?q=$q&o=$offset$au$filt").openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
                     setRequestProperty("X-VRCA-Device", device)
+                    if (whoValue.length > 1) setRequestProperty("X-VRCA-Who", whoValue)
                     connectTimeout = 10_000; readTimeout = 15_000
                 }
                 if (conn.responseCode == 429) {
@@ -1260,7 +1262,7 @@ object AvatarGlobalDb {
             while (sent < items.size) {
                 val end = minOf(sent + CONTRIBUTE_CHUNK, items.size)
                 val chunk = JSONArray().apply { for (i in sent until end) put(items[i]) }
-                if (!post("$WORKER_URL/contribute", JSONObject().put("entries", chunk).put("by", by).toString())) break
+                if (!post("$WORKER_URL/contribute", JSONObject().put("entries", chunk).put("by", by).toString(), whoHeader(context))) break
                 sent = end
             }
             if (sent >= items.size) {
@@ -1296,18 +1298,29 @@ object AvatarGlobalDb {
         }
     }
 
-    private fun post(url: String, body: String): Boolean {
+    /** "<deviceHash>.<vrchatUserId>" for the Worker's account-standing blocks (v58; search + contributing). */
+    @Volatile private var who: String = ""
+    fun whoHeader(context: Context): String {
+        if (who.isNotEmpty()) return who
+        val dh = context.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE).getString("device_id_hash", "").orEmpty()
+        val vid = runCatching { VrchatAuthManager.getStoredUserId(context) }.getOrNull().orEmpty()
+        return "$dh.$vid".also { if (dh.isNotEmpty() && vid.isNotEmpty()) who = it }
+    }
+
+    private fun post(url: String, body: String, whoValue: String = ""): Boolean {
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("User-Agent", "VRC-A")
+                if (whoValue.isNotEmpty()) setRequestProperty("X-VRCA-Who", whoValue)
                 doOutput = true
                 connectTimeout = 12_000; readTimeout = 12_000
             }
             conn.outputStream.use { it.write(body.toByteArray()) }
-            conn.responseCode in 200..299
+            // 403 = contributing is disabled on this account (account standing): drop the batch, don't retry forever.
+            conn.responseCode in 200..299 || (whoValue.isNotEmpty() && conn.responseCode == 403)
         } catch (e: Exception) {
             Log.w(TAG, "POST $url failed: ${e.message}"); false
         } finally { runCatching { conn?.disconnect() } }

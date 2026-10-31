@@ -538,7 +538,28 @@ export default {
         return res;
       }
 
+      if (req.method === "POST" && url.pathname === "/admin/standing") {
+        // v58: the admin's account-standing blocks the server enforces (search + contributing). Body:
+        // { key, ids: [deviceHash…, vrchatUserId], s: until ms | -1 forever | 0 off, c: same }. Set by the admin app's
+        // standing page on every save for that account.
+        const body = await req.json().catch(() => ({}));
+        if (!env.ADMIN_KEY || body.key !== env.ADMIN_KEY) return json({ ok: false, error: "unauthorized" }, 401);
+        const ids = (Array.isArray(body.ids) ? body.ids : []).filter((x) => typeof x === "string" && STD_ID_RE.test(x)).slice(0, 50);
+        if (!ids.length) return json({ ok: false, error: "no ids" }, 400);
+        const b = await stdBlocks(env, true);
+        const val = (x) => (x === -1 || (typeof x === "number" && x > Date.now())) ? x : 0;
+        const s = val(body.s), c = val(body.c);
+        for (const id of ids) { if (s || c) b.a[id] = { s, c }; else delete b.a[id]; }
+        // IPs those ids marked are dropped (re-marked on the next request if still blocked), so lifting a block lifts it now.
+        for (const ip of Object.keys(b.ip)) if (ids.includes(b.ip[ip].by)) delete b.ip[ip];
+        stdPrune(b);
+        await hubPut(env, "stdBlocks", JSON.stringify(b));
+        STD_CACHE.at = Date.now(); STD_CACHE.v = b;
+        return json({ ok: true, ids: ids.length, s, c });
+      }
+
       if (req.method === "POST" && url.pathname === "/contribute") {
+        if (await stdBlocked(env, req, "c")) return json({ ok: false, error: "disabled" }, 403);
         const body = await req.json().catch(() => null);
         const list = body && Array.isArray(body.entries)
           ? body.entries
@@ -988,7 +1009,7 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 57,   // v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
+          version: 58,   // v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
          //   // v55: /search filters pl + rk (applied on the Search press).
          //   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
          //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
@@ -2838,9 +2859,51 @@ async function searchRateLimit(req, url) {
   await Promise.all([put(devKey, String(now), gap + 1000), put(ipKey, JSON.stringify(win), SEARCH_IP_WINDOW_MS + 1000)]);
   return 0;
 }
+// ---- v58 account-standing blocks (search "s", contributing "c") ----
+// Hub key `stdBlocks` = { a: { id: { s, c } }, ip: { ip: { s, c } } } (until ms, -1 forever, 0 off). The app sends
+// X-VRCA-Who: "<deviceHash>.<vrchatUserId>". A request from a blocked id also marks its IP for up to 24 h, so a modified
+// app that drops or fakes the header on the same network is still blocked (shared networks: search/contributing only,
+// a day at most). Read once a minute per isolate; written only by the admin and when a blocked id shows up.
+const STD_ID_RE = /^[A-Za-z0-9_-]{8,80}$/;
+const STD_IP_MAX_MS = 24 * 3600_000;
+const STD_CACHE = { at: 0, v: null };
+async function stdBlocks(env, fresh) {
+  if (!fresh && STD_CACHE.v && Date.now() - STD_CACHE.at < 60_000) return STD_CACHE.v;
+  let v = { a: {}, ip: {} };
+  try { const raw = await hubGet(env, "stdBlocks"); if (raw) { const j = JSON.parse(raw); v = { a: j.a || {}, ip: j.ip || {} }; } } catch (_) {}
+  STD_CACHE.at = Date.now(); STD_CACHE.v = v;
+  return v;
+}
+function stdLive(e, f) { const u = e && e[f]; return u === -1 || (typeof u === "number" && u > Date.now()); }
+function stdPrune(b) {
+  for (const m of [b.a, b.ip]) for (const k of Object.keys(m)) if (!stdLive(m[k], "s") && !stdLive(m[k], "c")) delete m[k];
+}
+async function stdBlocked(env, req, f) {
+  const b = await stdBlocks(env, false);
+  if (!Object.keys(b.a).length && !Object.keys(b.ip).length) return false;
+  const ip = req.headers.get("cf-connecting-ip") || "";
+  const ids = (req.headers.get("x-vrca-who") || "").split(".").filter((x) => STD_ID_RE.test(x));
+  const hitId = ids.find((id) => stdLive(b.a[id], f)), hit = hitId ? b.a[hitId] : null;
+  if (hit) {
+    if (ip) {
+      const cap = Date.now() + STD_IP_MAX_MS;
+      const want = { s: stdLive(hit, "s") ? (hit.s === -1 ? cap : Math.min(hit.s, cap)) : 0, c: stdLive(hit, "c") ? (hit.c === -1 ? cap : Math.min(hit.c, cap)) : 0, by: hitId };
+      const cur = b.ip[ip];
+      if (!cur || (cur.s || 0) < want.s - 600_000 || (cur.c || 0) < want.c - 600_000) {
+        const fresh = await stdBlocks(env, true);
+        fresh.ip[ip] = want; stdPrune(fresh);
+        try { await hubPut(env, "stdBlocks", JSON.stringify(fresh)); } catch (_) {}
+      }
+    }
+    return true;
+  }
+  return !!ip && stdLive(b.ip[ip], f);
+}
+
 async function handleSearch(req, env, ctx, url) {
   const cors = { "access-control-allow-origin": "*" };
   if (!env.SEARCH) return json({ ok: false, error: "search not configured" }, 503);
+  if (await stdBlocked(env, req, "s")) return new Response(JSON.stringify({ ok: false, error: "disabled" }), { status: 403, headers: { "content-type": "application/json", ...cors } });
   const wait = await searchRateLimit(req, url);
   if (wait > 0) return new Response(JSON.stringify({ ok: false, error: "slow down", retryAfterMs: wait }),
     { status: 429, headers: { "content-type": "application/json", "retry-after": String(Math.ceil(wait / 1000)), ...cors } });

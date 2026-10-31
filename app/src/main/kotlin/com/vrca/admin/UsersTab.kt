@@ -741,10 +741,6 @@ internal fun UsersTab(
                     // buttons below — it was previously a single mis-tappable tap.
                     var showKillConfirm by remember(selectedDocId) { mutableStateOf(false) }
                     var showStanding by remember(selectedDocId) { mutableStateOf(false) }
-                    com.vrca.ui.common.GremlinButton(
-                        onClick = { showStanding = true }, modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
-                        kind = com.vrca.ui.common.GremlinButtonKind.Secondary
-                    ) { Text("Account standing") }
                     if (showStanding) AdminStandingDialog(
                         StandingTarget(row.docId, row.vrchatDisplayName.ifBlank { row.displayName }, row.vrchatUserId),
                         onClose = { showStanding = false }
@@ -752,23 +748,14 @@ internal fun UsersTab(
 
                     // Actions side-by-side for a tidy footer.
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        // "Moderate" (the old warn/ban tab) was replaced by the account standing page (2026-10-31).
                         com.vrca.ui.common.GremlinButton(
-                            onClick = {
-                                onSendToModeration(ModerationTarget(
-                                    docId = row.docId, authUid = row.authUid,
-                                    deviceHash = row.deviceHash,
-                                    displayName = row.vrchatDisplayName.ifBlank { row.displayName },
-                                    vrchatUserId = row.vrchatUserId,
-                                    banned = row.banned, warned = row.warned,
-                                    banReason = selectedDetail?.banReason ?: "",
-                                    warnReason = selectedDetail?.warnReason ?: ""
-                                ))
-                            },
+                            onClick = { showStanding = true },
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Filled.Gavel, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("Moderate")
+                            Text("Standing")
                         }
 
                         com.vrca.ui.common.GremlinButton(
