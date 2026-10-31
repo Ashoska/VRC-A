@@ -69,7 +69,7 @@ internal fun AnnouncementsTab(
 ) {
     val scope = rememberCoroutineScope()
     val announcements = remember { mutableStateListOf<AnnouncementRow>() }
-    val githubPat = BuildConfig.GITHUB_PAT
+    val ctx = androidx.compose.ui.platform.LocalContext.current.applicationContext
 
     var newTitle by rememberSaveable { mutableStateOf("") }
     var newActive by rememberSaveable { mutableStateOf(true) }
@@ -77,7 +77,7 @@ internal fun AnnouncementsTab(
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     // The rich body being authored. Backed by AdminRuntime (PROCESS lifetime) so the
     // content + in-flight media uploads survive the media picker recreating the
-    // Activity. One write; media on GitHub; zero Firestore reads.
+    // Activity. One write; media on Cloudflare; zero Firestore reads.
     val blocks = remember { AdminRuntime.editorBlocksFor("announcement") }
 
     fun resetForm() {
@@ -151,7 +151,7 @@ internal fun AnnouncementsTab(
                     label = { Text("Title") }
                 )
 
-                RichDocEditor(blocks = blocks, githubPat = githubPat, editorKey = "announcement")
+                RichDocEditor(blocks = blocks, editorKey = "announcement")
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -218,7 +218,7 @@ internal fun AnnouncementsTab(
                                         )
                                         // Delete media that was in the old version but not the new one.
                                         val newMedia = doc.mediaUrls()
-                                        githubDeleteMedia(oldMedia.filter { it !in newMedia }, githubPat)
+                                        deleteMedia(ctx, oldMedia.filter { it !in newMedia })
                                     }
                                     resetForm()
                                     setGlobalLoading(false)
@@ -249,7 +249,7 @@ internal fun AnnouncementsTab(
                     onClick = {
                         scope.launch {
                             setGlobalLoading(true); setError(null)
-                            val n = githubSweepOrphans(db, githubPat)
+                            val n = sweepMediaOrphans(ctx, db)
                             setGlobalLoading(false)
                             setError(if (n > 0) "Removed $n unused file(s) from storage." else "No unused files found.")
                         }
@@ -301,7 +301,7 @@ internal fun AnnouncementsTab(
                                             db.collection("announcements").document(a.id).delete().await()
                                             announcements.removeAll { it.id == a.id }
                                             if (editingId == a.id) resetForm()
-                                            githubDeleteMedia(media, githubPat)  // free the orphaned files
+                                            deleteMedia(ctx, media)  // free the orphaned files
                                             setGlobalLoading(false)
                                         }.onFailure { e ->
                                             setGlobalLoading(false)

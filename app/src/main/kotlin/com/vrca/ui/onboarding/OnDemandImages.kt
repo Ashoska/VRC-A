@@ -36,15 +36,18 @@ import java.util.concurrent.atomic.AtomicLong
  */
 object ImageManifest {
     private const val TAG = "ImageManifest"
-    const val BASE = "https://raw.githubusercontent.com/Ashoska/VRC-A-Image-store/main"
+    /** The pictures' home since Worker v54: Cloudflare R2 (`media/`), copied from the GitHub image store. */
+    const val CDN_BASE = "https://cdn.gremlininc.app/media"
+    /** The GitHub image store: the fallback while the Cloudflare copy isn't there, and what old apps read. */
+    const val GH_BASE = "https://raw.githubusercontent.com/Ashoska/VRC-A-Image-store/main"
     private const val FILE = "image_manifest.json"
     private const val FRESH_MS = 60_000L
 
-    data class Entry(val key: String, val path: String, val sha256: String, val bytes: Long) {
+    data class Entry(val key: String, val path: String, val sha256: String, val bytes: Long, val base: String = GH_BASE) {
         /** The picture's own name in its group ("platform_rules" for "tos/platform_rules"). */
         val name: String get() = key.substringAfterLast('/')
         val ext: String get() = path.substringAfterLast('.', "png")
-        val url: String get() = "$BASE/$path"
+        val url: String get() = "$base/$path"
     }
 
     @Volatile private var entries: Map<String, Entry>? = null
@@ -60,19 +63,23 @@ object ImageManifest {
     suspend fun get(ctx: Context): Map<String, Entry>? = lock.withLock {
         val now = System.currentTimeMillis()
         entries?.let { if (now - fetchedAt < FRESH_MS) return@withLock it }
+        // Cloudflare first; the GitHub list only if that one can't be read. The list names its own `base`.
         val fresh = withContext(Dispatchers.IO) {
-            try {
-                val conn = (URL("$BASE/manifest.json").openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 8000; readTimeout = 8000; useCaches = false
-                }
+            listOf(CDN_BASE, GH_BASE).firstNotNullOfOrNull { base ->
                 try {
-                    if (conn.responseCode != 200) null
-                    else conn.inputStream.bufferedReader().use { it.readText() }.let { text ->
-                        parse(text).also { File(ctx.filesDir, FILE).writeText(text) }
+                    val conn = (URL("$base/manifest.json").openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 8000; readTimeout = 8000; useCaches = false
+                        setRequestProperty(com.vrca.vrchat.AvatarGlobalDb.CDN_APP_HEADER, com.vrca.vrchat.AvatarGlobalDb.CDN_APP_MARK)
                     }
-                } finally { conn.disconnect() }
-            } catch (e: Exception) {
-                Log.w(TAG, "manifest fetch failed", e); null
+                    try {
+                        if (conn.responseCode != 200) null
+                        else conn.inputStream.bufferedReader().use { it.readText() }.let { text ->
+                            parse(text).also { File(ctx.filesDir, FILE).writeText(text) }
+                        }
+                    } finally { conn.disconnect() }
+                } catch (e: Exception) {
+                    Log.w(TAG, "manifest fetch failed ($base)", e); null
+                }
             }
         }
         if (fresh != null) { entries = fresh; fetchedAt = now; fresh } else known(ctx)
@@ -85,10 +92,12 @@ object ImageManifest {
     fun versionedUrl(ctx: Context, key: String): String? = known(ctx)?.get(key)?.let { "${it.url}?v=${it.sha256.take(12)}" }
 
     private fun parse(text: String): Map<String, Entry> {
-        val images = JSONObject(text).getJSONObject("images")
+        val root = JSONObject(text)
+        val base = root.optString("base").ifBlank { GH_BASE }.trimEnd('/')
+        val images = root.getJSONObject("images")
         return images.keys().asSequence().associateWith { k ->
             val o = images.getJSONObject(k)
-            Entry(k, o.getString("path"), o.getString("sha256"), o.optLong("bytes"))
+            Entry(k, o.getString("path"), o.getString("sha256"), o.optLong("bytes"), base)
         }
     }
 }
@@ -208,6 +217,7 @@ class OnDemandImages(private val tag: String, private val dirName: String, priva
             val conn = (URL(e.url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 8000; readTimeout = 8000; useCaches = false
                 if (have > 0) setRequestProperty("Range", "bytes=$have-")
+                setRequestProperty(com.vrca.vrchat.AvatarGlobalDb.CDN_APP_HEADER, com.vrca.vrchat.AvatarGlobalDb.CDN_APP_MARK)
             }
             // Cancelling (a stall, or the screen going away) closes the connection, which ends a blocked read.
             val closer = job?.invokeOnCompletion { if (it != null) conn.disconnect() }

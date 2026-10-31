@@ -650,6 +650,52 @@ export default {
         return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length, authorRenames: authorRenames.length });
       }
 
+      if (url.pathname === "/admin/media") {
+        // Admin rich-content media (announcement / release pictures, GIFs, videos) on R2 under media/rich/,
+        // served at <CATALOG_BASE>/media/rich/<name>. Replaces the GitHub rich-media release.
+        // POST ?name=  body = the file  -> { url }   (names are unique per upload, never overwritten)
+        // DELETE ?name=                 -> removes it (+ cache clear)
+        // GET                           -> { names } (for the admin orphan sweep)
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) return json({ ok: false, error: "unauthorized" }, 401);
+        if (req.method === "GET") return json({ ok: true, names: await mediaRichNames(env) });
+        const name = url.searchParams.get("name") || "";
+        if (!MEDIA_NAME_RE.test(name)) return json({ ok: false, error: "bad name" }, 400);
+        const k = "media/rich/" + name;
+        if (req.method === "DELETE") {
+          await env.CATALOG.delete(k);
+          await hubQueuePush(env, "pq", [{ u: catalogUrl(env, k), etag: "", t0: Date.now() }]);
+          return json({ ok: true });
+        }
+        if (req.method === "POST") {
+          const len = Number(req.headers.get("content-length") || 0);
+          if (!len || len > MEDIA_MAX_BYTES) return json({ ok: false, error: "size" }, 413);
+          const fls = new FixedLengthStream(len);
+          const pipe = req.body.pipeTo(fls.writable);
+          await env.CATALOG.put(k, fls.readable, { httpMetadata: { contentType: mediaType(name), cacheControl: MEDIA_RICH_CC } });
+          await pipe;
+          return json({ ok: true, url: catalogUrl(env, k) });
+        }
+        return json({ ok: false }, 405);
+      }
+
+      if (req.method === "POST" && url.pathname === "/admin/mediapic") {
+        // Replace or add an app picture (?pic=tos/platform_rules&ext=png, body = the file): stored under
+        // media/images/, its manifest entry (path, SHA-256, size) updated, both cache-cleared.
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) return json({ ok: false, error: "unauthorized" }, 401);
+        const pic = url.searchParams.get("pic") || "", ext = url.searchParams.get("ext") || "png";
+        if (!/^[a-z0-9_-]{1,40}\/[A-Za-z0-9_-]{1,60}$/.test(pic) || !/^(png|jpg|jpeg|webp|gif)$/.test(ext)) return json({ ok: false, error: "bad name" }, 400);
+        const buf = await req.arrayBuffer();
+        if (!buf.byteLength || buf.byteLength > 10 * 1024 * 1024) return json({ ok: false, error: "size" }, 413);
+        const path = "images/" + pic + "." + ext;
+        const put = await env.CATALOG.put("media/" + path, buf, { httpMetadata: { contentType: mediaType(path), cacheControl: MEDIA_PIC_CC } });
+        const man = await mediaManifest(env) || { images: {} };
+        man.images[pic] = { path, sha256: await sha256Hex(buf), bytes: buf.byteLength };
+        const mput = await mediaManifestPut(env, man);
+        await hubQueuePush(env, "pq", [{ u: catalogUrl(env, "media/" + path), etag: put.httpEtag, t0: Date.now() },
+          { u: catalogUrl(env, "media/manifest.json"), etag: mput.httpEtag, t0: Date.now() }]);
+        return json({ ok: true, entry: man.images[pic] });
+      }
+
       if (req.method === "GET" && url.pathname === "/admin/backupstep") {
         // v45: one step of the daily db.json backup (fired by the cron as its OWN invocation, so it has
         // its own subrequest budget and never holds the flush lock). Token-gated like the chain.
@@ -859,7 +905,8 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 53,   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
+          version: 54,   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
+         //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
                          // a fresh self-invocation (`/flush?cont=<ADMIN_KEY>`) with a fresh ~1000-subrequest
@@ -2490,6 +2537,7 @@ async function searchStep(env) {
     }
     Object.assign(out, await purgeStep(env));
     Object.assign(out, await legacyFilesCleanup(env));
+    try { Object.assign(out, await mediaImportStep(env)); } catch (e) { out.mediaErr = String(e && e.message || e).slice(0, 200); }
     if (env.SEARCH && got.items.length < 100) Object.assign(out, await searchFillStep(env));
   } finally { await hubUnlock(env, "search"); }
   try { await hubPut(env, "searchStat", JSON.stringify({ at: Date.now(), ...out })); } catch (_) {}
@@ -2508,6 +2556,68 @@ async function legacyFilesCleanup(env) {
   }
   if (!deleted) await hubPut(env, "legacyGone", "1");
   return { legacyDeleted: deleted };
+}
+
+// v54: app pictures + rich media on R2 (media/), copied once from the GitHub image store. The copy runs a few
+// files per search step until done (hub flag); GitHub keeps the originals so old apps still work. The app reads
+// media/manifest.json, whose "base" says where the pictures live.
+const MEDIA_GH = "https://raw.githubusercontent.com/Ashoska/VRC-A-Image-store/main";
+const MEDIA_GH_RELEASE = "https://api.github.com/repos/Ashoska/VRC-A-Image-store/releases/tags/rich-media";
+const MEDIA_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const MEDIA_MAX_BYTES = 95 * 1024 * 1024;
+const MEDIA_PIC_CC = "public, max-age=86400";
+const MEDIA_RICH_CC = "public, max-age=31536000, immutable";   // unique name per upload
+function mediaType(name) {
+  const e = name.split(".").pop().toLowerCase();
+  return { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", mp4: "video/mp4", webm: "video/webm", json: "application/json" }[e] || "application/octet-stream";
+}
+async function sha256Hex(buf) {
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", buf))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function mediaManifest(env) {
+  const o = await env.CATALOG.get("media/manifest.json");
+  return o ? JSON.parse(await o.text()) : null;
+}
+async function mediaManifestPut(env, man) {
+  man.base = catalogUrl(env, "media");
+  return env.CATALOG.put("media/manifest.json", JSON.stringify(man), { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=300" } });
+}
+async function mediaRichNames(env) {
+  const names = []; let cursor;
+  do { const l = await env.CATALOG.list({ prefix: "media/rich/", cursor, limit: 1000 }); for (const o of l.objects) names.push(o.key.slice(11)); cursor = l.truncated ? l.cursor : null; } while (cursor);
+  return names;
+}
+async function mediaImportStep(env) {
+  if (!env.CATALOG_BASE || (await hubGet(env, "mediaDone")) === "1") return {};
+  const ua = { "user-agent": "vrca-avatar-db" };
+  if (!(await mediaManifest(env))) {
+    const r = await fetch(MEDIA_GH + "/manifest.json?v=" + Date.now(), { headers: ua });
+    if (!r.ok) return { media: "manifest " + r.status };
+    const man = await r.json();
+    for (const e of Object.values(man.images || {})) {
+      const f = await fetch(MEDIA_GH + "/" + e.path, { headers: ua });
+      if (!f.ok) return { media: "pic " + f.status + " " + e.path };
+      await env.CATALOG.put("media/" + e.path, await f.arrayBuffer(), { httpMetadata: { contentType: mediaType(e.path), cacheControl: MEDIA_PIC_CC } });
+    }
+    await mediaManifestPut(env, man);
+    return { media: "pictures " + Object.keys(man.images || {}).length };
+  }
+  const rel = await fetch(MEDIA_GH_RELEASE, { headers: { ...ua, accept: "application/vnd.github+json" } });
+  if (rel.status === 404) { await hubPut(env, "mediaDone", "1"); return { media: "done" }; }
+  if (!rel.ok) return { media: "release " + rel.status };
+  const have = new Set(await mediaRichNames(env));
+  const todo = ((await rel.json()).assets || []).filter((a) => MEDIA_NAME_RE.test(a.name) && !have.has(a.name));
+  let copied = 0;
+  for (const a of todo.slice(0, 3)) {
+    const f = await fetch(a.browser_download_url, { headers: ua });
+    if (!f.ok || !a.size) continue;
+    const fls = new FixedLengthStream(a.size);
+    const pipe = f.body.pipeTo(fls.writable);
+    await env.CATALOG.put("media/rich/" + a.name, fls.readable, { httpMetadata: { contentType: mediaType(a.name), cacheControl: MEDIA_RICH_CC } });
+    await pipe; copied++;
+  }
+  if (todo.length <= copied) { await hubPut(env, "mediaDone", "1"); return { media: "done", copied }; }
+  return { media: "rich " + (todo.length - copied) + " left", copied };
 }
 
 // Guaranteed purge: a job leaves the queue only when Cloudflare confirmed the purge AND the CDN serves the

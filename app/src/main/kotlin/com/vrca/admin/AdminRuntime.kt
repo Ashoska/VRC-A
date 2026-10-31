@@ -247,7 +247,6 @@ object AdminRuntime {
         index: Int,
         uri: Uri,
         kind: MediaKind,
-        pat: String,
         slot: Int = 0
     ) {
         val tag = "$editorKey#$index"
@@ -257,7 +256,7 @@ object AdminRuntime {
             try {
                 val url = when (kind) {
                     MediaKind.IMAGE, MediaKind.GIF, MediaKind.POSTER ->
-                        githubUploadImage(appContext, uri, pat)
+                        uploadMediaImage(appContext, uri)
                     MediaKind.VIDEO -> {
                         // Admin build transcodes to small H.264; public stub returns null
                         // → raw file. Size guard keeps clips small so they cache fast.
@@ -277,7 +276,7 @@ object AdminRuntime {
                             "Video is ${bytes.size / 1_000_000}MB after compression — please use a " +
                                 "shorter clip so it stays small and loads fast."
                         )
-                        githubUploadVideoBytes(bytes, pat)
+                        uploadMediaVideoBytes(appContext, bytes)
                     }
                 }
                 val list = editorBlocksFor(editorKey)

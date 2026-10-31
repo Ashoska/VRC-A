@@ -732,7 +732,7 @@ internal fun ReleasesTab(
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    RichDocEditor(blocks = releaseBlocks, githubPat = githubPat, editorKey = "release")
+                    RichDocEditor(blocks = releaseBlocks, editorKey = "release")
 
                     if (uploading) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
