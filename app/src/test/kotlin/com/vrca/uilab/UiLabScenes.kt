@@ -380,7 +380,7 @@ object UiLabScenes {
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
     private val FULL = setOf("boot", "cats", "catframes", "thinkmock", "waitmock", "skipmock", "donemock", "warnmock", "maintmock", "failmock", "bgmock", "searchmock", "standingmock", "downloadmock", "countdownmock", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
-    val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
+    val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone", "standing") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
         val name = arg.substringBefore(' ')
@@ -958,6 +958,8 @@ object UiLabScenes {
                 destructive = name != "confirm"
             )
             "timezone" -> VrcaTimeZoneDialog(currentMode = "Europe/Paris", use24h = false, onSelect = {}, onDismiss = { d.overlay.value = null })
+            // `show standing <state>`: the account standing popup over the real app, animating in; Close animates it out.
+            "standing" -> androidx.compose.runtime.key(arg) { StandingMocks.Standing(arg.substringAfter(' ', "risk").trim(), onClosed = { d.overlay.value = null }) }
         }
     }
 
