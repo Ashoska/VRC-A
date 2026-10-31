@@ -579,8 +579,9 @@ internal fun SettingsPage(
 
                             // Announce VRC-A as an OSCQuery app so VRChat SENDS its
                             // output (head/wrist tracking, avatar params) to us.
-                            Text("Announce to VRChat (receive test)", style = MaterialTheme.typography.labelMedium)
+                            Text("Announce to VRChat (bridge, off by default)", style = MaterialTheme.typography.labelMedium)
                             var announceDiag by remember { mutableStateOf(com.vrca.osc.OscAnnouncer.diag()) }
+                            var bridgeOn by remember { mutableStateOf(com.vrca.osc.OscAnnouncer.isEnabled(ctx)) }
                             androidx.compose.runtime.LaunchedEffect(Unit) {
                                 while (true) {
                                     announceDiag = com.vrca.osc.OscAnnouncer.diag()
@@ -589,11 +590,13 @@ internal fun SettingsPage(
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 com.vrca.ui.common.GremlinSmallButton(onClick = {
+                                    val on = !bridgeOn
+                                    bridgeOn = on
                                     treeScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                        runCatching { com.vrca.osc.OscAnnouncer.toggle(ctx) }
+                                        runCatching { com.vrca.osc.OscAnnouncer.setEnabled(ctx, on) }
                                     }
                                 }) {
-                                    Text("Start / pause announcing")
+                                    Text(if (bridgeOn) "Turn bridge off" else "Turn bridge on")
                                 }
                                 // Send ourselves a packet: is our receive socket working?
                                 com.vrca.ui.common.GremlinSmallButton(onClick = {

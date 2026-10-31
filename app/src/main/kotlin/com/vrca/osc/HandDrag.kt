@@ -73,7 +73,7 @@ object HandDrag {
         enabled = on
         appContext = context.applicationContext
         if (on) {
-            if (!OscAnnouncer.running) OscAnnouncer.start(context)
+            if (!OscAnnouncer.running) OscAnnouncer.setEnabled(context, true)   // drag needs the bridge
             Thread({ loop() }, "vrca-hand-drag").apply { isDaemon = true; start() }
         }
     }
