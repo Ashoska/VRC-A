@@ -443,7 +443,7 @@ internal fun AppBoot(
         exitToTopBar = toMainApp,
         exitToRect = if (toTerms) ({ BootReveal.termsCat.value }) else null,
         onExitProgress = { p ->
-            if (toTerms) BootReveal.termsCatIn.floatValue = ((p - TERMS_LAND_FROM) / (1f - TERMS_LAND_FROM)).coerceIn(0f, 1f)
+            if (toTerms) BootReveal.termsCatIn.floatValue = if (p >= 1f) 1f else 0f
         },
         onExited = { BootReveal.termsCatIn.floatValue = 1f; onDone(toMainApp || toTerms) },
         onSignIn = if (signInNeeded && error == null) ({ showLogin = true }) else null
