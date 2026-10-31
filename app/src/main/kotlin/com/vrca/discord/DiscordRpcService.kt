@@ -97,7 +97,7 @@ class DiscordRpcService : Service() {
 
         /** The default image's key in the image-store repo (`images/discord/default`). */
         private const val DEFAULT_IMAGE_KEY = "discord/default"
-        private const val DEFAULT_VRCHAT_IMAGE_FALLBACK = "${com.vrca.ui.onboarding.ImageManifest.BASE}/images/discord/default.jpg"
+        private const val DEFAULT_VRCHAT_IMAGE_FALLBACK = "${com.vrca.ui.onboarding.ImageManifest.CDN_BASE}/images/discord/default.jpg"
 
         const val ACTION_START = "com.vrca.DISCORD_RPC_START"
         const val ACTION_STOP = "com.vrca.DISCORD_RPC_STOP"

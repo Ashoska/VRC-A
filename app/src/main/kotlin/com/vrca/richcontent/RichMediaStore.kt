@@ -87,36 +87,48 @@ object RichMediaStore {
             if (url.isNullOrBlank() || !url.startsWith("http")) return@withContext null
             val f = fileFor(ctx, url, scope)
             if (f.exists() && f.length() > 0) return@withContext f
-            try {
-                val req = Request.Builder()
-                    .url(url)
-                    .header("User-Agent", "VRC-A/1.0")
-                    .header("Accept", "*/*")
-                    .get()
-                    .build()
-                httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        Log.w(TAG, "download ${resp.code} for ${url.take(80)}")
-                        return@withContext null
-                    }
-                    val body = resp.body ?: run {
-                        Log.w(TAG, "empty body for ${url.take(80)}")
-                        return@withContext null
-                    }
-                    val tmp = File(f.parentFile, "${f.name}.part")
-                    body.byteStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
-                    if (tmp.length() > 0 && tmp.renameTo(f)) {
-                        Log.i(TAG, "cached ${tmp.length()}B for ${url.take(80)}")
-                        f
-                    } else {
-                        tmp.delete(); null
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "download failed for ${url.take(80)}", e)
-                null
-            }
+            // Media uploaded to the old GitHub rich-media release was copied to Cloudflare (Worker v54): read the
+            // copy, and the GitHub original only if the copy isn't there. The cache key stays the stored URL.
+            cdnCopyOf(url)?.let { download(it, f) }?.let { return@withContext it }
+            download(url, f)
         }
+
+    private const val GH_RICH_PREFIX = "https://github.com/Ashoska/VRC-A-Image-store/releases/download/rich-media/"
+    const val CDN_RICH_PREFIX = "https://cdn.gremlininc.app/media/rich/"
+    fun cdnCopyOf(url: String): String? = if (url.startsWith(GH_RICH_PREFIX)) CDN_RICH_PREFIX + url.removePrefix(GH_RICH_PREFIX) else null
+
+    private fun download(url: String, f: File): File? {
+        return try {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", "VRC-A/1.0")
+                .header("Accept", "*/*")
+                .header(com.vrca.vrchat.AvatarGlobalDb.CDN_APP_HEADER, com.vrca.vrchat.AvatarGlobalDb.CDN_APP_MARK)
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "download ${resp.code} for ${url.take(80)}")
+                    return null
+                }
+                val body = resp.body ?: run {
+                    Log.w(TAG, "empty body for ${url.take(80)}")
+                    return null
+                }
+                val tmp = File(f.parentFile, "${f.name}.part")
+                body.byteStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
+                if (tmp.length() > 0 && tmp.renameTo(f)) {
+                    Log.i(TAG, "cached ${tmp.length()}B for ${url.take(80)}")
+                    f
+                } else {
+                    tmp.delete(); null
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "download failed for ${url.take(80)}", e)
+            null
+        }
+    }
 
     /**
      * Reconcile a scope to EXACTLY the currently-referenced media: delete every file

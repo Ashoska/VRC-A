@@ -52,18 +52,14 @@ import java.util.concurrent.TimeUnit
  * Admin block editor (Phase 3). Authors a RichDoc as an ordered, reorderable list
  * of blocks with a live preview using the SAME RichDocRenderer users see. Reused by
  * both AnnouncementsTab and ReleasesTab. Reorder is via move up/down controls
- * (drag-and-drop is a later polish). Image upload pushes to the public image-store
- * GitHub repo via the Contents API with a UNIQUE filename per upload (never
- * overwrite — the raw CDN caches briefly, so a fresh URL = live edits show instantly and
- * the old URL falls out of the reference set → auto-culled client-side).
+ * (drag-and-drop is a later polish). Media uploads go to the Worker (Cloudflare R2
+ * `media/rich/`, Worker v54) with a UNIQUE filename per upload (never overwrite — a fresh URL
+ * = live edits show instantly and the old URL falls out of the reference set → auto-culled
+ * client-side).
  *
- * Firestore cost: ZERO. The editor is pure local state; media goes to GitHub, and
+ * Firestore cost: ZERO. The editor is pure local state; media goes to Cloudflare, and
  * saving the doc is the caller's single Firestore write.
  */
-
-private const val IMG_REPO_OWNER = "Ashoska"
-private const val IMG_REPO_NAME = "VRC-A-Image-store"
-private const val IMG_REPO_BRANCH = "main"
 
 private fun extFor(ctx: Context, uri: Uri): String {
     val mime = ctx.contentResolver.getType(uri).orEmpty()
@@ -76,11 +72,6 @@ private fun extFor(ctx: Context, uri: Uri): String {
     }
 }
 
-private const val MEDIA_RELEASE_TAG = "rich-media"
-
-@Volatile
-private var cachedMediaUploadUrl: String? = null
-
 private fun mimeForExt(ext: String): String = when (ext.lowercase()) {
     "png" -> "image/png"
     "jpg", "jpeg" -> "image/jpeg"
@@ -90,204 +81,105 @@ private fun mimeForExt(ext: String): String = when (ext.lowercase()) {
     else -> "application/octet-stream"
 }
 
-/**
- * Ensures the auto-managed `rich-media` release exists in the image-store repo and
- * returns its asset upload_url template (cached process-wide). Media uploads as
- * STREAMED release assets (raw bytes) rather than the base64 Contents API — no 33%
- * base64 inflation, no giant in-memory JSON, and it streams like the fast APK upload
- * (which is why APK pushes were near-instant while base64 media pushes crawled and
- * saturated the connection).
- */
-private suspend fun ensureMediaReleaseUploadUrl(pat: String): String {
-    cachedMediaUploadUrl?.let { return it }
-    return withContext(Dispatchers.IO) {
-        val client = OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .build()
-        val getReq = Request.Builder()
-            .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/tags/$MEDIA_RELEASE_TAG")
-            .header("Authorization", "Bearer $pat")
-            .header("Accept", "application/vnd.github+json")
-            .get()
-            .build()
-        val getResp = client.newCall(getReq).execute()
-        val getBody = getResp.body?.string().orEmpty()
-        val getCode = getResp.code
-        getResp.close()
-        if (getCode == 200) {
-            JSONObject(getBody).getString("upload_url").also { cachedMediaUploadUrl = it }
-        } else {
-            githubCreateRelease(
-                owner = IMG_REPO_OWNER, repo = IMG_REPO_NAME, pat = pat,
-                tagName = MEDIA_RELEASE_TAG, releaseName = "VRC-A Rich Media",
-                body = "Auto-managed rich-content media (images / videos / gifs)."
-            ).uploadUrl.also { cachedMediaUploadUrl = it }
-        }
-    }
+/** The admin key the Bots tab saved (the Worker's ADMIN_KEY); media uploads and deletes need it. */
+private fun workerAdminKey(ctx: Context): String =
+    ctx.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE).getString("avatar_admin_key", "").orEmpty()
+
+private val mediaClient: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(300, TimeUnit.SECONDS)
+        .writeTimeout(300, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
 }
 
-/** Uploads raw bytes as a STREAMED release asset; returns the download URL. */
-private suspend fun uploadBytesToImageStore(bytes: ByteArray, ext: String, pat: String): String =
+private fun mediaEndpoint(key: String, name: String? = null): String =
+    "${com.vrca.vrchat.AvatarGlobalDb.WORKER_URL}/admin/media?key=${java.net.URLEncoder.encode(key, "UTF-8")}" +
+        (name?.let { "&name=$it" } ?: "")
+
+/** The file name of media we host: a Cloudflare copy, or an upload to the old GitHub rich-media release
+ *  (copied to Cloudflare under the same name by Worker v54). Null for anything else. */
+private fun ourMediaName(url: String): String? =
+    (com.vrca.richcontent.RichMediaStore.cdnCopyOf(url) ?: url)
+        .takeIf { it.startsWith(com.vrca.richcontent.RichMediaStore.CDN_RICH_PREFIX) }
+        ?.removePrefix(com.vrca.richcontent.RichMediaStore.CDN_RICH_PREFIX)?.takeIf { it.isNotBlank() }
+
+/** Uploads raw bytes to the Worker (R2 `media/rich/`, unique name per upload); returns the public URL. */
+private suspend fun uploadMedia(ctx: Context, bytes: ByteArray, ext: String): String =
     withContext(Dispatchers.IO) {
-        if (pat.isBlank()) throw Exception("GitHub token missing in this build.")
-        val template = ensureMediaReleaseUploadUrl(pat)
-        val fileName = "rich_${System.currentTimeMillis()}.$ext"   // unique — never overwrite
-        val base = template.substringBefore("{")
-        val url = if (base.contains("?")) "$base&name=$fileName" else "$base?name=$fileName"
-        val client = OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(300, TimeUnit.SECONDS)
-            .writeTimeout(300, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-            .build()
-        val req = Request.Builder()
-            .url(url)
-            .header("Authorization", "Bearer $pat")
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .post(bytes.toRequestBody(mimeForExt(ext).toMediaType()))
-            .build()
-        val resp = client.newCall(req).execute()
-        val body = resp.body?.string().orEmpty()
-        val code = resp.code
-        resp.close()
-        if (code in 200..299) {
-            JSONObject(body).getString("browser_download_url")
-        } else {
-            if (code == 404) cachedMediaUploadUrl = null   // release vanished → recreate next time
-            throw Exception("Upload failed ($code): ${body.take(300)}")
+        val key = workerAdminKey(ctx)
+        if (key.isBlank()) throw Exception("Admin key missing: set it in the Bots tab.")
+        val name = "rich_${System.currentTimeMillis()}.$ext"   // unique — never overwrite
+        val req = Request.Builder().url(mediaEndpoint(key, name))
+            .post(bytes.toRequestBody(mimeForExt(ext).toMediaType())).build()
+        mediaClient.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw Exception("Upload failed (${resp.code}): ${body.take(300)}")
+            JSONObject(body).getString("url")
         }
     }
 
-internal suspend fun githubUploadImage(ctx: Context, uri: Uri, pat: String): String =
+internal suspend fun uploadMediaImage(ctx: Context, uri: Uri): String =
     withContext(Dispatchers.IO) {
         val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             ?: throw Exception("Could not read the selected image.")
-        uploadBytesToImageStore(bytes, extFor(ctx, uri), pat)
+        uploadMedia(ctx, bytes, extFor(ctx, uri))
     }
 
 /** Uploads an already-transcoded (or raw) video's bytes as `.mp4`. */
-internal suspend fun githubUploadVideoBytes(bytes: ByteArray, pat: String): String =
-    uploadBytesToImageStore(bytes, "mp4", pat)
+internal suspend fun uploadMediaVideoBytes(ctx: Context, bytes: ByteArray): String =
+    uploadMedia(ctx, bytes, "mp4")
 
-private const val MEDIA_DL_PREFIX =
-    "https://github.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/download/$MEDIA_RELEASE_TAG/"
-
-/**
- * Deletes a media file we uploaded (by its download URL) from the image-store repo's
- * rich-media release, so removed/replaced media doesn't accumulate as orphans. No-op
- * for URLs not hosted by us. Best-effort — never throws.
- */
-internal suspend fun githubDeleteFileByUrl(url: String, pat: String): Unit =
+/** Best-effort deletes media we host (removed/replaced in an edit) so it doesn't pile up. Never throws. */
+internal suspend fun deleteMedia(ctx: Context, urls: List<String>): Unit =
     withContext(Dispatchers.IO) {
-        if (pat.isBlank() || !url.startsWith(MEDIA_DL_PREFIX)) return@withContext
-        val name = url.removePrefix(MEDIA_DL_PREFIX)
-        if (name.isBlank()) return@withContext
-        try {
-            val client = OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
-                .build()
-            // Find the asset id by name from the release, then delete it.
-            val getReq = Request.Builder()
-                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/tags/$MEDIA_RELEASE_TAG")
-                .header("Authorization", "Bearer $pat")
-                .header("Accept", "application/vnd.github+json")
-                .get()
-                .build()
-            val getResp = client.newCall(getReq).execute()
-            val getBody = getResp.body?.string().orEmpty()
-            val getCode = getResp.code
-            getResp.close()
-            if (getCode != 200) return@withContext
-            val assets = JSONObject(getBody).optJSONArray("assets") ?: return@withContext
-            var assetId = -1L
-            for (i in 0 until assets.length()) {
-                val a = assets.optJSONObject(i) ?: continue
-                if (a.optString("name") == name) { assetId = a.optLong("id", -1L); break }
-            }
-            if (assetId < 0) return@withContext
-            val delReq = Request.Builder()
-                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/assets/$assetId")
-                .header("Authorization", "Bearer $pat")
-                .header("Accept", "application/vnd.github+json")
-                .delete()
-                .build()
-            client.newCall(delReq).execute().close()
-        } catch (_: Exception) {
+        val key = workerAdminKey(ctx).ifBlank { return@withContext }
+        for (u in urls) {
+            val name = ourMediaName(u) ?: continue
+            runCatching { mediaClient.newCall(Request.Builder().url(mediaEndpoint(key, name)).delete().build()).execute().close() }
         }
     }
 
-/** Best-effort deletes a batch of our-repo media URLs from the image-store repo. */
-internal suspend fun githubDeleteMedia(urls: List<String>, pat: String) {
-    for (u in urls) githubDeleteFileByUrl(u, pat)
-}
-
 /**
- * Full orphan sweep: lists every file in the image-store `rich/` folder and deletes
- * any whose raw URL isn't referenced by an announcement or release. Returns the count
- * deleted. Owner-only (lists announcements + releases). Best-effort.
+ * Full orphan sweep: lists every hosted media file and deletes any that no announcement or release
+ * references. Returns the count deleted. Owner-only (lists announcements + releases). Best-effort.
  */
-internal suspend fun githubSweepOrphans(db: FirebaseFirestore, pat: String): Int =
+internal suspend fun sweepMediaOrphans(ctx: Context, db: FirebaseFirestore): Int =
     withContext(Dispatchers.IO) {
-        if (pat.isBlank()) return@withContext 0
+        val key = workerAdminKey(ctx).ifBlank { return@withContext 0 }
         val referenced = HashSet<String>()
-        runCatching {
+        // A failed read must never look like "nothing is referenced" (that would delete everything).
+        try {
             for (d in db.collection("announcements").get().await().documents) {
                 resolveRichDoc(d.getString("bodyDoc"), d.getString("body"))?.mediaUrls()
-                    ?.let { referenced.addAll(it) }
+                    ?.forEach { u -> ourMediaName(u)?.let(referenced::add) }
             }
-        }
-        runCatching {
             for (d in db.collection("releases").get().await().documents) {
                 resolveRichDoc(d.getString("bodyDoc"), d.getString("notes"))?.mediaUrls()
-                    ?.let { referenced.addAll(it) }
+                    ?.forEach { u -> ourMediaName(u)?.let(referenced::add) }
             }
-        }
+        } catch (_: Exception) { return@withContext 0 }
         try {
-            val client = OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
-                .build()
-            val getReq = Request.Builder()
-                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/tags/$MEDIA_RELEASE_TAG")
-                .header("Authorization", "Bearer $pat")
-                .header("Accept", "application/vnd.github+json")
-                .get()
-                .build()
-            val getResp = client.newCall(getReq).execute()
-            val getBody = getResp.body?.string().orEmpty()
-            val getCode = getResp.code
-            getResp.close()
-            if (getCode != 200) return@withContext 0
-            val assets = JSONObject(getBody).optJSONArray("assets") ?: return@withContext 0
+            val names = mediaClient.newCall(Request.Builder().url(mediaEndpoint(key)).get().build()).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext 0
+                JSONObject(resp.body?.string().orEmpty()).optJSONArray("names") ?: return@withContext 0
+            }
             var deleted = 0
-            for (i in 0 until assets.length()) {
-                val a = assets.optJSONObject(i) ?: continue
-                val dlUrl = a.optString("browser_download_url")
-                val assetId = a.optLong("id", -1L)
-                if (dlUrl.isBlank() || assetId < 0 || dlUrl in referenced) continue
-                val delReq = Request.Builder()
-                    .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/assets/$assetId")
-                    .header("Authorization", "Bearer $pat")
-                    .header("Accept", "application/vnd.github+json")
-                    .delete()
-                    .build()
-                val r = client.newCall(delReq).execute()
-                if (r.isSuccessful) deleted++
-                r.close()
+            for (i in 0 until names.length()) {
+                val n = names.optString(i)
+                if (n.isBlank() || n in referenced) continue
+                val ok = mediaClient.newCall(Request.Builder().url(mediaEndpoint(key, n)).delete().build()).execute()
+                    .use { it.isSuccessful }
+                if (ok) deleted++
             }
             deleted
-        } catch (_: Exception) {
-            0
-        }
+        } catch (_: Exception) { 0 }
     }
 
 @Composable
 internal fun RichDocEditor(
     blocks: SnapshotStateList<RichBlock>,
-    githubPat: String,
     editorKey: String,
     modifier: Modifier = Modifier
 ) {
@@ -313,7 +205,7 @@ internal fun RichDocEditor(
         val slot = pendingImageSlot
         pendingImageIndex = -1; pendingImageSlot = 0
         if (uri != null && idx in blocks.indices) {
-            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.IMAGE, githubPat, slot)
+            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.IMAGE, slot)
         }
     }
 
@@ -321,7 +213,7 @@ internal fun RichDocEditor(
         val idx = pendingPosterIndex
         pendingPosterIndex = -1
         if (uri != null && idx in blocks.indices) {
-            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.POSTER, githubPat)
+            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.POSTER)
         }
     }
 
@@ -330,7 +222,7 @@ internal fun RichDocEditor(
         val slot = pendingGifSlot
         pendingGifIndex = -1; pendingGifSlot = 0
         if (uri != null && idx in blocks.indices) {
-            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.GIF, githubPat, slot)
+            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.GIF, slot)
         }
     }
 
@@ -338,7 +230,7 @@ internal fun RichDocEditor(
         val idx = pendingVideoIndex
         pendingVideoIndex = -1
         if (uri != null && idx in blocks.indices) {
-            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.VIDEO, githubPat)
+            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.VIDEO)
         }
     }
 
