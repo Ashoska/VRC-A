@@ -552,22 +552,13 @@ private fun StepPermissions() {
                 )
             }
         }
-        // Install-updates (unknown sources) — not on the headset: distributed via
-        // the Meta store, so no in-app APK install.
-        if (!com.vrca.BuildConfig.IS_HEADSET_BUILD) {
-            PermissionRow(
-                title = "Install updates",
-                why = "Lets VRC-A install its own update APKs when a new version is pushed.",
-                granted = installAllowed
-            ) {
-                runCatching {
-                    ctx.startActivity(
-                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
-                            .setData(Uri.parse("package:${ctx.packageName}"))
-                    )
-                }
-            }
-        }
+        // Install-updates (unknown sources): every build, the headset too (it updates
+        // itself from its own release doc, latest_headset; it isn't a store app).
+        PermissionRow(
+            title = "Install updates",
+            why = "Lets VRC-A install its own update APKs when a new version is pushed.",
+            granted = installAllowed
+        ) { com.vrca.app.openInstallPermission(ctx) }
         PermissionRow(
             title = "Display over other apps (optional)",
             why = "Only needed if you use the floating chatbox overlay.",

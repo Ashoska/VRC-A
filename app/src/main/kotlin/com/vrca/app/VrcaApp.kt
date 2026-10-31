@@ -1420,6 +1420,14 @@ internal fun UpdatePopup(info: ReleaseInfo, forced: Boolean, visible: Boolean, o
             onDismiss = onDismiss,
             onDownload = { url ->
                 downloadError = null
+                // Every build (the headset too: it updates from latest_headset, not a store) installs its own APK, which
+                // needs "Install unknown apps" for VRC-A. Without it the installer refuses after the download, so ask
+                // first: open the system page and say what to do, then the next tap downloads.
+                if (Build.VERSION.SDK_INT >= 26 && !ctx.packageManager.canRequestPackageInstalls()) {
+                    openInstallPermission(ctx)
+                    downloadError = "Turn on \"Allow from this source\" for VRC-A, then come back and tap Download again."
+                    return@UpdateDialog
+                }
                 // DownloadManager can be disabled/unavailable on some OEM builds (reported
                 // on Samsung Galaxy) — getSystemService returns null or enqueue() throws
                 // (IllegalArgumentException "Unknown URL"/SecurityException). Catch every
@@ -1461,6 +1469,20 @@ internal fun UpdatePopup(info: ReleaseInfo, forced: Boolean, visible: Boolean, o
             }
         )
     }
+}
+
+/**
+ * Opens the "Install unknown apps" page for VRC-A. Some builds (seen on Quest) have no per-app page for the
+ * package Uri, so fall back to the general list, then App info.
+ */
+internal fun openInstallPermission(ctx: Context) {
+    val pkg = Uri.parse("package:${ctx.packageName}")
+    val tries = listOf(
+        Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).setData(pkg),
+        Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES),
+        Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(pkg)
+    )
+    for (i in tries) if (runCatching { ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess) return
 }
 
 /** How long Boot Cat's Done landing (~1 s) shows before the installer opens. */

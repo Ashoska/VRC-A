@@ -17,3 +17,5 @@ _Scope: GitHub release upload, directed/global releases, forced updates + OSC bl
 ### Update dialog browser fallback
 
 The `UpdateDialog` (`VrcaApp.kt`) has a browser-download fallback TextButton ("Download failed? Tap here…") below the Download/Retry buttons that opens `info.downloadUrl` via `ACTION_VIEW` for devices where DownloadManager fails (storage perms, OEM download restrictions).
+
+- **Install permission check (2026-10-31)**: the update dialog's Download checks `canRequestPackageInstalls()` first (every build); when it's off it opens the "Install unknown apps" page (`openInstallPermission` in `VrcaApp.kt`) and says to turn on "Allow from this source" and tap Download again, instead of downloading an APK the installer then refuses. Quest users hit this after the headset tutorial/Settings stopped showing the permission.

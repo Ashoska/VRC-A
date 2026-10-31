@@ -354,7 +354,13 @@ private fun EvidenceViewer(e: Standing.Evidence, onClose: () -> Unit) {
     val ctx = LocalContext.current
     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.9f)).clickable(interactionSource = null, indication = null) { onClose() }
         .padding(24.dp), contentAlignment = Alignment.Center) {
-        if (!isVideo(e.kind)) coil.compose.AsyncImage(evidenceRequest(e.id), null, evidenceImageLoader(ctx), Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        // Both kinds take the box of the file's own shape (width / height), fitted inside the screen: a phone-shaped
+        // or square clip was stretched into a fixed 16:9 box before ("squished").
+        var ratio by remember(e.id) { mutableStateOf(0f) }
+        val fit = if (ratio > 0f) Modifier.aspectRatio(ratio) else Modifier.fillMaxSize()
+        if (!isVideo(e.kind)) coil.compose.AsyncImage(evidenceRequest(e.id), null, evidenceImageLoader(ctx), fit,
+            contentScale = ContentScale.Fit,
+            onSuccess = { st -> val d = st.result.drawable; if (d.intrinsicWidth > 0 && d.intrinsicHeight > 0) ratio = d.intrinsicWidth.toFloat() / d.intrinsicHeight })
         else {
             val exo = remember(e.id) {
                 val http = androidx.media3.datasource.DefaultHttpDataSource.Factory().setDefaultRequestProperties(
@@ -366,11 +372,19 @@ private fun EvidenceViewer(e: Standing.Evidence, onClose: () -> Unit) {
                         prepare(); playWhenReady = true
                     }
             }
-            androidx.compose.runtime.DisposableEffect(exo) { onDispose { exo.release() } }
+            androidx.compose.runtime.DisposableEffect(exo) {
+                val l = object : androidx.media3.common.Player.Listener {
+                    override fun onVideoSizeChanged(v: androidx.media3.common.VideoSize) {
+                        if (v.width > 0 && v.height > 0) ratio = v.width * v.pixelWidthHeightRatio / v.height
+                    }
+                }
+                exo.addListener(l)
+                onDispose { exo.removeListener(l); exo.release() }
+            }
             // A TextureView (like the rich-content videos: SurfaceView renders black inside Compose); it loops.
             androidx.compose.ui.viewinterop.AndroidView({ c ->
                 android.view.TextureView(c).also { exo.setVideoTextureView(it) }
-            }, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
+            }, if (ratio > 0f) Modifier.aspectRatio(ratio) else Modifier.fillMaxWidth().aspectRatio(16f / 9f))
         }
     }
 }
