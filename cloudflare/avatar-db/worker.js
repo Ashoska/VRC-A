@@ -650,6 +650,73 @@ export default {
         return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length, authorRenames: authorRenames.length });
       }
 
+      // v57: account-standing evidence (pictures, videos, GIFs). PRIVATE bucket only (never the public CDN), under
+      // evidence/<id> with a random id. Who may see a file is a flag in the hub (`ev:<id>`, strongly consistent): the
+      // admin's "show to user / admin only" switch flips it, so hiding a file stops it loading at once, with no copy.
+      //   POST   /admin/evidence?key=&id=&kind=   body = the file      (new files start admin-only)
+      //   POST   /admin/evidence/show?key=&id=&on=1|0
+      //   DELETE /admin/evidence?key=&id=
+      //   GET    /evidence/<id>   the app (X-VRCA-App) when shown; the admin with ?key= always. Never cached.
+      if (url.pathname === "/admin/evidence" || url.pathname === "/admin/evidence/show") {
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) return json({ ok: false, error: "unauthorized" }, 401);
+        if (!env.PRIVATE) return json({ ok: false, error: "no private bucket" }, 500);
+        const id = url.searchParams.get("id") || "";
+        if (!EVIDENCE_ID_RE.test(id)) return json({ ok: false, error: "bad id" }, 400);
+        if (url.pathname === "/admin/evidence/show" && req.method === "POST") {
+          const cur = JSON.parse((await hubGet(env, "ev:" + id)) || "null");
+          if (!cur) return json({ ok: false, error: "not found" }, 404);
+          cur.s = url.searchParams.get("on") === "1" ? 1 : 0;
+          await hubPut(env, "ev:" + id, JSON.stringify(cur));
+          return json({ ok: true, shown: cur.s === 1 });
+        }
+        if (req.method === "DELETE") {
+          await env.PRIVATE.delete("evidence/" + id);
+          await hubDel(env, "ev:" + id);
+          return json({ ok: true });
+        }
+        if (req.method === "POST") {
+          const kind = url.searchParams.get("kind") || "";
+          const type = EVIDENCE_TYPES[kind];
+          if (!type) return json({ ok: false, error: "bad kind" }, 400);
+          const len = Number(req.headers.get("content-length") || 0);
+          if (!len || len > MEDIA_MAX_BYTES) return json({ ok: false, error: "size" }, 413);
+          const fls = new FixedLengthStream(len);
+          const pipe = req.body.pipeTo(fls.writable);
+          await env.PRIVATE.put("evidence/" + id, fls.readable, { httpMetadata: { contentType: type } });
+          await pipe;
+          await hubPut(env, "ev:" + id, JSON.stringify({ s: 0, k: kind, b: len, at: Date.now() }));
+          return json({ ok: true, id, bytes: len });
+        }
+        return json({ ok: false }, 405);
+      }
+      if (req.method === "GET" && url.pathname.startsWith("/evidence/")) {
+        const id = url.pathname.slice("/evidence/".length);
+        const noStore = { "cache-control": "private, no-store", "access-control-allow-origin": "*" };
+        if (!EVIDENCE_ID_RE.test(id) || !env.PRIVATE) return new Response("not found", { status: 404, headers: noStore });
+        const admin = !!env.ADMIN_KEY && url.searchParams.get("key") === env.ADMIN_KEY;
+        if (!admin) {
+          const app = !!env.CDN_APP_MARK && req.headers.get("x-vrca-app") === env.CDN_APP_MARK;
+          const meta = app ? JSON.parse((await hubGet(env, "ev:" + id)) || "null") : null;
+          // Hidden, unknown, or not the app: the same plain 404, so nothing tells a hidden file from a missing one.
+          if (!meta || meta.s !== 1) return new Response("not found", { status: 404, headers: noStore });
+        }
+        const range = req.headers.get("range");
+        const obj = await env.PRIVATE.get("evidence/" + id, range ? { range: req.headers } : undefined);
+        if (!obj) return new Response("not found", { status: 404, headers: noStore });
+        const h = new Headers(noStore);
+        obj.writeHttpMetadata(h);
+        h.set("cache-control", "private, no-store");
+        h.set("accept-ranges", "bytes");
+        if (range && obj.range) {
+          const off = obj.range.offset || 0, ln = obj.range.length ?? (obj.size - off);
+          h.set("content-range", `bytes ${off}-${off + ln - 1}/${obj.size}`);
+          h.set("content-length", String(ln));
+          return new Response(obj.body, { status: 206, headers: h });
+        }
+        h.set("content-length", String(obj.size));
+        return new Response(obj.body, { headers: h });
+      }
+
       if (url.pathname === "/admin/media") {
         // Admin rich-content media (announcement / release pictures, GIFs, videos) on R2 under media/rich/,
         // served at <CATALOG_BASE>/media/rich/<name>. Replaces the GitHub rich-media release.
@@ -921,7 +988,7 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 56,   // v56: /status (maintenance switch + self-checks) for the boot screen and website.
+          version: 57,   // v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
          //   // v55: /search filters pl + rk (applied on the Search press).
          //   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
          //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
@@ -2586,6 +2653,9 @@ const MEDIA_GH = "https://raw.githubusercontent.com/Ashoska/VRC-A-Image-store/ma
 const MEDIA_GH_RELEASE = "https://api.github.com/repos/Ashoska/VRC-A-Image-store/releases/tags/rich-media";
 const MEDIA_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 const MEDIA_MAX_BYTES = 95 * 1024 * 1024;
+// v57 evidence: 32 hex chars (128-bit random, made by the admin app), and the file kinds the admin can attach.
+const EVIDENCE_ID_RE = /^[0-9a-f]{32}$/;
+const EVIDENCE_TYPES = { png: "image/png", jpg: "image/jpeg", webp: "image/webp", gif: "image/gif", mp4: "video/mp4", webm: "video/webm" };
 const MEDIA_PIC_CC = "public, max-age=86400";
 const MEDIA_RICH_CC = "public, max-age=31536000, immutable";   // unique name per upload
 function mediaType(name) {
