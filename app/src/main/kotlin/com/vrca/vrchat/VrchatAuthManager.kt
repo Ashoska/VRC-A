@@ -1685,7 +1685,7 @@ object VrchatAuthManager {
                         avatarLiveName[avatarId] = liveName; avatarLiveAuthor[avatarId] = liveAuthor
                         AvatarConfirm(true, ids, plats, liveName, liveAuthor)
                     }
-                    code == 403 || code == 404 -> { avatarLiveCache[avatarId] = false; AvatarConfirm(false, emptySet(), emptyList()) }
+                    (code == 403 && !isWafBlock(body)) || code == 404 -> { avatarLiveCache[avatarId] = false; AvatarConfirm(false, emptySet(), emptyList()) }
                     else -> AvatarConfirm(null, emptySet(), emptyList())   // transient — do not cache, retry
                 }
             } catch (e: Exception) { AvatarConfirm(null, emptySet(), emptyList()) }
@@ -2572,6 +2572,11 @@ object VrchatAuthManager {
         ids.toList()
     }
 
+    /** VRChat's firewall also answers 403 (body carries a `waf_code`) when it blocks a request, e.g. a
+     *  bot hitting it too fast. That says nothing about the avatar, so it must never count as "private":
+     *  treating it so culled live avatars from the catalog. */
+    fun isWafBlock(body: String): Boolean = body.contains("waf_code")
+
     /** Does this avatar still exist? 200 -> true, 404/410 -> false (deleted),
      *  anything else (rate limit / network) -> null (unknown, don't act). Used to
      *  confirm a dead avatar before reporting it, so a transient clone failure never
@@ -2579,8 +2584,9 @@ object VrchatAuthManager {
     suspend fun avatarExists(context: Context, avatarId: String): Boolean? = withContext(Dispatchers.IO) {
         val cookie = getCookieHeader(context) ?: return@withContext null
         try {
-            val (code, _, raw) = get("$BASE/avatars/$avatarId", null, cookie)
+            val (code, body, raw) = get("$BASE/avatars/$avatarId", null, cookie)
             if (code == 200) captureRolledCookies(context, raw)
+            if (code == 403 && isWafBlock(body)) return@withContext null
             // 403 = private / not publicly accessible → NOT cloneable (selecting it gives the
             // default robot avatar), so treat it like a 404 here: callers use `== false` to
             // report + grey + cull it. 429/5xx/network stay null (transient — never cull).

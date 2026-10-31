@@ -304,6 +304,10 @@ object BotVrchatSession {
                 val code = conn.responseCode
                 // Any of these proves the cookie is valid (a bad cookie 401s), so mark the slot
                 // authed — this is what flips "Checking…" to "Authed" as soon as the bot works.
+                // A firewall 403 (VRChat blocking the bot, `waf_code` in the body) is NOT "private":
+                // unknown, so the avatar is never removed on it.
+                if (code == 403 && com.vrca.vrchat.VrchatAuthManager.isWafBlock(
+                        conn.errorStream?.bufferedReader()?.use { it.readText() } ?: "")) return@withContext null
                 if (code == 200 || code == 403 || code == 404 || code == 410) noteAuthOk(slot)
                 if (code == 404 || code == 410 || code == 403)
                     return@withContext AvatarCheck(false, null, "", "", "", emptyList())
