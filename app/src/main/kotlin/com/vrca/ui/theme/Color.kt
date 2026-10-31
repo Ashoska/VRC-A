@@ -64,13 +64,15 @@ object GremlinColors {
         val Ios = Color(0xFFE0E0E0)
     }
 
-    /** Avatar performance ranks. */
+    /** Avatar performance ranks: VRChat's own rank-icon colours (sampled from creators.vrchat.com), so
+     *  the icons ([com.vrca.ui.common.PerfRankIcon]) read exactly like VRChat's. */
     object Performance {
-        val Excellent = Color(0xFF3CCF4E)
-        val Good = Color(0xFF8CC63F)
-        val Medium = Color(0xFFFFC107)
-        val Poor = Color(0xFFFF7B42)
-        val VeryPoor = Color(0xFFE53935)
+        val Excellent = Color(0xFF6AE854)
+        val Good = Color(0xFF6AE854)
+        val Medium = Color(0xFFEAAA09)
+        val Poor = Color(0xFFE55A42)
+        val VeryPoor = Color(0xFFE55A42)
+        val Inner = Color(0xFF474747)   // the dark face inside the rank rings
     }
 
     /** Instance access types. */

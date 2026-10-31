@@ -877,6 +877,10 @@ private fun AvatarSearchPanel() {
     var searched by remember { mutableStateOf(false) }
     var seq by remember { mutableStateOf(0) }
     var platFilter by remember { mutableStateOf<String?>(null) }
+    // Rank filter: keep ranks 0..rankMax (0 Excellent … 3 Poor), null = any. One avatar ranks differently per
+    // platform: with a platform selected it checks that platform's rank; with "All", EVERY platform the avatar has
+    // must meet it (user, 2026-10-31). An unknown rank never passes.
+    var rankMax by remember { mutableStateOf<Int?>(null) }
     val deadIds = remember { androidx.compose.runtime.mutableStateListOf<String>() }
     var recent by remember { mutableStateOf(com.vrca.vrchat.AvatarSearch.recentSearches()) }
 
@@ -891,7 +895,7 @@ private fun AvatarSearchPanel() {
         // A term still remembered (20 min) reopens from memory: no request, so no cooldown either (user).
         val fromMemory = reuse || com.vrca.vrchat.AvatarSearch.isRemembered(q)
         if (!fromMemory) { if (cooldown.value > 0f) return; scope.launch { cooldown.snapTo(1f); cooldown.animateTo(0f, androidx.compose.animation.core.tween(3000, easing = androidx.compose.animation.core.LinearEasing)) } }
-        query = q; shownQuery = q; searched = true; page = 0; more = false; platFilter = null
+        query = q; shownQuery = q; searched = true; page = 0; more = false; platFilter = null; rankMax = null
         deadIds.clear(); loaded.clear()
         val s = ++seq
         scope.launch {
@@ -935,7 +939,15 @@ private fun AvatarSearchPanel() {
     }
     if (!searched) return
 
-    val visible by remember { androidx.compose.runtime.derivedStateOf { loaded.filter { it.id !in deadIds && (platFilter == null || it.platforms.any { p -> p.equals(platFilter, true) }) } } }
+    val visible by remember { androidx.compose.runtime.derivedStateOf {
+        loaded.filter { r ->
+            r.id !in deadIds && (platFilter == null || r.platforms.any { p -> p.equals(platFilter, true) }) &&
+                rankMax.let { max ->
+                    max == null || platFilter?.let { rankOf(r, it) <= max }
+                        ?: (r.platforms.isNotEmpty() && r.platforms.all { p -> rankOf(r, p) <= max })
+                }
+        }
+    } }
     val pageCount = (visible.size + pageSize - 1) / pageSize
     if (page > 0 && page >= pageCount && !loadingNext) page = (pageCount - 1).coerceAtLeast(0)
     // Prefetch: on the second-to-last loaded page, quietly fetch the next 500.
@@ -946,13 +958,31 @@ private fun AvatarSearchPanel() {
     var pageShown by remember { mutableStateOf(page) }
     androidx.compose.runtime.LaunchedEffect(page) { if (page != pageShown) { pageShown = page; resultsTop.bringIntoView() } }
 
-    // Platform filter over what's loaded (no re-search).
-    Row(Modifier.bringIntoViewRequester(resultsTop), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+    // Platform + rank filters over what's loaded (no re-search). One line on the wide headset panel, two on a phone.
+    val platformChips: @Composable () -> Unit = {
         com.vrca.ui.common.GremlinChip("All", selected = platFilter == null, onClick = { platFilter = null; page = 0 })
         listOf("PC", "Quest", "iOS").forEach { plat ->
             com.vrca.ui.common.GremlinChip(plat, selected = platFilter == plat, onClick = { platFilter = if (platFilter == plat) null else plat; page = 0 },
                 leading = { PlatformSymbol(plat) })
         }
+    }
+    val rankChips: @Composable () -> Unit = {
+        Text(platFilter?.let { "Rank ($it)" } ?: "Rank (every platform)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        com.vrca.ui.common.GremlinChip("Any", selected = rankMax == null, onClick = { rankMax = null; page = 0 })
+        listOf(0 to "Excellent", 1 to "Good+", 2 to "Medium+", 3 to "Poor+").forEach { (rank, label) ->
+            com.vrca.ui.common.GremlinChip(label, selected = rankMax == rank, onClick = { rankMax = if (rankMax == rank) null else rank; page = 0 },
+                leading = { com.vrca.ui.common.PerfRankIcon(rank, 16.dp, label = null) })
+        }
+    }
+    if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+        Row(Modifier.bringIntoViewRequester(resultsTop).horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            platformChips(); Spacer(Modifier.width(10.dp)); rankChips()
+        }
+    } else {
+        Row(Modifier.bringIntoViewRequester(resultsTop), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) { platformChips() }
+        Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically) { rankChips() }
     }
     when {
         searching -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -961,7 +991,7 @@ private fun AvatarSearchPanel() {
         }
         visible.isEmpty() && !loadingNext -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             com.vrca.app.BootCat(com.vrca.app.Mark.Skipped, 0, Modifier.size(28.dp))
-            Text(if (platFilter != null && loaded.isNotEmpty()) "No $platFilter avatars in these results." else "No avatars found for \"$shownQuery\".",
+            Text(if ((platFilter != null || rankMax != null) && loaded.isNotEmpty()) "No avatars in these results match the filters." else "No avatars found for \"$shownQuery\".",
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         else -> {
@@ -1007,29 +1037,25 @@ private fun SearchPageBar(page: Int, pageCount: Int, more: Boolean, loadingNext:
     }
 }
 
-/** VRChat avatar performance rank badge (Excellent…Very Poor). Shows the rank for the user's own
- *  platform (Quest on the headset build, else PC), falling back to any known one. Hidden when unknown. */
+private fun rankOf(r: com.vrca.vrchat.AvatarSearch.Result, plat: String): Int =
+    when (plat) { "PC" -> r.perfPc; "Quest" -> r.perfQuest; "iOS" -> r.perfIos; else -> 5 }
+
+/** Each platform the avatar has, as its symbol with that platform's own VRChat performance rank as a small badge
+ *  on its bottom-right corner, like Discord's status dot (an avatar can be Good on PC and Very Poor on Quest).
+ *  The badge sits in a ring of [ring] (the surface behind) so it reads as cut into the symbol. */
 @Composable
-private fun PerfBadge(r: com.vrca.vrchat.AvatarSearch.Result) {
-    val rank = when {
-        com.vrca.BuildConfig.IS_HEADSET_BUILD && r.perfQuest < 5 -> r.perfQuest
-        r.perfPc < 5 -> r.perfPc
-        r.perfQuest < 5 -> r.perfQuest
-        r.perfIos < 5 -> r.perfIos
-        else -> return
-    }
-    val (label, color) = when (rank) {
-        0 -> "Excellent" to GremlinColors.Performance.Excellent
-        1 -> "Good" to GremlinColors.Performance.Good
-        2 -> "Medium" to GremlinColors.Performance.Medium
-        3 -> "Poor" to GremlinColors.Performance.Poor
-        else -> "Very Poor" to GremlinColors.Performance.VeryPoor
-    }
-    Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp), color = color.copy(alpha = 0.18f)) {
-        Text(
-            label, style = MaterialTheme.typography.labelSmall, color = color,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
-        )
+private fun PlatformRanks(r: com.vrca.vrchat.AvatarSearch.Result, ring: Color = GremlinColors.Card) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        r.platforms.forEach { plat ->
+            val rank = rankOf(r, plat)
+            Box(Modifier.size(25.dp)) {
+                Box(Modifier.align(Alignment.TopStart)) { PlatformSymbol(plat) }
+                if (rank in 0..4) Box(Modifier.align(Alignment.BottomEnd).size(12.dp).background(ring, androidx.compose.foundation.shape.CircleShape),
+                    contentAlignment = Alignment.Center) {
+                    com.vrca.ui.common.PerfRankIcon(rank, 9.dp, label = com.vrca.ui.common.perfRankName(rank)?.let { "$plat: $it" })
+                }
+            }
+        }
     }
 }
 
@@ -1111,13 +1137,8 @@ private fun ResultText(r: com.vrca.vrchat.AvatarSearch.Result, modifier: Modifie
     Text(r.name.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
     Text("by ${r.author.ifBlank { "unknown" }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-    // Platform SYMBOLS (same glyphs as the instance roster) + performance rank.
-    if (r.platforms.isNotEmpty() || r.perfPc < 5 || r.perfQuest < 5 || r.perfIos < 5) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            r.platforms.forEach { PlatformSymbol(it) }
-            PerfBadge(r)
-        }
-    }
+    // Platform SYMBOLS (same glyphs as the instance roster), each with its own performance rank.
+    if (r.platforms.isNotEmpty()) PlatformRanks(r)
 }
 
 /** Phone: one result per row. */
@@ -1147,9 +1168,7 @@ private fun AvatarResultCard(ctx: android.content.Context, r: com.vrca.vrchat.Av
                 }
                 CardRound(onClick = { openResult(ctx, r) }, label = "Open in VRChat") { Icon(Icons.Filled.OpenInNew, null, Modifier.size(15.dp), tint = GremlinColors.Text) }
             }
-            if (r.platforms.isNotEmpty()) Row(Modifier.align(Alignment.BottomStart).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                r.platforms.forEach { PlatformSymbol(it) }
-            }
+            if (r.platforms.isNotEmpty()) Box(Modifier.align(Alignment.BottomStart).padding(4.dp)) { PlatformRanks(r) }
         }
         Spacer(Modifier.height(5.dp))
         Text(r.name.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.bodyMedium, maxLines = 1,
