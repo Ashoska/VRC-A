@@ -699,7 +699,15 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
        Main app
        ------------------------- */
 
-    VrcaScreen(chatboxViewModel = vm, discordInvite = remoteDiscordInvite)
+    androidx.compose.foundation.layout.Box {
+        VrcaScreen(chatboxViewModel = vm, discordInvite = remoteDiscordInvite)
+        // Account standing: opened from Settings or a disabled-feature line, or by itself when an action is new or an
+        // admin changed one (it rides the moderation listener, so that's live). Banned: no Close, it stays.
+        val standing = Standing.state.value
+        LaunchedEffect(standing) { if (Standing.shouldPop(ctx, standing)) StandingPopupOpen.value = true }
+        LaunchedEffect(remoteDiscordInvite) { StandingSupportUrl.value = remoteDiscordInvite }
+        if (StandingPopupOpen.value) StandingPopup(onClosed = { StandingPopupOpen.value = false })
+    }
 }
 
 /**

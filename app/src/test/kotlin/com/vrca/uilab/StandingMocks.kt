@@ -79,6 +79,21 @@ object StandingMocks {
             Action("Restriction", "Abusing VRC-A's servers", "30 Oct", "Too many searches in a short time.", listOf("Avatar search"), listOf(true), true)))
     }
 
+    /** The same sample data as the `standing` field the admin writes (for `show standingreal`). */
+    fun sampleMap(state: String): Map<String, Any?> {
+        val now = System.currentTimeMillis(); val d = 86_400_000L
+        fun act(id: String, kind: String, title: String, msg: String, given: Long, off: Map<String, Long>, ban: Long, ev: List<String>, active: Boolean = true) =
+            mapOf("id" to id, "kind" to kind, "title" to title, "message" to msg, "given" to given, "active" to active, "off" to off, "banUntil" to ban,
+                "ev" to ev.map { mapOf("id" to it, "kind" to "png") })
+        val warn = act("a2", "warning", "Spam through the chatbox", "Repeated the same message in a busy instance.", now - 40 * d, emptyMap(), 0L, emptyList(), active = false)
+        return when (state) {
+            "warned" -> mapOf("rev" to now, "level" to "good", "actions" to listOf(act("a3", "warning", "Spam through the chatbox", "Repeated the same message in a busy instance.", now, emptyMap(), 0L, emptyList())))
+            "banned" -> mapOf("rev" to now, "level" to "banned", "actions" to listOf(act("a4", "ban", "Abusing VRC-A's servers", "Automated requests from a modified app.", now, emptyMap(), -1L, emptyList()), warn))
+            else -> mapOf("rev" to now, "level" to "atrisk", "actions" to listOf(act("a1", "restriction", "Harassment through the chatbox", "Targeted messages at another player after being asked to stop.", now - 2 * d,
+                mapOf("chatbox_manual" to now + 2 * d, "avatar_clone" to now + 28 * d, "avatar_search" to now + 28 * d), 0L, emptyList()), warn))
+        }
+    }
+
     /** Full-screen still (`show standingmock <state>[open]`): over a dim stand-in app, fully in. */
     @Composable
     fun Page(state: String) = Box(Modifier.fillMaxSize().background(G.Panel)) {

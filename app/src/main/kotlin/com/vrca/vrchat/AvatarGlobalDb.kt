@@ -1092,6 +1092,7 @@ object AvatarGlobalDb {
         // mature catalog, where a worn/favourited avatar is usually already present).
         if (!FILE_RE.matches(fileId)) return false
         if (!AVTR_RE.matches(avatarId)) return false
+        if (com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.AvatarContribute)) return false
         // NEVER catalog VRChat's default/system avatars (Robot etc.) — a loading player shows the
         // Robot's thumbnail, so catalog-ing it makes every loading avatar resolve to the Robot and
         // clone into it. This is the crowdsource-harvest regression vs the old curated whole-file DB.

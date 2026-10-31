@@ -70,3 +70,5 @@ The admin panel shares one visual language defined in **`AdminUiKit.kt`** — al
 
 ### Crashes tab (`CrashesTab.kt`)
 - Crash reports sent by `CrashUpload` (`crashes`): newest first, one `get()` (limit 100) on open + Refresh icon, no listener. Row: where (error colour), relative time, Delete; what; version · build · device; device hash (first 16). Tap a row to open the full report (monospace, scrolls both ways, text selectable) with **Copy** (clipboard) and **Share** (Android share sheet: save to a file, Discord, email…) for the whole report, since the scroll box is too small to read or send a long one. Release-build reports have renamed class names (packages kept); decode them with that build's mapping.txt (CI artifact `headset-mapping` for the headset).
+
+**Account standing (2026-10-31)**: UsersTab detail → "Account standing" opens `AdminStandingDialog` (action list + add/edit page, evidence uploads via the Worker with the Bots-tab admin key). Details: moderation-accounts.md "Account standing".

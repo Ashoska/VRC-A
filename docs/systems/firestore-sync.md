@@ -115,3 +115,5 @@ The public app's moderation snapshot listener on `users/{deviceHash}` also picks
 2. Per-field `lastSyncedValues` comparison — if the remote value matches what we last wrote, it's our own echo and is skipped; if it differs, an admin changed it and it's applied
 
 After those filters, the snapshot's content fields (afkMessage, cycleLines, presets) are written to DataStore so existing flow collectors propagate them into ViewModel state. Toggles are set directly on the ViewModel (they don't persist — see below).
+
+**`standing` (2026-10-31)**: admin-only map on `users/{deviceHash}` (account-wide), the user's view of their account standing; read by the existing moderation listener (no extra read) and once at boot. Full records in admin-only `standingActions/{id}`. See moderation-accounts.md "Account standing".

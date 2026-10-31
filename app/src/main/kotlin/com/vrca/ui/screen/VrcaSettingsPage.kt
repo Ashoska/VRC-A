@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -186,6 +187,15 @@ internal fun SettingsPage(
                 subtitle = "Walk through OSC, IP, permissions and notifications again.",
                 primary = "Start"
             ) { com.vrca.ui.onboarding.OnboardingState.replayRequested.value = true }
+            if (!BuildConfig.IS_ADMIN_BUILD) {
+                val lvl = com.vrca.app.Standing.state.value?.level ?: com.vrca.app.Standing.Level.Good
+                SettingsRow(
+                    icon = Icons.Filled.Shield,
+                    title = "Account standing",
+                    subtitle = lvl.label,
+                    primary = "View"
+                ) { com.vrca.app.StandingPopupOpen.value = true }
+            }
             var showWhatsNew by remember { mutableStateOf(false) }
             SettingsRow(
                 icon = Icons.Filled.NewReleases,

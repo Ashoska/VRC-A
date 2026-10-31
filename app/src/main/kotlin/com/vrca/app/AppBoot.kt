@@ -285,8 +285,20 @@ internal fun AppBoot(
                 } else {
                     BootResults.banId = result.banId
                     BootResults.banChecked = true
-                    // A ban is shown by the ban gate after boot; here it's just noted.
+                    // Account standing: one read of this device's own users doc (the app's moderation listener reads
+                    // the same doc right after, from cache). Needed here so a new action or a ban shows before the
+                    // hand-off. A failed read just leaves the standing unknown (the listener fills it in).
+                    if (deviceHash.isNotBlank()) {
+                        val doc = orNull { withTimeoutOrNull(8_000L) {
+                            com.google.firebase.firestore.FirebaseFirestore.getInstance().collection("users").document(deviceHash).get().await()
+                        } }
+                        if (doc != null) Standing.publish(doc.get("standing"))
+                    }
+                    // A legacy ban is shown by the ban gate after boot; here it's just noted. Standing: the level, or
+                    // what's new (the popup then opens over this screen before the hand-off).
+                    val standingNote = Standing.bootNote(ctx, Standing.state.value)
                     if (result.isBanned) set(Row.Account, BootState.Warn, BootNote.Restricted)
+                    else if (standingNote != BootNote.Good) set(Row.Account, BootState.Warn, standingNote)
                     else set(Row.Account, BootState.Done, BootNote.Good)
                 }
             }
@@ -361,6 +373,7 @@ internal fun AppBoot(
     // it is just the fold and the fade over an app that's already there.
     var exiting by remember { mutableStateOf(false) }
     var celebrate by remember { mutableStateOf(false) }
+    var standingUp by remember { mutableStateOf(false) }
     val appReadyNow by rememberUpdatedState(appReady)
     // The main app (not a terms, sign-in, first-run or ban screen) is what opens next. A function,
     // asked only when it's needed: as a value it re-read the saved VRChat login (encrypted store)
@@ -392,6 +405,13 @@ internal fun AppBoot(
             timeline.event("every row settled")
             // First open: the Ready moment waits until Boot Cat has listed every check.
             if (firstOpen) { snapshotFlow { welcomeListed }.first { it }; timeline.event("Boot Cat listed every check") }
+            // Account standing: a new or changed action (or a ban) opens the standing popup over this screen, and the
+            // hand-off waits until it's closed. Banned: it has no Close, so boot never hands off.
+            if (Standing.shouldPop(ctx, Standing.state.value)) {
+                timeline.event("account standing popup")
+                standingUp = true
+                snapshotFlow { standingUp }.first { !it }
+            }
             val mainNext = withContext(Dispatchers.IO) { mainAppNext() }
             // The terms come next (user, 2026-10-25: boot hands over to them like it does to the app).
             val termsNext = rows[Row.Terms.ordinal].note == BootNote.NewTerms &&
@@ -452,6 +472,7 @@ internal fun AppBoot(
         onExited = { BootReveal.termsCatIn.floatValue = 1f; onDone(toMainApp || toTerms) },
         onSignIn = if (signInNeeded && error == null) ({ showLogin = true }) else null
     )
+    if (standingUp) StandingPopup(onClosed = { standingUp = false })
     // Sign in right here, over the boot screen (which stays underneath, so it doesn't replay).
     if (showLogin) {
         androidx.compose.material3.Surface(androidx.compose.ui.Modifier.fillMaxSize(), color = com.vrca.ui.theme.GremlinColors.Backdrop) {
@@ -774,6 +795,10 @@ internal fun fetchServerStatus(): String? {
             useCaches = false; setRequestProperty("User-Agent", "VRC-A"); connectTimeout = 8_000; readTimeout = 8_000
         }
         if (conn.responseCode != 200) null
-        else org.json.JSONObject(conn.inputStream.bufferedReader().readText()).optString("state").ifBlank { null }
+        else {
+            // The server's clock for account-standing lengths (a changed phone clock can't end them early).
+            com.vrca.app.Standing.anchorServerTime(conn.date)
+            org.json.JSONObject(conn.inputStream.bufferedReader().readText()).optString("state").ifBlank { null }
+        }
     } catch (_: Exception) { null } finally { runCatching { conn?.disconnect() } }
 }

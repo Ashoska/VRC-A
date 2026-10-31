@@ -295,6 +295,10 @@ class DiscordRpcService : Service() {
                 return START_NOT_STICKY
             }
         }
+        // Account standing: Discord status disabled by an admin (or banned) → don't run. The login is kept.
+        if (com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.Discord)) {
+            teardown(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); return START_NOT_STICKY
+        }
         // A null intent is a START_STICKY restart. If the user swiped the app away,
         // honour the deliberate kill so this WebView-backed service doesn't resurrect
         // itself and keep the app alive. Check both the 15s window and the persistent

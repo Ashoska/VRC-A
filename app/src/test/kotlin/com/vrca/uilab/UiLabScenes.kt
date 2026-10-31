@@ -380,7 +380,7 @@ object UiLabScenes {
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
     private val FULL = setOf("boot", "cats", "catframes", "thinkmock", "waitmock", "skipmock", "donemock", "warnmock", "maintmock", "failmock", "bgmock", "searchmock", "standingmock", "standingboot", "modactionmock", "disabledmock", "downloadmock", "countdownmock", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
-    val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone", "standing") + FULL
+    val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone", "standing", "standingreal") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
         val name = arg.substringBefore(' ')
@@ -962,6 +962,13 @@ object UiLabScenes {
             )
             "timezone" -> VrcaTimeZoneDialog(currentMode = "Europe/Paris", use24h = false, onSelect = {}, onDismiss = { d.overlay.value = null })
             // `show standing <state>`: the account standing popup over the real app, animating in; Close animates it out.
+            // `show standingreal <warned|risk|banned>`: the REAL popup (app/StandingPopup.kt) over the real app, fed sample data
+            // through Standing.publish exactly as the moderation listener does.
+            "standingreal" -> androidx.compose.runtime.key(arg) {
+                val st = arg.substringAfter(' ', "risk").trim()
+                androidx.compose.runtime.remember { com.vrca.app.Standing.publish(StandingMocks.sampleMap(st)); true }
+                com.vrca.app.StandingPopup(onClosed = { d.overlay.value = null })
+            }
             "standing" -> androidx.compose.runtime.key(arg) { StandingMocks.Standing(arg.substringAfter(' ', "risk").trim(), onClosed = { d.overlay.value = null }) }
         }
     }
