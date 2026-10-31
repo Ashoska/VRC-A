@@ -41,7 +41,10 @@ service cloud.firestore {
         // payload (transferPayload) is end-to-end encrypted to the target's one-time key, so
         // the admin only relays ciphertext. Admin-only write.
         "transferReqId", "transferRole", "transferAt",
-        "transferPubKey", "transferPayload", "transferPeerHash"
+        "transferPubKey", "transferPayload", "transferPeerHash",
+        // Account standing (revamp 2): the user's view of their standing (level, actions, disabled features,
+        // shown evidence ids). Admin-only write; the full records live in standingActions (admin-only).
+        "standing"
       ];
     }
 
@@ -313,6 +316,12 @@ service cloud.firestore {
     /* =========================
        MODERATION EVENTS — audit / ban-evasion
        ========================= */
+
+    // Account standing: the admin's full action records (admin note, every evidence file and its visibility,
+    // history). Admin-only; the user sees only the `standing` projection on their own users doc.
+    match /standingActions/{id} {
+      allow read, write: if isOwner();
+    }
 
     match /moderationEvents/{id} {
       allow get, list: if isOwner();
