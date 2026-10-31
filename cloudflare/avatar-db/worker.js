@@ -1006,7 +1006,7 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 60,   // v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
+          version: 61,   // v61: name files update at once again (v60 leftovers drained); /health search.last.today = nm writes by cause. v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
          //   // v55: /search filters pl + rk (applied on the Search press).
          //   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
          //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
@@ -2604,6 +2604,7 @@ async function nmApply(env, puts, removes, maxBuckets) {
   for (const r of removes) touch(nameBucketOf(r.k)).rem.push(r);
   for (const s of puts) { const k = nameKey(s.n); touch(nameBucketOf(k)).add.push({ k, s }); }
   const done = new Set(), failed = new Set(), jobs = [];
+  let written = 0;
   const buckets = [...byB.keys()];
   await runPool(buckets.slice(0, maxBuckets), 6, async (b) => {
     const w = byB.get(b);
@@ -2622,11 +2623,11 @@ async function nmApply(env, puts, removes, maxBuckets) {
     if (after === before) { done.add(b); return; }   // v60: nothing visible changed (e.g. a bio-only edit): no write, no purge
     try {
       const put = await env.CATALOG.put(`nm/${b}.json`, after, { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + NAME_TTL } });
-      done.add(b); jobs.push({ u: catalogUrl(env, `nm/${b}.json`), etag: (put && put.etag) || "", t0: Date.now() });
+      done.add(b); written++; jobs.push({ u: catalogUrl(env, `nm/${b}.json`), etag: (put && put.etag) || "", t0: Date.now() });
     } catch (_) { failed.add(b); }
   });
   const pending = new Set(buckets.filter((b) => !done.has(b)));   // failed + over budget
-  return { done: done.size, pending, jobs };
+  return { done: done.size, written, pending, jobs };
 }
 
 // ---- v60 lazy nm/ refresh: D1 table nmdirty (bucket numbers whose file needs rebuilding from D1) ----
@@ -2645,16 +2646,13 @@ async function nmDirtyAdd(db, buckets) {
   }
   if (st.length) await db.batch(st);
 }
-const NM_LAZY_HOUR_UTC = 4;   // the daily refresh starts at 04:00 UTC (quiet), then runs each step until done
 async function nmLazyStep(env) {
+  // v61: name files update at once again (user); this only rebuilds the files v60 left marked, then stops.
+  if (DONE_FLAGS.has("nmdirty")) return {};
   const db = env.SEARCH;
-  const today = new Date().toISOString().slice(0, 10);
-  const due = new Date().getUTCHours() >= NM_LAZY_HOUR_UTC;
-  let doneDay = null; try { doneDay = await env.AVATAR_KV.get("nmLazyDay"); } catch (_) {}
-  if (!due || doneDay === today) return {};
   await nmDirtySchema(db);
   const rows = (await db.prepare("SELECT b FROM nmdirty ORDER BY b LIMIT ?").bind(NMFILL_BUCKETS_PER_STEP).all()).results || [];
-  if (!rows.length) { try { await env.AVATAR_KV.put("nmLazyDay", today); } catch (_) {} return { nmLazy: 0 }; }
+  if (!rows.length) { DONE_FLAGS.add("nmdirty"); return {}; }
   const bs = rows.map((r) => r.b);
   const r = await db.prepare(`SELECT av.id a, av.f f, av.n n, av.nk k, av.nb b, av.ai ai, av.p p, av.pf pf, au.n au FROM av LEFT JOIN au ON au.id = av.ai WHERE av.nb IN (${bs.map(() => "?").join(",")})`).bind(...bs).all();
   const files = new Map(bs.map((b) => [b, {}]));
@@ -2690,34 +2688,25 @@ async function searchStep(env) {
         if (r.d1) continue;
         if (r.nw) { d1Puts.set(r.id, r.nw); d1Dels.delete(r.id); } else if (!d1Puts.has(r.id)) d1Dels.set(r.id, r);
       }
-      // v60: a change that keeps the avatar's exact name and image (platforms / perf / author id / bio) updates D1 at
-      // once but only marks its nm/ file for the daily refresh from D1 (`nmdirty`), so a file busy with such edits is
-      // written once a day instead of once a minute. New avatars, removals, renames and re-files still go out now.
-      const lazy = new Set();
+      // v61: cause counts for the daily stats (what made the nm/ writes).
+      const cause = { add: 0, rem: 0, rename: 0, meta: 0 };
       for (const r of got.items) {
-        if (r.nw && r.old && r.old.n === r.nw.n && r.old.f === r.nw.f && r.nw.id === r.id) lazy.add(r.id);
+        if (r.d1) continue;
+        if (!r.nw) cause.rem++; else if (!r.old) cause.add++; else if (r.old.n !== r.nw.n) cause.rename++; else cause.meta++;
       }
-      for (const r of got.items) if (lazy.has(r.id) && (!r.nw || !r.old || r.old.n !== r.nw.n)) lazy.delete(r.id);
-      const lazyBuckets = new Set([...puts.values()].filter((x) => lazy.has(x.id)).map((x) => parseInt(nameBucketOf(nameKey(x.n)), 16)));
-      for (const id of lazy) puts.delete(id);
-      for (let i = rem.length - 1; i >= 0; i--) if (lazy.has(rem[i].id)) rem.splice(i, 1);
       const d1PutList = [...d1Puts.values()], d1DelList = [...d1Dels.values()].map((r) => ({ id: r.id, f: r.f }));
       let d1ok = true;
       if (env.SEARCH && (d1PutList.length || d1DelList.length)) {
         try { await ensureSearchSchema(env.SEARCH); const w = await d1Apply(env.SEARCH, d1PutList, d1DelList); out.d1Written = w.written; }
         catch (e) { d1ok = false; out.d1Err = String(e && e.message || e).slice(0, 200); }
       }
-      if (d1ok && lazyBuckets.size && env.SEARCH) {
-        try { await nmDirtyAdd(env.SEARCH, [...lazyBuckets]); out.nmMarked = lazyBuckets.size; }
-        catch (_) { for (const id of lazy) { const x = got.items.find((r) => r.id === id && r.nw); if (x) puts.set(id, x.nw); } lazy.clear(); }   // fall back to writing now
-      }
       const putList = [...puts.values()];
       // nm/ for dels: drop (id, f) under the old name; rem covers renames and removals.
       const nm = await nmApply(env, putList, rem, NM_BUCKETS_PER_STEP);
-      out.nm = nm.done;
+      out.nm = nm.written; out.nmSame = nm.done - nm.written; out.cause = cause;
       if (nm.jobs.length) await hubQueuePush(env, "pq", nm.jobs);
       // Requeue: everything if D1 failed, else only records whose nm/ bucket wasn't written (idempotent).
-      const again = got.items.filter((r) => !d1ok || (!lazy.has(r.id) && (
+      const again = got.items.filter((r) => !d1ok || ((
         (r.nw && nm.pending.has(nameBucketOf(nameKey(r.nw.n)))) || (r.old && r.old.n && nm.pending.has(nameBucketOf(nameKey(r.old.n)))))));
       if (again.length) { await hubQueuePush(env, "srq", d1ok ? again.map((r) => ({ ...r, d1: 1 })) : again); out.requeued = again.length; }
       await hubQueueAck(env, got.keys);
@@ -2732,7 +2721,15 @@ async function searchStep(env) {
   } finally { await hubUnlock(env, "search"); }
   // v60: tell the cron whether to run the next step at once (otherwise it waits for new work or the 5-minute check).
   try { if (out.more) await env.AVATAR_KV.put("sqwork", "1"); else await env.AVATAR_KV.delete("sqwork"); } catch (_) {}
-  try { await hubPut(env, "searchStat", JSON.stringify({ at: Date.now(), ...out })); } catch (_) {}
+  // v61: today's totals ride the same record (one read + the put the step already made): name-file writes by cause.
+  try {
+    const prev = JSON.parse((await hubGet(env, "searchStat")) || "null");
+    const d = new Date().toISOString().slice(0, 10);
+    const t = prev && prev.today && prev.today.d === d ? prev.today : { d, nm: 0, nmSame: 0, add: 0, rem: 0, rename: 0, meta: 0, steps: 0 };
+    t.nm += out.nm || 0; t.nmSame += out.nmSame || 0; t.steps++;
+    if (out.cause) for (const k of ["add", "rem", "rename", "meta"]) t[k] += out.cause[k];
+    await hubPut(env, "searchStat", JSON.stringify({ at: Date.now(), ...out, today: t }));
+  } catch (_) {}
   return out;
 }
 
@@ -2822,6 +2819,7 @@ async function mediaImportStep(env) {
 // Guaranteed purge: a job leaves the queue only when Cloudflare confirmed the purge AND the CDN serves the
 // ETag we wrote (or a newer write superseded it). Anything else is retried every step; /health flags a job
 // older than 30 min.
+const PURGE_VERIFY_DELAY_MS = 3000;
 async function purgeStep(env) {
   const res = { purged: 0, purgeFailed: 0 };
   if (!env.CF_PURGE_TOKEN || !env.CF_ZONE_ID) return res;
@@ -2842,6 +2840,9 @@ async function purgeStep(env) {
   // Verify: the CDN must now serve our write (the ETag R2 returned on put). A newer write elsewhere changes
   // the ETag too; that write queued its own job, so a mismatch here just retries once more.
   const norm = (s) => String(s || "").replace(/^W\//, "").replace(/"/g, "");
+  // v61: give the purge a moment to reach the edge before checking. Checking at once failed a big share of
+  // fresh purges (seen as "45 retrying" in the admin Cache line), each costing a second purge + check next step.
+  if (jobs.some((j) => !bad.has(j.u) && j.etag)) await new Promise((r) => setTimeout(r, PURGE_VERIFY_DELAY_MS));
   await runPool(jobs.filter((j) => !bad.has(j.u) && j.etag), 6, async (j) => {
     try {
       const r = await fetch(j.u, { headers: { "user-agent": "VRC-A purge-verify", ...(env.CDN_APP_MARK ? { "x-vrca-app": env.CDN_APP_MARK } : {}) } }); await r.body?.cancel();
