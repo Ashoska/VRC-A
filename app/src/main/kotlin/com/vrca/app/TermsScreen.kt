@@ -79,8 +79,9 @@ private val TERMS_SECTIONS = listOf(
     TermsSection("Bugs and reports", BootIcons.Bug, "Crash reports and fixes",
         "If VRC-A crashes, a short report is sent to the VRC-A team so we can fix it: your device model, the app version and what went wrong. It never includes your messages or passwords, and you can see what happened on the crash screen."),
     TermsSection("Account standing", BootIcons.Account, "Moderation, warnings and bans",
-        "Accounts that break these terms can be warned, and repeat or serious cases banned from VRC-A.",
-        callout = Mark.Failed to "Trying to get around a ban gets every device and account involved banned."),
+        "We can limit or end anyone's access to VRC-A at any time, for any reason. Breaking these terms can lead to a warning or a ban. A ban only affects VRC-A, never your VRChat account itself.",
+        callout = Mark.Failed to "Trying to get around a ban gets every device and account involved banned from VRC-A.",
+        after = "If you think a ban is a mistake, contact us in the VRC-A support server on Discord."),
     TermsSection("Terms and changes", BootIcons.Terms, "Updates to these terms",
         "If these terms change, VRC-A shows them again the next time you open it, and you can read what's new before accepting."),
 )
@@ -228,6 +229,8 @@ private fun ReaderBody(s: TermsSection, wide: Boolean) {
                 Text(text, style = MaterialTheme.typography.bodyMedium, color = G.Text)
             }
         }
+        // A closing line under everything (e.g. where to appeal), quieter than the body.
+        s.after?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = G.TextMuted) }
     }
 }
 
