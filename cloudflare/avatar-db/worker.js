@@ -1006,7 +1006,7 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 63,   // v63: purge step reads several queue chunks and merges them per file (queue can't outgrow the step); v61 leftover name files rebuild again (D1 100-variable limit). v62: purge jobs superseded by a newer write count as done (no false "files out of date"). v61: name files update at once again (v60 leftovers drained); /health search.last.today = nm writes by cause. v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
+          version: 64,   // v64: purge API calls capped at 4 a step, 100 files each (Free zone allows ~5 calls/min), unsent files wait instead of failing. v63: purge step reads several queue chunks and merges them per file (queue can't outgrow the step); v61 leftover name files rebuild again (D1 100-variable limit). v62: purge jobs superseded by a newer write count as done (no false "files out of date"). v61: name files update at once again (v60 leftovers drained); /health search.last.today = nm writes by cause. v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
          //   // v55: /search filters pl + rk (applied on the Search press).
          //   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
          //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
@@ -2480,7 +2480,9 @@ async function purgeShards(env, prefixes) {
 const NAME_TTL = 7 * 24 * 3600;           // nm/ files: purge-on-write, the TTL is only a safety net
 const SEARCH_RECS_PER_STEP = 1500;        // queued change records applied per search step
 const NM_BUCKETS_PER_STEP = 150;          // nm/ read+write pairs per step (the rest stays queued)
-const PURGE_PER_STEP = 300;               // distinct files purged (+1 verify fetch each) per step
+const PURGE_PER_STEP = 400;               // distinct files purged (+1 verify fetch each) per step
+const PURGE_CALLS = 4;                    // v64: purge API calls per step (Free zone: ~5/min refill; 1 left for manifest/index purges)
+let purgeBatch = 100;                     // v64: files per purge call; drops to 30 for the isolate if the API refuses 100
 const PURGE_TAKE = 2000;                  // v63: queued jobs read per step (many are the same file; merged before purging)
 const PURGE_STUCK_MS = 30 * 60_000;       // a purge still failing after this is flagged on /health
 const SEARCH_PAGE = 500;                  // results per /search batch (the app shows 50 a page)
@@ -2840,21 +2842,36 @@ async function purgeStep(env) {
   const all = [...by.values()], jobs = all.slice(0, PURGE_PER_STEP), later = all.slice(PURGE_PER_STEP), bad = new Set(), dbg = [];
   res.pqTaken = got.items.length; res.pqFiles = all.length; res.pqChunks = got.depth;
   const api = `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/purge_cache`;
-  for (let i = 0; i < jobs.length; i += 30) {
-    const c = jobs.slice(i, i + 30);
+  // v64: the Free zone's purge API allows ~5 calls a minute (bucket of 25), so a step makes at most PURGE_CALLS calls
+  // of up to purgeBatch files and stops at the first 429; files it didn't send wait (`later`), they didn't fail.
+  // v63 sent 10 calls of 30 a step and ~6 were refused every minute (seen as ~180 "failed" a step).
+  const unsent = new Set();
+  let calls = 0, limited = false;
+  for (let i = 0; i < jobs.length; ) {
+    const c = jobs.slice(i, i + purgeBatch);
+    if (limited || calls >= PURGE_CALLS) { for (const x of c) unsent.add(x.u); i += c.length; continue; }
+    calls++;
     try {
       const r = await fetch(api, { method: "POST", headers: { authorization: `Bearer ${env.CF_PURGE_TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ files: c.map((j) => j.u) }) });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.success) for (const x of c) bad.add(x.u);
+      if (r.ok && j.success) { i += c.length; continue; }
+      const e = (j.errors && j.errors[0]) || {};
+      res.purgeApiErr = r.status + " " + (e.code || "") + " " + String(e.message || "").slice(0, 80);
+      if (r.status === 429) { limited = true; for (const x of c) unsent.add(x.u); i += c.length; continue; }
+      // A batch too big for this plan: drop to 30 for this isolate and resend the same files.
+      if (purgeBatch > 30 && c.length > 30) { purgeBatch = 30; continue; }
+      for (const x of c) bad.add(x.u);
     } catch (_) { for (const x of c) bad.add(x.u); }
+    i += c.length;
   }
+  res.purgeCalls = calls; res.purgeBatch = purgeBatch;
   // Verify: the CDN must now serve our write (the ETag R2 returned on put). A newer write elsewhere changes
   // the ETag too; that write queued its own job, so a mismatch here just retries once more.
   const norm = (s) => String(s || "").replace(/^W\//, "").replace(/"/g, "");
   // v61: give the purge a moment to reach the edge before checking. Checking at once failed a big share of
   // fresh purges (seen as "45 retrying" in the admin Cache line), each costing a second purge + check next step.
-  if (jobs.some((j) => !bad.has(j.u) && j.etag)) await new Promise((r) => setTimeout(r, PURGE_VERIFY_DELAY_MS));
-  await runPool(jobs.filter((j) => !bad.has(j.u) && j.etag), 6, async (j) => {
+  if (jobs.some((j) => !bad.has(j.u) && !unsent.has(j.u) && j.etag)) await new Promise((r) => setTimeout(r, PURGE_VERIFY_DELAY_MS));
+  await runPool(jobs.filter((j) => !bad.has(j.u) && !unsent.has(j.u) && j.etag), 6, async (j) => {
     try {
       const r = await fetch(j.u, { headers: { "user-agent": "VRC-A purge-verify", ...(env.CDN_APP_MARK ? { "x-vrca-app": env.CDN_APP_MARK } : {}) } }); await r.body?.cancel();
       const served = norm(r.headers.get("etag"));
@@ -2871,10 +2888,13 @@ async function purgeStep(env) {
     catch (_) { bad.add(j.u); }
   });
   const retry = jobs.filter((j) => bad.has(j.u));
+  for (const j of jobs) if (unsent.has(j.u)) later.push(j);
   if (retry.length || later.length) await hubQueuePush(env, "pq", [...later, ...retry]);
   await hubQueueAck(env, got.keys);
-  res.purged = jobs.length - retry.length; res.purgeFailed = retry.length; res.purgeLater = later.length;
-  res.purgeOldestMs = retry.length ? Date.now() - Math.min(...retry.map((j) => j.t0)) : 0;
+  res.purged = jobs.length - retry.length - unsent.size; res.purgeFailed = retry.length; res.purgeLater = later.length;
+  // v64: the oldest job still waiting, failed or not yet sent (a backlog the API limit can't clear is out-of-date files too).
+  const waiting = [...retry, ...later];
+  res.purgeOldestMs = waiting.length ? Date.now() - Math.min(...waiting.map((j) => j.t0 || Date.now())) : 0;
   res.purgeRetry = retry.slice(0, 3).map((j) => j.u.replace(/^https?:\/\/[^/]+\//, ''));   // which files keep failing (for /health)
   res.purgeDbg = dbg;   // v62: what the CDN answered for the first few mismatches
   return res;
