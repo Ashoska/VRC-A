@@ -378,7 +378,7 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "cats", "catframes", "thinkmock", "waitmock", "skipmock", "donemock", "warnmock", "maintmock", "failmock", "bgmock", "downloadmock", "countdownmock", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    private val FULL = setOf("boot", "cats", "catframes", "thinkmock", "waitmock", "skipmock", "donemock", "warnmock", "maintmock", "failmock", "bgmock", "searchmock", "downloadmock", "countdownmock", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
     val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
@@ -787,6 +787,8 @@ object UiLabScenes {
             "failmock" -> FailMocks.Sheet()
             // `show bgmock`: three idle beats for the Background Boot Cat (BgMocks).
             "bgmock" -> BgMocks.Sheet()
+            // `show searchmock`: six custom search boxes x idle / typing / cooldown (SearchBarMocks).
+            "searchmock" -> SearchBarMocks.Sheet()
             // `show downloadmock`: three eye beats for the Downloading Boot Cat on a fast and a slow bar (DownloadMocks).
             "downloadmock" -> DownloadMocks.Sheet()
             // `show countdownmock`: three eye beats for the Countdown Boot Cat on a short and a long countdown (CountdownMocks).

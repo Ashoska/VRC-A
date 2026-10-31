@@ -916,12 +916,9 @@ private fun AvatarSearchPanel() {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         com.vrca.ui.common.GremlinSearchField(
             value = query, onValueChange = { query = it }, onSearch = { run(query, reuse = false) },
-            placeholder = "Avatar name or creator", modifier = Modifier.weight(1f)
+            placeholder = "Avatar / Creator", modifier = Modifier.weight(1f),
+            searching = searching, cooldown = { cooldown.value }
         )
-        val coolingDown by remember { androidx.compose.runtime.derivedStateOf { cooldown.value > 0f } }
-        com.vrca.ui.common.GremlinButton("Search", onClick = { run(query, reuse = false) },
-            enabled = query.isNotBlank() && !coolingDown, loading = searching,
-            leading = if (coolingDown && !searching) ({ com.vrca.app.BootCatCountdown(cooldown.value, Modifier.size(20.dp)) }) else null)
     }
     // Recent searches (remembered for 20 minutes): tap to reopen with no request.
     if (recent.isNotEmpty() && !searching) {
@@ -965,9 +962,19 @@ private fun AvatarSearchPanel() {
         }
         else -> {
             val from = page * pageSize
-            visible.subList(from.coerceAtMost(visible.size), (from + pageSize).coerceAtMost(visible.size)).forEach { r ->
-                androidx.compose.runtime.key(r.id) { AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) }) }
-            }
+            val pageItems = visible.subList(from.coerceAtMost(visible.size), (from + pageSize).coerceAtMost(visible.size))
+            val markDead: (String) -> Unit = { if (it !in deadIds) deadIds.add(it) }
+            if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+                // Headset: 5 across x 10 rows = one page of 50 (one-per-row wasted the wide panel).
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    pageItems.chunked(5).forEach { row ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            row.forEach { r -> androidx.compose.runtime.key(r.id) { AvatarResultCard(ctx, r, markDead, Modifier.weight(1f)) } }
+                            repeat(5 - row.size) { Spacer(Modifier.weight(1f)) }
+                        }
+                    }
+                }
+            } else pageItems.forEach { r -> androidx.compose.runtime.key(r.id) { AvatarResultRow(ctx, r, onDead = markDead) } }
             SearchPageBar(page = page, pageCount = pageCount, more = more, loadingNext = loadingNext,
                 onPage = { p -> if (p < pageCount) page = p else if (more) { loadNext(); page = p } })
             Text(
@@ -1026,23 +1033,15 @@ private fun PerfBadge(r: com.vrca.vrchat.AvatarSearch.Result) {
     }
 }
 
+/** The thumbnail of a search result. Boot Cat thinks in its place while it loads (revamp 2: status shown by
+ *  the cats). A dead avatar's thumbnail 404s: on an image error, CONFIRM the avatar is gone (a network blip
+ *  never hides a valid one), then hide it and report it dead so the admin bots remove it from the catalog. */
 @Composable
-private fun AvatarResultRow(
-    ctx: android.content.Context,
-    r: com.vrca.vrchat.AvatarSearch.Result,
-    onDead: (String) -> Unit = {}
-) {
+private fun AvatarThumb(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSearch.Result, onDead: (String) -> Unit, modifier: Modifier, catSize: androidx.compose.ui.unit.Dp = 24.dp) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var cloning by remember { mutableStateOf(false) }
-    Row(
-        Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        // While the thumbnail loads, Boot Cat thinks in its place (revamp 2: status shown by the cats).
-        var imgLoading by remember(r.imageUrl) { mutableStateOf(true) }
-        Box(Modifier.size(width = 56.dp, height = 42.dp), contentAlignment = Alignment.Center) {
-        if (imgLoading) com.vrca.app.BootCat(com.vrca.app.Mark.Working, 0, Modifier.size(24.dp))
+    var imgLoading by remember(r.imageUrl) { mutableStateOf(true) }
+    Box(modifier, contentAlignment = Alignment.Center) {
+        if (imgLoading) com.vrca.app.BootCat(com.vrca.app.Mark.Working, 0, Modifier.size(catSize))
         coil.compose.AsyncImage(
             model = r.imageUrl,
             onLoading = { imgLoading = true },
@@ -1050,9 +1049,6 @@ private fun AvatarResultRow(
             imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            // A dead avatar's thumbnail 404s. On an image error, CONFIRM the avatar is
-            // gone (avoids hiding a valid one on a network blip), then hide it + report
-            // it dead so the admin bot removes it from the catalog.
             onError = {
                 imgLoading = false
                 scope.launch {
@@ -1064,85 +1060,85 @@ private fun AvatarResultRow(
                     }
                 }
             },
-            modifier = Modifier
-                .size(width = 56.dp, height = 42.dp)
-                .clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
+            modifier = Modifier.matchParentSize()
         )
+    }
+}
+
+/** Clone/wear a search result (we have its id). Also contributes it to our catalog (fetching its file id if the
+ *  source lacked one); a clone that fails because the avatar is gone hides and reports it. */
+private fun cloneResult(ctx: android.content.Context, scope: kotlinx.coroutines.CoroutineScope, r: com.vrca.vrchat.AvatarSearch.Result,
+                        onDead: (String) -> Unit, setCloning: (Boolean) -> Unit) {
+    setCloning(true)
+    scope.launch {
+        val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, r.id)
+        val fid = r.imageFileId ?: com.vrca.vrchat.VrchatAuthManager.avatarCatalogEntry(ctx, r.id)?.fileId
+        if (fid != null) com.vrca.vrchat.AvatarGlobalDb.contribute(ctx, fid, r.id, r.name, r.author, r.authorId, r.platforms)
+        android.widget.Toast.makeText(ctx,
+            if (res.ok) "Cloned ${r.name.ifBlank { "avatar" }} — shows on your next avatar reload" else (res.error ?: "Couldn't wear this avatar"),
+            android.widget.Toast.LENGTH_LONG).show()
+        if (!res.ok && com.vrca.vrchat.VrchatAuthManager.avatarExists(ctx, r.id) == false) {
+            onDead(r.id)
+            val df = r.imageFileId ?: fid
+            if (df != null) com.vrca.vrchat.AvatarGlobalDb.report(ctx, df, r.id, "dead")
         }
-        Column(Modifier.weight(1f)) {
-            Text(
-                r.name.ifBlank { "(unnamed)" },
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-            )
-            Text(
-                "by ${r.author.ifBlank { "unknown" }}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-            )
-            // Platform SYMBOLS (same glyphs as the instance roster) + performance rank.
-            if (r.platforms.isNotEmpty() || r.perfPc < 5 || r.perfQuest < 5 || r.perfIos < 5) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    r.platforms.forEach { PlatformSymbol(it) }
-                    PerfBadge(r)
-                }
-            }
+        setCloning(false)
+    }
+}
+
+private fun openResult(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSearch.Result) {
+    runCatching {
+        ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://vrchat.com/home/avatar/${r.id}"))
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+}
+
+@Composable
+private fun CloneOpenButtons(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSearch.Result, onDead: (String) -> Unit) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var cloning by remember { mutableStateOf(false) }
+    androidx.compose.material3.IconButton(enabled = !cloning, onClick = { if (!cloning) cloneResult(ctx, scope, r, onDead) { cloning = it } }) {
+        if (cloning) com.vrca.app.BootCat(com.vrca.app.Mark.Working, 0, Modifier.size(22.dp))
+        else Icon(Icons.Filled.PeopleAlt, contentDescription = "Clone avatar", tint = MaterialTheme.colorScheme.primary)
+    }
+    androidx.compose.material3.IconButton(onClick = { openResult(ctx, r) }) {
+        Icon(Icons.Filled.OpenInNew, contentDescription = "Open in VRChat")
+    }
+}
+
+@Composable
+private fun ResultText(r: com.vrca.vrchat.AvatarSearch.Result, modifier: Modifier = Modifier) = Column(modifier) {
+    Text(r.name.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+    Text("by ${r.author.ifBlank { "unknown" }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+    // Platform SYMBOLS (same glyphs as the instance roster) + performance rank.
+    if (r.platforms.isNotEmpty() || r.perfPc < 5 || r.perfQuest < 5 || r.perfIos < 5) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            r.platforms.forEach { PlatformSymbol(it) }
+            PerfBadge(r)
         }
-        // Clone/wear this avatar directly (we have its id). Also contributes it to
-        // the global catalog (fetching its file id if the search source lacked one).
-        androidx.compose.material3.IconButton(
-            enabled = !cloning,
-            onClick = {
-                if (cloning) return@IconButton
-                cloning = true
-                scope.launch {
-                    val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, r.id)
-                    // Contribute to our catalog: use the search file id if present,
-                    // else resolve it once via GET /avatars/{id}.
-                    val fid = r.imageFileId ?: com.vrca.vrchat.VrchatAuthManager.avatarCatalogEntry(ctx, r.id)?.fileId
-                    if (fid != null) com.vrca.vrchat.AvatarGlobalDb.contribute(
-                        ctx, fid, r.id, r.name, r.author, r.authorId, r.platforms
-                    )
-                    android.widget.Toast.makeText(
-                        ctx,
-                        if (res.ok) "Cloned ${r.name.ifBlank { "avatar" }} — shows on your next avatar reload"
-                        else (res.error ?: "Couldn't wear this avatar"),
-                        android.widget.Toast.LENGTH_LONG
-                    ).show()
-                    // If the clone failed because the avatar is gone, hide + report it.
-                    if (!res.ok && com.vrca.vrchat.VrchatAuthManager.avatarExists(ctx, r.id) == false) {
-                        onDead(r.id)
-                        val df = r.imageFileId ?: fid
-                        if (df != null) com.vrca.vrchat.AvatarGlobalDb.report(ctx, df, r.id, "dead")
-                    }
-                    cloning = false
-                }
-            }
-        ) {
-            if (cloning) {
-                androidx.compose.material3.CircularProgressIndicator(
-                    strokeWidth = 2.dp, modifier = Modifier.size(18.dp)
-                )
-            } else {
-                Icon(Icons.Filled.PeopleAlt, contentDescription = "Clone avatar",
-                    tint = MaterialTheme.colorScheme.primary)
-            }
-        }
-        androidx.compose.material3.IconButton(onClick = {
-            runCatching {
-                ctx.startActivity(
-                    android.content.Intent(
-                        android.content.Intent.ACTION_VIEW,
-                        android.net.Uri.parse("https://vrchat.com/home/avatar/${r.id}")
-                    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
-            }
-        }) {
-            Icon(Icons.Filled.OpenInNew, contentDescription = "Open in VRChat")
-        }
+    }
+}
+
+/** Phone: one result per row. */
+@Composable
+private fun AvatarResultRow(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSearch.Result, onDead: (String) -> Unit = {}) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        AvatarThumb(ctx, r, onDead, Modifier.size(width = 56.dp, height = 42.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp)))
+        ResultText(r, Modifier.weight(1f))
+        CloneOpenButtons(ctx, r, onDead)
+    }
+}
+
+/** Headset: a grid card (5 across, 10 rows = one page of 50). Raised layer, thumbnail on top. */
+@Composable
+private fun AvatarResultCard(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSearch.Result, onDead: (String) -> Unit, modifier: Modifier) {
+    val shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+    Column(modifier.background(GremlinColors.Raised, shape).border(1.dp, GremlinColors.Edge, shape).padding(6.dp)) {
+        AvatarThumb(ctx, r, onDead, Modifier.fillMaxWidth().aspectRatio(4f / 3f).clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp)), catSize = 32.dp)
+        Spacer(Modifier.height(6.dp))
+        ResultText(r, Modifier.padding(horizontal = 2.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { CloneOpenButtons(ctx, r, onDead) }
     }
 }
 
