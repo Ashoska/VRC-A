@@ -77,7 +77,7 @@ private val TERMS_SECTIONS = listOf(
             "The names of public avatars you come across, for avatar search"),
         callout = Mark.Done to "Your passwords are never stored, and your information is never sold."),
     TermsSection("Bugs and reports", BootIcons.Bug, "Crash reports and fixes",
-        "If VRC-A crashes, a report is sent to the developer with your device model, the app version and what went wrong. Nothing personal is in it."),
+        "If VRC-A crashes, a short report is sent to the VRC-A team so we can fix it: your device model, the app version and what went wrong. It never includes your messages or passwords, and you can see what happened on the crash screen."),
     TermsSection("Account standing", BootIcons.Account, "Moderation, warnings and bans",
         "Accounts that break these terms can be warned, and repeat or serious cases banned from VRC-A.",
         callout = Mark.Failed to "Trying to get around a ban gets every device and account involved banned."),
