@@ -105,7 +105,7 @@ private fun SearchRing(enabled: Boolean, searching: Boolean, cooldown: () -> Flo
     ) {
         when {
             searching -> BootCat(Mark.Working, 0, Modifier.size(26.dp))
-            cooling -> BootCatCountdown(cooldown(), Modifier.size(24.dp))
+            cooling -> BootCatCountdown(cooldown(), Modifier.size(24.dp), smooth = false)
             else -> BootIconView(BootIcons.Search, { GremlinColors.TextMuted }, { if (active) GremlinColors.Accent else GremlinColors.TextMuted }, Modifier.size(22.dp))
         }
     }

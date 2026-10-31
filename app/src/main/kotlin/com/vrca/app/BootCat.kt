@@ -250,15 +250,18 @@ internal fun BootCatDownload(progress: Float?, modifier: Modifier, color: Color 
  * length. Everything is read while drawing.
  */
 @Composable
-internal fun BootCatCountdown(left: Float, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary) {
+internal fun BootCatCountdown(left: Float, modifier: Modifier, color: Color = MaterialTheme.colorScheme.primary, smooth: Boolean = true) {
     val head = remember { headPath() }
     val start = remember {
         androidx.compose.ui.graphics.PathMeasure().apply { setPath(PathParser().parsePathString(HEAD_TO_TOP).toPath(), false) }.length
     }
     // A second's worth of draining takes a second, so the outline shrinks steadily instead of in steps.
-    val shown = androidx.compose.animation.core.animateFloatAsState(
-        left.coerceIn(0f, 1f), tween(1000, easing = LinearEasing), label = "catCountdown"
+    // [smooth] = false when [left] is already a smooth value (e.g. the search cooldown): easing it again would
+    // trail it by up to a second, so the outline would still show time left when the wait is over.
+    val eased = androidx.compose.animation.core.animateFloatAsState(
+        left.coerceIn(0f, 1f), tween(if (smooth) 1000 else 0, easing = LinearEasing), label = "catCountdown"
     )
+    val shown = if (smooth) eased else androidx.compose.runtime.rememberUpdatedState(left.coerceIn(0f, 1f))
     val ms = remember { mutableStateOf(0L) }
     LaunchedEffect(Unit) { val t0 = androidx.compose.runtime.withFrameMillis { it }; while (true) androidx.compose.runtime.withFrameMillis { ms.value = it - t0 } }
     Canvas(modifier) {
