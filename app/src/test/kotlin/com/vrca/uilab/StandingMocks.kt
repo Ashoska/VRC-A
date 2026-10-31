@@ -166,7 +166,7 @@ object StandingMocks {
                     // The pair meets across the gap between the cards (like boot's Retry pill): Close's right edge on the
                     // standing card's right edge, Support server's left edge on the actions card's left edge. With one
                     // card only, its button is centred under it.
-                    Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         val one = actions.isEmpty()
                         Box(Modifier.width(440.dp).then(btnL), contentAlignment = if (one) Alignment.Center else Alignment.CenterEnd) { if (level != Level.Banned) closeBtn() }
                         if (!one) Box(Modifier.width(440.dp).then(btnR), contentAlignment = Alignment.CenterStart) { supportBtn() }
@@ -176,7 +176,7 @@ object StandingMocks {
                     if (actions.isNotEmpty()) com.vrca.app.Unfold({ panelR.value }, Modifier.padding(top = 16.dp).fillMaxWidth()) {
                         ActionsCard(actions, openFirst, { partsR.value }, Modifier.fillMaxWidth())
                     }
-                    Row(Modifier.padding(top = 20.dp).then(btnR), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Row(Modifier.padding(top = 12.dp).then(btnR), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         if (level != Level.Banned) closeBtn()
                         if (actions.isNotEmpty()) supportBtn()
                     }
