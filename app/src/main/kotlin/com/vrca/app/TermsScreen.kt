@@ -69,18 +69,21 @@ private val TERMS_SECTIONS = listOf(
             "Don't use the chatbox to spam, harass or impersonate anyone",
             "Don't abuse VRC-A or its servers, for example with bots, scripts or modified versions of the app")),
     TermsSection("Login Centre", BootIcons.VrchatSignIn, "Your connected accounts",
-        "Signing in to VRChat powers your status, friends, instances and avatar tools. Signing in to Discord is optional and shows what you're up to on your Discord profile. Your logins are kept encrypted on this device.",
-        callout = Mark.Warn to "VRC-A isn't made by VRChat. Using third-party tools with your account is at your own risk."),
+        "Signing in to VRChat powers your status, friends, instances and avatar tools. Signing in to Discord is optional and shows your VRChat world on your Discord profile. Your sign-ins stay encrypted on this device, and your password is never stored or sent to us.",
+        callout = Mark.Warn to "VRC-A isn't made by or affiliated with VRChat or Discord. Using third-party tools with your accounts is at your own risk."),
     TermsSection("Data and privacy", BootIcons.Privacy, "What we store",
-        "To sync your settings and keep VRC-A safe, a small amount is stored with us.",
-        listOf("A random ID for this device", "Your app version and settings", "Never your VRChat password")),
+        "Some information is kept on our servers so your setup syncs between devices and VRC-A stays safe.",
+        listOf("Your settings and chatbox lines", "Your VRChat name and status", "A random device ID and your app version",
+            "The names of public avatars you come across, for avatar search"),
+        callout = Mark.Done to "Your passwords are never stored, and your information is never sold."),
     TermsSection("Bugs and reports", BootIcons.Bug, "Crash reports and fixes",
-        "If VRC-A crashes, a report is sent to the developer with your device model, the app version and what went wrong. Nothing personal is in it."),
+        "If VRC-A crashes, a short report is sent to the VRC-A team so we can fix it: your device model, the app version and what went wrong. It never includes your messages or passwords, and you can see what happened on the crash screen."),
     TermsSection("Account standing", BootIcons.Account, "Moderation, warnings and bans",
-        "Accounts that break these terms can be warned, and repeat or serious cases banned from VRC-A.",
-        callout = Mark.Failed to "Trying to get around a ban gets every device and account involved banned."),
+        "We can limit or end anyone's access to VRC-A at any time, for any reason. Breaking these terms can lead to a warning or a ban. A ban only affects VRC-A, never your VRChat account itself.",
+        callout = Mark.Failed to "Trying to get around a ban gets every device and account involved banned from VRC-A.",
+        after = "If you think a ban is a mistake, contact us in the VRC-A support server on Discord."),
     TermsSection("Terms and changes", BootIcons.Terms, "Updates to these terms",
-        "If these terms change, VRC-A shows them again the next time you open it, and you can read what's new before accepting."),
+        "If these terms change, VRC-A shows them again the next time you open it, so you can read what's new before accepting. You need to accept the current terms to keep using VRC-A, and you can stop using it at any time."),
 )
 
 /** Whether any section shows a picture; boot only fetches the terms' pictures when one does. */
@@ -215,7 +218,7 @@ private fun ReaderBody(s: TermsSection, wide: Boolean) {
             }
         }
         s.callout?.let { (mark, text) ->
-            val tone = if (mark == Mark.Failed) G.Negative else G.Caution
+            val tone = when (mark) { Mark.Failed -> G.Negative; Mark.Done -> G.Success; else -> G.Caution }   // frame matches the cat
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(tone.copy(alpha = 0.10f))
                     .border(1.dp, tone.copy(alpha = 0.45f), RoundedCornerShape(14.dp)).padding(14.dp),
@@ -226,6 +229,8 @@ private fun ReaderBody(s: TermsSection, wide: Boolean) {
                 Text(text, style = MaterialTheme.typography.bodyMedium, color = G.Text)
             }
         }
+        // A closing line under everything (e.g. where to appeal), quieter than the body.
+        s.after?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = G.TextMuted) }
     }
 }
 
@@ -378,25 +383,28 @@ private const val AGREE_NOTE = "By tapping Accept you agree to these terms"
  */
 @Composable
 private fun CountdownButtons(onBack: () -> Unit, onAccept: () -> Unit) {
-    var left by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(ACCEPT_WAIT) }
+    // One linear drain over ACCEPT_WAIT s: the cat's outline runs out in the same frame Accept unlocks (it used to ease
+    // each 1 s step over the next second, trailing the number, and an extra second hid that: 6 s for a "5").
+    val drain = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(1f) }
     var ready by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        while (left > 0) { kotlinx.coroutines.delay(1000); left-- }
-        kotlinx.coroutines.delay(1000) // the last second's drain
+        drain.animateTo(0f, androidx.compose.animation.core.tween(ACCEPT_WAIT * 1000, easing = androidx.compose.animation.core.LinearEasing))
         ready = true
     }
+    // The whole seconds left, for the label (changes once a second, so the button rebuilds only then).
+    val left by androidx.compose.runtime.remember { androidx.compose.runtime.derivedStateOf { kotlin.math.ceil(drain.value * ACCEPT_WAIT).toInt() } }
     Row(verticalAlignment = Alignment.CenterVertically) {
         com.vrca.ui.common.GremlinButton("Back", onBack, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = GremlinButtonSize.Large)
         Spacer(Modifier.width(10.dp))
         GremlinButton(
             // Wide enough for "Accept  5", so the pair doesn't shift as the number goes.
-            if (left > 0) "Accept  $left" else "Accept", onAccept, Modifier.widthIn(min = 158.dp), enabled = ready, size = GremlinButtonSize.Large,
+            if (!ready && left > 0) "Accept  $left" else "Accept", onAccept, Modifier.widthIn(min = 158.dp), enabled = ready, size = GremlinButtonSize.Large,
             leading = {
                 // One box size for both, so the button doesn't change width at the swap.
                 androidx.compose.animation.Crossfade(ready, Modifier.size(28.dp), label = "acceptReady") { r ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         if (r) BootIconView(BootIcons.Start, { G.Accent }, { G.Accent }, Modifier.size(22.dp))
-                        else BootCatCountdown(left.toFloat() / ACCEPT_WAIT, Modifier.fillMaxSize(), G.Accent.copy(alpha = 0.55f))
+                        else BootCatCountdown(drain.value, Modifier.fillMaxSize(), G.Accent.copy(alpha = 0.55f), smooth = false)
                     }
                 }
             }
