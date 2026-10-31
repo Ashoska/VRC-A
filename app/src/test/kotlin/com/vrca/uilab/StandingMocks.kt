@@ -185,6 +185,50 @@ object StandingMocks {
         }
     }
 
+    /**
+     * `show standingboot <warned|banned> [first]`: an action is found while booting (normal boot, or the first-open
+     * welcome with `first`). Boot runs as usual; once its rows are in, the standing popup unfolds over the boot
+     * screen, and boot does NOT hand off underneath it: the boot screen stays until the popup is closed, then plays
+     * its normal way out into the app ([toApp]). Banned: no Close, so it stays on screen for good.
+     */
+    @Composable
+    fun BootFlow(arg: String, toApp: () -> Unit) {
+        val words = arg.split(' ').filter { it.isNotBlank() }
+        val state = words.firstOrNull() ?: "warned"
+        val first = "first" in words
+        val banned = state.startsWith("banned")
+        val icons = mapOf(
+            "Device session" to com.vrca.app.BootIcons.DeviceSession, "Terms of Service" to com.vrca.app.BootIcons.Terms,
+            "Account standing" to com.vrca.app.BootIcons.Account, "VRChat sign-in" to com.vrca.app.BootIcons.VrchatSignIn,
+            "Discord" to com.vrca.app.BootIcon(androidx.compose.ui.graphics.vector.ImageVector.vectorResource(com.vrca.R.drawable.ic_discord)),
+            "VRChat on this headset" to com.vrca.app.BootIcons.VrchatHere, "Updates" to com.vrca.app.BootIcons.Updates,
+            "Tutorial" to com.vrca.app.BootIcons.Tutorial
+        )
+        fun c(l: String, st: com.vrca.app.BootState, n: com.vrca.app.BootNote?, b: Boolean = false) = com.vrca.app.BootCheck(l, st, n, b, icons[l])
+        val checks = listOf(
+            c("Device session", com.vrca.app.BootState.Done, com.vrca.app.BootNote.Connected, true), c("Terms of Service", com.vrca.app.BootState.Done, com.vrca.app.BootNote.Accepted, true),
+            if (banned) c("Account standing", com.vrca.app.BootState.Failed, com.vrca.app.BootNote.Banned, true) else c("Account standing", com.vrca.app.BootState.Warn, com.vrca.app.BootNote.NewWarning, true),
+            c("VRChat sign-in", com.vrca.app.BootState.Done, com.vrca.app.BootNote.SignedIn), c("Discord", com.vrca.app.BootState.Done, com.vrca.app.BootNote.Connected),
+            c("VRChat on this headset", com.vrca.app.BootState.Done, com.vrca.app.BootNote.Found), c("Updates", com.vrca.app.BootState.Done, com.vrca.app.BootNote.UpToDate),
+            c("Tutorial", com.vrca.app.BootState.Done, com.vrca.app.BootNote.Ready)
+        ).filter { (com.vrca.BuildConfig.IS_HEADSET_BUILD || it.label != "VRChat on this headset") && (first || it.label != "Tutorial") }
+        val status = com.vrca.app.BootStatus(internet = com.vrca.app.InternetLink.WiFi, internetMbps = 240,
+            vrchat = com.vrca.app.ServiceState.Online, servers = com.vrca.app.ServiceState.Online)
+        var ready by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+        var popup by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+        var exit by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+        // Once boot has shown its result (and on the first open Boot Cat has said it), the popup opens.
+        androidx.compose.runtime.LaunchedEffect(ready) { if (ready) { kotlinx.coroutines.delay(if (first) 1600 else 700); popup = true } }
+        Box(Modifier.fillMaxSize()) {
+            com.vrca.app.BootScreen(
+                checks, status, playIntro = true, userName = if (first) null else "Ashoska", firstOpen = first,
+                onWelcomeListed = { if (first) ready = true }, onShown = { if (!first) ready = true },
+                exit = exit, exitToTopBar = false, onExited = toApp
+            )
+            if (popup) Standing(state, onClosed = { popup = false; exit = true })
+        }
+    }
+
     /** How far piece [i] of [n] has appeared when its card's pieces are [reveal] through (boot's stagger). */
     private fun stagger(reveal: Float, i: Int, n: Int): Float {
         val span = 0.45f

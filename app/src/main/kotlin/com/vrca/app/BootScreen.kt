@@ -133,7 +133,14 @@ enum class BootNote(val text: String) {
     Ready("Ready"),
     Downloading("Downloading"),
     WillRetry("Will retry"),
-    TimedOut("Timed out")
+    TimedOut("Timed out"),
+    // Account standing (revamp 2): the level, or what changed since the user last looked.
+    Limited("Limited"),
+    VeryLimited("Very limited"),
+    AtRisk("At risk"),
+    Banned("Banned"),
+    NewWarning("New warning"),
+    ActionUpdated("Action updated")
 }
 
 /** One row of the boot checklist. [blocking] rows must be Done before boot hands off. */
@@ -1061,6 +1068,8 @@ private fun welcomeSteps(checks: List<BootCheck>, status: BootStatus): List<Welc
     fun check(label: String) = checks.firstOrNull { it.label == label }
     fun row(c: BootCheck?): Pair<Mark, String>? = when (c?.state) {
         BootState.Done, BootState.Warn, BootState.Skipped, BootState.Background -> c.state.mark() to (c.note?.text ?: "")
+        // A ban is a finished result (not a retry): Boot Cat lists it and goes on to say so.
+        BootState.Failed -> if (c.note == BootNote.Banned) Mark.Failed to c.note.text else null
         else -> null
     }
     fun service(s: ServiceState): Pair<Mark, String>? = if (s == ServiceState.Checking) null else s.mark() to s.text
@@ -1444,9 +1453,13 @@ private fun welcomeFailure(checks: List<BootCheck>, status: BootStatus): String 
 
 /** Boot Cat's verdict once everything passed: the first thing worth knowing, else all set. */
 private fun welcomeVerdict(checks: List<BootCheck>, status: BootStatus): Pair<Mark, String> {
-    val account = checks.firstOrNull { it.label == "Account standing" }?.state
+    val accountRow = checks.firstOrNull { it.label == "Account standing" }
+    val account = accountRow?.state
     return when {
-        account == BootState.Warn -> Mark.Warn to "Your account has been restricted"
+        accountRow?.note == BootNote.Banned -> Mark.Failed to "You're banned from VRC-A"
+        accountRow?.note == BootNote.NewWarning -> Mark.Warn to "Heads up, you've got a new warning"
+        accountRow?.note == BootNote.ActionUpdated -> Mark.Warn to "Something on your account changed"
+        account == BootState.Warn -> Mark.Warn to "Some features are disabled for a while"
         status.internet == InternetLink.NoAccess -> Mark.Warn to "This Wi-Fi has no internet behind it"
         status.servers == ServiceState.Maintenance -> Mark.Maintenance to "VRC-A servers are having a nap (maintenance)"
         status.servers != ServiceState.Online -> Mark.Warn to "VRC-A servers are a bit wobbly right now"
