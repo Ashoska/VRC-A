@@ -571,6 +571,7 @@ export default {
         await env.AVATAR_KV.put("pend:" + crypto.randomUUID(), JSON.stringify(payload), {
           expirationTtl: 7 * 86400,
         });
+        await markFlushWork(env);
         return json({ ok: true, accepted: good.length });
       }
 
@@ -663,6 +664,7 @@ export default {
           // 30-day TTL so an unprocessed rename can't linger forever; the cron deletes it on completion.
           await env.AVATAR_KV.put("arn:" + rn.authorId, rn.name.slice(0, 100), { expirationTtl: 30 * 86400 });
         }
+        if (upserts.length || removes.length || clearReports.length || authorRenames.length || (Array.isArray(body.checked) && body.checked.length)) await markFlushWork(env);
         return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length, authorRenames: authorRenames.length });
       }
 
@@ -1004,7 +1006,7 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 59,   // v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
+          version: 60,   // v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
          //   // v55: /search filters pl + rk (applied on the Search press).
          //   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
          //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
@@ -1109,7 +1111,13 @@ export default {
       if (new Date(event.scheduledTime || Date.now()).getUTCMinutes() % 5 === 0) {
         try { await statusWatch(env); } catch (_) {}
       }
-      if (await chainBusy(env)) { await fireSearchStep(env); return; }
+      // v60: the search step only runs when work is queued (KV `sqwork`, set by every queue push and kept by a step
+      // that left work behind), plus a check every 5 minutes; an idle step cost ~5 hub requests a minute for nothing.
+      const minute = new Date(event.scheduledTime || Date.now()).getUTCMinutes();
+      const searchDue = async () => minute % 5 === 0 || (await env.AVATAR_KV.get("sqwork").catch(() => null)) === "1";
+      const flushDue = minute % 5 === 0 || (await env.AVATAR_KV.get("fwork").catch(() => null)) === "1";
+      if (!flushDue) { if (await searchDue()) await fireSearchStep(env); return; }
+      if (await chainBusy(env)) { if (await searchDue()) await fireSearchStep(env); return; }
       // Maintenance only when ~2 min have passed (it's every cron at the 2-min cadence; kept in case the
       // cadence ever speeds up, see wrangler.toml for why 1 min needs a Durable Object first).
       await cronTasksIfDue(env);
@@ -1117,14 +1125,16 @@ export default {
       // self-chaining drain (each step a FRESH ~1000-subrequest budget) instead of waiting 2 min for
       // the next cron. Releases the lock when there's nothing left to chain.
       await chainLockPut(env);
+      try { await env.AVATAR_KV.delete("fwork"); } catch (_) {}   // cleared BEFORE the flush: work arriving during it sets it again
       let res = null;
-      try { res = await flushR2(env); } catch (e) { console.log("flushR2 err", e); }
+      try { res = await flushR2(env); } catch (e) { console.log("flushR2 err", e); await markFlushWork(env); }
+      if (res && (res.pendRemaining > 0 || res.iqRemaining > 0)) await markFlushWork(env);
       if (res && ((res.pendRemaining > 0 && res.progressed) || (res.iqRemaining && res.iqProgressed))) {
         fireContinuation(env, ctx, 1);
       } else {
         await chainLockDel(env);
       }
-      await fireSearchStep(env);   // v53: D1 + nm/ + purge queue, its own invocation (own subrequest budget)
+      if (await searchDue()) await fireSearchStep(env);   // v53: D1 + nm/ + purge queue, its own invocation (own subrequest budget)
     })());
   },
 };
@@ -1297,6 +1307,7 @@ async function reconcileIndex(env) {
     if (shardHasUnfilled) fillSeen.add(prefix);   // this shard belongs in the fill worklist
   }
   // Enqueue the repairs (TTL-free) — the normal flush drains them via applyIndexOps.
+  if (missing.length || foldOps.length) await markFlushWork(env);
   for (let i = 0; i < missing.length; i += MAX_INDEX_OPS_PER_FLUSH)
     await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(missing.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
   for (let i = 0; i < foldOps.length; i += MAX_INDEX_OPS_PER_FLUSH) {
@@ -1592,6 +1603,10 @@ async function listPrefix(env, prefix, cap = 5000) {
 
 // ---- continuation-chain helpers (see the FLUSH_LOCK_TTL_MS block above) --------------------------
 function selfBase(env) { return (env.WORKER_SELF_URL || DEFAULT_SELF_URL).replace(/\/$/, ""); }
+// v60: the cron only flushes when something is waiting (KV `fwork`, set by /contribute, /admin and the
+// reconcile, kept by a flush that left work behind), plus a check every 5 minutes. An idle flush cost ~4 hub
+// requests a minute (lock + meta) for nothing.
+async function markFlushWork(env) { try { await env.AVATAR_KV.put("fwork", "1"); } catch (_) {} }
 async function chainBusy(env) {
   try {
     const v = await hubGet(env, "flushlock");
@@ -2509,6 +2524,8 @@ function searchChange(fid, before, after) {
 // ---- hub queues (durable, strongly consistent) ----
 async function hubQueuePush(env, name, items) {
   if (!items || !items.length) return true;
+  // v60: the cron only wakes the search step when something is queued (KV flag, cleared by the step when idle).
+  try { await env.AVATAR_KV.put("sqwork", "1"); } catch (_) {}
   const h = hubStub(env); if (!h) return false;
   try { const r = await h.fetch("https://hub/q/push", { method: "POST", body: JSON.stringify({ name, items }) }); return r.ok; }
   catch (_) { return false; }
@@ -2593,6 +2610,7 @@ async function nmApply(env, puts, removes, maxBuckets) {
     let cur;
     try { const o = await env.CATALOG.get(`nm/${b}.json`); cur = o ? await o.json() : { v: 1, e: {} }; if (!cur || typeof cur.e !== "object") cur = { v: 1, e: {} }; }
     catch (_) { failed.add(b); return; }   // a failed READ never writes (would wipe the bucket)
+    const before = JSON.stringify(cur);
     const e = cur.e;
     for (const r of w.rem) { const l = e[r.k]; if (!l) continue; const n = l.filter((x) => !(x.a === r.id && x.f === r.f)); if (n.length) e[r.k] = n; else delete e[r.k]; }
     for (const { k, s } of w.add) {
@@ -2600,13 +2618,58 @@ async function nmApply(env, puts, removes, maxBuckets) {
       l.push({ a: s.id, f: s.f, n: s.n, au: s.au, ai: s.ai, p: s.p, pf: s.pf });
       e[k] = l;
     }
+    const after = JSON.stringify(cur);
+    if (after === before) { done.add(b); return; }   // v60: nothing visible changed (e.g. a bio-only edit): no write, no purge
     try {
-      const put = await env.CATALOG.put(`nm/${b}.json`, JSON.stringify(cur), { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + NAME_TTL } });
+      const put = await env.CATALOG.put(`nm/${b}.json`, after, { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + NAME_TTL } });
       done.add(b); jobs.push({ u: catalogUrl(env, `nm/${b}.json`), etag: (put && put.etag) || "", t0: Date.now() });
     } catch (_) { failed.add(b); }
   });
   const pending = new Set(buckets.filter((b) => !done.has(b)));   // failed + over budget
   return { done: done.size, pending, jobs };
+}
+
+// ---- v60 lazy nm/ refresh: D1 table nmdirty (bucket numbers whose file needs rebuilding from D1) ----
+let _nmDirtyOk = false;
+async function nmDirtySchema(db) {
+  if (_nmDirtyOk) return;
+  await db.prepare("CREATE TABLE IF NOT EXISTS nmdirty (b INTEGER PRIMARY KEY)").run();
+  _nmDirtyOk = true;
+}
+async function nmDirtyAdd(db, buckets) {
+  await nmDirtySchema(db);
+  const st = [];
+  for (let i = 0; i < buckets.length; i += 90) {
+    const c = buckets.slice(i, i + 90);
+    st.push(db.prepare(`INSERT OR IGNORE INTO nmdirty(b) VALUES ${c.map(() => "(?)").join(",")}`).bind(...c));
+  }
+  if (st.length) await db.batch(st);
+}
+const NM_LAZY_HOUR_UTC = 4;   // the daily refresh starts at 04:00 UTC (quiet), then runs each step until done
+async function nmLazyStep(env) {
+  const db = env.SEARCH;
+  const today = new Date().toISOString().slice(0, 10);
+  const due = new Date().getUTCHours() >= NM_LAZY_HOUR_UTC;
+  let doneDay = null; try { doneDay = await env.AVATAR_KV.get("nmLazyDay"); } catch (_) {}
+  if (!due || doneDay === today) return {};
+  await nmDirtySchema(db);
+  const rows = (await db.prepare("SELECT b FROM nmdirty ORDER BY b LIMIT ?").bind(NMFILL_BUCKETS_PER_STEP).all()).results || [];
+  if (!rows.length) { try { await env.AVATAR_KV.put("nmLazyDay", today); } catch (_) {} return { nmLazy: 0 }; }
+  const bs = rows.map((r) => r.b);
+  const r = await db.prepare(`SELECT av.id a, av.f f, av.n n, av.nk k, av.nb b, av.ai ai, av.p p, av.pf pf, au.n au FROM av LEFT JOIN au ON au.id = av.ai WHERE av.nb IN (${bs.map(() => "?").join(",")})`).bind(...bs).all();
+  const files = new Map(bs.map((b) => [b, {}]));
+  for (const x of r.results || []) { const e = files.get(x.b); if (e) (e[x.k] ||= []).push({ a: x.a, f: x.f, n: x.n, au: x.au || "", ai: x.ai, p: x.p, pf: x.pf }); }
+  const jobs = [], written = [];
+  await runPool([...files.keys()], 6, async (b) => {
+    const key = `nm/${b.toString(16).padStart(3, "0")}.json`;
+    try {
+      const put = await env.CATALOG.put(key, JSON.stringify({ v: 1, e: files.get(b) }), { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + NAME_TTL } });
+      jobs.push({ u: catalogUrl(env, key), etag: (put && put.etag) || "", t0: Date.now() }); written.push(b);
+    } catch (_) {}
+  });
+  if (jobs.length) await hubQueuePush(env, "pq", jobs);
+  if (written.length) await db.prepare(`DELETE FROM nmdirty WHERE b IN (${written.map(() => "?").join(",")})`).bind(...written).run();
+  return { nmLazy: written.length, nmLazyMore: true };
 }
 
 // One search step: apply queued change records to D1 + nm/, then work the purge queue. Single-flight.
@@ -2627,20 +2690,35 @@ async function searchStep(env) {
         if (r.d1) continue;
         if (r.nw) { d1Puts.set(r.id, r.nw); d1Dels.delete(r.id); } else if (!d1Puts.has(r.id)) d1Dels.set(r.id, r);
       }
-      const putList = [...puts.values()];
+      // v60: a change that keeps the avatar's exact name and image (platforms / perf / author id / bio) updates D1 at
+      // once but only marks its nm/ file for the daily refresh from D1 (`nmdirty`), so a file busy with such edits is
+      // written once a day instead of once a minute. New avatars, removals, renames and re-files still go out now.
+      const lazy = new Set();
+      for (const r of got.items) {
+        if (r.nw && r.old && r.old.n === r.nw.n && r.old.f === r.nw.f && r.nw.id === r.id) lazy.add(r.id);
+      }
+      for (const r of got.items) if (lazy.has(r.id) && (!r.nw || !r.old || r.old.n !== r.nw.n)) lazy.delete(r.id);
+      const lazyBuckets = new Set([...puts.values()].filter((x) => lazy.has(x.id)).map((x) => parseInt(nameBucketOf(nameKey(x.n)), 16)));
+      for (const id of lazy) puts.delete(id);
+      for (let i = rem.length - 1; i >= 0; i--) if (lazy.has(rem[i].id)) rem.splice(i, 1);
       const d1PutList = [...d1Puts.values()], d1DelList = [...d1Dels.values()].map((r) => ({ id: r.id, f: r.f }));
       let d1ok = true;
       if (env.SEARCH && (d1PutList.length || d1DelList.length)) {
         try { await ensureSearchSchema(env.SEARCH); const w = await d1Apply(env.SEARCH, d1PutList, d1DelList); out.d1Written = w.written; }
         catch (e) { d1ok = false; out.d1Err = String(e && e.message || e).slice(0, 200); }
       }
+      if (d1ok && lazyBuckets.size && env.SEARCH) {
+        try { await nmDirtyAdd(env.SEARCH, [...lazyBuckets]); out.nmLazy = lazyBuckets.size; }
+        catch (_) { for (const id of lazy) { const x = got.items.find((r) => r.id === id && r.nw); if (x) puts.set(id, x.nw); } lazy.clear(); }   // fall back to writing now
+      }
+      const putList = [...puts.values()];
       // nm/ for dels: drop (id, f) under the old name; rem covers renames and removals.
       const nm = await nmApply(env, putList, rem, NM_BUCKETS_PER_STEP);
       out.nm = nm.done;
       if (nm.jobs.length) await hubQueuePush(env, "pq", nm.jobs);
       // Requeue: everything if D1 failed, else only records whose nm/ bucket wasn't written (idempotent).
-      const again = got.items.filter((r) => !d1ok ||
-        (r.nw && nm.pending.has(nameBucketOf(nameKey(r.nw.n)))) || (r.old && r.old.n && nm.pending.has(nameBucketOf(nameKey(r.old.n)))));
+      const again = got.items.filter((r) => !d1ok || (!lazy.has(r.id) && (
+        (r.nw && nm.pending.has(nameBucketOf(nameKey(r.nw.n)))) || (r.old && r.old.n && nm.pending.has(nameBucketOf(nameKey(r.old.n)))))));
       if (again.length) { await hubQueuePush(env, "srq", d1ok ? again.map((r) => ({ ...r, d1: 1 })) : again); out.requeued = again.length; }
       await hubQueueAck(env, got.keys);
       out.applied = got.items.length;
@@ -2649,15 +2727,22 @@ async function searchStep(env) {
     Object.assign(out, await legacyFilesCleanup(env));
     try { Object.assign(out, await mediaImportStep(env)); } catch (e) { out.mediaErr = String(e && e.message || e).slice(0, 200); }
     if (env.SEARCH && got.items.length < 100) Object.assign(out, await searchFillStep(env));
+    if (env.SEARCH) { try { Object.assign(out, await nmLazyStep(env)); } catch (e) { out.nmLazyErr = String(e && e.message || e).slice(0, 200); } }
+    out.more = got.items.length >= SEARCH_RECS_PER_STEP || out.requeued > 0 || out.purgeFailed > 0 || !!out.nmLazyMore;
   } finally { await hubUnlock(env, "search"); }
+  // v60: tell the cron whether to run the next step at once (otherwise it waits for new work or the 5-minute check).
+  try { if (out.more) await env.AVATAR_KV.put("sqwork", "1"); else await env.AVATAR_KV.delete("sqwork"); } catch (_) {}
   try { await hubPut(env, "searchStat", JSON.stringify({ at: Date.now(), ...out })); } catch (_) {}
   return out;
 }
 
 // One-time cleanup (v53): delete the old search files (index/ + fragments/, ~8,200 objects) in bulk, 1,000 per
 // step, until none are left; then it's a no-op (a hub flag). R2 deletes are free; each list is one Class A op.
+// v60: one-time "done" flags never go back, so an isolate remembers them instead of asking the hub every minute.
+const DONE_FLAGS = new Set();
 async function legacyFilesCleanup(env) {
-  if ((await hubGet(env, "legacyGone")) === "1") return {};
+  if (DONE_FLAGS.has("legacyGone")) return {};
+  if ((await hubGet(env, "legacyGone")) === "1") { DONE_FLAGS.add("legacyGone"); return {}; }
   let deleted = 0;
   for (const prefix of ["index/", "fragments/"]) {
     const l = await env.CATALOG.list({ prefix, limit: 1000 });
@@ -2701,7 +2786,8 @@ async function mediaRichNames(env) {
   return names;
 }
 async function mediaImportStep(env) {
-  if (!env.CATALOG_BASE || (await hubGet(env, "mediaDone")) === "1") return {};
+  if (!env.CATALOG_BASE || DONE_FLAGS.has("mediaDone")) return {};
+  if ((await hubGet(env, "mediaDone")) === "1") { DONE_FLAGS.add("mediaDone"); return {}; }
   const ua = { "user-agent": "vrca-avatar-db" };
   if (!(await mediaManifest(env))) {
     const r = await fetch(MEDIA_GH + "/manifest.json?v=" + Date.now(), { headers: ua });
@@ -2782,10 +2868,11 @@ async function purgeStep(env) {
 // step), phase 2 builds every nm/ file from D1 (one D1 scan per NMFILL_BUCKETS_PER_STEP buckets). Steps ride
 // the search step, so they run once a minute and never overlap. Progress in the hub (`searchFill`).
 async function searchFillStep(env) {
+  if (DONE_FLAGS.has("searchFill")) return {};
   let st = JSON.parse((await hubGet(env, "searchFill")) || "null");
   // First time D1 is attached: start the backfill by itself (no admin call needed). Runs once.
   if (!st) { st = { phase: 1, next: 0, startedAt: new Date().toISOString(), auto: true }; await hubPut(env, "searchFill", JSON.stringify(st)); }
-  if (st.done) return {};
+  if (st.done) { DONE_FLAGS.add("searchFill"); return {}; }
   const db = env.SEARCH; await ensureSearchSchema(db);
   if (st.phase === 1) {
     const from = st.next || 0, to = Math.min(4096, from + FILL_SHARDS_PER_STEP);
