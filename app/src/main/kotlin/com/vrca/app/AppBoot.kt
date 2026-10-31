@@ -771,7 +771,7 @@ internal fun fetchServerStatus(): String? {
     var conn: java.net.HttpURLConnection? = null
     return try {
         conn = (java.net.URL("https://gremlininc.app/status").openConnection() as java.net.HttpURLConnection).apply {
-            setRequestProperty("User-Agent", "VRC-A"); connectTimeout = 8_000; readTimeout = 8_000
+            useCaches = false; setRequestProperty("User-Agent", "VRC-A"); connectTimeout = 8_000; readTimeout = 8_000
         }
         if (conn.responseCode != 200) null
         else org.json.JSONObject(conn.inputStream.bufferedReader().readText()).optString("state").ifBlank { null }
