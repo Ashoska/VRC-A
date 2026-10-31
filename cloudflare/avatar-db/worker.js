@@ -826,6 +826,22 @@ export default {
         await hubPut(env, "searchFill", JSON.stringify(st));
         return json({ ok: true, ...st });
       }
+      if (req.method === "GET" && url.pathname === "/status") {
+        // v56: VRC-A servers status for the app's boot screen and the website: the admin's maintenance switch
+        // plus the server checking itself. Cached at the edge for 30 s, so app opens barely reach the Worker.
+        return serviceStatus(env, ctx);
+      }
+
+      if (req.method === "POST" && url.pathname === "/admin/status") {
+        // The admin Config tab's maintenance switch (+ optional message), shown by /status everywhere.
+        const body = await req.json().catch(() => null);
+        if (!body || !env.ADMIN_KEY || body.key !== env.ADMIN_KEY) return json({ ok: false, error: "unauthorized" }, 401);
+        const m = { on: !!body.maintenance, msg: String(body.message || "").slice(0, 200), at: Date.now() };
+        await hubPut(env, "maint", JSON.stringify(m));
+        try { await caches.default.delete(STATUS_CACHE_KEY); } catch (_) {}
+        return json({ ok: true, maintenance: m });
+      }
+
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
         // ONE cheap KV read (no list ops — those have a tight free-tier limit and this is
         // polled every 15s). Counts come from meta (set at flush).
@@ -905,7 +921,8 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 55,   // v55: /search filters pl + rk (applied on the Search press).
+          version: 56,   // v56: /status (maintenance switch + self-checks) for the boot screen and website.
+         //   // v55: /search filters pl + rk (applied on the Search press).
          //   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
          //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
@@ -2782,6 +2799,31 @@ async function handleSearch(req, env, ctx, url) {
     headers: { "content-type": "application/json", "cache-control": "public, max-age=60", ...cors },
   });
   try { ctx.waitUntil(cache.put(cacheKey, res.clone())); } catch (_) {}
+  return res;
+}
+
+// ---- v56 service status (/status) -------------------------------------------------------------------------
+// state: online | issues | maintenance. "issues" comes from the server's own checks, read from records it already
+// keeps (no extra storage reads beyond the hub): catalog updates stuck behind, the search step not running or
+// failing, a cache clear stuck for over 30 min. The app's own database session is checked on the device.
+const STATUS_CACHE_KEY = new Request("https://gremlininc.app/__status");
+const STATUS_STALE_MS = 15 * 60_000;
+async function serviceStatus(env, ctx) {
+  try { const hit = await caches.default.match(STATUS_CACHE_KEY); if (hit) return hit; } catch (_) {}
+  const now = Date.now();
+  let maint = null, meta = {}, ss = null;
+  try { maint = JSON.parse((await hubGet(env, "maint")) || "null"); } catch (_) {}
+  try { meta = JSON.parse((await hubGet(env, "meta")) || "{}"); } catch (_) {}
+  try { ss = JSON.parse((await hubGet(env, "searchStat")) || "null"); } catch (_) {}
+  const problems = [];
+  const lastFlush = meta.lastFlush ? Date.parse(meta.lastFlush) : 0;
+  if ((meta.pendingBatches || 0) > 0 && lastFlush && now - lastFlush > STATUS_STALE_MS) problems.push("catalog updates delayed");
+  if (env.SEARCH && (!ss || now - (ss.at || 0) > STATUS_STALE_MS || ss.d1Err)) problems.push("avatar search delayed");
+  if (ss && ss.purgeOldestMs > PURGE_STUCK_MS) problems.push("some avatar files may be out of date");
+  const state = maint && maint.on ? "maintenance" : problems.length ? "issues" : "online";
+  const body = { ok: true, state, message: maint && maint.on ? (maint.msg || "") : problems.join(", "), at: now };
+  const res = new Response(JSON.stringify(body), { headers: { "content-type": "application/json", "cache-control": "public, max-age=30", "access-control-allow-origin": "*" } });
+  try { ctx.waitUntil(caches.default.put(STATUS_CACHE_KEY, res.clone())); } catch (_) {}
   return res;
 }
 

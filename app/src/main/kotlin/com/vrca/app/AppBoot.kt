@@ -241,19 +241,23 @@ internal fun AppBoot(
                 launch { discord(ctx) { s, n -> set(Row.Discord, s, n) } }
                 if (Row.VrchatHere.inThisBuild) launch { vrchatHere { s, n -> set(Row.VrchatHere, s, n) } }
             }
-            val worker = async(Dispatchers.IO) { AvatarGlobalDb.fetchHealth() != null }
+            // VRC-A servers status from the website (Worker v56 `/status`: the admin's maintenance switch + the
+            // server's own checks; edge-cached 30 s), null when it can't be reached.
+            val worker = async(Dispatchers.IO) { fetchServerStatus() }
             val maintenance = kotlinx.coroutines.CompletableDeferred<Boolean>()
 
             set(Row.Device, BootState.Working)
             val deviceOk = orNull { kotlinx.coroutines.withTimeout(30_000L) { bootstrapFirebaseAndCache(ctx) } } != null
             launch {
-                val workerOk = worker.await()
-                // The admin's maintenance switch comes with the terms read (only once the device session is up).
-                val down = deviceOk && withTimeoutOrNull(9_000L) { maintenance.await() } == true
-                timeline.event("VRC-A servers: device session ${if (deviceOk) "ok" else "failed"}, worker ${if (workerOk) "ok" else "failed"}${if (down) ", maintenance on" else ""}")
+                val server = worker.await()
+                val workerOk = server != null
+                // The maintenance switch: the website's status, or (older admin builds) the terms read's config flag.
+                val down = server == "maintenance" || (deviceOk && withTimeoutOrNull(9_000L) { maintenance.await() } == true)
+                timeline.event("VRC-A servers: device session ${if (deviceOk) "ok" else "failed"}, status ${server ?: "unreachable"}${if (down) ", maintenance on" else ""}")
                 status = status.copy(
                     servers = when {
                         down -> ServiceState.Maintenance
+                        server == "issues" -> ServiceState.Issues
                         deviceOk && workerOk -> ServiceState.Online
                         deviceOk || workerOk -> ServiceState.Issues
                         else -> ServiceState.Down
@@ -759,4 +763,17 @@ private class BootTimeline {
     }
 
     companion object { @Volatile var discordStartedEarly = false }
+}
+
+/** The website's VRC-A servers status (`https://gremlininc.app/status`): "online", "issues" or "maintenance",
+ *  or null when it can't be reached. One small edge-cached request per boot. */
+internal fun fetchServerStatus(): String? {
+    var conn: java.net.HttpURLConnection? = null
+    return try {
+        conn = (java.net.URL("https://gremlininc.app/status").openConnection() as java.net.HttpURLConnection).apply {
+            setRequestProperty("User-Agent", "VRC-A"); connectTimeout = 8_000; readTimeout = 8_000
+        }
+        if (conn.responseCode != 200) null
+        else org.json.JSONObject(conn.inputStream.bufferedReader().readText()).optString("state").ifBlank { null }
+    } catch (_: Exception) { null } finally { runCatching { conn?.disconnect() } }
 }
