@@ -306,7 +306,7 @@ internal fun AppBoot(
                     when (withTimeoutOrNull(PICTURES_PREFETCH_CAP_MS) {
                         coroutineScope {
                             val tutorialPics = async { com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx) }
-                            val termsPics = async { com.vrca.ui.onboarding.TosImageStore.ensureDownloaded(ctx) }
+                            val termsPics = async { !TERMS_HAVE_PICTURES || com.vrca.ui.onboarding.TosImageStore.ensureDownloaded(ctx) }
                             tutorialPics.await() and termsPics.await()
                         }
                     }) {
@@ -636,7 +636,7 @@ private suspend fun terms(ctx: Context, maintenance: kotlinx.coroutines.Completa
         return
     }
     // On a first open the visible Tutorial row fetches them along with the tutorial's.
-    if (!fetchPictures) { set(BootState.Warn, BootNote.NewTerms); return }
+    if (!fetchPictures || !TERMS_HAVE_PICTURES) { set(BootState.Warn, BootNote.NewTerms); return }
     // The terms are coming up: fetch their pictures while the boot screen is up, like the tutorial's
     // (user, 2026-10-25). A stall holds boot on Retry like any check; a retry resumes what was fetched.
     when (withTimeoutOrNull(PICTURES_PREFETCH_CAP_MS) { com.vrca.ui.onboarding.TosImageStore.ensureDownloaded(ctx) }) {

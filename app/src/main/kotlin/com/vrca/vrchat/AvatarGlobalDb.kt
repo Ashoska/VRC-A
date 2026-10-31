@@ -854,10 +854,13 @@ object AvatarGlobalDb {
     /** One batch from the server's D1 search, or null when it isn't available (the caller falls back).
      *  The server allows one new search per 3 s (and a further batch per 1.5 s); a "too fast" answer is
      *  waited out and retried once. */
-    suspend fun searchD1(context: Context, query: String, offset: Int, author: String? = null): SearchBatch? {
+    suspend fun searchD1(context: Context, query: String, offset: Int, author: String? = null,
+                         platform: String? = null, rankMax: Int? = null): SearchBatch? {
         if (!d1SearchLive(context)) return null
+        // Filters (Worker v55): pl = pc|quest|ios, rk = 0..3 (Excellent..Poor or better).
+        val filt = (platform?.let { "&pl=" + it.lowercase() } ?: "") + (rankMax?.let { "&rk=$it" } ?: "")
         repeat(2) {
-            when (val r = searchD1Once(context, query, offset, author)) {
+            when (val r = searchD1Once(context, query, offset, author, filt)) {
                 is D1Result.Ok -> return r.batch
                 is D1Result.TooFast -> delay(r.waitMs.coerceIn(200L, 4_000L))
                 D1Result.Unavailable -> return null
@@ -870,14 +873,14 @@ object AvatarGlobalDb {
         class TooFast(val waitMs: Long) : D1Result()
         object Unavailable : D1Result()
     }
-    private suspend fun searchD1Once(context: Context, query: String, offset: Int, author: String?): D1Result {
+    private suspend fun searchD1Once(context: Context, query: String, offset: Int, author: String?, filt: String = ""): D1Result {
         val device = installId(context)
         return kotlinx.coroutines.withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
                 val q = java.net.URLEncoder.encode(query.trim(), "UTF-8")
                 val au = author?.takeIf { it.isNotBlank() }?.let { "&au=" + java.net.URLEncoder.encode(it.trim(), "UTF-8") } ?: ""
-                conn = (URL("$SEARCH_URL?q=$q&o=$offset$au").openConnection() as HttpURLConnection).apply {
+                conn = (URL("$SEARCH_URL?q=$q&o=$offset$au$filt").openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
                     setRequestProperty("X-VRCA-Device", device)
                     connectTimeout = 10_000; readTimeout = 15_000

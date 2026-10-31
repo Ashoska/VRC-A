@@ -905,7 +905,8 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 54,   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
+          version: 55,   // v55: /search filters pl + rk (applied on the Search press).
+         //   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
          //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
                          // deep-probe/contHits/selfBinding diagnostics. v37: wrap meta-put + recentBatches so flushR2 always RETURNS (chain cascades, counter accurate); v36: CLEAR pend keys BEFORE the index drain (+ cost-cap the drain) so an index-drain
                          // ceiling-throw can't strand batches (the "nothing drains" root cause); v35: deep pend probe; v34: diagnostics for the continuation chain (selfBinding/selfUrl/contHits). v33: SELF-CHAINING flush continuation — a flush that still sees pend work fires
@@ -2751,13 +2752,27 @@ async function handleSearch(req, env, ctx, url) {
   const o = Math.max(0, Math.min(100000, parseInt(url.searchParams.get("o") || "0", 10) || 0));
   const fq = ftsQuery(au ? q + " " + au : q);
   if (!fq) return json({ ok: true, r: [], more: false });
-  const cacheKey = new Request(`https://gremlininc.app/search?q=${encodeURIComponent(q.trim().toLowerCase())}&o=${o}&au=${encodeURIComponent(au.trim().toLowerCase())}`);
+  // v55 filters, applied when the user presses Search (tapping a filter in the app does nothing on its own):
+  // pl = pc | quest | ios (the avatar has that platform), rk = 0..3 (rank Excellent..Poor or better; on `pl` if
+  // given, else on EVERY platform the avatar has). p = platform bits (1 PC, 2 Quest, 4 iOS), pf = packed ranks
+  // (pc | quest << 4 | ios << 8, 5 = unknown, which never passes).
+  const pl = { pc: 0, quest: 1, ios: 2 }[(url.searchParams.get("pl") || "").toLowerCase()];
+  const rkRaw = parseInt(url.searchParams.get("rk") || "", 10);
+  const rk = rkRaw >= 0 && rkRaw <= 3 ? rkRaw : undefined;
+  let filt = "";
+  if (pl !== undefined) {
+    filt += ` AND (av.p & ${1 << pl}) != 0`;
+    if (rk !== undefined) filt += ` AND ((av.pf >> ${pl * 4}) & 15) <= ${rk}`;
+  } else if (rk !== undefined) {
+    filt += " AND av.p != 0" + [0, 1, 2].map((i) => ` AND ((av.p & ${1 << i}) = 0 OR ((av.pf >> ${i * 4}) & 15) <= ${rk})`).join("");
+  }
+  const cacheKey = new Request(`https://gremlininc.app/search?q=${encodeURIComponent(q.trim().toLowerCase())}&o=${o}&au=${encodeURIComponent(au.trim().toLowerCase())}&pl=${pl ?? ""}&rk=${rk ?? ""}`);
   const cache = caches.default;
   try { const hit = await cache.match(cacheKey); if (hit) return hit; } catch (_) {}
   await ensureSearchSchema(env.SEARCH);
   const nk = nameKey(q);
   const sql = "SELECT av.id a, av.f f, av.n n, au.n au, av.ai ai, av.p p, av.pf pf FROM avx JOIN av ON av.k = avx.rowid LEFT JOIN au ON au.id = av.ai " +
-    "WHERE avx MATCH ?" + (au ? " AND au.k = ?" : "") + " ORDER BY (av.nk = ?) DESC, rank LIMIT ? OFFSET ?";
+    "WHERE avx MATCH ?" + (au ? " AND au.k = ?" : "") + filt + " ORDER BY (av.nk = ?) DESC, rank LIMIT ? OFFSET ?";
   const b = au ? [fq, nameKey(au), nk, SEARCH_PAGE + 1, o] : [fq, nk, SEARCH_PAGE + 1, o];
   let rows;
   try { rows = (await env.SEARCH.prepare(sql).bind(...b).all()).results || []; }

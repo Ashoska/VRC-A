@@ -188,13 +188,14 @@ object UiLabScenes {
             "alerts" -> addSampleAlerts(ctx)
             // Avatar search (v53): 130 sample results for any query, 500-per-batch rules (so 3 pages, no more).
             "avatar-search" -> com.vrca.vrchat.AvatarSearch.labBatches = { q, offset ->
-                val names = listOf("Moontail", "Moon Fox", "Rexouium", "Nardoragon", "Avali", "Protogen", "Kitsune Neko", "Shep", "Rusk", "Taidum")
+                val names = listOf("Moontail", "Moon Fox", "Rexouium", "Nardoragon", "Avali", "Protogen", "Kitsune Neko", "Shep", "Rusk", "ᵂᴴᴵᵀᴱ ᵀᴵᴳᴱᴿ")
                 val plats = listOf(listOf("PC", "Quest"), listOf("PC"), listOf("PC", "Quest", "iOS"), listOf("Quest"))
-                val all = (0 until 130).map { i ->
+                // 1200 results over three batches; Excellent on every platform only every 40th (the filter fill test).
+                val all = (0 until 1200).map { i ->
                     com.vrca.vrchat.AvatarSearch.Result(id = "avtr_%08d-0000-0000-0000-000000000000".format(i), name = names[i % names.size] + if (i >= names.size) " ${i / names.size + 1}" else "",
-                        author = listOf("Ghurst", "Ashoska", "Blue", "Mira")[i % 4], imageUrl = "", platforms = plats[i % plats.size], authorId = "usr_x", imageFileId = "", source = "catalog", perfPc = i % 6, perfQuest = (i + 2) % 6)
+                        author = listOf("Ghurst", "~❀Noëlle❀~", "偷腥猫ゞ", "ཀMiraཀ")[i % 4], imageUrl = "", platforms = plats[i % plats.size], authorId = "usr_x", imageFileId = "", source = "catalog", perfPc = if (i % 40 == 0) 0 else i % 6, perfQuest = if (i % 40 == 0) 0 else (i + 2) % 6, perfIos = if (i % 40 == 0) 0 else 5)
                 }
-                com.vrca.vrchat.AvatarSearch.Batch(all.drop(offset).take(500), false, offset)
+                com.vrca.vrchat.AvatarSearch.Batch(all.drop(offset).take(500), offset + 500 < all.size, offset)
             }
             "no-alerts" -> InAppAlertState.dismissAll(ctx)
             "sending" -> {

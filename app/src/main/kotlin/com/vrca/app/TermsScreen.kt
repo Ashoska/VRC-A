@@ -53,29 +53,38 @@ private class TermsSection(
     val after: String? = null, val callout: Pair<Mark, String>? = null,
 )
 
+// No pictures for now (user, 2026-10-31): they come back once the UI revamp is done. While no section names one,
+// boot skips downloading the terms' pictures ([TERMS_HAVE_PICTURES]).
 private val TERMS_SECTIONS = listOf(
     TermsSection("Welcome to VRC-A", BootIcons.Tutorial, "What's possible with VRC-A",
-        "VRC-A is a free companion app for VRChat. It runs on your phone or Quest and talks to VRChat for you, so your chatbox, status and music can update while you play."),
+        "VRC-A is a companion app for VRChat. It runs on your phone or Quest alongside VRChat and handles the things you'd normally have to stop playing for.",
+        listOf("Keep your chatbox alive with cycling lines, live info, music and voice to text",
+            "Show your VRChat world on your Discord profile",
+            "Get alerts for friends, invites, groups and events",
+            "See who's in your instance and look back at where you've been",
+            "Search, clone and resize avatars")),
     TermsSection("Platform rules", BootIcons.Vrchat, "Third-party guidelines",
-        "VRC-A works with VRChat and Discord, so their rules apply to everything you do through it, on top of these terms.",
-        listOf("Follow VRChat's Terms and Community Guidelines", "Follow Discord's Terms when Discord status is on", "No spam or harassment through the chatbox"),
-        image = "platform_rules"),
+        "VRC-A works with VRChat and Discord, so their rules still apply to everything you do through it, on top of these terms.",
+        listOf("Follow VRChat's Terms and Community Guidelines", "Follow Discord's Terms when Discord status is on",
+            "Don't use the chatbox to spam, harass or impersonate anyone",
+            "Don't abuse VRC-A or its servers, for example with bots, scripts or modified versions of the app")),
     TermsSection("Login Centre", BootIcons.VrchatSignIn, "Your connected accounts",
         "Signing in to VRChat powers your status, friends, instances and avatar tools. Signing in to Discord is optional and shows what you're up to on your Discord profile. Your logins are kept encrypted on this device.",
-        image = "login_centre",
         callout = Mark.Warn to "VRC-A isn't made by VRChat. Using third-party tools with your account is at your own risk."),
     TermsSection("Data and privacy", BootIcons.Privacy, "What we store",
         "To sync your settings and keep VRC-A safe, a small amount is stored with us.",
         listOf("A random ID for this device", "Your app version and settings", "Never your VRChat password")),
     TermsSection("Bugs and reports", BootIcons.Bug, "Crash reports and fixes",
-        "If VRC-A crashes, a report is sent to the developer with your device model, the app version and what went wrong. Nothing personal is in it.",
-        image = "bugs_reports"),
+        "If VRC-A crashes, a report is sent to the developer with your device model, the app version and what went wrong. Nothing personal is in it."),
     TermsSection("Account standing", BootIcons.Account, "Moderation, warnings and bans",
         "Accounts that break these terms can be warned, and repeat or serious cases banned from VRC-A.",
         callout = Mark.Failed to "Trying to get around a ban gets every device and account involved banned."),
     TermsSection("Terms and changes", BootIcons.Terms, "Updates to these terms",
         "If these terms change, VRC-A shows them again the next time you open it, and you can read what's new before accepting."),
 )
+
+/** Whether any section shows a picture; boot only fetches the terms' pictures when one does. */
+internal val TERMS_HAVE_PICTURES: Boolean get() = TERMS_SECTIONS.any { it.image != null }
 
 @Composable
 private fun Header(compact: Boolean, subtitle: String) {
