@@ -326,9 +326,10 @@ private fun EvidenceViewer(e: Standing.Evidence, onClose: () -> Unit) {
                     }
             }
             androidx.compose.runtime.DisposableEffect(exo) { onDispose { exo.release() } }
+            // A TextureView (like the rich-content videos: SurfaceView renders black inside Compose); it loops.
             androidx.compose.ui.viewinterop.AndroidView({ c ->
-                androidx.media3.ui.PlayerView(c).apply { player = exo; useController = true }
-            }, Modifier.fillMaxSize())
+                android.view.TextureView(c).also { exo.setVideoTextureView(it) }
+            }, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
         }
     }
 }

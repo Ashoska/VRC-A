@@ -29,7 +29,7 @@ import kotlinx.coroutines.launch
  * Real enforcement of what goes through our servers is the server's job; this is what honest users see.
  */
 object Standing {
-    enum class Level(val key: String, val label: String, val line: String, val mark: Mark) {
+    enum class Level(val key: String, val label: String, val line: String, internal val mark: Mark) {
         Good("good", "All good", "Your account is in good standing. Thanks for following the rules.", Mark.Done),
         Limited("limited", "Limited", "Some features are disabled for a while.", Mark.Warn),
         VeryLimited("verylimited", "Very limited", "Several features are disabled for a while.", Mark.Warn),

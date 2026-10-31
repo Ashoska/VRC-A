@@ -2602,14 +2602,20 @@ async function searchStep(env) {
     if (got.items.length) {
       // Resolve per avatar: any put wins (latest); a del only where no put for that avatar in this step.
       const puts = new Map(), dels = new Map(), rem = [];
+      // D1 uses only records not already written to D1 (v57: a record requeued for its nm/ file carries `d1: 1`;
+      // before, every requeue re-wrote its ~3 D1 rows each step, ~80% of D1 writes during a burst).
+      const d1Puts = new Map(), d1Dels = new Map();
       for (const r of got.items) {
         if (r.old && r.old.n) rem.push({ k: nameKey(r.old.n), id: r.id, f: r.old.f });
         if (r.nw) { puts.set(r.id, r.nw); dels.delete(r.id); } else if (!puts.has(r.id)) dels.set(r.id, r);
+        if (r.d1) continue;
+        if (r.nw) { d1Puts.set(r.id, r.nw); d1Dels.delete(r.id); } else if (!d1Puts.has(r.id)) d1Dels.set(r.id, r);
       }
-      const putList = [...puts.values()], delList = [...dels.values()].map((r) => ({ id: r.id, f: r.f }));
+      const putList = [...puts.values()];
+      const d1PutList = [...d1Puts.values()], d1DelList = [...d1Dels.values()].map((r) => ({ id: r.id, f: r.f }));
       let d1ok = true;
-      if (env.SEARCH) {
-        try { await ensureSearchSchema(env.SEARCH); const w = await d1Apply(env.SEARCH, putList, delList); out.d1Written = w.written; }
+      if (env.SEARCH && (d1PutList.length || d1DelList.length)) {
+        try { await ensureSearchSchema(env.SEARCH); const w = await d1Apply(env.SEARCH, d1PutList, d1DelList); out.d1Written = w.written; }
         catch (e) { d1ok = false; out.d1Err = String(e && e.message || e).slice(0, 200); }
       }
       // nm/ for dels: drop (id, f) under the old name; rem covers renames and removals.
@@ -2619,7 +2625,7 @@ async function searchStep(env) {
       // Requeue: everything if D1 failed, else only records whose nm/ bucket wasn't written (idempotent).
       const again = got.items.filter((r) => !d1ok ||
         (r.nw && nm.pending.has(nameBucketOf(nameKey(r.nw.n)))) || (r.old && r.old.n && nm.pending.has(nameBucketOf(nameKey(r.old.n)))));
-      if (again.length) { await hubQueuePush(env, "srq", again); out.requeued = again.length; }
+      if (again.length) { await hubQueuePush(env, "srq", d1ok ? again.map((r) => ({ ...r, d1: 1 })) : again); out.requeued = again.length; }
       await hubQueueAck(env, got.keys);
       out.applied = got.items.length;
     }
