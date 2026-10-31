@@ -52,6 +52,7 @@ internal fun ConfigTab(
     setError: (String?) -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    val ctx = androidx.compose.ui.platform.LocalContext.current.applicationContext
 
     var tosVersion by rememberSaveable { mutableIntStateOf(1) }
     var tosText by rememberSaveable { mutableStateOf("") }
@@ -162,7 +163,22 @@ internal fun ConfigTab(
                 Text("VRC-A servers maintenance", style = MaterialTheme.typography.labelLarge)
                 androidx.compose.material3.Switch(
                     checked = serversMaintenance,
-                    onCheckedChange = { serversMaintenance = it; scope.launch { saveConfig() } }
+                    onCheckedChange = { on ->
+                        serversMaintenance = on
+                        scope.launch { saveConfig() }
+                        // Also tell the website's status (Worker v56), which the boot screen and gremlininc.app read.
+                        val key = ctx.getSharedPreferences("vrca_admin_local", android.content.Context.MODE_PRIVATE).getString("avatar_admin_key", "").orEmpty()
+                        if (key.isNotBlank()) scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            runCatching {
+                                val c = (java.net.URL("${com.vrca.vrchat.AvatarGlobalDb.WORKER_URL}/admin/status").openConnection() as java.net.HttpURLConnection).apply {
+                                    requestMethod = "POST"; doOutput = true; setRequestProperty("content-type", "application/json")
+                                    connectTimeout = 10_000; readTimeout = 10_000
+                                }
+                                c.outputStream.use { it.write(org.json.JSONObject().put("key", key).put("maintenance", on).toString().toByteArray()) }
+                                c.responseCode; c.disconnect()
+                            }
+                        }
+                    }
                 )
             }
 
