@@ -855,22 +855,15 @@ fun VrcaScreen(
                   androidx.compose.runtime.CompositionLocalProvider(com.vrca.ui.common.LocalStagedBuild provides staging) {
                     when (p) {
                         AppPage.Home -> {
-                            if (isBannedEffective) {
-                                BannedScreen(
-                                    uid = safeUid(),
-                                    deviceHash = deviceHash,
-                                    banReason = moderation.banReason,
-                                    deviceBanReason = moderation.deviceBanReason,
-                                    onOpenInfo = { page = AppPage.Settings },
-                                    onOpenSettings = { page = AppPage.Settings }
-                                )
-                            } else {
+                            // Bans and warnings show in the account standing popup (VrcaApp) over the app; Home stays
+                            // underneath with every control off (isBanned), so there's no separate ban screen any more.
+                            run {
                                 HomePage(
                                     vm = chatboxViewModel,
                                     onNavigate = { page = it },
                                     announcements = announcements,
                                     moderation = moderation,
-                                    isBanned = false,
+                                    isBanned = isBannedEffective,
                                     vrcLinked = vrcLinked
                                 )
                             }
@@ -920,98 +913,7 @@ fun VrcaScreen(
         }
 }
 
-/* =========================
-   Global banners (WARNINGS ONLY)
-   ========================= */
 
-@Composable
-private fun GlobalStatusBanner(
-    moderation: ModerationUi
-) {
-    if (!moderation.warned || (moderation.banned || moderation.deviceBanned)) return
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("Warning", style = MaterialTheme.typography.labelLarge)
-                Text(
-                    moderation.warnReason.ifBlank { "You have been warned by moderators." },
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-        }
-    }
-}
-
-/* =========================
-   Ban screen
-   ========================= */
-
-@Composable
-private fun BannedScreen(
-    uid: String,
-    deviceHash: String,
-    banReason: String,
-    deviceBanReason: String,
-    onOpenInfo: () -> Unit,
-    onOpenSettings: () -> Unit
-) {
-    Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("Access restricted", style = MaterialTheme.typography.headlineSmall)
-
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("You are banned from using this app.", style = MaterialTheme.typography.titleSmall)
-
-                    val reasons = buildList {
-                        if (banReason.isNotBlank()) add("Ban reason: $banReason")
-                        if (deviceBanReason.isNotBlank()) add("Device ban: $deviceBanReason")
-                    }.ifEmpty { listOf("No reason provided.") }
-
-                    reasons.forEach { r ->
-                        Text(r, style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-            }
-
-            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("IDs (for support/admin)", style = MaterialTheme.typography.titleSmall)
-                    Text("uid=${uid.ifBlank { "?" }}", fontFamily = FontFamily.Monospace)
-                    Text(
-                        "deviceHash=${deviceHash.take(16).ifBlank { "?" }}...",
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
-
-            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("What you can do", style = MaterialTheme.typography.titleSmall)
-                    Text("- You can still open Settings and Info.")
-                    Text("- If this is a mistake, contact the app moderators.")
-                }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                com.vrca.ui.common.GremlinSecondaryButton(onClick = onOpenSettings, modifier = Modifier.weight(1f)) { Text("Settings") }
-                com.vrca.ui.common.GremlinSecondaryButton(onClick = onOpenInfo, modifier = Modifier.weight(1f)) { Text("Info") }
-            }
-        }
-    }
-}
 
 /* =========================
    LEFT NAV DRAWER

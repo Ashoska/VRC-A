@@ -634,8 +634,6 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
        ------------------------- */
 
     var vrcLoginDone    by remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
-    var isBannedPhase2  by remember { mutableStateOf(false) }
-    var banPhase2Reason by remember { mutableStateOf("") }
     var phase2Checking  by remember { mutableStateOf(false) }
     var reloginTick     by remember { mutableStateOf(0) }
 
@@ -685,15 +683,11 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
         phase2Checking = true
         runPhase2AndStartPipeline(
             ctx, phase1BanId,
-            onBanned = { reason -> isBannedPhase2 = true; banPhase2Reason = reason },
+            onBanned = { reason -> Standing.ensureBanned(reason); StandingPopupOpen.value = true },
             onClean  = { phase2Checking = false }
         )
     }
 
-    if (isBannedPhase2) {
-        BannedScreen(reason = banPhase2Reason)
-        return
-    }
 
     /* -------------------------
        Main app
@@ -704,6 +698,15 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
         // Account standing: opened from Settings or a disabled-feature line, or by itself when an action is new or an
         // admin changed one (it rides the moderation listener, so that's live). Banned: no Close, it stays.
         val standing = Standing.state.value
+        // An old-style ban flag or a device ban with no standing record here still gets the banned popup.
+        val vmBanned = vm.isBanned
+        // (After a short wait, so a lift arriving as two separate updates, the user doc and the device-ban doc, can't
+        // leave a stale ban behind.)
+        LaunchedEffect(vmBanned, standing) {
+            if (!vmBanned) return@LaunchedEffect
+            kotlinx.coroutines.delay(3_000)
+            if (vm.isBanned) Standing.ensureBanned(vm.banReason.ifBlank { vm.deviceBanReason })
+        }
         LaunchedEffect(standing) { if (Standing.shouldPop(ctx, standing)) StandingPopupOpen.value = true }
         LaunchedEffect(remoteDiscordInvite) { StandingSupportUrl.value = remoteDiscordInvite }
         if (StandingPopupOpen.value) StandingPopup(onClosed = { StandingPopupOpen.value = false })
@@ -1255,48 +1258,6 @@ private suspend fun runPhase2AndStartPipeline(
     onClean()
 }
 
-/* =========================================================
-   Ban screen
-   ========================================================= */
-
-@Composable
-internal fun BannedScreen(reason: String) {
-    Surface(modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(28.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                "Access Denied",
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.error,
-                textAlign = TextAlign.Center
-            )
-            Spacer(Modifier.height(16.dp))
-            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "Your account has been banned from VRC-A.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    if (reason.isNotBlank()) {
-                        Divider()
-                        Text(
-                            "Reason: $reason",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
 
 internal object TosPrefs {
     private const val FILE = "vrca_tos"

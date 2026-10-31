@@ -311,11 +311,10 @@ fun AdminScreen() {
     // ==========================================
     // MAIN UI
     // ==========================================
-    val tabs = remember { listOf("Dashboard", "Users", "Mod", "Announce", "Releases", "Config", "Log", "Bots", "Bot", "Crashes") }
+    val tabs = remember { listOf("Dashboard", "Users", "Announce", "Releases", "Config", "Log", "Bots", "Bot", "Crashes") }
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
 
     // ModerationTarget is NOT saveable
-    var moderationTarget by remember { mutableStateOf<ModerationTarget?>(null) }
 
     // Compact IDs drawer
     var idsExpanded by rememberSaveable { mutableStateOf(false) }
@@ -744,8 +743,9 @@ fun AdminScreen() {
                     .fillMaxWidth()
                     .weight(1f)
             ) {
-                when (tabIndex) {
-                    0 -> DashboardTab(
+                // By name (the old "Mod" tab was removed 2026-10-31: the Standing page in a user's detail replaced it).
+                when (tabs.getOrNull(tabIndex)) {
+                    "Dashboard" -> DashboardTab(
                         db = db,
                         users = sharedUsers,
                         usersLoading = sharedUsersLoading,
@@ -761,7 +761,7 @@ fun AdminScreen() {
                         setError = ::setErr
                     )
 
-                    1 -> UsersTab(
+                    "Users" -> UsersTab(
                         db = db,
                         myDeviceHash = deviceHash,
                         users = sharedUsers,
@@ -808,50 +808,34 @@ fun AdminScreen() {
                             }
                         },
                         setGlobalLoading = { globalLoading = it },
-                        setError = ::setErr,
-                        onSendToModeration = { target ->
-                            moderationTarget = target
-                            tabIndex = 2
-                        }
+                        setError = ::setErr
                     )
 
-                    2 -> ModerationTab(
-                        db = db,
-                        myUid = myUid,
-                        byDeviceHash = deviceHash,
-                        byAppId = BuildConfig.APPLICATION_ID,
-                        clipboardCopy = { },
-                        setGlobalLoading = { globalLoading = it },
-                        setError = ::setErr,
-                        initialTarget = moderationTarget,
-                        onClearInitialTarget = { moderationTarget = null }
-                    )
-
-                    3 -> AnnouncementsTab(
+                    "Announce" -> AnnouncementsTab(
                         db = db,
                         createdByDevice = deviceHash,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
 
-                    4 -> ReleasesTab(
+                    "Releases" -> ReleasesTab(
                         db = db,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
 
-                    5 -> ConfigTab(
+                    "Config" -> ConfigTab(
                         db = db,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
 
-                    6 -> ModLogTab(db = db, setError = ::setErr)
+                    "Log" -> ModLogTab(db = db, setError = ::setErr)
 
-                    7 -> BotsTab()
+                    "Bots" -> BotsTab()
 
-                    8 -> DiscordBotTab()
-                    9 -> CrashesTab(db = db, setError = ::setErr)
+                    "Bot" -> DiscordBotTab()
+                    "Crashes" -> CrashesTab(db = db, setError = ::setErr)
 
                     else -> ModLogTab(db = db, setError = ::setErr)
                 }

@@ -88,7 +88,12 @@ object Standing {
     // ---- reading ------------------------------------------------------------------------------------------
     /** Parses the `standing` field (a Firestore map) and publishes it. Returns the parsed state. */
     fun publish(raw: Any?): State? {
-        val s = parse(raw)
+        lastRaw = raw
+        var s = parse(raw)
+        // A ban found by the evasion check / an old-style flag stays until the process ends, whatever the doc says.
+        val lb = localBan
+        if (lb != null && banUntil(s) == null) s = State(s?.rev ?: nowMs(), Level.Banned, listOf(
+            Action("ban", "ban", lb, "", nowMs(), true, emptyMap(), -1L, emptyList())) + s?.actions.orEmpty())
         if (s != state.value) state.value = s
         return s
     }
@@ -145,6 +150,19 @@ object Standing {
     }
 
     fun isBanned(): Boolean { tick.longValue; return banUntil() != null }
+
+    /**
+     * A ban found without a standing record on this device (the evasion check found a banned VRChat id, device or
+     * sign-in on a phone the admin's save didn't reach, or an old-style ban flag): shows the popup in its banned state
+     * with no Close. The admin's next save of that account writes the real record to this device too.
+     */
+    fun ensureBanned(reason: String = "") {
+        if (banUntil() != null) return
+        localBan = reason.ifBlank { "Account banned" }
+        publish(lastRaw)
+    }
+    @Volatile private var localBan: String? = null
+    @Volatile private var lastRaw: Any? = null
 
     /** Every disabled feature with its end, longest first, for the standing card. */
     fun disabled(s: State?): List<Pair<String, Long>> {

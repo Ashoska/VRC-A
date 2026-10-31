@@ -197,17 +197,6 @@ internal data class UserDetail(
     val instanceRoster: String = ""
 )
 
-internal data class ModerationTarget(
-    val docId: String,
-    val authUid: String,
-    val deviceHash: String,
-    val displayName: String,
-    val vrchatUserId: String = "",
-    val banReason: String = "",
-    val warnReason: String = "",
-    val banned: Boolean = false,
-    val warned: Boolean = false
-)
 
 /**
  * Derives the instance TYPE (Public / Friends / Friends+ / Group / Invite / Invite+)
@@ -384,8 +373,7 @@ internal fun UsersTab(
     onRefresh: () -> Unit,
     onUpdateUserRow: (String, UserDetail) -> Unit,
     setGlobalLoading: (Boolean) -> Unit,
-    setError: (String?) -> Unit,
-    onSendToModeration: (ModerationTarget) -> Unit
+    setError: (String?) -> Unit
 ) {
     var search       by rememberSaveable { mutableStateOf("") }
     var filterWarned by rememberSaveable { mutableStateOf(false) }
