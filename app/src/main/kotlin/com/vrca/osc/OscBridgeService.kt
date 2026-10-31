@@ -35,6 +35,11 @@ class OscBridgeService : Service() {
                 )
             }
         }
+
+        /** Ends the bridge process (the Debug switch turned off). */
+        fun stop(context: Context) {
+            runCatching { context.startService(Intent(context, OscBridgeService::class.java).setAction(ACTION_STOP)) }
+        }
     }
 
     @Volatile private var lastConnected: Boolean? = null
@@ -43,7 +48,8 @@ class OscBridgeService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        // Switched off (the default): never run, also when Android restarts this sticky service by itself.
+        if (intent?.action == ACTION_STOP || !OscAnnouncer.isEnabled(this)) {
             // User asked: end the bridge (VRChat stops sending until it restarts).
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

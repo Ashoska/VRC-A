@@ -177,7 +177,8 @@ open class VrcaApplication : Application(), ViewModelStoreOwner {
             Thread({
                 // Last process died mid hand-drag (sticky axes): stop the player first.
                 runCatching { com.vrca.osc.HandDrag.clearStale(appCtx) }
-                runCatching { com.vrca.osc.OscAnnouncer.start(appCtx) }
+                // Off by default (Settings → Debug, testers only): the bridge caused issues for users.
+                if (com.vrca.osc.OscAnnouncer.isEnabled(appCtx)) runCatching { com.vrca.osc.OscAnnouncer.start(appCtx) }
             }, "vrca-announce-start")
                 .apply { isDaemon = true; start() }
             // Start the instance-roster / log reader in the BACKGROUND at launch,

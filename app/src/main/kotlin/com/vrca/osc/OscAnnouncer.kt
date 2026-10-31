@@ -78,9 +78,25 @@ object OscAnnouncer {
      *  (after a bridge relink nothing is held), the OSCQuery poll's fresh value stands in. */
     fun param(name: String): Float? = if (paused) null else params[name] ?: VrcaOscState.freshFloat(name)
 
-    /** Debug button: first tap starts; later taps pause/resume (the bridge keeps going). */
-    fun toggle(context: Context) {
-        if (!running) start(context) else paused = !paused
+    // OFF by default (user, 2026-10-31: the bridge caused too many issues for everyone; only testers use it).
+    // Settings → Debug turns it on; the choice is saved, and the bridge process itself refuses to start while off.
+    private const val PREFS = "vrca_osc_bridge"
+    private const val KEY_ON = "enabled"
+
+    fun isEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ON, false)
+
+    /** Debug switch: on = start announcing (and keep doing it on every launch); off = end the bridge now. */
+    fun setEnabled(context: Context, on: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ON, on).commit()
+        if (on) start(context) else stop(context)
+    }
+
+    /** Ends announcing: the link loop stops and the bridge process is told to quit. */
+    @Synchronized
+    fun stop(context: Context) {
+        running = false
+        OscBridgeService.stop(context.applicationContext)
     }
 
     @Synchronized
@@ -90,14 +106,16 @@ object OscAnnouncer {
         running = true
         appContext = context.applicationContext
         OscBridgeService.start(context.applicationContext)
-        Thread({ linkLoop() }, "vrca-bridge-link").apply { isDaemon = true; start() }
+        val g = ++linkGen   // an off→on flip mustn't leave the old link loop running next to the new one
+        Thread({ linkLoop(g) }, "vrca-bridge-link").apply { isDaemon = true; start() }
     }
 
     /** Stay connected to the bridge; (re)start it when it isn't there. */
-    private fun linkLoop() {
+    @Volatile private var linkGen = 0
+    private fun linkLoop(gen: Int) {
         val ctx = appContext ?: return
         var failures = 0
-        while (running) {
+        while (running && gen == linkGen) {
             val sock = LocalSocket()
             try {
                 sock.connect(LocalSocketAddress(OscBridge.relayName(ctx)))
