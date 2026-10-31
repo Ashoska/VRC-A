@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -64,118 +65,97 @@ object StandingMocks {
             Action("Restriction", "Abusing VRC-A's servers", "30 Oct", "Too many searches in a short time.", "Ends 6 Nov", listOf(true), true)))
     }
 
+    /** Built like the crash screen: one centred block (max 640dp), Boot Cat + title above a single layer card. */
     @Composable
     fun Page(state: String) {
         val (level, off, actions) = data(state)
-        BoxWithConstraints(Modifier.fillMaxSize().background(G.Backdrop)) {
-            val wide = maxWidth >= 700.dp
-            if (wide) Row(Modifier.fillMaxSize().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Column(Modifier.weight(0.42f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Header(); StandingCard(level); OffCard(off)
+        val (active, past) = actions.partition { it.active }
+        Box(Modifier.fillMaxSize().background(G.Backdrop), contentAlignment = Alignment.Center) {
+            Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 24.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    BootCat(level.mark, 0, Modifier.size(52.dp))
+                    Spacer(Modifier.width(14.dp))
+                    Column {
+                        Text(title(level), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = G.Text)
+                        Text("Account standing  ·  31 Oct 14:20", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
+                    }
                 }
-                Column(Modifier.weight(0.58f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ActionsCard(actions)
+                Spacer(Modifier.height(18.dp))
+                com.vrca.app.Layer(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+                        Text(level.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium, color = level.color)
+                        Text(level.line, style = MaterialTheme.typography.bodyMedium, color = G.Text, modifier = Modifier.padding(top = 2.dp))
+                        Meter(level, Modifier.padding(top = 14.dp))
+                        // What's switched off, as the crash screen's details panel (label -> time left).
+                        Panel(Modifier.padding(top = 14.dp)) {
+                            if (off.isEmpty()) KeyValue("Switched off", "Nothing")
+                            off.forEachIndexed { k, o -> KeyValue(if (k == 0) "Switched off" else "", "${o.feature}  ·  ${o.until}") }
+                        }
+                        active.forEach { ActionBlock(it, Modifier.padding(top = 14.dp)) }
+                        if (past.isNotEmpty()) Text("History: " + past.joinToString { "${it.kind} on ${it.date} (${it.ends.replaceFirstChar { c -> c.lowercase() }})" },
+                            style = MaterialTheme.typography.bodySmall, color = G.TextMuted, modifier = Modifier.padding(top = 12.dp))
+                        Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
+                            com.vrca.ui.common.GremlinButton("Support server", {}, kind = com.vrca.ui.common.GremlinButtonKind.Secondary)
+                            if (level != Level.Banned) com.vrca.ui.common.GremlinButton("Close", {})
+                        }
+                    }
                 }
-            } else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Header(); StandingCard(level); OffCard(off); ActionsCard(actions)
+            }
+        }
+    }
+
+    private fun title(l: Level) = when (l) {
+        Level.Good -> "Your account is in good standing"
+        Level.Banned -> "You're banned from VRC-A"
+        else -> "Your account is " + l.label.lowercase()
+    }
+
+    @Composable
+    private fun Meter(level: Level, modifier: Modifier) = Row(modifier, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Level.entries.forEach { l ->
+            val on = l == level
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp))
+                    .background(if (l.ordinal <= level.ordinal) l.color.copy(alpha = if (on) 1f else 0.35f) else G.Raised))
+                Text(l.label, style = MaterialTheme.typography.bodySmall, color = if (on) G.Text else G.TextMuted, maxLines = 2,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
             }
         }
     }
 
     @Composable
-    private fun Header() = Row(verticalAlignment = Alignment.CenterVertically) {
-        BootIconView(BootIcons.Account, { G.Accent }, { G.AccentSoft }, Modifier.size(28.dp))
-        Spacer(Modifier.width(10.dp))
-        Text("Account standing", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = G.Text)
-    }
-
-    @Composable
-    private fun Card(content: @Composable () -> Unit) = Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(G.Card).border(1.dp, G.Edge, RoundedCornerShape(16.dp)).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+    private fun Panel(modifier: Modifier, content: @Composable () -> Unit) = Column(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card).padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) { content() }
 
-    /** The meter: five steps, the current one lit in its colour with Boot Cat on it. */
     @Composable
-    private fun StandingCard(level: Level) = Card {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            BootCat(level.mark, 0, Modifier.size(40.dp))
-            Spacer(Modifier.width(12.dp))
-            Column {
-                Text(level.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = level.color)
-                Text(level.line, style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Level.entries.forEach { l ->
-                val on = l == level
-                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(Modifier.fillMaxWidth().height(if (on) 10.dp else 6.dp).clip(RoundedCornerShape(5.dp))
-                        .background(if (l.ordinal <= level.ordinal) l.color.copy(alpha = if (on) 1f else 0.35f) else G.Raised))
-                    Spacer(Modifier.height(6.dp))
-                    Text(l.label, style = MaterialTheme.typography.labelSmall, color = if (on) G.Text else G.TextMuted, maxLines = 1)
-                }
-            }
-        }
+    private fun KeyValue(label: String, value: String) = Row {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = G.TextMuted, modifier = Modifier.width(96.dp))
+        Text(value, style = MaterialTheme.typography.bodySmall, color = G.Text)
     }
 
+    /** One active action: what it was for, the note, when it ends, and its evidence (if shown to the user). */
     @Composable
-    private fun OffCard(off: List<Off>) = Card {
-        Text("Switched off", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = G.Text)
-        if (off.isEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
-            BootCat(Mark.Done, 0, Modifier.size(24.dp)); Spacer(Modifier.width(10.dp))
-            Text("Everything is on", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
-        }
-        off.forEach { o ->
-            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Raised).padding(horizontal = 14.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(8.dp).background(G.Error, CircleShape)); Spacer(Modifier.width(12.dp))
-                Text(o.feature, style = MaterialTheme.typography.bodyMedium, color = G.Text, modifier = Modifier.weight(1f))
-                Text(o.until, style = MaterialTheme.typography.labelMedium, color = G.TextMuted)
-            }
-        }
-    }
-
-    @Composable
-    private fun ActionsCard(actions: List<Action>) = Card {
-        val (active, past) = actions.partition { it.active }
-        Text("Actions on your account", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = G.Text)
-        if (active.isEmpty()) Text("No active actions", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
-        active.forEach { ActionRow(it) }
-        if (past.isNotEmpty()) {
-            Text("History", style = MaterialTheme.typography.labelLarge, color = G.TextMuted)
-            past.forEach { ActionRow(it) }
-        }
-        Text("If you think an action is a mistake, contact us in the VRC-A support server on Discord.",
-            style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
-    }
-
-    @Composable
-    private fun ActionRow(a: Action) {
+    private fun ActionBlock(a: Action, modifier: Modifier) = Panel(modifier) {
         val tone = when (a.kind) { "Ban" -> G.Alert; "Restriction" -> G.Caution; else -> G.Warning }
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Raised)
-            .border(1.dp, if (a.active) tone.copy(alpha = 0.5f) else G.Edge, RoundedCornerShape(12.dp)).padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(a.kind, style = MaterialTheme.typography.labelMedium, color = if (a.active) tone else G.TextMuted,
-                    modifier = Modifier.clip(RoundedCornerShape(6.dp)).background((if (a.active) tone else G.TextMuted).copy(alpha = 0.14f)).padding(horizontal = 7.dp, vertical = 2.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(a.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = if (a.active) G.Text else G.TextMuted, modifier = Modifier.weight(1f))
-                Text(a.date, style = MaterialTheme.typography.labelMedium, color = G.TextMuted)
-            }
-            Text(a.note, style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
-            if (a.evidence.any { it }) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                a.evidence.filter { it }.forEachIndexed { i, _ -> Evidence(video = i == 1) }
-            }
-            Text(a.ends, style = MaterialTheme.typography.labelMedium, color = if (a.active) tone else G.TextMuted)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("${a.kind}: ${a.title}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = tone, modifier = Modifier.weight(1f))
+            Text(a.date, style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
+        }
+        Text(a.note, style = MaterialTheme.typography.bodySmall, color = G.Text)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
+            a.evidence.filter { it }.forEachIndexed { i, _ -> Evidence(video = i == 1) }
+            Spacer(Modifier.weight(1f))
+            Text(a.ends, style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
         }
     }
 
     /** A placeholder evidence thumbnail (a picture, or a video with a play mark). */
     @Composable
-    private fun Evidence(video: Boolean) = Box(Modifier.width(96.dp).aspectRatio(16f / 10f).clip(RoundedCornerShape(8.dp))
+    private fun Evidence(video: Boolean) = Box(Modifier.width(64.dp).aspectRatio(16f / 10f).clip(RoundedCornerShape(8.dp))
         .background(G.Panel).border(1.dp, G.Edge, RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
         if (video) BootIconView(BootIcons.Start, { G.TextMuted }, { G.TextMuted }, Modifier.size(22.dp))
-        else Text("Picture", style = MaterialTheme.typography.labelSmall, color = G.TextMuted)
+        else Text("Pic", style = MaterialTheme.typography.labelSmall, color = G.TextMuted)
     }
 }
