@@ -59,6 +59,7 @@ import com.vrca.ui.common.widenIn
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import com.vrca.ui.theme.GremlinColors as G
 
 /** The support server link (config/app.discordInvite), set by VrcaApp's config listener. */
@@ -147,10 +148,21 @@ fun StandingPopup(onClosed: () -> Unit, animate: Boolean = true) {
             val uri = androidx.compose.ui.platform.LocalUriHandler.current
             val support = StandingSupportUrl.value
             val closeBtn: @Composable () -> Unit = { GremlinButton("Close", { close() }, size = GremlinButtonSize.Large) }
+            val scope = androidx.compose.runtime.rememberCoroutineScope()
             val supportBtn: @Composable () -> Unit = {
-                GremlinButton("Support server", { if (support.isNotBlank()) runCatching { uri.openUri(support) } },
-                    kind = GremlinButtonKind.Secondary, size = GremlinButtonSize.Large,
-                    icon = ImageVector.vectorResource(com.vrca.R.drawable.ic_discord), enabled = support.isNotBlank())
+                // Always enabled (it used to grey out while the link hadn't loaded, which is always the case during
+                // boot): without the link yet, it reads config/app once, then opens it.
+                GremlinButton("Support server", {
+                    if (support.isNotBlank()) runCatching { uri.openUri(support) }
+                    else scope.launch {
+                        val link = runCatching {
+                            com.google.firebase.firestore.FirebaseFirestore.getInstance().collection("config").document("app").get()
+                                .await().getString("discordInvite")?.trim()
+                        }.getOrNull().orEmpty()
+                        if (link.isNotBlank()) { StandingSupportUrl.value = link; runCatching { uri.openUri(link) } }
+                    }
+                }, kind = GremlinButtonKind.Secondary, size = GremlinButtonSize.Large,
+                    icon = ImageVector.vectorResource(com.vrca.R.drawable.ic_discord))
             }
             val btnL = Modifier.widenIn { stagger(partsL.value, 4, 5) }
             val btnR = Modifier.widenIn { stagger(partsR.value, 2, 3) }
