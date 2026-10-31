@@ -296,9 +296,11 @@ internal fun AppBoot(
                     }
                     // A legacy ban is shown by the ban gate after boot; here it's just noted. Standing: the level, or
                     // what's new (the popup then opens over this screen before the hand-off).
+                    // The evasion check (bannedIdentifiers: this device / sign-in) found a ban: the standing popup in its
+                    // banned state (no old ban screen any more).
+                    if (result.isBanned) Standing.ensureBanned(result.banReason)
                     val standingNote = Standing.bootNote(ctx, Standing.state.value)
-                    if (result.isBanned) set(Row.Account, BootState.Warn, BootNote.Restricted)
-                    else if (standingNote != BootNote.Good) set(Row.Account, BootState.Warn, standingNote)
+                    if (standingNote != BootNote.Good) set(Row.Account, BootState.Warn, standingNote)
                     else set(Row.Account, BootState.Done, BootNote.Good)
                 }
             }
@@ -379,7 +381,7 @@ internal fun AppBoot(
     // asked only when it's needed: as a value it re-read the saved VRChat login (encrypted store)
     // and onboarding prefs on EVERY AppBoot recomposition, i.e. on every row change.
     fun mainAppNext() = rows[Row.Terms.ordinal].state == BootState.Done &&
-        rows[Row.Account.ordinal].note != BootNote.Restricted &&
+        rows[Row.Account.ordinal].note != BootNote.Banned &&
         VrchatAuthManager.isLoggedIn(ctx) && com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
     // Decided once, when the hand-off is about to start.
     var toMainApp by remember { mutableStateOf(false) }
@@ -415,7 +417,7 @@ internal fun AppBoot(
             val mainNext = withContext(Dispatchers.IO) { mainAppNext() }
             // The terms come next (user, 2026-10-25: boot hands over to them like it does to the app).
             val termsNext = rows[Row.Terms.ordinal].note == BootNote.NewTerms &&
-                rows[Row.Account.ordinal].note != BootNote.Restricted
+                rows[Row.Account.ordinal].note != BootNote.Banned
             if (termsNext) {
                 BootReveal.termsCatIn.floatValue = 0f
                 prepareApp()

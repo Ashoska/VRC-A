@@ -95,7 +95,9 @@ object AdminStandingStore {
         val id: String, val account: String, val docId: String, val kind: String, val reason: String, val title: String,
         val message: String, val adminNote: String, val given: Long, val editedAt: Long, val active: Boolean,
         val off: Map<String, Long>, val banUntil: Long, val banAccount: Boolean, val banDevice: Boolean, val banOthers: Boolean,
-        val level: String, val evidence: List<Ev>, val bannedHashes: List<String>, val givenBy: String, val seenAt: Long = 0L
+        val level: String, val evidence: List<Ev>, val bannedHashes: List<String>, val givenBy: String, val seenAt: Long = 0L,
+        /** Ids put in `bannedIdentifiers` (the evasion check): banned device hashes + the VRChat id. */
+        val identifiers: List<String> = emptyList()
     )
 
     fun accountKey(docId: String, vrchatUserId: String) = vrchatUserId.ifBlank { docId }
@@ -117,6 +119,7 @@ object AdminStandingStore {
             Ev(o["id"] as? String ?: return@mapNotNull null, o["kind"] as? String ?: "png", o["shown"] as? Boolean ?: false)
         },
         bannedHashes = (m["bannedHashes"] as? List<Any?>).orEmpty().filterIsInstance<String>(),
+        identifiers = (m["identifiers"] as? List<Any?>).orEmpty().filterIsInstance<String>(),
         givenBy = m["givenBy"] as? String ?: ""
     )
 
@@ -124,7 +127,7 @@ object AdminStandingStore {
         "account" to a.account, "docId" to a.docId, "kind" to a.kind, "reason" to a.reason, "title" to a.title,
         "message" to a.message, "adminNote" to a.adminNote, "given" to a.given, "editedAt" to a.editedAt, "active" to a.active,
         "off" to a.off, "banUntil" to a.banUntil, "banAccount" to a.banAccount, "banDevice" to a.banDevice,
-        "banOthers" to a.banOthers, "level" to a.level, "bannedHashes" to a.bannedHashes, "givenBy" to a.givenBy,
+        "banOthers" to a.banOthers, "level" to a.level, "bannedHashes" to a.bannedHashes, "identifiers" to a.identifiers, "givenBy" to a.givenBy,
         "evidence" to a.evidence.map { mapOf("id" to it.id, "kind" to it.kind, "shown" to it.shown) }
     )
 
@@ -172,7 +175,9 @@ object AdminStandingStore {
                 if (a.banOthers) addAll(hashes.filter { it != a.docId })
             }
         }
-        val saved = a.copy(editedAt = now, bannedHashes = bans.toList())
+        val idents = if (bans.isEmpty() && !(a.kind == "ban" && a.active && a.banAccount && live(a.banUntil, now) && !remove)) emptyList()
+            else bans.toList() + listOfNotNull(vid.takeIf { it.isNotBlank() && a.banAccount })
+        val saved = a.copy(editedAt = now, bannedHashes = bans.toList(), identifiers = idents)
         val all = (if (remove) others else others + saved).sortedByDescending { it.given }
         // Device bans: every hash a live record bans; un-ban only hashes a standing record banned before.
         val banNow = all.filter { it.kind == "ban" && isLive(it, now) }.flatMap { it.bannedHashes }.toSet()
@@ -183,6 +188,13 @@ object AdminStandingStore {
             mapOf("banned" to true, "reason" to (all.firstOrNull { h in it.bannedHashes }?.title ?: "Banned"), "byStanding" to true,
                 "updatedAt" to FieldValue.serverTimestamp()), com.google.firebase.firestore.SetOptions.merge())
         for (h in banBefore - banNow) batch.delete(db.collection("bannedDevices").document(h))
+        // The evasion check (VrchatBanChecker): a banned VRChat id or device found on ANOTHER phone or sign-in shows the
+        // banned popup there too. Same "only remove what a standing record added" rule.
+        val idNow = all.filter { it.kind == "ban" && isLive(it, now) }.flatMap { it.identifiers }.toSet()
+        val idBefore = (others + a).flatMap { it.identifiers }.toSet()
+        for (i in idNow) batch.set(db.collection("bannedIdentifiers").document(i),
+            mapOf("banId" to (all.firstOrNull { i in it.identifiers }?.id ?: a.id), "type" to (if (i.startsWith("usr_")) "vrchatId" else "deviceHash"), "active" to true))
+        for (i in idBefore - idNow) batch.delete(db.collection("bannedIdentifiers").document(i))
         batch.commit().await()
         val view = mapOf(
             "rev" to now,
