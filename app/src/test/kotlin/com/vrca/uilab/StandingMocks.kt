@@ -53,6 +53,7 @@ object StandingMocks {
     private class Action(val kind: String, val title: String, val date: String, val note: String, val ends: String, val evidence: List<Boolean>, val active: Boolean)
 
     private fun data(state: String): Triple<Level, List<Off>, List<Action>> = when (state) {
+        "clean" -> Triple(Level.Good, emptyList(), emptyList())
         "good" -> Triple(Level.Good, emptyList(), listOf(
             Action("Warning", "Spam through the chatbox", "12 Sep", "Repeated the same message in a busy instance.", "Ended 12 Oct", emptyList(), false)))
         "risk" -> Triple(Level.AtRisk, listOf(Off("Chatbox: custom text", "for 2 days"), Off("Avatar clone", "for 28 days"), Off("Avatar search", "for 28 days")), listOf(
@@ -65,41 +66,67 @@ object StandingMocks {
             Action("Restriction", "Abusing VRC-A's servers", "30 Oct", "Too many searches in a short time.", "Ends 6 Nov", listOf(true), true)))
     }
 
-    /** Built like the crash screen: one centred block (max 640dp), Boot Cat + title above a single layer card. */
+    /** Floats over the app (opened from Settings): the app dimmed behind, the standing card in the crash screen's
+     *  style. No actions on record: the standing card alone, centred. With actions (active or past): on a wide screen
+     *  the standing card moves left and the actions card sits beside it; on a phone they stack. */
     @Composable
     fun Page(state: String) {
         val (level, off, actions) = data(state)
+        Box(Modifier.fillMaxSize().background(G.Panel)) {
+            // Stand-in for the app underneath, dimmed.
+            Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                repeat(5) { Box(Modifier.fillMaxWidth().height(72.dp).clip(RoundedCornerShape(16.dp)).background(G.Card)) }
+            }
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.62f)))
+            BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                val wide = maxWidth >= 700.dp
+                val scroll = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 24.dp)
+                if (wide) Row(scroll, horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
+                    StandingCard(level, off, Modifier.width(440.dp))
+                    if (actions.isNotEmpty()) ActionsCard(actions, Modifier.width(440.dp))
+                } else Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().then(scroll), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    StandingCard(level, off, Modifier.fillMaxWidth())
+                    if (actions.isNotEmpty()) ActionsCard(actions, Modifier.fillMaxWidth())
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun StandingCard(level: Level, off: List<Off>, modifier: Modifier) = com.vrca.app.Layer(modifier) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                BootCat(level.mark, 0, Modifier.size(52.dp))
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text("Account standing", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = G.Text)
+                    Text("Updated 31 Oct 14:20", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
+                }
+            }
+            Text(level.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium, color = level.color, modifier = Modifier.padding(top = 16.dp))
+            Text(level.line, style = MaterialTheme.typography.bodyMedium, color = G.Text, modifier = Modifier.padding(top = 2.dp))
+            Meter(level, Modifier.padding(top = 14.dp))
+            Panel(Modifier.padding(top = 14.dp)) {
+                if (off.isEmpty()) KeyValue("Switched off", "Nothing")
+                off.forEachIndexed { k, o -> KeyValue(if (k == 0) "Switched off" else "", "${o.feature}  ·  ${o.until}") }
+            }
+            if (level != Level.Banned) Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.End) {
+                com.vrca.ui.common.GremlinButton("Close", {})
+            }
+        }
+    }
+
+    @Composable
+    private fun ActionsCard(actions: List<Action>, modifier: Modifier) = com.vrca.app.Layer(modifier) {
         val (active, past) = actions.partition { it.active }
-        Box(Modifier.fillMaxSize().background(G.Backdrop), contentAlignment = Alignment.Center) {
-            Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 24.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    BootCat(level.mark, 0, Modifier.size(52.dp))
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text(title(level), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = G.Text)
-                        Text("Account standing  ·  31 Oct 14:20", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
-                    }
-                }
-                Spacer(Modifier.height(18.dp))
-                com.vrca.app.Layer(Modifier.fillMaxWidth()) {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
-                        Text(level.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium, color = level.color)
-                        Text(level.line, style = MaterialTheme.typography.bodyMedium, color = G.Text, modifier = Modifier.padding(top = 2.dp))
-                        Meter(level, Modifier.padding(top = 14.dp))
-                        // What's switched off, as the crash screen's details panel (label -> time left).
-                        Panel(Modifier.padding(top = 14.dp)) {
-                            if (off.isEmpty()) KeyValue("Switched off", "Nothing")
-                            off.forEachIndexed { k, o -> KeyValue(if (k == 0) "Switched off" else "", "${o.feature}  ·  ${o.until}") }
-                        }
-                        active.forEach { ActionBlock(it, Modifier.padding(top = 14.dp)) }
-                        if (past.isNotEmpty()) Text("History: " + past.joinToString { "${it.kind} on ${it.date} (${it.ends.replaceFirstChar { c -> c.lowercase() }})" },
-                            style = MaterialTheme.typography.bodySmall, color = G.TextMuted, modifier = Modifier.padding(top = 12.dp))
-                        Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
-                            com.vrca.ui.common.GremlinButton("Support server", {}, kind = com.vrca.ui.common.GremlinButtonKind.Secondary)
-                            if (level != Level.Banned) com.vrca.ui.common.GremlinButton("Close", {})
-                        }
-                    }
-                }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+            Text("Actions on your account", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium, color = G.Text)
+            if (active.isEmpty()) Text("Nothing active", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted, modifier = Modifier.padding(top = 2.dp))
+            active.forEach { ActionBlock(it, Modifier.padding(top = 12.dp)) }
+            if (past.isNotEmpty()) Text("History: " + past.joinToString { "${it.kind} on ${it.date} (${it.ends.replaceFirstChar { c -> c.lowercase() }})" },
+                style = MaterialTheme.typography.bodySmall, color = G.TextMuted, modifier = Modifier.padding(top = 12.dp))
+            Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.End) {
+                com.vrca.ui.common.GremlinButton("Support server", {}, kind = com.vrca.ui.common.GremlinButtonKind.Secondary)
             }
         }
     }
