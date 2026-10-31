@@ -2,6 +2,9 @@ package com.vrca.uilab
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -28,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.vrca.app.BootCat
@@ -72,7 +76,8 @@ object StandingMocks {
      *  the standing card moves left and the actions card sits beside it; on a phone they stack. */
     @Composable
     fun Page(state: String) {
-        val (level, off, actions) = data(state)
+        val open = state.endsWith("open")
+        val (level, off, actions) = data(state.removeSuffix("open"))
         Box(Modifier.fillMaxSize().background(G.Panel)) {
             // Stand-in for the app underneath, dimmed.
             Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -84,10 +89,10 @@ object StandingMocks {
                 val scroll = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 24.dp)
                 if (wide) Row(scroll.height(androidx.compose.foundation.layout.IntrinsicSize.Max), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     StandingCard(level, off, Modifier.width(440.dp).fillMaxHeight())
-                    if (actions.isNotEmpty()) ActionsCard(actions, Modifier.width(440.dp).fillMaxHeight())
+                    if (actions.isNotEmpty()) ActionsCard(actions, open, Modifier.width(440.dp).fillMaxHeight())
                 } else Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().then(scroll), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     StandingCard(level, off, Modifier.fillMaxWidth())
-                    if (actions.isNotEmpty()) ActionsCard(actions, Modifier.fillMaxWidth())
+                    if (actions.isNotEmpty()) ActionsCard(actions, open, Modifier.fillMaxWidth())
                 }
             }
         }
@@ -107,13 +112,15 @@ object StandingMocks {
             Text(level.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium, color = level.color, modifier = Modifier.padding(top = 16.dp))
             Text(level.line, style = MaterialTheme.typography.bodyMedium, color = G.Text, modifier = Modifier.padding(top = 2.dp))
             Meter(level, Modifier.padding(top = 14.dp))
-            Text("Switched off", style = MaterialTheme.typography.labelLarge, color = G.TextMuted, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
-            if (off.isEmpty()) Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card).padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                BootCat(Mark.Done, 0, Modifier.size(22.dp)); Spacer(Modifier.width(10.dp))
-                Text("Nothing. Every feature is on.", style = MaterialTheme.typography.bodyMedium, color = G.Text)
+            Text("Disabled", style = MaterialTheme.typography.labelLarge, color = G.TextMuted, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card).padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (off.isEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
+                    BootCat(Mark.Done, 0, Modifier.size(20.dp)); Spacer(Modifier.width(10.dp))
+                    Text("Nothing. Every feature is on.", style = MaterialTheme.typography.bodyMedium, color = G.Text)
+                }
+                off.forEach { OffRow(it, level.color) }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { off.forEach { OffTile(it, level.color) } }
             Spacer(Modifier.weight(1f))
             if (level != Level.Banned) Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.End) {
                 com.vrca.ui.common.GremlinButton("Close", {})
@@ -122,25 +129,58 @@ object StandingMocks {
     }
 
     @Composable
-    private fun ActionsCard(actions: List<Action>, modifier: Modifier) = com.vrca.app.Layer(modifier) {
+    private fun ActionsCard(actions: List<Action>, openFirst: Boolean, modifier: Modifier) = com.vrca.app.Layer(modifier) {
         val (active, past) = actions.partition { it.active }
         Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Actions on your account", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium, color = G.Text, modifier = Modifier.weight(1f))
-                if (active.isNotEmpty()) Pill("${active.size} active", G.AccentSoft)
+                if (active.isNotEmpty()) Text("${active.size} active", style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
             }
-            Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                active.forEach { ActionTile(it) }
-                if (past.isNotEmpty()) Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card).padding(horizontal = 14.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Text("History", style = MaterialTheme.typography.bodyMedium, color = G.Text, modifier = Modifier.weight(1f))
-                    Text("${past.size} past", style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
-                    Text("  ›", style = MaterialTheme.typography.bodyLarge, color = G.TextMuted)
+            // Like the website's contributions feed: one collapsed line each, tap to open the details.
+            Column(Modifier.padding(top = 12.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card)) {
+                active.forEachIndexed { k, a -> if (k > 0) Divider(); ActionRow(a, startOpen = openFirst && k == 0) }
+                if (past.isNotEmpty()) { Divider(); past.forEach { ActionRow(it, startOpen = false) } }
+            }
+            Row(Modifier.padding(top = 10.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card).padding(horizontal = 14.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("Think an action is a mistake?", style = MaterialTheme.typography.bodySmall, color = G.TextMuted, modifier = Modifier.weight(1f))
+                Text("Support server ›", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = G.AccentSoft)
+            }
+        }
+    }
+
+    @Composable
+    private fun Divider() = Box(Modifier.fillMaxWidth().height(1.dp).background(G.Edge))
+
+    /** One action as a feed line: type colour, type, title and date; tapping opens its note, evidence and end. */
+    @Composable
+    private fun ActionRow(a: Action, startOpen: Boolean) {
+        var open by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(startOpen) }
+        val tone = if (!a.active) G.TextMuted else when (a.kind) { "Ban" -> G.Alert; "Restriction" -> G.Caution; else -> G.Warning }
+        Column(Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 14.dp, vertical = 11.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(8.dp).background(tone, CircleShape)); Spacer(Modifier.width(10.dp))
+                Text(a.kind, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium, color = tone)
+                Spacer(Modifier.width(8.dp))
+                Text(a.title, style = MaterialTheme.typography.bodyMedium, color = if (a.active) G.Text else G.TextMuted, maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Text(a.date, style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
+                Spacer(Modifier.width(10.dp))
+                val turn by androidx.compose.animation.core.animateFloatAsState(if (open) 180f else 0f, label = "chev")
+                androidx.compose.foundation.Canvas(Modifier.size(12.dp).graphicsLayer { rotationZ = turn }) {
+                    val w = 1.6.dp.toPx(); val c = G.TextMuted
+                    drawLine(c, androidx.compose.ui.geometry.Offset(size.width * 0.2f, size.height * 0.38f),
+                        androidx.compose.ui.geometry.Offset(size.width * 0.5f, size.height * 0.66f), w, androidx.compose.ui.graphics.StrokeCap.Round)
+                    drawLine(c, androidx.compose.ui.geometry.Offset(size.width * 0.5f, size.height * 0.66f),
+                        androidx.compose.ui.geometry.Offset(size.width * 0.8f, size.height * 0.38f), w, androidx.compose.ui.graphics.StrokeCap.Round)
                 }
             }
-            Spacer(Modifier.weight(1f))
-            Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.End) {
-                com.vrca.ui.common.GremlinButton("Support server", {}, kind = com.vrca.ui.common.GremlinButtonKind.Secondary)
+            if (open) Column(Modifier.padding(start = 18.dp, top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(a.note, style = MaterialTheme.typography.bodySmall, color = G.Text)
+                if (a.evidence.any { it }) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    a.evidence.filter { it }.forEachIndexed { k, _ -> Evidence(video = k == 1) }
+                }
+                Text(a.ends, style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
             }
         }
     }
@@ -150,15 +190,15 @@ object StandingMocks {
     private fun Pill(text: String, color: Color) = Text(text, style = MaterialTheme.typography.labelMedium, color = color,
         modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(color.copy(alpha = 0.14f)).padding(horizontal = 8.dp, vertical = 3.dp))
 
-    /** One switched-off feature: name, time left, and a bar draining as the time runs out. */
+    /** One disabled feature: name and time left on one line, a thin bar under it draining as the time runs out. */
     @Composable
-    private fun OffTile(o: Off, tone: Color) = Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card).padding(horizontal = 14.dp, vertical = 11.dp)) {
+    private fun OffRow(o: Off, tone: Color) = Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(o.feature, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = G.Text, modifier = Modifier.weight(1f))
-            Pill(o.until, tone)
+            Text(o.feature, style = MaterialTheme.typography.bodyMedium, color = G.Text, modifier = Modifier.weight(1f))
+            Text(o.until, style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
         }
-        Box(Modifier.padding(top = 9.dp).fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(G.Raised)) {
-            Box(Modifier.fillMaxWidth(o.left).height(4.dp).clip(RoundedCornerShape(2.dp)).background(tone.copy(alpha = 0.8f)))
+        Box(Modifier.padding(top = 5.dp).fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(G.Raised)) {
+            Box(Modifier.fillMaxWidth(o.left).height(3.dp).clip(RoundedCornerShape(2.dp)).background(tone.copy(alpha = 0.75f)))
         }
     }
 
