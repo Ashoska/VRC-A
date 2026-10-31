@@ -1010,7 +1010,7 @@ private fun SearchPageBar(page: Int, pageCount: Int, more: Boolean, loadingNext:
 /** VRChat avatar performance rank badge (Excellent…Very Poor). Shows the rank for the user's own
  *  platform (Quest on the headset build, else PC), falling back to any known one. Hidden when unknown. */
 @Composable
-private fun PerfBadge(r: com.vrca.vrchat.AvatarSearch.Result) {
+private fun PerfBadge(r: com.vrca.vrchat.AvatarSearch.Result, overlay: Boolean = false) {
     val rank = when {
         com.vrca.BuildConfig.IS_HEADSET_BUILD && r.perfQuest < 5 -> r.perfQuest
         r.perfPc < 5 -> r.perfPc
@@ -1025,10 +1025,11 @@ private fun PerfBadge(r: com.vrca.vrchat.AvatarSearch.Result) {
         3 -> "Poor" to GremlinColors.Performance.Poor
         else -> "Very Poor" to GremlinColors.Performance.VeryPoor
     }
-    Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp), color = color.copy(alpha = 0.18f)) {
+    // Over a thumbnail the tint alone is unreadable, so it sits on the dark Card face with the tint on top.
+    Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp), color = if (overlay) GremlinColors.Card.copy(alpha = 0.92f) else Color.Transparent) {
         Text(
             label, style = MaterialTheme.typography.labelSmall, color = color,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+            modifier = Modifier.background(color.copy(alpha = 0.18f)).padding(horizontal = 6.dp, vertical = 1.dp)
         )
     }
 }
@@ -1150,6 +1151,7 @@ private fun AvatarResultCard(ctx: android.content.Context, r: com.vrca.vrchat.Av
             if (r.platforms.isNotEmpty()) Row(Modifier.align(Alignment.BottomStart).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                 r.platforms.forEach { PlatformSymbol(it) }
             }
+            Box(Modifier.align(Alignment.BottomEnd).padding(4.dp)) { PerfBadge(r, overlay = true) }
         }
         Spacer(Modifier.height(5.dp))
         Text(r.name.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.bodyMedium, maxLines = 1,

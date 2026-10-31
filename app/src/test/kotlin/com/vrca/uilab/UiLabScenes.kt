@@ -192,7 +192,7 @@ object UiLabScenes {
                 val plats = listOf(listOf("PC", "Quest"), listOf("PC"), listOf("PC", "Quest", "iOS"), listOf("Quest"))
                 val all = (0 until 130).map { i ->
                     com.vrca.vrchat.AvatarSearch.Result(id = "avtr_%08d-0000-0000-0000-000000000000".format(i), name = names[i % names.size] + if (i >= names.size) " ${i / names.size + 1}" else "",
-                        author = listOf("Ghurst", "Ashoska", "Blue", "Mira")[i % 4], imageUrl = "", platforms = plats[i % plats.size], authorId = "usr_x", imageFileId = "", source = "catalog")
+                        author = listOf("Ghurst", "Ashoska", "Blue", "Mira")[i % 4], imageUrl = "", platforms = plats[i % plats.size], authorId = "usr_x", imageFileId = "", source = "catalog", perfPc = i % 6, perfQuest = (i + 2) % 6)
                 }
                 com.vrca.vrchat.AvatarSearch.Batch(all.drop(offset).take(500), false, offset)
             }
