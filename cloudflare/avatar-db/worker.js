@@ -1006,7 +1006,7 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 61,   // v61: name files update at once again (v60 leftovers drained); /health search.last.today = nm writes by cause. v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
+          version: 62,   // v62: purge jobs superseded by a newer write count as done (no false "files out of date"). v61: name files update at once again (v60 leftovers drained); /health search.last.today = nm writes by cause. v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
          //   // v55: /search filters pl + rk (applied on the Search press).
          //   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
          //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
@@ -2826,7 +2826,7 @@ async function purgeStep(env) {
   const got = await hubQueueTake(env, "pq", PURGE_PER_STEP);
   if (!got.items.length) return res;
   const by = new Map();   // newest etag per URL, oldest t0
-  for (const j of got.items) { const c = by.get(j.u); by.set(j.u, { u: j.u, etag: j.etag, t0: c ? Math.min(c.t0, j.t0) : j.t0 }); }
+  for (const j of got.items) by.set(j.u, { u: j.u, etag: j.etag, t0: j.t0 });   // v62: the newest job per file, with ITS time (an old time kept made the queue look stuck)
   const jobs = [...by.values()], bad = new Set();
   const api = `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/purge_cache`;
   for (let i = 0; i < jobs.length; i += 30) {
@@ -2848,10 +2848,12 @@ async function purgeStep(env) {
       const r = await fetch(j.u, { headers: { "user-agent": "VRC-A purge-verify", ...(env.CDN_APP_MARK ? { "x-vrca-app": env.CDN_APP_MARK } : {}) } }); await r.body?.cancel();
       const served = norm(r.headers.get("etag"));
       if (served !== norm(j.etag)) {
-        // A newer write of the same file supersedes this job: the CDN serving the file's CURRENT version means the
-        // purge did its work (an older job would otherwise retry forever, seen live with nm/4bd.json).
+        // v62: a job whose file has been REWRITTEN since (R2's current ETag isn't this job's) is done: the newer write
+        // queued its own purge job, which checks the newer version. Only a file still at this job's version that the
+        // CDN serves stale is retried. (Before, hot shards kept failing their old jobs while being rewritten, which
+        // aged the queue past PURGE_STUCK_MS and showed "some avatar files may be out of date" on the website.)
         const cur = await env.CATALOG.head(new URL(j.u).pathname.slice(1)).catch(() => null);
-        if (!cur || norm(cur.etag) !== served) bad.add(j.u);
+        if (cur && norm(cur.etag) === norm(j.etag)) bad.add(j.u);
       }
     }
     catch (_) { bad.add(j.u); }
