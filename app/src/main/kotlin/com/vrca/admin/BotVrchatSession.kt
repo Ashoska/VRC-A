@@ -324,17 +324,22 @@ object BotVrchatSession {
                 // platform somehow appears twice (lower int = better; 5 = unknown).
                 var perfPc = 5; var perfQuest = 5; var perfIos = 5
                 val platSet = LinkedHashSet<String>()
-                j.optJSONArray("unityPackages")?.let { ups ->
-                    for (i in 0 until ups.length()) {
-                        val up = ups.optJSONObject(i) ?: continue
-                        val rawPlat = up.optString("platform", "")
-                        val rank = perfRank(up.optString("performanceRating", ""))
-                        when (rawPlat.lowercase()) {
-                            "standalonewindows" -> { platSet.add("PC"); if (rank < perfPc) perfPc = rank }
-                            "android" -> { platSet.add("Quest"); if (rank < perfQuest) perfQuest = rank }
-                            "ios" -> { platSet.add("iOS"); if (rank < perfIos) perfIos = rank }
-                        }
+                // Real uploads only: VRChat's auto-made impostors (variant "impostor") would list a PC-only avatar as
+                // Quest + iOS too (user, 2026-10-31: PC-only avatars showing all three platforms, no rank on two).
+                com.vrca.vrchat.VrchatAuthManager.realPackages(j).forEach { up ->
+                    val rank = perfRank(up.optString("performanceRating", ""))
+                    when (up.optString("platform", "").lowercase()) {
+                        "standalonewindows" -> { platSet.add("PC"); if (rank < perfPc) perfPc = rank }
+                        "android" -> { platSet.add("Quest"); if (rank < perfQuest) perfQuest = rank }
+                        "ios" -> { platSet.add("iOS"); if (rank < perfIos) perfIos = rank }
                     }
+                }
+                // A real upload with no rating of its own: the avatar's per-platform summary (`performance`), if present,
+                // only for platforms it really has.
+                j.optJSONObject("performance")?.let { p ->
+                    if (perfPc == 5 && "PC" in platSet) perfPc = perfRank(p.optString("standalonewindows", ""))
+                    if (perfQuest == 5 && "Quest" in platSet) perfQuest = perfRank(p.optString("android", ""))
+                    if (perfIos == 5 && "iOS" in platSet) perfIos = perfRank(p.optString("ios", ""))
                 }
                 AvatarCheck(
                     true, fileId, j.optString("name", ""),
