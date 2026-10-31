@@ -877,10 +877,10 @@ private fun AvatarSearchPanel() {
     var searched by remember { mutableStateOf(false) }
     var seq by remember { mutableStateOf(0) }
     var platFilter by remember { mutableStateOf<String?>(null) }
-    // Rank filter: keep ranks 0..rankMax (0 Excellent … 3 Poor), null = any. It checks the selected platform's
-    // rank, or with "All" the rank for the platform this device plays on (one avatar ranks differently per platform).
+    // Rank filter: keep ranks 0..rankMax (0 Excellent … 3 Poor), null = any. One avatar ranks differently per
+    // platform: with a platform selected it checks that platform's rank; with "All", EVERY platform the avatar has
+    // must meet it (user, 2026-10-31). An unknown rank never passes.
     var rankMax by remember { mutableStateOf<Int?>(null) }
-    val ownPlatform = if (com.vrca.BuildConfig.IS_HEADSET_BUILD) "Quest" else "PC"
     val deadIds = remember { androidx.compose.runtime.mutableStateListOf<String>() }
     var recent by remember { mutableStateOf(com.vrca.vrchat.AvatarSearch.recentSearches()) }
 
@@ -940,10 +940,12 @@ private fun AvatarSearchPanel() {
     if (!searched) return
 
     val visible by remember { androidx.compose.runtime.derivedStateOf {
-        val rankPlat = platFilter ?: ownPlatform
         loaded.filter { r ->
             r.id !in deadIds && (platFilter == null || r.platforms.any { p -> p.equals(platFilter, true) }) &&
-                rankMax.let { max -> max == null || (r.platforms.any { p -> p.equals(rankPlat, true) } && rankOf(r, rankPlat) <= max) }
+                rankMax.let { max ->
+                    max == null || platFilter?.let { rankOf(r, it) <= max }
+                        ?: (r.platforms.isNotEmpty() && r.platforms.all { p -> rankOf(r, p) <= max })
+                }
         }
     } }
     val pageCount = (visible.size + pageSize - 1) / pageSize
@@ -965,7 +967,7 @@ private fun AvatarSearchPanel() {
         }
     }
     val rankChips: @Composable () -> Unit = {
-        Text("Rank (${platFilter ?: ownPlatform})", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(platFilter?.let { "Rank ($it)" } ?: "Rank (every platform)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         com.vrca.ui.common.GremlinChip("Any", selected = rankMax == null, onClick = { rankMax = null; page = 0 })
         listOf(0 to "Excellent", 1 to "Good+", 2 to "Medium+", 3 to "Poor+").forEach { (rank, label) ->
             com.vrca.ui.common.GremlinChip(label, selected = rankMax == rank, onClick = { rankMax = if (rankMax == rank) null else rank; page = 0 },
