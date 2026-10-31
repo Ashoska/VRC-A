@@ -45,6 +45,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.scale
@@ -129,8 +130,32 @@ fun VrcaApp() {
     androidx.compose.foundation.layout.Box {
         VrcaAppContent()
         BootRevealOverlay()
+        TermsLeaveCover()
     }
 }
+
+/**
+ * After Accept the terms fade to the plain backdrop; the screen that follows (the tutorial or the app) then fades
+ * in from it, instead of appearing in one frame (lab, 2026-10-31). A backdrop sheet on top fading 1 → 0, drawn
+ * only while it runs and read while drawing.
+ */
+@Composable
+private fun TermsLeaveCover() {
+    val cover = remember { androidx.compose.animation.core.Animatable(0f) }
+    val run by TermsLeave.run
+    LaunchedEffect(run) {
+        if (run == 0) return@LaunchedEffect
+        cover.snapTo(1f)
+        cover.animateTo(0f, androidx.compose.animation.core.tween(TERMS_COVER_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+    }
+    if (cover.value > 0f || cover.isRunning) androidx.compose.foundation.layout.Spacer(
+        Modifier.fillMaxSize().drawBehind { if (cover.value > 0f) drawRect(com.vrca.ui.theme.GremlinColors.Backdrop.copy(alpha = cover.value)) }
+    )
+}
+
+/** Bumped when the terms are accepted, to fade in what comes next ([TermsLeaveCover]). */
+internal object TermsLeave { val run = mutableStateOf(0) }
+private const val TERMS_COVER_MS = 320
 
 @Composable
 private fun VrcaAppContent() {
@@ -534,6 +559,7 @@ private fun VrcaAfterBoot(warmResume: Boolean, bootOk: androidx.compose.runtime.
     if (!tosAccepted) {
         TermsScreen(version = requiredTosVersion, updatedAtMs = remoteTosUpdatedAtMs, onAccept = {
             TosPrefs.accept(ctx, requiredTosVersion)
+            TermsLeave.run.value++
             // A new user who accepts and is closed before the tutorial starts must still get the tutorial
             // (the existing-user pre-seed below treats "accepted, tutorial never started" as an upgrade).
             if (!com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)) com.vrca.ui.onboarding.OnboardingPrefs.markStarted(ctx)

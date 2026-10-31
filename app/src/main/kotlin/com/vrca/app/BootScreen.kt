@@ -350,6 +350,9 @@ fun BootScreen(
     // Whether the logo glides somewhere (the top bar or the terms' Boot Cat) and the backdrop fades
     // off the screen underneath, instead of the logo just fading out in place.
     val glides = exitToTopBar || exitToRect != null
+    // Folding onto the terms, the panels' bright fold lines sweep over the terms already showing through (on a
+    // phone right across a row, like a strikethrough, lab): they fade out in the first third of the glide.
+    val foldLineFade: () -> Float = { if (exitToRect != null) (1f - exitP.value * 3f).coerceIn(0f, 1f) else 1f }
     LaunchedEffect(exit) {
         if (!exit) return@LaunchedEffect
         // Reverse of the opening: right panel first, then the left, folding back to their lines.
@@ -433,7 +436,7 @@ fun BootScreen(
                     fadeIn = {
                         logoIn.value * when {
                             // Onto the terms header's logo: hands over to it as it lands.
-                            exitToRect != null -> 1f - ((exitP.value - TERMS_LAND_FROM) / (1f - TERMS_LAND_FROM)).coerceIn(0f, 1f)
+                            exitToRect != null -> if (exitP.value >= 1f) 0f else 1f
                             exitToTopBar -> 1f
                             else -> 1f - exitP.value
                         }
@@ -494,11 +497,11 @@ fun BootScreen(
                         // Sized so its top lines up with the checklist's top (user), just above Status.
                         logo(WIDE_LOGO_HEIGHT)
                         Spacer(Modifier.height(WIDE_LOGO_GAP))
-                        Unfold({ panelR.value }, Modifier.fillMaxWidth().then(NoA11y)) {
+                        Unfold({ panelR.value }, Modifier.fillMaxWidth().then(NoA11y), foldLineFade) {
                             StatusPanel(status, Modifier.fillMaxWidth(), { partsR.value }, rowHeight = WIDE_ROW_HEIGHT)
                         }
                     }
-                    Unfold({ panelL.value }, Modifier.weight(1.15f).then(NoA11y)) {
+                    Unfold({ panelL.value }, Modifier.weight(1.15f).then(NoA11y), foldLineFade) {
                         LoadingPanel(checks, Modifier.fillMaxWidth(), { partsL.value }, userName = userName, celebrate = celebrate)
                     }
                 }
@@ -526,11 +529,11 @@ fun BootScreen(
                     logo(if (compact) PHONE_LOGO_HEIGHT_COMPACT else PHONE_LOGO_HEIGHT)
                     Spacer(Modifier.height(PHONE_GAP + 4.dp))
                     Column(Modifier.widthIn(max = PHONE_MAX_WIDTH).fillMaxWidth()) {
-                        Unfold({ panelR.value }, Modifier.fillMaxWidth().then(NoA11y)) {
+                        Unfold({ panelR.value }, Modifier.fillMaxWidth().then(NoA11y), foldLineFade) {
                             StatusPanel(status, Modifier.fillMaxWidth(), { partsR.value }, rowHeight = rowH, rowGap = rowGap)
                         }
                         Spacer(Modifier.height(PHONE_GAP))
-                        Unfold({ panelL.value }, Modifier.fillMaxWidth().then(NoA11y)) {
+                        Unfold({ panelL.value }, Modifier.fillMaxWidth().then(NoA11y), foldLineFade) {
                             LoadingPanel(checks, Modifier.fillMaxWidth(), { partsL.value }, userName = userName, rowHeight = rowH, rowGap = rowGap, celebrate = celebrate)
                         }
                         pills()
@@ -584,8 +587,8 @@ private const val EXIT_LOGO_MS = 700
 private const val REVEAL_FROM = 0.35f
 /** The boot logo lands at exactly the size of the terms header's logo. */
 private const val TERMS_CAT_FIT = 1f
-/** From this point of the glide the boot logo hands over to the terms header's own logo underneath. */
-internal const val TERMS_LAND_FROM = 0.97f
+// The boot logo hands over to the terms header's own logo in the one frame the glide lands, where the two are
+// identical. A crossfade over the glide's last 3% (~100 ms, the eased tail) showed both a few px apart (phone lab).
 
 /**
  * The logo on its own (no tile: a speech bubble inside a box read oddly), with a flat
@@ -642,7 +645,7 @@ private const val LINE_SHARE = 0.42f
  * part unfolds up and down from that line, and the line fades as it does. [progress] 0..1.
  */
 @Composable
-private fun Unfold(progress: () -> Float, modifier: Modifier, content: @Composable () -> Unit) {
+private fun Unfold(progress: () -> Float, modifier: Modifier, lineFade: () -> Float = { 1f }, content: @Composable () -> Unit) {
     Box(modifier) {
         Box(
             Modifier.graphicsLayer {
@@ -662,7 +665,7 @@ private fun Unfold(progress: () -> Float, modifier: Modifier, content: @Composab
                 val p = progress()
                 val line = (p / LINE_SHARE).coerceIn(0f, 1f)
                 val open = ((p - LINE_SHARE) / (1f - LINE_SHARE)).coerceIn(0f, 1f)
-                val a = line * (1f - open)
+                val a = line * (1f - open) * lineFade()
                 if (a <= 0f) return@drawBehind
                 val w = size.width * line
                 val x0 = (size.width - w) / 2f
