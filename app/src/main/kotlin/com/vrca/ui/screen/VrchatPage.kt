@@ -54,6 +54,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
@@ -950,8 +951,10 @@ private fun AvatarSearchPanel() {
     } }
     val pageCount = (visible.size + pageSize - 1) / pageSize
     if (page > 0 && page >= pageCount && !loadingNext) page = (pageCount - 1).coerceAtLeast(0)
-    // Prefetch: on the second-to-last loaded page, quietly fetch the next 500.
-    androidx.compose.runtime.LaunchedEffect(page, pageCount, more) { if (more && page >= pageCount - 2) loadNext() }
+    // Prefetch: on the second-to-last loaded page, quietly fetch the next 500. Keyed on what's loaded too, so with a
+    // filter that matches few of them it keeps going batch after batch until two pages match (or the server has no
+    // more, capped at 5000), instead of stopping short or saying "no match" while more are on the server (user).
+    androidx.compose.runtime.LaunchedEffect(page, pageCount, more, loadingNext, loaded.size) { if (more && !loadingNext && page >= pageCount - 2) loadNext() }
 
     // A page change brings the top of the results back into view (the list sits inside the tab's scroll).
     val resultsTop = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
@@ -986,7 +989,11 @@ private fun AvatarSearchPanel() {
     }
     when {
         searching -> Unit   // the search ring's thinking Boot Cat already shows it (a second "Searching" row repeated it)
-        visible.isEmpty() && !loadingNext -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        visible.isEmpty() && (loadingNext || more) -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            com.vrca.app.BootCat(com.vrca.app.Mark.Working, 0, Modifier.size(28.dp))
+            Text("Looking through more results", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        visible.isEmpty() -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             com.vrca.app.BootCat(com.vrca.app.Mark.Skipped, 0, Modifier.size(28.dp))
             Text(if ((platFilter != null || rankMax != null) && loaded.isNotEmpty()) "No avatars in these results match the filters." else "No avatars found for \"$shownQuery\".",
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1131,11 +1138,21 @@ private fun CloneOpenButtons(ctx: android.content.Context, r: com.vrca.vrchat.Av
 
 @Composable
 private fun ResultText(r: com.vrca.vrchat.AvatarSearch.Result, modifier: Modifier = Modifier) = Column(modifier) {
-    Text(r.name.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-    Text("by ${r.author.ifBlank { "unknown" }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+    OneLine(r.name.ifBlank { "(unnamed)" }, MaterialTheme.typography.bodyMedium)
+    OneLine("by ${r.author.ifBlank { "unknown" }}", MaterialTheme.typography.bodySmall, MaterialTheme.colorScheme.onSurfaceVariant)
     // Platform SYMBOLS (same glyphs as the instance roster), each with its own performance rank.
     if (r.platforms.isNotEmpty()) PlatformRanks(r)
+}
+
+/** One line of a result's text at a FIXED height (the style's line height): names in fancy Unicode fonts (other
+ *  scripts, decorations like "~❀Noëlle❀~") use fallback fonts with taller lines, which stretched their card (user).
+ *  Anything taller is clipped instead. */
+@Composable
+private fun OneLine(text: String, style: androidx.compose.ui.text.TextStyle, color: Color = Color.Unspecified, modifier: Modifier = Modifier) {
+    val h = with(androidx.compose.ui.platform.LocalDensity.current) { style.lineHeight.toDp() }
+    Box(modifier.height(h).clipToBounds(), contentAlignment = Alignment.CenterStart) {
+        Text(text, style = style, color = color, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+    }
 }
 
 /** Phone: one result per row. */
@@ -1168,10 +1185,8 @@ private fun AvatarResultCard(ctx: android.content.Context, r: com.vrca.vrchat.Av
             if (r.platforms.isNotEmpty()) Box(Modifier.align(Alignment.BottomStart).padding(4.dp)) { PlatformRanks(r) }
         }
         Spacer(Modifier.height(5.dp))
-        Text(r.name.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.bodyMedium, maxLines = 1,
-            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 3.dp))
-        Text("by ${r.author.ifBlank { "unknown" }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 3.dp))
+        OneLine(r.name.ifBlank { "(unnamed)" }, MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 3.dp))
+        OneLine("by ${r.author.ifBlank { "unknown" }}", MaterialTheme.typography.bodySmall, MaterialTheme.colorScheme.onSurfaceVariant, Modifier.padding(horizontal = 3.dp))
     }
 }
 
