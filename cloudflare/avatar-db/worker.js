@@ -2708,7 +2708,7 @@ async function searchStep(env) {
         catch (e) { d1ok = false; out.d1Err = String(e && e.message || e).slice(0, 200); }
       }
       if (d1ok && lazyBuckets.size && env.SEARCH) {
-        try { await nmDirtyAdd(env.SEARCH, [...lazyBuckets]); out.nmLazy = lazyBuckets.size; }
+        try { await nmDirtyAdd(env.SEARCH, [...lazyBuckets]); out.nmMarked = lazyBuckets.size; }
         catch (_) { for (const id of lazy) { const x = got.items.find((r) => r.id === id && r.nw); if (x) puts.set(id, x.nw); } lazy.clear(); }   // fall back to writing now
       }
       const putList = [...puts.values()];
