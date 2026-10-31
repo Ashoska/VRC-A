@@ -929,7 +929,7 @@ private fun AvatarSearchPanel() {
         Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Recent", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             recent.take(8).forEach { term ->
-                FilterChip(selected = searched && term == shownQuery.trim().lowercase(), onClick = { run(term, reuse = true) }, label = { Text(term, maxLines = 1) })
+                com.vrca.ui.common.GremlinChip(term, selected = searched && term == shownQuery.trim().lowercase(), onClick = { run(term, reuse = true) })
             }
         }
     }
@@ -948,10 +948,10 @@ private fun AvatarSearchPanel() {
 
     // Platform filter over what's loaded (no re-search).
     Row(Modifier.bringIntoViewRequester(resultsTop), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        FilterChip(selected = platFilter == null, onClick = { platFilter = null; page = 0 }, label = { Text("All") })
+        com.vrca.ui.common.GremlinChip("All", selected = platFilter == null, onClick = { platFilter = null; page = 0 })
         listOf("PC", "Quest", "iOS").forEach { plat ->
-            FilterChip(selected = platFilter == plat, onClick = { platFilter = if (platFilter == plat) null else plat; page = 0 },
-                label = { Text(plat) }, leadingIcon = { PlatformSymbol(plat) })
+            com.vrca.ui.common.GremlinChip(plat, selected = platFilter == plat, onClick = { platFilter = if (platFilter == plat) null else plat; page = 0 },
+                leading = { PlatformSymbol(plat) })
         }
     }
     when {
