@@ -1007,30 +1007,18 @@ private fun SearchPageBar(page: Int, pageCount: Int, more: Boolean, loadingNext:
     }
 }
 
-/** VRChat avatar performance rank badge (Excellent…Very Poor). Shows the rank for the user's own
- *  platform (Quest on the headset build, else PC), falling back to any known one. Hidden when unknown. */
+/** Each platform the avatar has, as its symbol with that platform's own VRChat performance rank icon beside
+ *  it (an avatar can be Good on PC and Very Poor on Quest). Unknown ranks show the symbol alone. */
 @Composable
-private fun PerfBadge(r: com.vrca.vrchat.AvatarSearch.Result, overlay: Boolean = false) {
-    val rank = when {
-        com.vrca.BuildConfig.IS_HEADSET_BUILD && r.perfQuest < 5 -> r.perfQuest
-        r.perfPc < 5 -> r.perfPc
-        r.perfQuest < 5 -> r.perfQuest
-        r.perfIos < 5 -> r.perfIos
-        else -> return
-    }
-    val (label, color) = when (rank) {
-        0 -> "Excellent" to GremlinColors.Performance.Excellent
-        1 -> "Good" to GremlinColors.Performance.Good
-        2 -> "Medium" to GremlinColors.Performance.Medium
-        3 -> "Poor" to GremlinColors.Performance.Poor
-        else -> "Very Poor" to GremlinColors.Performance.VeryPoor
-    }
-    // Over a thumbnail the tint alone is unreadable, so it sits on the dark Card face with the tint on top.
-    Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp), color = if (overlay) GremlinColors.Card.copy(alpha = 0.92f) else Color.Transparent) {
-        Text(
-            label, style = MaterialTheme.typography.labelSmall, color = color,
-            modifier = Modifier.background(color.copy(alpha = 0.18f)).padding(horizontal = 6.dp, vertical = 1.dp)
-        )
+private fun PlatformRanks(r: com.vrca.vrchat.AvatarSearch.Result, gap: androidx.compose.ui.unit.Dp = 8.dp) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(gap)) {
+        r.platforms.forEach { plat ->
+            val rank = when (plat) { "PC" -> r.perfPc; "Quest" -> r.perfQuest; "iOS" -> r.perfIos; else -> 5 }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                PlatformSymbol(plat)
+                com.vrca.ui.common.PerfRankIcon(rank, 16.dp, label = com.vrca.ui.common.perfRankName(rank)?.let { "$plat: $it" })
+            }
+        }
     }
 }
 
@@ -1112,13 +1100,8 @@ private fun ResultText(r: com.vrca.vrchat.AvatarSearch.Result, modifier: Modifie
     Text(r.name.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
     Text("by ${r.author.ifBlank { "unknown" }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-    // Platform SYMBOLS (same glyphs as the instance roster) + performance rank.
-    if (r.platforms.isNotEmpty() || r.perfPc < 5 || r.perfQuest < 5 || r.perfIos < 5) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            r.platforms.forEach { PlatformSymbol(it) }
-            PerfBadge(r)
-        }
-    }
+    // Platform SYMBOLS (same glyphs as the instance roster), each with its own performance rank.
+    if (r.platforms.isNotEmpty()) PlatformRanks(r)
 }
 
 /** Phone: one result per row. */
@@ -1148,10 +1131,7 @@ private fun AvatarResultCard(ctx: android.content.Context, r: com.vrca.vrchat.Av
                 }
                 CardRound(onClick = { openResult(ctx, r) }, label = "Open in VRChat") { Icon(Icons.Filled.OpenInNew, null, Modifier.size(15.dp), tint = GremlinColors.Text) }
             }
-            if (r.platforms.isNotEmpty()) Row(Modifier.align(Alignment.BottomStart).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                r.platforms.forEach { PlatformSymbol(it) }
-            }
-            Box(Modifier.align(Alignment.BottomEnd).padding(4.dp)) { PerfBadge(r, overlay = true) }
+            if (r.platforms.isNotEmpty()) Box(Modifier.align(Alignment.BottomStart).padding(4.dp)) { PlatformRanks(r, gap = 5.dp) }
         }
         Spacer(Modifier.height(5.dp))
         Text(r.name.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.bodyMedium, maxLines = 1,
