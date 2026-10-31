@@ -2827,7 +2827,7 @@ async function purgeStep(env) {
   if (!got.items.length) return res;
   const by = new Map();   // newest etag per URL, oldest t0
   for (const j of got.items) by.set(j.u, { u: j.u, etag: j.etag, t0: j.t0 });   // v62: the newest job per file, with ITS time (an old time kept made the queue look stuck)
-  const jobs = [...by.values()], bad = new Set();
+  const jobs = [...by.values()], bad = new Set(), dbg = [];
   const api = `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/purge_cache`;
   for (let i = 0; i < jobs.length; i += 30) {
     const c = jobs.slice(i, i + 30);
@@ -2847,6 +2847,7 @@ async function purgeStep(env) {
     try {
       const r = await fetch(j.u, { headers: { "user-agent": "VRC-A purge-verify", ...(env.CDN_APP_MARK ? { "x-vrca-app": env.CDN_APP_MARK } : {}) } }); await r.body?.cancel();
       const served = norm(r.headers.get("etag"));
+      if (served !== norm(j.etag) && dbg.length < 4) dbg.push({ f: j.u.replace(/^https?:\/\/[^/]+\//, ""), st: r.status, served, job: norm(j.etag), cache: r.headers.get("cf-cache-status") || "", age: r.headers.get("age") || "" });
       if (served !== norm(j.etag)) {
         // v62: a job whose file has been REWRITTEN since (R2's current ETag isn't this job's) is done: the newer write
         // queued its own purge job, which checks the newer version. Only a file still at this job's version that the
@@ -2864,6 +2865,7 @@ async function purgeStep(env) {
   res.purged = jobs.length - retry.length; res.purgeFailed = retry.length;
   res.purgeOldestMs = retry.length ? Date.now() - Math.min(...retry.map((j) => j.t0)) : 0;
   res.purgeRetry = retry.slice(0, 3).map((j) => j.u.replace(/^https?:\/\/[^/]+\//, ''));   // which files keep failing (for /health)
+  res.purgeDbg = dbg;   // v62: what the CDN answered for the first few mismatches
   return res;
 }
 
