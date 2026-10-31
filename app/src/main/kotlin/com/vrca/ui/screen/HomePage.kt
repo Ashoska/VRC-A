@@ -496,6 +496,7 @@ private fun ManualSendCard(vm: VrcaViewModel, banned: Boolean) {
         title = "Manual Send",
         icon = Icons.Filled.Send,
         summary = when {
+            com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.ManualSend) -> "Disabled on your account"
             vm.speechListening -> "Voice to text is on"
             vm.manualLiveMode -> "Live typing"
             else -> "Type a manual message"

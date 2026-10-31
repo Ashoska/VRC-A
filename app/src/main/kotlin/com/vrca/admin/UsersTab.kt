@@ -740,6 +740,15 @@ internal fun UsersTab(
                     // account), so it now goes through a confirm like the logout
                     // buttons below — it was previously a single mis-tappable tap.
                     var showKillConfirm by remember(selectedDocId) { mutableStateOf(false) }
+                    var showStanding by remember(selectedDocId) { mutableStateOf(false) }
+                    com.vrca.ui.common.GremlinButton(
+                        onClick = { showStanding = true }, modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                        kind = com.vrca.ui.common.GremlinButtonKind.Secondary
+                    ) { Text("Account standing") }
+                    if (showStanding) AdminStandingDialog(
+                        StandingTarget(row.docId, row.vrchatDisplayName.ifBlank { row.displayName }, row.vrchatUserId),
+                        onClose = { showStanding = false }
+                    )
 
                     // Actions side-by-side for a tidy footer.
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {

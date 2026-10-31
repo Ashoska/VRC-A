@@ -161,6 +161,7 @@ object Standing {
         val h = ms / 3_600_000L
         return when {
             h >= 48 -> "${h / 24} days left"
+            h >= 24 -> "1 day left"
             h >= 1 -> "$h h left"
             else -> "${(ms / 60_000L).coerceAtLeast(1)} min left"
         }
