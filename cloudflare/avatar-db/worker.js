@@ -1006,7 +1006,7 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 62,   // v62: purge jobs superseded by a newer write count as done (no false "files out of date"). v61: name files update at once again (v60 leftovers drained); /health search.last.today = nm writes by cause. v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
+          version: 63,   // v63: purge step reads several queue chunks and merges them per file (queue can't outgrow the step); v61 leftover name files rebuild again (D1 100-variable limit). v62: purge jobs superseded by a newer write count as done (no false "files out of date"). v61: name files update at once again (v60 leftovers drained); /health search.last.today = nm writes by cause. v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
          //   // v55: /search filters pl + rk (applied on the Search press).
          //   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
          //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
@@ -2480,7 +2480,8 @@ async function purgeShards(env, prefixes) {
 const NAME_TTL = 7 * 24 * 3600;           // nm/ files: purge-on-write, the TTL is only a safety net
 const SEARCH_RECS_PER_STEP = 1500;        // queued change records applied per search step
 const NM_BUCKETS_PER_STEP = 150;          // nm/ read+write pairs per step (the rest stays queued)
-const PURGE_PER_STEP = 150;               // purge jobs (+1 verify fetch each) per step
+const PURGE_PER_STEP = 300;               // distinct files purged (+1 verify fetch each) per step
+const PURGE_TAKE = 2000;                  // v63: queued jobs read per step (many are the same file; merged before purging)
 const PURGE_STUCK_MS = 30 * 60_000;       // a purge still failing after this is flagged on /health
 const SEARCH_PAGE = 500;                  // results per /search batch (the app shows 50 a page)
 const FILL_SHARDS_PER_STEP = 24;          // backfill: shards read per step (~2k avatars)
@@ -2654,9 +2655,15 @@ async function nmLazyStep(env) {
   const rows = (await db.prepare("SELECT b FROM nmdirty ORDER BY b LIMIT ?").bind(NMFILL_BUCKETS_PER_STEP).all()).results || [];
   if (!rows.length) { DONE_FLAGS.add("nmdirty"); return {}; }
   const bs = rows.map((r) => r.b);
-  const r = await db.prepare(`SELECT av.id a, av.f f, av.n n, av.nk k, av.nb b, av.ai ai, av.p p, av.pf pf, au.n au FROM av LEFT JOIN au ON au.id = av.ai WHERE av.nb IN (${bs.map(() => "?").join(",")})`).bind(...bs).all();
+  // v63: D1 allows at most 100 bound variables per query; one IN list of 256 failed every step since v61.
+  const found = [];
+  for (let i = 0; i < bs.length; i += 90) {
+    const c = bs.slice(i, i + 90);
+    const q = await db.prepare(`SELECT av.id a, av.f f, av.n n, av.nk k, av.nb b, av.ai ai, av.p p, av.pf pf, au.n au FROM av LEFT JOIN au ON au.id = av.ai WHERE av.nb IN (${c.map(() => "?").join(",")})`).bind(...c).all();
+    found.push(...(q.results || []));
+  }
   const files = new Map(bs.map((b) => [b, {}]));
-  for (const x of r.results || []) { const e = files.get(x.b); if (e) (e[x.k] ||= []).push({ a: x.a, f: x.f, n: x.n, au: x.au || "", ai: x.ai, p: x.p, pf: x.pf }); }
+  for (const x of found) { const e = files.get(x.b); if (e) (e[x.k] ||= []).push({ a: x.a, f: x.f, n: x.n, au: x.au || "", ai: x.ai, p: x.p, pf: x.pf }); }
   const jobs = [], written = [];
   await runPool([...files.keys()], 6, async (b) => {
     const key = `nm/${b.toString(16).padStart(3, "0")}.json`;
@@ -2666,7 +2673,7 @@ async function nmLazyStep(env) {
     } catch (_) {}
   });
   if (jobs.length) await hubQueuePush(env, "pq", jobs);
-  if (written.length) await db.prepare(`DELETE FROM nmdirty WHERE b IN (${written.map(() => "?").join(",")})`).bind(...written).run();
+  for (let i = 0; i < written.length; i += 90) { const c = written.slice(i, i + 90); await db.prepare(`DELETE FROM nmdirty WHERE b IN (${c.map(() => "?").join(",")})`).bind(...c).run(); }
   return { nmLazy: written.length, nmLazyMore: true };
 }
 
@@ -2717,7 +2724,7 @@ async function searchStep(env) {
     try { Object.assign(out, await mediaImportStep(env)); } catch (e) { out.mediaErr = String(e && e.message || e).slice(0, 200); }
     if (env.SEARCH && got.items.length < 100) Object.assign(out, await searchFillStep(env));
     if (env.SEARCH) { try { Object.assign(out, await nmLazyStep(env)); } catch (e) { out.nmLazyErr = String(e && e.message || e).slice(0, 200); } }
-    out.more = got.items.length >= SEARCH_RECS_PER_STEP || out.requeued > 0 || out.purgeFailed > 0 || !!out.nmLazyMore;
+    out.more = got.items.length >= SEARCH_RECS_PER_STEP || out.requeued > 0 || out.purgeFailed > 0 || out.purgeLater > 0 || !!out.nmLazyMore;
   } finally { await hubUnlock(env, "search"); }
   // v60: tell the cron whether to run the next step at once (otherwise it waits for new work or the 5-minute check).
   try { if (out.more) await env.AVATAR_KV.put("sqwork", "1"); else await env.AVATAR_KV.delete("sqwork"); } catch (_) {}
@@ -2823,11 +2830,15 @@ const PURGE_VERIFY_DELAY_MS = 3000;
 async function purgeStep(env) {
   const res = { purged: 0, purgeFailed: 0 };
   if (!env.CF_PURGE_TOKEN || !env.CF_ZONE_ID) return res;
-  const got = await hubQueueTake(env, "pq", PURGE_PER_STEP);
+  // v63: read up to PURGE_TAKE queued jobs (several chunks) and merge them per file. Before, a step took about one
+  // chunk while each step pushed two or more (name-file jobs + its own retries), so in a busy wave the queue grew and
+  // a retried job waited behind it past PURGE_STUCK_MS ("some avatar files may be out of date" on the website).
+  const got = await hubQueueTake(env, "pq", PURGE_TAKE);
   if (!got.items.length) return res;
   const by = new Map();   // newest etag per URL, oldest t0
   for (const j of got.items) by.set(j.u, { u: j.u, etag: j.etag, t0: j.t0 });   // v62: the newest job per file, with ITS time (an old time kept made the queue look stuck)
-  const jobs = [...by.values()], bad = new Set(), dbg = [];
+  const all = [...by.values()], jobs = all.slice(0, PURGE_PER_STEP), later = all.slice(PURGE_PER_STEP), bad = new Set(), dbg = [];
+  res.pqTaken = got.items.length; res.pqFiles = all.length; res.pqChunks = got.depth;
   const api = `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/purge_cache`;
   for (let i = 0; i < jobs.length; i += 30) {
     const c = jobs.slice(i, i + 30);
@@ -2860,9 +2871,9 @@ async function purgeStep(env) {
     catch (_) { bad.add(j.u); }
   });
   const retry = jobs.filter((j) => bad.has(j.u));
-  if (retry.length) await hubQueuePush(env, "pq", retry);
+  if (retry.length || later.length) await hubQueuePush(env, "pq", [...later, ...retry]);
   await hubQueueAck(env, got.keys);
-  res.purged = jobs.length - retry.length; res.purgeFailed = retry.length;
+  res.purged = jobs.length - retry.length; res.purgeFailed = retry.length; res.purgeLater = later.length;
   res.purgeOldestMs = retry.length ? Date.now() - Math.min(...retry.map((j) => j.t0)) : 0;
   res.purgeRetry = retry.slice(0, 3).map((j) => j.u.replace(/^https?:\/\/[^/]+\//, ''));   // which files keep failing (for /health)
   res.purgeDbg = dbg;   // v62: what the CDN answered for the first few mismatches
