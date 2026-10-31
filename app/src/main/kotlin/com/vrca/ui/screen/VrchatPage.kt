@@ -985,10 +985,7 @@ private fun AvatarSearchPanel() {
             verticalAlignment = Alignment.CenterVertically) { rankChips() }
     }
     when {
-        searching -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            com.vrca.app.BootCat(com.vrca.app.Mark.Working, 0, Modifier.size(28.dp))
-            Text("Searching", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+        searching -> Unit   // the search ring's thinking Boot Cat already shows it (a second "Searching" row repeated it)
         visible.isEmpty() && !loadingNext -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             com.vrca.app.BootCat(com.vrca.app.Mark.Skipped, 0, Modifier.size(28.dp))
             Text(if ((platFilter != null || rankMax != null) && loaded.isNotEmpty()) "No avatars in these results match the filters." else "No avatars found for \"$shownQuery\".",
