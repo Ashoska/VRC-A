@@ -297,24 +297,15 @@ internal fun SettingsPage(
                 }
             }
 
-            // Install-updates (unknown sources) — not on the headset: it's
-            // distributed through the Meta store, so no in-app APK install.
-            if (!BuildConfig.IS_HEADSET_BUILD) {
-                SettingsRow(
-                    icon = Icons.Filled.SystemUpdate,
-                    title = "Install updates",
-                    subtitle = "Lets VRC-A install its own update APKs when a new version is pushed.",
-                    primary = "Open",
-                    granted = installAllowed
-                ) {
-                    runCatching {
-                        ctx.startActivity(
-                            android.content.Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
-                                .setData(android.net.Uri.parse("package:${ctx.packageName}"))
-                        )
-                    }
-                }
-            }
+            // Install-updates (unknown sources): every build, the headset too (it
+            // updates itself from latest_headset; it isn't a store app).
+            SettingsRow(
+                icon = Icons.Filled.SystemUpdate,
+                title = "Install updates",
+                subtitle = "Lets VRC-A install its own update APKs when a new version is pushed.",
+                primary = "Open",
+                granted = installAllowed
+            ) { com.vrca.app.openInstallPermission(ctx) }
 
             SettingsRow(
                 icon = Icons.Filled.Bolt,

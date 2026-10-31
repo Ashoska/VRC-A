@@ -44,7 +44,6 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import com.vrca.app.BannedScreen
 import com.vrca.app.BootState as S
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Headset
@@ -917,7 +916,6 @@ object UiLabScenes {
                     ReleaseInfo(480, "v1.4.80", "https://example.com/vrc-a.apk", 0, "", SAMPLE_NOTES), forced = true, visible = true, onDismiss = {}
                 )
             }
-            "banned" -> BannedScreen(reason = rest.ifBlank { "Repeated harassment after warnings." })
             "tos" -> com.vrca.app.TermsScreen(version = 4, updatedAtMs = 1_792_800_000_000L, onAccept = {})
             "onboarding" -> OnboardingFlow(
                 vm = d.vm, phase1BanId = null, replay = false, onFinish = {}
