@@ -1006,7 +1006,7 @@ export default {
           foldV: FOLD_STAMP_V,                // v49 font rules version the bots compare each avatar's fv to
           writesToday: meta.wr || null,       // v49 R2 writes today (UTC): sh = shards, ix = search files, ot = manifest/worklist
           writesYesterday: meta.wrPrev || null,
-          version: 64,   // v64: purge API calls capped at 4 a step, 100 files each (Free zone allows ~5 calls/min), unsent files wait instead of failing. v63: purge step reads several queue chunks and merges them per file (queue can't outgrow the step); v61 leftover name files rebuild again (D1 100-variable limit). v62: purge jobs superseded by a newer write count as done (no false "files out of date"). v61: name files update at once again (v60 leftovers drained); /health search.last.today = nm writes by cause. v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
+          version: 65,   // v65: purge spot-checks 60 files a step (checking all 400 hit the subrequest limit and retried them). v64: purge API calls capped at 4 a step, 100 files each (Free zone allows ~5 calls/min), unsent files wait instead of failing. v63: purge step reads several queue chunks and merges them per file (queue can't outgrow the step); v61 leftover name files rebuild again (D1 100-variable limit). v62: purge jobs superseded by a newer write count as done (no false "files out of date"). v61: name files update at once again (v60 leftovers drained); /health search.last.today = nm writes by cause. v60: name files: bio/platform/perf-only edits refresh daily from D1 (nmdirty), unchanged files never rewritten; search step only wakes for queued work; done flags remembered. v59: standing blocks moved to D1 table `std` (one PK lookup per request, no hub reads). v58: account-standing server blocks (/admin/standing, X-VRCA-Who on /search + /contribute). v57: private account-standing evidence (/admin/evidence, /evidence/<id>). v56: /status (maintenance switch + self-checks) for the boot screen and website.
          //   // v55: /search filters pl + rk (applied on the Search press).
          //   // v54: app pictures + rich media on R2 (media/, copied from GitHub), admin media upload.
          //   // v49: calm lane for bot refreshes (one write per shard), no "last checked" writes (font checks only), fast-lane search purge, no automatic re-index (fold/recount ride the bots + daily backup), adaptive backup steps, write counters.    // v48: the count adopts each finished daily backup's exact count (a one-off +~7,000 miscount had stuck). v47: chain steps await the next step (waitUntil cut them off after ~30 s); depth caps 8. v46: fill-list pruner always runs + recounts unfilled each pass (phantom 1,176 vs 7 real). v45: daily db.json backup built in R2 (multipart, /admin/backupstep, own invocation). v44: record a throwing drain in lastDrain. v43: /health lastDrain report; requeue before deleting drained keys. v42: index bucket IO 6-way parallel (runPool); chain steps run reconcile/prune/rename when due (cronTasksIfDue) so a long drain can't starve them. v41: fold-rule fingerprint re-arms the fold catch-up lap on any CONFUSABLES change. v40: bucket-budgeted index drain (no silent loss past the subrequest ceiling), iqp: priority lane for fold ops, fold stamp (fz) instead of every-check re-asserts, legacy re-asserts dropped, index-backlog chaining, shard-only reconcile (120/run) + on-demand budgeted presence heal, new CONFUSABLES. v39: prototype-free index token maps (a "constructor" token was a poison op). v38: continuation chain confirmed working (backlog drained to 0); removed the temporary
@@ -2829,6 +2829,7 @@ async function mediaImportStep(env) {
 // ETag we wrote (or a newer write superseded it). Anything else is retried every step; /health flags a job
 // older than 30 min.
 const PURGE_VERIFY_DELAY_MS = 3000;
+const PURGE_VERIFY_MAX = 60;              // v65: purged files checked against the CDN per step (spot check)
 async function purgeStep(env) {
   const res = { purged: 0, purgeFailed: 0 };
   if (!env.CF_PURGE_TOKEN || !env.CF_ZONE_ID) return res;
@@ -2870,8 +2871,13 @@ async function purgeStep(env) {
   const norm = (s) => String(s || "").replace(/^W\//, "").replace(/"/g, "");
   // v61: give the purge a moment to reach the edge before checking. Checking at once failed a big share of
   // fresh purges (seen as "45 retrying" in the admin Cache line), each costing a second purge + check next step.
-  if (jobs.some((j) => !bad.has(j.u) && !unsent.has(j.u) && j.etag)) await new Promise((r) => setTimeout(r, PURGE_VERIFY_DELAY_MS));
-  await runPool(jobs.filter((j) => !bad.has(j.u) && !unsent.has(j.u) && j.etag), 6, async (j) => {
+  // v65: only PURGE_VERIFY_MAX files a step are checked (the purge API's success is trusted for the rest). Checking
+  // all 400 put the step over the Worker's subrequest limit (with ~300 nm/ reads+writes), and every check past it
+  // threw and was retried: 150-250 "failed" a step while the API had purged them fine.
+  const toCheck = jobs.filter((j) => !bad.has(j.u) && !unsent.has(j.u) && j.etag).slice(0, PURGE_VERIFY_MAX);
+  if (toCheck.length) await new Promise((r) => setTimeout(r, PURGE_VERIFY_DELAY_MS));
+  res.purgeChecked = toCheck.length;
+  await runPool(toCheck, 6, async (j) => {
     try {
       const r = await fetch(j.u, { headers: { "user-agent": "VRC-A purge-verify", ...(env.CDN_APP_MARK ? { "x-vrca-app": env.CDN_APP_MARK } : {}) } }); await r.body?.cancel();
       const served = norm(r.headers.get("etag"));
@@ -2885,7 +2891,7 @@ async function purgeStep(env) {
         if (cur && norm(cur.etag) === norm(j.etag)) bad.add(j.u);
       }
     }
-    catch (_) { bad.add(j.u); }
+    catch (e) { res.verifyErr = String(e && e.message || e).slice(0, 120); }   // v65: a check that couldn't run isn't a failed purge
   });
   const retry = jobs.filter((j) => bad.has(j.u));
   for (const j of jobs) if (unsent.has(j.u)) later.push(j);
