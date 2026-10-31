@@ -425,8 +425,9 @@ object AvatarSearch {
     }
     private fun rememberKey(q: String) = q.trim().lowercase()
 
-    /** A batch of results starting at [offset]. [reuse] = Back / a recent-search tap (any remembered copy
-     *  under 20 minutes); otherwise a remembered first batch is reused only if under 2 minutes old. */
+    /** A batch of results starting at [offset]. [reuse] = any remembered copy under 20 minutes (the UI passes it
+     *  for a recent-chip tap and for Search on a still-remembered term, user 2026-10-31); otherwise a remembered
+     *  first batch is reused only if under 2 minutes old. */
     suspend fun searchBatch(context: Context, query: String, offset: Int, reuse: Boolean = false): Batch {
         val key = rememberKey(query)
         val now = System.currentTimeMillis()
@@ -444,6 +445,12 @@ object AvatarSearch {
 
     /** UI Lab only: answers searches with sample batches (never set in the app). */
     @Volatile var labBatches: ((String, Int) -> Batch)? = null
+
+    /** True while [query]'s first batch is still remembered (under 20 minutes old). */
+    fun isRemembered(query: String): Boolean {
+        val r = synchronized(remembered) { remembered[rememberKey(query)] } ?: return false
+        return System.currentTimeMillis() - r.at < REMEMBER_MS
+    }
 
     /** Recent searches still remembered (newest first), for the search box's recent list. */
     fun recentSearches(): List<String> {

@@ -888,13 +888,15 @@ private fun AvatarSearchPanel() {
     val cooldown = remember { androidx.compose.animation.core.Animatable(0f) }
     fun run(term: String, reuse: Boolean) {
         val q = term.trim(); if (q.isEmpty()) return
-        if (!reuse) { if (cooldown.value > 0f) return; scope.launch { cooldown.snapTo(1f); cooldown.animateTo(0f, androidx.compose.animation.core.tween(3000, easing = androidx.compose.animation.core.LinearEasing)) } }
+        // A term still remembered (20 min) reopens from memory: no request, so no cooldown either (user).
+        val fromMemory = reuse || com.vrca.vrchat.AvatarSearch.isRemembered(q)
+        if (!fromMemory) { if (cooldown.value > 0f) return; scope.launch { cooldown.snapTo(1f); cooldown.animateTo(0f, androidx.compose.animation.core.tween(3000, easing = androidx.compose.animation.core.LinearEasing)) } }
         query = q; shownQuery = q; searched = true; page = 0; more = false; platFilter = null
         deadIds.clear(); loaded.clear()
         val s = ++seq
         scope.launch {
             searching = true
-            val b = com.vrca.vrchat.AvatarSearch.searchBatch(ctx, q, 0, reuse)
+            val b = com.vrca.vrchat.AvatarSearch.searchBatch(ctx, q, 0, fromMemory)
             if (s != seq) return@launch
             loaded.addAll(b.results); more = b.more; searching = false
             recent = com.vrca.vrchat.AvatarSearch.recentSearches()
@@ -979,10 +981,6 @@ private fun AvatarSearchPanel() {
             } else pageItems.forEach { r -> androidx.compose.runtime.key(r.id) { AvatarResultRow(ctx, r, onDead = markDead) } }
             SearchPageBar(page = page, pageCount = pageCount, more = more, loadingNext = loadingNext,
                 onPage = { p -> if (p < pageCount) page = p else if (more) { loadNext(); page = p } })
-            Text(
-                "${visible.size}${if (more) "+" else ""} avatars" + if (platFilter != null) " ($platFilter)" else "",
-                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
     }
 }
