@@ -877,11 +877,14 @@ private fun AvatarSearchPanel() {
     var loadingNext by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf(false) }
     var seq by remember { mutableStateOf(0) }
+    // Filters (user, 2026-10-31): tapping one only SELECTS it; nothing changes until Search is pressed, which sends
+    // them to the server (Worker v55), so every batch of 500 is 500 matches from the whole catalog. Rank keeps ranks
+    // 0..rankMax (0 Excellent … 3 Poor): on the selected platform, or with "All" on EVERY platform the avatar has
+    // (one avatar ranks differently per platform); an unknown rank never passes. applied* = what's on screen.
     var platFilter by remember { mutableStateOf<String?>(null) }
-    // Rank filter: keep ranks 0..rankMax (0 Excellent … 3 Poor), null = any. One avatar ranks differently per
-    // platform: with a platform selected it checks that platform's rank; with "All", EVERY platform the avatar has
-    // must meet it (user, 2026-10-31). An unknown rank never passes.
     var rankMax by remember { mutableStateOf<Int?>(null) }
+    var appliedPlat by remember { mutableStateOf<String?>(null) }
+    var appliedRank by remember { mutableStateOf<Int?>(null) }
     val deadIds = remember { androidx.compose.runtime.mutableStateListOf<String>() }
     var recent by remember { mutableStateOf(com.vrca.vrchat.AvatarSearch.recentSearches()) }
 
@@ -893,15 +896,18 @@ private fun AvatarSearchPanel() {
     val cooldown = remember { androidx.compose.animation.core.Animatable(0f) }
     fun run(term: String, reuse: Boolean) {
         val q = term.trim(); if (q.isEmpty()) return
-        // A term still remembered (20 min) reopens from memory: no request, so no cooldown either (user).
-        val fromMemory = reuse || com.vrca.vrchat.AvatarSearch.isRemembered(q)
+        // A term still remembered (20 min) WITH THESE FILTERS reopens from memory: no request, so no cooldown either
+        // (user). The same term with different filters is a new search.
+        val fromMemory = com.vrca.vrchat.AvatarSearch.isRemembered(q, platFilter, rankMax)
         if (!fromMemory) { if (cooldown.value > 0f) return; scope.launch { cooldown.snapTo(1f); cooldown.animateTo(0f, androidx.compose.animation.core.tween(3000, easing = androidx.compose.animation.core.LinearEasing)) } }
-        query = q; shownQuery = q; searched = true; page = 0; more = false; platFilter = null; rankMax = null
+        query = q; shownQuery = q; searched = true; page = 0; more = false
+        val pl = platFilter; val rk = rankMax
+        appliedPlat = pl; appliedRank = rk
         deadIds.clear(); loaded.clear()
         val s = ++seq
         scope.launch {
             searching = true
-            val b = com.vrca.vrchat.AvatarSearch.searchBatch(ctx, q, 0, fromMemory)
+            val b = com.vrca.vrchat.AvatarSearch.searchBatch(ctx, q, 0, fromMemory || reuse, pl, rk)
             if (s != seq) return@launch
             loaded.addAll(b.results); more = b.more; searching = false
             recent = com.vrca.vrchat.AvatarSearch.recentSearches()
@@ -912,10 +918,10 @@ private fun AvatarSearchPanel() {
     }
     fun loadNext() {
         if (loadingNext || !more || loaded.size >= 5000) return
-        val s = seq; val q = shownQuery; val offset = loaded.size
+        val s = seq; val q = shownQuery; val offset = loaded.size; val pl = appliedPlat; val rk = appliedRank
         scope.launch {
             loadingNext = true
-            val b = com.vrca.vrchat.AvatarSearch.searchBatch(ctx, q, offset)
+            val b = com.vrca.vrchat.AvatarSearch.searchBatch(ctx, q, offset, platform = pl, rankMax = rk)
             if (s == seq) { loaded.addAll(b.results); more = b.more && loaded.size < 5000 }
             loadingNext = false
         }
@@ -940,21 +946,13 @@ private fun AvatarSearchPanel() {
     }
     if (!searched) return
 
-    val visible by remember { androidx.compose.runtime.derivedStateOf {
-        loaded.filter { r ->
-            r.id !in deadIds && (platFilter == null || r.platforms.any { p -> p.equals(platFilter, true) }) &&
-                rankMax.let { max ->
-                    max == null || platFilter?.let { rankOf(r, it) <= max }
-                        ?: (r.platforms.isNotEmpty() && r.platforms.all { p -> rankOf(r, p) <= max })
-                }
-        }
-    } }
+    // The server already filtered them (as applied at the last Search press); only dead avatars are hidden here.
+    val visible by remember { androidx.compose.runtime.derivedStateOf { loaded.filter { it.id !in deadIds } } }
+    val filtersPending = platFilter != appliedPlat || rankMax != appliedRank
     val pageCount = (visible.size + pageSize - 1) / pageSize
     if (page > 0 && page >= pageCount && !loadingNext) page = (pageCount - 1).coerceAtLeast(0)
-    // Prefetch: on the second-to-last loaded page, quietly fetch the next 500. Keyed on what's loaded too, so with a
-    // filter that matches few of them it keeps going batch after batch until two pages match (or the server has no
-    // more, capped at 5000), instead of stopping short or saying "no match" while more are on the server (user).
-    androidx.compose.runtime.LaunchedEffect(page, pageCount, more, loadingNext, loaded.size) { if (more && !loadingNext && page >= pageCount - 2) loadNext() }
+    // Prefetch: on the second-to-last loaded page, quietly fetch the next 500 (with the applied filters).
+    androidx.compose.runtime.LaunchedEffect(page, pageCount, more) { if (more && page >= pageCount - 2) loadNext() }
 
     // A page change brings the top of the results back into view (the list sits inside the tab's scroll).
     val resultsTop = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
@@ -963,17 +961,17 @@ private fun AvatarSearchPanel() {
 
     // Platform + rank filters over what's loaded (no re-search). One line on the wide headset panel, two on a phone.
     val platformChips: @Composable () -> Unit = {
-        com.vrca.ui.common.GremlinChip("All", selected = platFilter == null, onClick = { platFilter = null; page = 0 })
+        com.vrca.ui.common.GremlinChip("All", selected = platFilter == null, onClick = { platFilter = null })
         listOf("PC", "Quest", "iOS").forEach { plat ->
-            com.vrca.ui.common.GremlinChip(plat, selected = platFilter == plat, onClick = { platFilter = if (platFilter == plat) null else plat; page = 0 },
+            com.vrca.ui.common.GremlinChip(plat, selected = platFilter == plat, onClick = { platFilter = if (platFilter == plat) null else plat },
                 leading = { PlatformSymbol(plat) })
         }
     }
     val rankChips: @Composable () -> Unit = {
         Text(platFilter?.let { "Rank ($it)" } ?: "Rank (every platform)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        com.vrca.ui.common.GremlinChip("Any", selected = rankMax == null, onClick = { rankMax = null; page = 0 })
+        com.vrca.ui.common.GremlinChip("Any", selected = rankMax == null, onClick = { rankMax = null })
         listOf(0 to "Excellent", 1 to "Good+", 2 to "Medium+", 3 to "Poor+").forEach { (rank, label) ->
-            com.vrca.ui.common.GremlinChip(label, selected = rankMax == rank, onClick = { rankMax = if (rankMax == rank) null else rank; page = 0 },
+            com.vrca.ui.common.GremlinChip(label, selected = rankMax == rank, onClick = { rankMax = if (rankMax == rank) null else rank },
                 leading = { com.vrca.ui.common.PerfRankIcon(rank, 16.dp, label = null) })
         }
     }
@@ -987,15 +985,12 @@ private fun AvatarSearchPanel() {
         Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically) { rankChips() }
     }
+    if (filtersPending) Text("Press Search to apply the filters", style = MaterialTheme.typography.labelMedium, color = GremlinColors.AccentSoft)
     when {
         searching -> Unit   // the search ring's thinking Boot Cat already shows it (a second "Searching" row repeated it)
-        visible.isEmpty() && (loadingNext || more) -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            com.vrca.app.BootCat(com.vrca.app.Mark.Working, 0, Modifier.size(28.dp))
-            Text("Looking through more results", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
         visible.isEmpty() -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             com.vrca.app.BootCat(com.vrca.app.Mark.Skipped, 0, Modifier.size(28.dp))
-            Text(if ((platFilter != null || rankMax != null) && loaded.isNotEmpty()) "No avatars in these results match the filters." else "No avatars found for \"$shownQuery\".",
+            Text(if (appliedPlat != null || appliedRank != null) "No avatars found for \"$shownQuery\" with these filters." else "No avatars found for \"$shownQuery\".",
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         else -> {

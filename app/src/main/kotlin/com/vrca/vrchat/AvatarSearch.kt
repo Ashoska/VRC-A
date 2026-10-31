@@ -394,19 +394,22 @@ object AvatarSearch {
     private val remembered = object : LinkedHashMap<String, Remembered>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Remembered>): Boolean = size > REMEMBER_MAX
     }
-    private fun rememberKey(q: String) = q.trim().lowercase()
+    /** Remembered per term AND filters: the same term with other filters is another search (user). */
+    private fun rememberKey(q: String, platform: String? = null, rankMax: Int? = null) =
+        q.trim().lowercase() + "\u0000" + (platform ?: "") + "\u0000" + (rankMax ?: "")
 
     /** A batch of results starting at [offset]. [reuse] = any remembered copy under 20 minutes (the UI passes it
      *  for a recent-chip tap and for Search on a still-remembered term, user 2026-10-31); otherwise a remembered
      *  first batch is reused only if under 2 minutes old. */
-    suspend fun searchBatch(context: Context, query: String, offset: Int, reuse: Boolean = false): Batch {
-        val key = rememberKey(query)
+    suspend fun searchBatch(context: Context, query: String, offset: Int, reuse: Boolean = false,
+                            platform: String? = null, rankMax: Int? = null): Batch {
+        val key = rememberKey(query, platform, rankMax)
         val now = System.currentTimeMillis()
         if (offset == 0) synchronized(remembered) { remembered[key] }?.let {
             if (now - it.at < if (reuse) REMEMBER_MS else FRESH_MS) return it.batch
         }
-        labBatches?.let { f -> return f(query, offset).also { if (offset == 0) synchronized(remembered) { remembered[key] = Remembered(it, now) } } }
-        val d1 = AvatarGlobalDb.searchD1(context, query, offset)
+        labBatches?.let { f -> return labFiltered(f(query, offset), platform, rankMax).also { if (offset == 0) synchronized(remembered) { remembered[key] = Remembered(it, now) } } }
+        val d1 = AvatarGlobalDb.searchD1(context, query, offset, platform = platform, rankMax = rankMax)
         val batch = if (d1 != null) Batch(d1.results.map { entryToResult(it) }, d1.more, offset)
             else Batch(emptyList(), false, offset)   // search unavailable right now: nothing (the old files are gone)
         if (offset == 0) synchronized(remembered) { remembered[key] = Remembered(batch, now) }
@@ -416,16 +419,26 @@ object AvatarSearch {
     /** UI Lab only: answers searches with sample batches (never set in the app). */
     @Volatile var labBatches: ((String, Int) -> Batch)? = null
 
-    /** True while [query]'s first batch is still remembered (under 20 minutes old). */
-    fun isRemembered(query: String): Boolean {
-        val r = synchronized(remembered) { remembered[rememberKey(query)] } ?: return false
+    /** The lab plays the server's filter on its sample batches (the same rules as Worker v55's /search). */
+    private fun labFiltered(b: Batch, platform: String?, rankMax: Int?): Batch {
+        fun rank(r: Result, p: String) = when (p) { "PC" -> r.perfPc; "Quest" -> r.perfQuest; "iOS" -> r.perfIos; else -> 5 }
+        return b.copy(results = b.results.filter { r ->
+            (platform == null || platform in r.platforms) && (rankMax == null ||
+                (platform?.let { rank(r, it) <= rankMax } ?: (r.platforms.isNotEmpty() && r.platforms.all { rank(r, it) <= rankMax })))
+        })
+    }
+
+    /** True while [query]'s first batch with these filters is still remembered (under 20 minutes old). */
+    fun isRemembered(query: String, platform: String? = null, rankMax: Int? = null): Boolean {
+        val r = synchronized(remembered) { remembered[rememberKey(query, platform, rankMax)] } ?: return false
         return System.currentTimeMillis() - r.at < REMEMBER_MS
     }
 
     /** Recent searches still remembered (newest first), for the search box's recent list. */
     fun recentSearches(): List<String> {
         val now = System.currentTimeMillis()
-        return synchronized(remembered) { remembered.entries.filter { now - it.value.at < REMEMBER_MS }.map { it.key } }.asReversed()
+        return synchronized(remembered) { remembered.entries.filter { now - it.value.at < REMEMBER_MS }.map { it.key.substringBefore('\u0000') } }
+            .asReversed().distinct()
     }
 
     /** Drop the per-query candidate + shard-search caches (tab-away / new search / close). */
