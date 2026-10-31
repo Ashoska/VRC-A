@@ -207,8 +207,8 @@ private fun stagger(reveal: Float, i: Int, n: Int): Float {
     return ((reveal - start) / span).coerceIn(0f, 1f)
 }
 
-private val dateFmt = java.text.SimpleDateFormat("d MMM", java.util.Locale.getDefault())
-private val updatedFmt = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.getDefault())
+private val dateFmt = java.text.SimpleDateFormat("d MMM", java.util.Locale.UK)
+private val updatedFmt = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.UK)
 
 @Composable
 private fun StandingCard(level: Standing.Level, s: Standing.State?, parts: () -> Float, modifier: Modifier) = Layer(modifier) {

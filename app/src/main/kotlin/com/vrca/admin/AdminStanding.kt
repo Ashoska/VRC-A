@@ -283,8 +283,8 @@ data class StandingTarget(val docId: String, val name: String, val vrchatUserId:
 private val DURATIONS = listOf("1 h" to 3_600_000L, "1 d" to 86_400_000L, "3 d" to 3 * 86_400_000L, "7 d" to 7 * 86_400_000L,
     "30 d" to 30 * 86_400_000L, "Forever" to -1L)
 private val REASONS = listOf("Spam", "Harassment", "Server abuse", "Ban evasion", "Modified app", "Other")
-private val dayFmt = java.text.SimpleDateFormat("d MMM", java.util.Locale.getDefault())
-private val stampFmt = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.getDefault())
+private val dayFmt = java.text.SimpleDateFormat("d MMM", java.util.Locale.UK)
+private val stampFmt = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.UK)
 private fun endText(until: Long) = if (until == -1L) "Forever" else "until " + dayFmt.format(java.util.Date(until))
 private fun kindLabel(k: String) = when (k) { "ban" -> "Ban"; "restriction" -> "Restriction"; else -> "Warning" }
 private fun tone(k: String) = when (k) { "ban" -> G.Alert; "restriction" -> G.Caution; else -> G.Warning }
@@ -362,6 +362,9 @@ private fun ActionEditor(target: StandingTarget, start: AdminStandingStore.Act, 
     var note by remember { mutableStateOf(start.adminNote) }
     val off = remember { mutableStateMapOf<String, Long>().apply { putAll(start.off) } }
     var banUntil by remember { mutableStateOf(start.banUntil) }
+    // The length chip last picked (per feature, and for the ban), so the chosen chip stays lit. An end loaded from a
+    // saved action shows only its date until a chip is picked; Forever is recognised from the value itself.
+    val picked = remember { mutableStateMapOf<String, String>() }
     var banAccount by remember { mutableStateOf(start.banAccount) }
     var banDevice by remember { mutableStateOf(start.banDevice) }
     var banOthers by remember { mutableStateOf(start.banOthers) }
@@ -418,7 +421,7 @@ private fun ActionEditor(target: StandingTarget, start: AdminStandingStore.Act, 
             if (kind == "ban") Section("Ban") {
                 Label("Length")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    DURATIONS.drop(1).forEach { (l, ms) -> GremlinChip(l, banUntil != 0L && (if (ms == -1L) banUntil == -1L else false), { banUntil = if (ms == -1L) -1L else System.currentTimeMillis() + ms }) }
+                    DURATIONS.drop(1).forEach { (l, ms) -> GremlinChip(l, banUntil != 0L && (if (ms == -1L) banUntil == -1L else picked["ban"] == l && banUntil != -1L), { picked["ban"] = l; banUntil = if (ms == -1L) -1L else System.currentTimeMillis() + ms }) }
                 }
                 if (banUntil != 0L) Text(endText(banUntil), style = MaterialTheme.typography.bodySmall, color = G.Caution)
                 SwitchRow("VRChat account", banAccount) { banAccount = it }
@@ -428,8 +431,8 @@ private fun ActionEditor(target: StandingTarget, start: AdminStandingStore.Act, 
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card)) {
                     Standing.Feature.entries.forEachIndexed { i, f ->
                         if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(G.Edge))
-                        FeatureRow(f.label, off[f.key], { on -> if (on) off[f.key] = System.currentTimeMillis() + 86_400_000L else off.remove(f.key) },
-                            { ms -> off[f.key] = if (ms == -1L) -1L else System.currentTimeMillis() + ms })
+                        FeatureRow(f.label, off[f.key], picked[f.key], { on -> if (on) { picked[f.key] = "1 d"; off[f.key] = System.currentTimeMillis() + 86_400_000L } else { picked.remove(f.key); off.remove(f.key) } },
+                            { l, ms -> picked[f.key] = l; off[f.key] = if (ms == -1L) -1L else System.currentTimeMillis() + ms })
                     }
                 }
             }
@@ -590,7 +593,7 @@ private fun SwitchRow(label: String, on: Boolean, onChange: (Boolean) -> Unit) =
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun FeatureRow(name: String, until: Long?, onToggle: (Boolean) -> Unit, onLength: (Long) -> Unit) =
+private fun FeatureRow(name: String, until: Long?, picked: String?, onToggle: (Boolean) -> Unit, onLength: (String, Long) -> Unit) =
     Column(Modifier.fillMaxWidth().animateContentSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(name, style = MaterialTheme.typography.bodyMedium, color = if (until != null) G.Text else G.TextMuted, modifier = Modifier.weight(1f))
@@ -598,7 +601,7 @@ private fun FeatureRow(name: String, until: Long?, onToggle: (Boolean) -> Unit, 
             Switch(until != null, onToggle)
         }
         if (until != null) FlowRow(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            DURATIONS.forEach { (l, ms) -> SmallChip(l, ms == -1L && until == -1L) { onLength(ms) } }
+            DURATIONS.forEach { (l, ms) -> SmallChip(l, if (ms == -1L) until == -1L else picked == l && until != -1L) { onLength(l, ms) } }
         }
     }
 
