@@ -55,7 +55,12 @@ private class TermsSection(
 
 private val TERMS_SECTIONS = listOf(
     TermsSection("Welcome to VRC-A", BootIcons.Tutorial, "What's possible with VRC-A",
-        "VRC-A is a free companion app for VRChat. It runs on your phone or Quest and talks to VRChat for you, so your chatbox, status and music can update while you play."),
+        "VRC-A is a companion app for VRChat. It runs on your phone or Quest alongside VRChat and handles the things you'd normally have to stop playing for.",
+        listOf("Keep your chatbox alive with cycling lines, live info, music and voice to text",
+            "Show your VRChat world on your Discord profile",
+            "Get alerts for friends, invites, groups and events",
+            "See who's in your instance and look back at where you've been",
+            "Search, clone and resize avatars")),
     TermsSection("Platform rules", BootIcons.Vrchat, "Third-party guidelines",
         "VRC-A works with VRChat and Discord, so their rules apply to everything you do through it, on top of these terms.",
         listOf("Follow VRChat's Terms and Community Guidelines", "Follow Discord's Terms when Discord status is on", "No spam or harassment through the chatbox"),
