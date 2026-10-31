@@ -72,8 +72,10 @@ private val TERMS_SECTIONS = listOf(
         "Signing in to VRChat powers your status, friends, instances and avatar tools. Signing in to Discord is optional and shows your VRChat world on your Discord profile. Your sign-ins stay encrypted on this device, and your password is never stored or sent to us.",
         callout = Mark.Warn to "VRC-A isn't made by or affiliated with VRChat or Discord. Using third-party tools with your accounts is at your own risk."),
     TermsSection("Data and privacy", BootIcons.Privacy, "What we store",
-        "To sync your settings and keep VRC-A safe, a small amount is stored with us.",
-        listOf("A random ID for this device", "Your app version and settings", "Never your VRChat password")),
+        "Some information is kept on our servers so your setup syncs between devices and VRC-A stays safe.",
+        listOf("Your settings and chatbox lines", "Your VRChat name and status", "A random device ID and your app version",
+            "The names of public avatars you come across, for avatar search"),
+        callout = Mark.Done to "Your passwords are never stored, and your information is never sold."),
     TermsSection("Bugs and reports", BootIcons.Bug, "Crash reports and fixes",
         "If VRC-A crashes, a report is sent to the developer with your device model, the app version and what went wrong. Nothing personal is in it."),
     TermsSection("Account standing", BootIcons.Account, "Moderation, warnings and bans",
@@ -215,7 +217,7 @@ private fun ReaderBody(s: TermsSection, wide: Boolean) {
             }
         }
         s.callout?.let { (mark, text) ->
-            val tone = if (mark == Mark.Failed) G.Negative else G.Caution
+            val tone = when (mark) { Mark.Failed -> G.Negative; Mark.Done -> G.Success; else -> G.Caution }   // frame matches the cat
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(tone.copy(alpha = 0.10f))
                     .border(1.dp, tone.copy(alpha = 0.45f), RoundedCornerShape(14.dp)).padding(14.dp),
