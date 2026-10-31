@@ -1600,17 +1600,21 @@ object VrchatAuthManager {
 
     /** VRChat avatar-object platform compatibility (`unityPackages[].platform`) mapped
      *  to our display labels. Empty when the object carries no packages. */
-    private fun platformsFromAvatarJson(j: org.json.JSONObject): List<String> {
-        val ups = j.optJSONArray("unityPackages") ?: return emptyList()
-        val out = LinkedHashSet<String>()
-        for (i in 0 until ups.length()) {
-            when ((ups.optJSONObject(i)?.optString("platform", "") ?: "").lowercase()) {
-                "standalonewindows" -> out.add("PC")
-                "android" -> out.add("Quest")
-                "ios" -> out.add("iOS")
-            }
+    private fun platformsFromAvatarJson(j: org.json.JSONObject): List<String> = realPackages(j).mapNotNull {
+        when (it.optString("platform", "").lowercase()) {
+            "standalonewindows" -> "PC"; "android" -> "Quest"; "ios" -> "iOS"; else -> null
         }
-        return out.toList()
+    }.distinct()
+
+    /**
+     * An avatar's REAL uploads (`unityPackages`), without VRChat's auto-made impostors. VRChat generates an
+     * impostor (variant "impostor") for Quest/iOS on PC-only avatars, so counting those listed PC-only avatars
+     * as Quest + iOS in the catalog (and let the Quest clone gate through). Used everywhere platforms are read.
+     */
+    internal fun realPackages(j: org.json.JSONObject): List<org.json.JSONObject> {
+        val ups = j.optJSONArray("unityPackages") ?: return emptyList()
+        return (0 until ups.length()).mapNotNull { ups.optJSONObject(it) }
+            .filter { !it.optString("variant", "").equals("impostor", ignoreCase = true) }
     }
 
     /** `(fileIds, platforms)` for a public avatar via `GET /avatars/{id}`, or null on
@@ -2495,11 +2499,8 @@ object VrchatAuthManager {
             if (j.optString("releaseStatus", "public") != "public") return@withContext null
             val fileId = fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
                 ?: return@withContext null
-            val plats = j.optJSONArray("unityPackages")?.let { ups ->
-                (0 until ups.length()).mapNotNull {
-                    ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
-                }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
-            } ?: emptyList()
+            val plats = realPackages(j).mapNotNull { it.optString("platform", "").takeIf { s -> s.isNotBlank() } }
+                .map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
             CatalogEntry(fileId, avatarId, j.optString("name", ""),
                 j.optString("authorName", ""), j.optString("authorId", ""), plats,
                 j.optString("description", ""))
@@ -2529,11 +2530,8 @@ object VrchatAuthManager {
                             return@withContext AvatarFetchResult(AvatarFetch.PRIVATE)
                         val fileId = fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
                             ?: return@withContext AvatarFetchResult(AvatarFetch.PRIVATE)
-                        val plats = j.optJSONArray("unityPackages")?.let { ups ->
-                            (0 until ups.length()).mapNotNull {
-                                ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
-                            }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
-                        } ?: emptyList()
+                        val plats = realPackages(j).mapNotNull { it.optString("platform", "").takeIf { s -> s.isNotBlank() } }
+                            .map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
                         AvatarFetchResult(AvatarFetch.FOUND, CatalogEntry(fileId, avatarId,
                             j.optString("name", ""), j.optString("authorName", ""),
                             j.optString("authorId", ""), plats, j.optString("description", "")))
@@ -2631,11 +2629,8 @@ object VrchatAuthManager {
                         j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") }
                     ) ?: continue
                     val isPublic = j.optString("releaseStatus", "public") == "public"
-                    val plats = j.optJSONArray("unityPackages")?.let { ups ->
-                        (0 until ups.length()).mapNotNull {
-                            ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
-                        }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
-                    } ?: emptyList()
+                    val plats = realPackages(j).mapNotNull { it.optString("platform", "").takeIf { s -> s.isNotBlank() } }
+                        .map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
                     out.putIfAbsent(fileId, OwnAvatar(
                         CatalogEntry(fileId, id, j.optString("name", ""),
                             j.optString("authorName", ""), j.optString("authorId", ""), plats,

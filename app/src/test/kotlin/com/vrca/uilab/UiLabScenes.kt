@@ -379,8 +379,8 @@ object UiLabScenes {
     // ------------------------------------------------------------------- shows
 
     /** Full-screen shows replace the base; the rest are drawn over it. */
-    private val FULL = setOf("boot", "cats", "catframes", "thinkmock", "waitmock", "skipmock", "donemock", "warnmock", "maintmock", "failmock", "bgmock", "searchmock", "downloadmock", "countdownmock", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
-    val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone") + FULL
+    private val FULL = setOf("boot", "cats", "catframes", "thinkmock", "waitmock", "skipmock", "donemock", "warnmock", "maintmock", "failmock", "bgmock", "searchmock", "standingmock", "standingboot", "modactionmock", "disabledmock", "downloadmock", "countdownmock", "symbols", "buttons", "download", "downloadcat", "tosmock", "lock", "headsetboot", "crash", "banned", "tos", "onboarding", "login")
+    val SHOWS = listOf("update", "update-optional", "whatsnew", "confirm", "confirm-destructive", "timezone", "standing") + FULL
 
     fun show(d: UiLabDriver, arg: String): String {
         val name = arg.substringBefore(' ')
@@ -790,6 +790,10 @@ object UiLabScenes {
             "bgmock" -> BgMocks.Sheet()
             // `show searchmock`: six custom search boxes x idle / typing / cooldown (SearchBarMocks).
             "searchmock" -> SearchBarMocks.Sheet()
+            "standingmock" -> StandingMocks.Page(rest.trim())
+            "disabledmock" -> DisabledMocks.Page()
+            "modactionmock" -> androidx.compose.runtime.key(rest) { ModActionMocks.Page(rest) }
+            "standingboot" -> androidx.compose.runtime.key(rest) { StandingMocks.BootFlow(rest.trim()) { com.vrca.app.BootReveal.start(withLogo = false); d.base.value = "screen" } }
             // `show downloadmock`: three eye beats for the Downloading Boot Cat on a fast and a slow bar (DownloadMocks).
             "downloadmock" -> DownloadMocks.Sheet()
             // `show countdownmock`: three eye beats for the Countdown Boot Cat on a short and a long countdown (CountdownMocks).
@@ -957,6 +961,8 @@ object UiLabScenes {
                 destructive = name != "confirm"
             )
             "timezone" -> VrcaTimeZoneDialog(currentMode = "Europe/Paris", use24h = false, onSelect = {}, onDismiss = { d.overlay.value = null })
+            // `show standing <state>`: the account standing popup over the real app, animating in; Close animates it out.
+            "standing" -> androidx.compose.runtime.key(arg) { StandingMocks.Standing(arg.substringAfter(' ', "risk").trim(), onClosed = { d.overlay.value = null }) }
         }
     }
 
