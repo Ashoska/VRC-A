@@ -54,6 +54,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
@@ -928,13 +929,16 @@ private fun AvatarSearchPanel() {
     }
 
     // Search box + button. Enter on the keyboard is the same as the button.
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    val searchOff = com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.AvatarSearch)
+    Row(Modifier.then(if (searchOff) Modifier.alpha(0.38f) else Modifier),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         com.vrca.ui.common.GremlinSearchField(
             value = query, onValueChange = { query = it }, onSearch = { run(query, reuse = false) },
             placeholder = "Avatar / Creator", modifier = Modifier.weight(1f),
             searching = searching, cooldown = { cooldown.value }
         )
     }
+    com.vrca.app.StandingDisabledLine(com.vrca.app.Standing.Feature.AvatarSearch)
     // Recent searches (remembered for 20 minutes): tap to reopen with no request.
     if (recent.isNotEmpty() && !searching) {
         Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1122,7 +1126,7 @@ private fun openResult(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSe
 private fun CloneOpenButtons(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSearch.Result, onDead: (String) -> Unit) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var cloning by remember { mutableStateOf(false) }
-    androidx.compose.material3.IconButton(enabled = !cloning, onClick = { if (!cloning) cloneResult(ctx, scope, r, onDead) { cloning = it } }) {
+    androidx.compose.material3.IconButton(enabled = !cloning && !com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.AvatarClone), onClick = { if (!cloning) cloneResult(ctx, scope, r, onDead) { cloning = it } }) {
         if (cloning) com.vrca.app.BootCat(com.vrca.app.Mark.Working, 0, Modifier.size(22.dp))
         else Icon(Icons.Filled.PeopleAlt, contentDescription = "Clone avatar", tint = MaterialTheme.colorScheme.primary)
     }

@@ -1067,9 +1067,10 @@ private class WelcomeStep(val icon: BootIcon, val name: String, val working: Str
 private fun welcomeSteps(checks: List<BootCheck>, status: BootStatus): List<WelcomeStep> {
     fun check(label: String) = checks.firstOrNull { it.label == label }
     fun row(c: BootCheck?): Pair<Mark, String>? = when (c?.state) {
-        BootState.Done, BootState.Warn, BootState.Skipped, BootState.Background -> c.state.mark() to (c.note?.text ?: "")
+        BootState.Done, BootState.Skipped, BootState.Background -> c.state.mark() to (c.note?.text ?: "")
         // A ban is a finished result (not a retry): Boot Cat lists it and goes on to say so.
         BootState.Failed -> if (c.note == BootNote.Banned) Mark.Failed to c.note.text else null
+        BootState.Warn -> if (c.note == BootNote.Banned) Mark.Failed to c.note.text else c.state.mark() to (c.note?.text ?: "")
         else -> null
     }
     fun service(s: ServiceState): Pair<Mark, String>? = if (s == ServiceState.Checking) null else s.mark() to s.text

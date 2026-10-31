@@ -64,6 +64,35 @@ import com.vrca.ui.theme.GremlinColors as G
 /** The support server link (config/app.discordInvite), set by VrcaApp's config listener. */
 val StandingSupportUrl = mutableStateOf("")
 
+/** True while the standing popup is asked for (Settings, a disabled-feature line); VrcaApp shows it. */
+val StandingPopupOpen = mutableStateOf(false)
+
+/**
+ * The line that takes a disabled control's place (approved mock 2026-10-31): the countdown Boot Cat draining, what
+ * and how long; tapping it opens the standing popup. Shows nothing while [feature] is on. The control itself should
+ * also be greyed and off ([Standing.isOff]).
+ */
+@Composable
+fun StandingDisabledLine(feature: Standing.Feature, modifier: Modifier = Modifier) {
+    val s = Standing.state.value
+    Standing.tick.longValue
+    val banned = Standing.banUntil(s)
+    val until = banned ?: Standing.offUntil(feature, s) ?: return
+    val name = if (banned != null) "VRC-A" else feature.label
+    Row(
+        modifier.clip(RoundedCornerShape(10.dp)).background(G.Caution.copy(alpha = 0.10f)).clickable { StandingPopupOpen.value = true }
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        BootCatCountdown(Standing.leftFraction(until, Standing.givenFor(if (banned != null) "" else feature.label, s)), Modifier.size(18.dp), G.Caution, smooth = false)
+        Spacer(Modifier.width(8.dp))
+        Text("$name disabled · " + Standing.leftText(until).replaceFirstChar { it.lowercase() }, style = MaterialTheme.typography.bodySmall,
+            color = G.Caution, modifier = Modifier.weight(1f, fill = false))
+        Spacer(Modifier.width(6.dp))
+        Text("›", style = MaterialTheme.typography.bodyMedium, color = G.Caution)
+    }
+}
+
 /**
  * The account standing popup (revamp 2, approved 2026-10-31): floats over whatever is underneath (the app, opened from
  * Settings or by itself when an action is new or changed; or the boot screen, which waits behind it). It opens like

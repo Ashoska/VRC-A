@@ -1301,7 +1301,7 @@ class VrcaViewModel(
         private set
 
     val isBanned: Boolean
-        get() = uidBanned || deviceBanned
+        get() = uidBanned || deviceBanned || com.vrca.app.Standing.isBanned()
 
     private var lastBanEffective: Boolean = false
 
@@ -1473,6 +1473,17 @@ class VrcaViewModel(
         }
     }
 
+    /** Re-applies the account standing's switches: chatbox sending off stops sending and blocks OSC. */
+    private fun applyStanding() {
+        refreshOscBlockGate()
+        if (com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.ChatboxAll) && oscSending) stopSending()
+        if (com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.Voice) && speechListening) stopDictation()
+        if (com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.Discord)) runCatching {
+            app.startService(android.content.Intent(app, com.vrca.discord.DiscordRpcService::class.java)
+                .setAction(com.vrca.discord.DiscordRpcService.ACTION_STOP))
+        }
+    }
+
     private fun enforceIfBannedChanged() {
         val nowBanned = isBanned
         if (nowBanned == lastBanEffective) return
@@ -1524,6 +1535,7 @@ class VrcaViewModel(
                                 warned = false; warnReason = ""
                                 uidBanned = false; banReason = ""
                                 moderationConnected = true; moderationLastError = ""
+                                com.vrca.app.Standing.publish(null); applyStanding()
                                 enforceIfBannedChanged()
                                 return@addSnapshotListener
                             }
@@ -1533,6 +1545,8 @@ class VrcaViewModel(
                             uidBanned = snap.getBoolean("banned") ?: false
                             banReason = (snap.getString("banReason") ?: "").trim()
                             moderationConnected = true; moderationLastError = ""
+                            // Account standing rides this same snapshot (no extra read): every admin edit shows live.
+                            com.vrca.app.Standing.publish(snap.get("standing")); applyStanding()
                             enforceIfBannedChanged()
 
                             val killSignal = snap.getTimestamp("killSignal")
@@ -2033,7 +2047,8 @@ class VrcaViewModel(
 
     /** OSC is blocked when ANY gate reason is active. */
     private fun refreshOscBlockGate() {
-        val blocked = forceUpdatePending || vrchatLoggedOut || vrchatAuthDead
+        val blocked = forceUpdatePending || vrchatLoggedOut || vrchatAuthDead ||
+            com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.ChatboxAll)
         remoteVrcaOsc.blocked = blocked
         localVrcaOsc.blocked = blocked
     }
@@ -2268,6 +2283,8 @@ class VrcaViewModel(
         viewModelScope.launch { userPreferencesRepository.saveIpAddress(address) }
         startSelfSyncLoopIfNeeded()
         attachModerationListenersLoopOnce()
+        // Account standing: a length running out re-opens what it switched off (and ends a timed ban) on time.
+        com.vrca.app.Standing.startClock(viewModelScope) { enforceIfBannedChanged(); applyStanding() }
     }
 
     fun ipAddressApplyRuntimeOnly(address: String) {
@@ -2636,6 +2653,7 @@ class VrcaViewModel(
      */
     fun startDictation(local: Boolean = false, restored: Boolean = false) {
         if (!speechSupported || isBanned || speechListening || speechLoading || speechStopping) return
+        if (com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.Voice)) return
         if (!speechModelReady) { downloadSpeechModel(); return }
         if (!restored) { speechNotice = null; speechResume = null; com.vrca.speech.DictationRestore.clear(app.applicationContext) }
         speechError = null
@@ -3095,7 +3113,7 @@ class VrcaViewModel(
         messageText.value = message
         stashedMessage = message.text
 
-        if (isBanned) {
+        if (isBanned || com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.ManualSend)) {
             osc.typing = false
             return
         }
@@ -3137,7 +3155,7 @@ class VrcaViewModel(
      * budget is a no-op (the UI also disables the button).
      */
     fun sendMessage(local: Boolean = false) {
-        if (isBanned) return
+        if (isBanned || com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.ManualSend)) return
         val text = messageText.value.text
         if (text.isBlank()) return
         if (text.length > manualCharBudget()) return // UI blocks this too
@@ -3266,7 +3284,7 @@ class VrcaViewModel(
         manualRevertJob?.cancel(); manualRevertJob = null
         manualLiveJob = viewModelScope.launch {
             var typingOn = false
-            while (manualLiveMode && !isBanned) {
+            while (manualLiveMode && !isBanned && !com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.ManualSend)) {
                 val text = messageText.value.text
                 if (text.isEmpty()) {
                     // Field cleared: revert immediately and stop the loop.
@@ -4324,7 +4342,7 @@ class VrcaViewModel(
      *  launches the sender loops for whatever toggles are currently enabled.
      *  Toggling features without pressing START only updates the preview. */
     fun startSending(local: Boolean = false) {
-        if (isBanned) return
+        if (isBanned || com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.ChatboxAll)) return
         // Cancel any in-flight robust-clear from a just-pressed Stop so its trailing
         // empty sends can't blank the content we're about to transmit.
         clearJob?.cancel(); clearJob = null

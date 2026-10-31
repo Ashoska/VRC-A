@@ -403,6 +403,7 @@ object AvatarSearch {
      *  first batch is reused only if under 2 minutes old. */
     suspend fun searchBatch(context: Context, query: String, offset: Int, reuse: Boolean = false,
                             platform: String? = null, rankMax: Int? = null): Batch {
+        if (com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.AvatarSearch)) return Batch(emptyList(), false, offset)
         val key = rememberKey(query, platform, rankMax)
         val now = System.currentTimeMillis()
         if (offset == 0) synchronized(remembered) { remembered[key] }?.let {

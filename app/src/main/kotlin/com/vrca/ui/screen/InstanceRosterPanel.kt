@@ -497,7 +497,7 @@ private fun CloneButton(
         }
         else -> {
             var busy by remember(avaId) { mutableStateOf(false) }
-            RosterActionButton(enabled = !busy, onClick = {
+            RosterActionButton(enabled = !busy && !com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.AvatarClone), onClick = {
                 if (!busy) {
                     busy = true
                     val name = m.avatarName

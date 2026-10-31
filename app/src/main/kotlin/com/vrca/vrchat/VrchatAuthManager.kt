@@ -513,6 +513,8 @@ object VrchatAuthManager {
         withContext(Dispatchers.IO) {
             val id = avatarId.trim()
             if (!id.startsWith("avtr_")) return@withContext InviteResult(false, "No avatar id yet")
+            if (com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.AvatarClone))
+                return@withContext InviteResult(false, "Avatar clone is disabled on your account")
             // DIAGNOSTIC: record EVERY select VRC-A issues (id + wall-clock time + a
             // running count, persisted). The user reports booting into a VRC-A-cloned
             // avatar even after switching — this proves whether VRC-A is re-selecting on

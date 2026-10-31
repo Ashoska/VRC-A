@@ -410,7 +410,7 @@ internal fun HomePage(
                                     onResetOrder = { vm.resetCardOrder() },
                                     onNavigate = onNavigate
                                 )
-                                ManualSendCard(vm = vm, isBanned = isBanned)
+                                ManualSendCard(vm = vm, banned = isBanned)
                             }
                         }
                         Column(
@@ -447,7 +447,7 @@ internal fun HomePage(
                                 onResetOrder = { vm.resetCardOrder() },
                                 onNavigate = onNavigate
                             )
-                            ManualSendCard(vm = vm, isBanned = isBanned)
+                            ManualSendCard(vm = vm, banned = isBanned)
                         }
                     }
                 }
@@ -459,7 +459,7 @@ internal fun HomePage(
                     ) {
                         preview(true)
                         InstanceRosterPanel()
-                        ManualSendCard(vm = vm, isBanned = isBanned)
+                        ManualSendCard(vm = vm, banned = isBanned)
                     }
                 }
             }
@@ -469,7 +469,7 @@ internal fun HomePage(
         PageContainer {
             alertCards()
             preview(true)
-            build.Step(1) { ManualSendCard(vm = vm, isBanned = isBanned) }
+            build.Step(1) { ManualSendCard(vm = vm, banned = isBanned) }
         }
     }
 }
@@ -478,7 +478,9 @@ internal fun HomePage(
  *  the right column under the Quick Toggles). */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
+private fun ManualSendCard(vm: VrcaViewModel, banned: Boolean) {
+    // Account standing: Manual Send disabled counts like a ban here (the field and buttons go grey).
+    val isBanned = banned || com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.ManualSend)
     val manualBring = remember { BringIntoViewRequester() }
     var manualFieldFocused by remember { mutableStateOf(false) }
     // Expanding the card should scroll the column down so the whole editor shows.
@@ -501,6 +503,7 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
         expandedState = manualExpanded,
         modifier = Modifier.bringIntoViewRequester(cardBring)
     ) {
+        com.vrca.app.StandingDisabledLine(com.vrca.app.Standing.Feature.ManualSend, Modifier.padding(bottom = 8.dp))
         val budget = vm.manualCharBudget()
         val msgLen = vm.messageText.value.text.length
         val over = msgLen > budget
@@ -1293,10 +1296,12 @@ private fun PreviewAndTogglesCard(
                 )
             }
         } else {
+            val chatOff = com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.ChatboxAll)
             com.vrca.ui.common.GremlinButton(
                 "Start sending", { vm.startSending() }, Modifier.fillMaxWidth(),
-                enabled = !isBanned, bootIcon = com.vrca.app.BootIcons.Start
+                enabled = !isBanned && !chatOff, bootIcon = com.vrca.app.BootIcons.Start
             )
+            com.vrca.app.StandingDisabledLine(com.vrca.app.Standing.Feature.ChatboxAll, Modifier.padding(top = 8.dp))
         }
 
         // Warning chips under the preview
