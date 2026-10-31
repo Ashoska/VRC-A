@@ -106,6 +106,17 @@ object UiLabScenes {
     }
 
     fun set(d: UiLabDriver, prop: String, value: String): String {
+        // `set standing <warned|risk|banned|none>`: a live admin edit, published like the moderation listener does
+        // (Standing.publish) without reopening anything, to check every open screen follows it.
+        if (prop == "standing") {
+            com.vrca.app.Standing.publish(if (value == "none") null else StandingMocks.sampleMap(value))
+            com.vrca.app.Standing.tick.longValue++
+            // Run the ViewModel's own reaction too (stop sending, OSC gate, voice, Discord), like the listener does.
+            val vm = d.vm
+            vm.javaClass.getDeclaredMethod("applyStanding").apply { isAccessible = true }.invoke(vm)
+            vm.javaClass.getDeclaredMethod("enforceIfBannedChanged").apply { isAccessible = true }.invoke(vm)
+            return "standing = $value (oscSending=${vm.oscSending})"
+        }
         val (owner, name) = target(d, prop)
         return d.setState(owner, name, value)
     }

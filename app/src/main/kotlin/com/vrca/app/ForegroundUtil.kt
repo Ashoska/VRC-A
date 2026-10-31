@@ -46,3 +46,29 @@ fun Service.startForegroundSafely(
         false
     }
 }
+
+/**
+ * Stops a service that was asked to START but won't run (a safe start after a crash, or a feature an admin disabled),
+ * without breaking Android's `startForegroundService` contract. If the start came through startForegroundService
+ * (sticky restarts, the watchdog, boot, the pipeline), Android kills the whole app ~5-10 s later unless the service
+ * called startForeground first; that kill leaves NO crash report of ours (2026-10-31: it turned one crash into a
+ * loop of crashes with nothing recorded). So: enter the foreground with a quiet notification of its own id (never
+ * the shared 1001 keep-alive one), leave it at once (removing only that notification), then stop.
+ */
+fun Service.stopWithoutForegroundCrash() {
+    try {
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        if (android.os.Build.VERSION.SDK_INT >= 26 && nm?.getNotificationChannel(HOLD_CHANNEL) == null) {
+            nm?.createNotificationChannel(android.app.NotificationChannel(HOLD_CHANNEL, "Starting", android.app.NotificationManager.IMPORTANCE_MIN))
+        }
+        val n = androidx.core.app.NotificationCompat.Builder(this, HOLD_CHANNEL)
+            .setSmallIcon(com.vrca.R.drawable.ic_notif_sync).setContentTitle("VRC-A")
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_MIN).build()
+        startForeground(HOLD_NOTIF_ID, n)
+        stopForeground(Service.STOP_FOREGROUND_REMOVE)
+    } catch (_: Throwable) {}
+    try { stopSelf() } catch (_: Throwable) {}
+}
+
+private const val HOLD_CHANNEL = "vrca_hold"
+private const val HOLD_NOTIF_ID = 4799

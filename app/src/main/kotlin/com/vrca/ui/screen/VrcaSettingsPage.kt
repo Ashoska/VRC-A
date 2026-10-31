@@ -1178,6 +1178,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
             repo.saveDiscordRpcEnabled(enabled)
             val svcIntent = android.content.Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
             if (enabled) {
+                if (com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.Discord)) return@launch
                 svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_START
                 ctx.startForegroundService(svcIntent)
             } else {

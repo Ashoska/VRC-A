@@ -1298,11 +1298,13 @@ private fun PreviewAndTogglesCard(
             }
         } else {
             val chatOff = com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.ChatboxAll)
-            com.vrca.ui.common.GremlinButton(
+            // Sending disabled by an admin: the line takes the button's place (under it, the card's fixed height on
+            // the headset cut it off).
+            if (chatOff && !isBanned) com.vrca.app.StandingDisabledLine(com.vrca.app.Standing.Feature.ChatboxAll, Modifier.fillMaxWidth())
+            else com.vrca.ui.common.GremlinButton(
                 "Start sending", { vm.startSending() }, Modifier.fillMaxWidth(),
-                enabled = !isBanned && !chatOff, bootIcon = com.vrca.app.BootIcons.Start
+                enabled = !isBanned, bootIcon = com.vrca.app.BootIcons.Start
             )
-            com.vrca.app.StandingDisabledLine(com.vrca.app.Standing.Feature.ChatboxAll, Modifier.padding(top = 8.dp))
         }
 
         // Warning chips under the preview

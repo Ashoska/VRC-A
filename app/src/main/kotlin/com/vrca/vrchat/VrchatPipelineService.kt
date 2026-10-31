@@ -648,7 +648,9 @@ class VrchatPipelineService : Service() {
                             val prefs = dataStore.data.first()
                             val rpcEnabled = prefs[booleanPreferencesKey("discord_rpc_enabled")] ?: false
                             val sessionSeeded = prefs[booleanPreferencesKey("discord_session_seeded")] ?: false
-                            if (rpcEnabled && sessionSeeded && !DiscordRpcService.isRunning) {
+                            // Not while an admin has Discord status disabled (the service would only stop again).
+                            if (rpcEnabled && sessionSeeded && !DiscordRpcService.isRunning &&
+                                !com.vrca.app.Standing.isOff(com.vrca.app.Standing.Feature.Discord)) {
                                 val rpcIntent = Intent(this@VrchatPipelineService, DiscordRpcService::class.java)
                                 rpcIntent.action = DiscordRpcService.ACTION_START
                                 startForegroundService(rpcIntent)

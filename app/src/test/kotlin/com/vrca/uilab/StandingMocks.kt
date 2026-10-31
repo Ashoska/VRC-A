@@ -88,6 +88,8 @@ object StandingMocks {
         val warn = act("a2", "warning", "Spam through the chatbox", "Repeated the same message in a busy instance.", now - 40 * d, emptyMap(), 0L, emptyList(), active = false)
         return when (state) {
             "warned" -> mapOf("rev" to now, "level" to "good", "actions" to listOf(act("a3", "warning", "Spam through the chatbox", "Repeated the same message in a busy instance.", now, emptyMap(), 0L, emptyList())))
+            "chatbox" -> mapOf("rev" to now, "level" to "limited", "actions" to listOf(act("a5", "restriction", "Chatbox spam", "Spam.", now,
+                mapOf("chatbox_all" to now + d, "chatbox_manual" to now + d), 0L, emptyList())))
             "banned" -> mapOf("rev" to now, "level" to "banned", "actions" to listOf(act("a4", "ban", "Abusing VRC-A's servers", "Automated requests from a modified app.", now, emptyMap(), -1L, emptyList()), warn))
             else -> mapOf("rev" to now, "level" to "atrisk", "actions" to listOf(act("a1", "restriction", "Harassment through the chatbox", "Targeted messages at another player after being asked to stop.", now - 2 * d,
                 mapOf("chatbox_manual" to now + 2 * d, "avatar_clone" to now + 28 * d, "avatar_search" to now + 28 * d), 0L, emptyList()), warn))
