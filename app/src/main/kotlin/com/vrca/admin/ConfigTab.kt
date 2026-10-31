@@ -53,6 +53,21 @@ internal fun ConfigTab(
 ) {
     val scope = rememberCoroutineScope()
     val ctx = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    // The website's status (Worker v56 `/admin/status`), read by everyone's boot screen and gremlininc.app.
+    fun sendStatus(on: Boolean, message: String) {
+        val key = ctx.getSharedPreferences("vrca_admin_local", android.content.Context.MODE_PRIVATE).getString("avatar_admin_key", "").orEmpty()
+        if (key.isBlank()) return
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                val c = (java.net.URL("${com.vrca.vrchat.AvatarGlobalDb.WORKER_URL}/admin/status").openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "POST"; doOutput = true; setRequestProperty("content-type", "application/json")
+                    connectTimeout = 10_000; readTimeout = 10_000
+                }
+                c.outputStream.use { it.write(org.json.JSONObject().put("key", key).put("maintenance", on).put("message", message.trim()).toString().toByteArray()) }
+                c.responseCode; c.disconnect()
+            }
+        }
+    }
 
     var tosVersion by rememberSaveable { mutableIntStateOf(1) }
     var tosText by rememberSaveable { mutableStateOf("") }
@@ -61,6 +76,8 @@ internal fun ConfigTab(
     var discordInvite by rememberSaveable { mutableStateOf("") }
     // Shows "Maintenance" on everyone's boot screen VRC-A servers row (read with the terms, no extra read).
     var serversMaintenance by rememberSaveable { mutableStateOf(false) }
+    // The reason shown with it (boot row + website banner); kept in the config doc so it reloads here.
+    var maintenanceMsg by rememberSaveable { mutableStateOf("") }
     var loadedAt by remember { mutableStateOf<Timestamp?>(null) }
     // The terms as last loaded: a save stamps `tosUpdatedAt` (which asks users to accept again) only
     // when one of these actually changed, never for the other settings on this tab.
@@ -78,6 +95,7 @@ internal fun ConfigTab(
             ownerUid = snap.getString("ownerUid") ?: ""
             discordInvite = snap.getString("discordInvite") ?: ""
             serversMaintenance = snap.getBoolean("serversMaintenance") ?: false
+            maintenanceMsg = snap.getString("serversMaintenanceMessage") ?: ""
             loadedAt = snap.getTimestamp("updatedAt")
             savedTos = Triple(tosVersion, tosText, tosUrl)
             setGlobalLoading(false)
@@ -98,7 +116,8 @@ internal fun ConfigTab(
                 "tosText" to tosText,
                 "tosUrl" to tosUrl,
                 "discordInvite" to discordInvite.trim(),
-                "serversMaintenance" to serversMaintenance
+                "serversMaintenance" to serversMaintenance,
+                "serversMaintenanceMessage" to maintenanceMsg.trim()
             )
             // Only a real terms change is stamped: `tosUpdatedAt` for this version's apps, and the doc's
             // `updatedAt` too, because apps from before this fix still re-ask the terms when THAT moves.
@@ -163,23 +182,18 @@ internal fun ConfigTab(
                 Text("VRC-A servers maintenance", style = MaterialTheme.typography.labelLarge)
                 androidx.compose.material3.Switch(
                     checked = serversMaintenance,
-                    onCheckedChange = { on ->
-                        serversMaintenance = on
-                        scope.launch { saveConfig() }
-                        // Also tell the website's status (Worker v56), which the boot screen and gremlininc.app read.
-                        val key = ctx.getSharedPreferences("vrca_admin_local", android.content.Context.MODE_PRIVATE).getString("avatar_admin_key", "").orEmpty()
-                        if (key.isNotBlank()) scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            runCatching {
-                                val c = (java.net.URL("${com.vrca.vrchat.AvatarGlobalDb.WORKER_URL}/admin/status").openConnection() as java.net.HttpURLConnection).apply {
-                                    requestMethod = "POST"; doOutput = true; setRequestProperty("content-type", "application/json")
-                                    connectTimeout = 10_000; readTimeout = 10_000
-                                }
-                                c.outputStream.use { it.write(org.json.JSONObject().put("key", key).put("maintenance", on).toString().toByteArray()) }
-                                c.responseCode; c.disconnect()
-                            }
-                        }
-                    }
+                    onCheckedChange = { on -> serversMaintenance = on; scope.launch { saveConfig() }; sendStatus(on, maintenanceMsg) }
                 )
+            }
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = maintenanceMsg,
+                    onValueChange = { maintenanceMsg = it.take(200) },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    label = { Text("Maintenance message") }
+                )
+                com.vrca.ui.common.GremlinSmallButton(onClick = { scope.launch { saveConfig() }; if (serversMaintenance) sendStatus(true, maintenanceMsg) }) { Text("Save") }
             }
 
             Row(
