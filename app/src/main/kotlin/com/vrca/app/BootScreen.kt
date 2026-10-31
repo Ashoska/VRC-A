@@ -645,7 +645,7 @@ private const val LINE_SHARE = 0.42f
  * part unfolds up and down from that line, and the line fades as it does. [progress] 0..1.
  */
 @Composable
-private fun Unfold(progress: () -> Float, modifier: Modifier, lineFade: () -> Float = { 1f }, content: @Composable () -> Unit) {
+internal fun Unfold(progress: () -> Float, modifier: Modifier, lineFade: () -> Float = { 1f }, content: @Composable () -> Unit) {
     Box(modifier) {
         Box(
             Modifier.graphicsLayer {

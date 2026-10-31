@@ -3,7 +3,8 @@ package com.vrca.uilab
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.animation.animateContentSize
-import androidx.compose.ui.zIndex
+import com.vrca.ui.common.widenIn
+import kotlinx.coroutines.launch
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.foundation.clickable
 import androidx.compose.runtime.getValue
@@ -89,71 +90,109 @@ object StandingMocks {
 
     /**
      * The standing popup floating over the app (opened from Settings, or popped up by itself when an action is new
-     * or an admin changed one; a warning is just this popup, no separate warn screen). Everything moves while
-     * drawing from one 0..1 value [p]: the scrim fades in, the standing card rises and settles, the actions card
-     * slides out from behind it to the right, and the buttons open underneath last (like boot's Retry pill).
-     * Close (or Back) runs the same thing backwards, then [onClosed]. No actions: the standing card alone, centred.
+     * or an admin changed one; a warning is just this popup, no separate warn screen). It opens like the boot
+     * screen (SAO style, the same [com.vrca.app.Unfold]): the app darkens, a line stretches out across each card's
+     * middle and the card unfolds up and down from it (standing first, actions just after), then the card's pieces
+     * widen in one by one and the buttons last. Close (or Back) folds them shut again (actions first), the dark
+     * fades, then [onClosed]. Everything moves while drawing. No actions: the standing card alone, centred.
      */
     @Composable
     fun Standing(state: String, onClosed: () -> Unit, animate: Boolean = true) {
         val openFirst = state.endsWith("open")
         val (level, off, actions) = data(state.removeSuffix("open"))
-        val p = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(if (animate) 0f else 1f) }
+        val start = if (animate) 0f else 1f
+        val dim = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(start) }
+        val panelL = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(start) }
+        val panelR = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(start) }
+        val partsL = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(start) }
+        val partsR = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(start) }
         var closing by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
         androidx.compose.runtime.LaunchedEffect(closing) {
-            if (!closing) p.animateTo(1f, androidx.compose.animation.core.tween(420, easing = androidx.compose.animation.core.FastOutSlowInEasing))
-            else { p.animateTo(0f, androidx.compose.animation.core.tween(260, easing = androidx.compose.animation.core.FastOutLinearInEasing)); onClosed() }
+            val ease = androidx.compose.animation.core.FastOutSlowInEasing
+            fun t(ms: Int) = androidx.compose.animation.core.tween<Float>(ms, easing = ease)
+            if (!closing) kotlinx.coroutines.coroutineScope {
+                if (dim.value >= 1f) return@coroutineScope
+                launch { dim.animateTo(1f, t(450)) }
+                kotlinx.coroutines.delay(180)
+                launch { panelL.animateTo(1f, t(700)) }
+                kotlinx.coroutines.delay(130)
+                launch { panelR.animateTo(1f, t(700)) }
+                kotlinx.coroutines.delay(470)
+                launch { partsL.animateTo(1f, androidx.compose.animation.core.tween(700)) }
+                kotlinx.coroutines.delay(130)
+                partsR.animateTo(1f, androidx.compose.animation.core.tween(700))
+            } else kotlinx.coroutines.coroutineScope {
+                // Like boot's exit: the pieces go, the cards fold shut (actions first), then the dark lifts.
+                launch { partsR.animateTo(0f, t(200)) }
+                launch { partsL.animateTo(0f, t(200)) }
+                kotlinx.coroutines.delay(120)
+                launch { panelR.animateTo(0f, t(420)) }
+                kotlinx.coroutines.delay(90)
+                panelL.animateTo(0f, t(420))
+                dim.animateTo(0f, t(300))
+                onClosed()
+            }
         }
         val close = { closing = true }
         androidx.activity.compose.BackHandler(enabled = level != Level.Banned && !closing) { close() }
-        fun part(from: Float, to: Float) = ((p.value - from) / (to - from)).coerceIn(0f, 1f)
         Box(Modifier.fillMaxSize()) {
-            // Scrim: blocks taps on the app underneath; tapping it does nothing (Close is explicit).
-            Box(Modifier.fillMaxSize().graphicsLayer { alpha = p.value }.background(Color.Black.copy(alpha = 0.62f))
+            // Darkens the app well behind it and blocks taps on it (tapping it does nothing: Close is explicit).
+            Box(Modifier.fillMaxSize().graphicsLayer { alpha = dim.value }.background(Color.Black.copy(alpha = 0.82f))
                 .clickable(interactionSource = null, indication = null) {})
             BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 val wide = maxWidth >= 700.dp
-                val rise = Modifier.graphicsLayer {
-                    val t = part(0f, 0.8f); alpha = t
-                    val s = 0.94f + 0.06f * t; scaleX = s; scaleY = s; translationY = (1f - t) * 28.dp.toPx()
+                val closeBtn: @Composable () -> Unit = {
+                    com.vrca.ui.common.GremlinButton("Close", { close() }, size = com.vrca.ui.common.GremlinButtonSize.Large)
                 }
-                val slide = Modifier.graphicsLayer {
-                    val t = part(0.25f, 1f); alpha = t
-                    if (wide) translationX = -(1f - t) * 120.dp.toPx() else translationY = (1f - t) * 40.dp.toPx()
+                val supportBtn: @Composable () -> Unit = {
+                    com.vrca.ui.common.GremlinButton(
+                        "Support server", {}, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = com.vrca.ui.common.GremlinButtonSize.Large,
+                        icon = androidx.compose.ui.graphics.vector.ImageVector.vectorResource(com.vrca.R.drawable.ic_discord)
+                    )
                 }
-                val buttonsIn = Modifier.graphicsLayer { val t = part(0.5f, 1f); alpha = t; translationY = (1f - t) * -12.dp.toPx() }
-                val buttons: @Composable () -> Unit = {
-                    Row(buttonsIn.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                        if (level != Level.Banned) com.vrca.ui.common.GremlinButton("Close", { close() }, size = com.vrca.ui.common.GremlinButtonSize.Large)
-                        if (actions.isNotEmpty()) com.vrca.ui.common.GremlinButton(
-                            "Support server", {}, kind = com.vrca.ui.common.GremlinButtonKind.Secondary, size = com.vrca.ui.common.GremlinButtonSize.Large,
-                            icon = androidx.compose.ui.graphics.vector.ImageVector.vectorResource(com.vrca.R.drawable.ic_discord)
-                        )
-                    }
-                }
+                // The buttons widen in last, once each card's pieces are in.
+                val btnL = Modifier.widenIn { stagger(partsL.value, 4, 5) }
+                val btnR = Modifier.widenIn { stagger(partsR.value, 2, 3) }
                 val scroll = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 24.dp)
                 if (wide) Column(scroll, horizontalAlignment = Alignment.CenterHorizontally) {
                     Row(Modifier.height(androidx.compose.foundation.layout.IntrinsicSize.Max), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        // The standing card sits on top (zIndex) so the actions card slides out from behind it.
-                        StandingCard(level, off, Modifier.width(440.dp).fillMaxHeight().zIndex(1f).then(rise))
-                        if (actions.isNotEmpty()) Box(Modifier.width(440.dp).fillMaxHeight().then(slide)) {
-                            ActionsCard(actions, openFirst, Modifier.fillMaxSize())
+                        com.vrca.app.Unfold({ panelL.value }, Modifier.width(440.dp).fillMaxHeight()) {
+                            StandingCard(level, off, { partsL.value }, Modifier.fillMaxSize())
+                        }
+                        if (actions.isNotEmpty()) com.vrca.app.Unfold({ panelR.value }, Modifier.width(440.dp).fillMaxHeight()) {
+                            ActionsCard(actions, openFirst, { partsR.value }, Modifier.fillMaxSize())
                         }
                     }
-                    buttons()
+                    // Each button centred under its own card.
+                    Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Box(Modifier.width(440.dp).then(btnL), contentAlignment = Alignment.Center) { if (level != Level.Banned) closeBtn() }
+                        if (actions.isNotEmpty()) Box(Modifier.width(440.dp).then(btnR), contentAlignment = Alignment.Center) { supportBtn() }
+                    }
                 } else Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().then(scroll), horizontalAlignment = Alignment.CenterHorizontally) {
-                    StandingCard(level, off, Modifier.fillMaxWidth().then(rise))
-                    if (actions.isNotEmpty()) ActionsCard(actions, openFirst, Modifier.padding(top = 16.dp).fillMaxWidth().then(slide))
-                    buttons()
+                    com.vrca.app.Unfold({ panelL.value }, Modifier.fillMaxWidth()) { StandingCard(level, off, { partsL.value }, Modifier.fillMaxWidth()) }
+                    if (actions.isNotEmpty()) com.vrca.app.Unfold({ panelR.value }, Modifier.padding(top = 16.dp).fillMaxWidth()) {
+                        ActionsCard(actions, openFirst, { partsR.value }, Modifier.fillMaxWidth())
+                    }
+                    Row(Modifier.padding(top = 20.dp).then(btnR), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        if (level != Level.Banned) closeBtn()
+                        if (actions.isNotEmpty()) supportBtn()
+                    }
                 }
             }
         }
     }
 
+    /** How far piece [i] of [n] has appeared when its card's pieces are [reveal] through (boot's stagger). */
+    private fun stagger(reveal: Float, i: Int, n: Int): Float {
+        val span = 0.45f
+        val start = if (n <= 1) 0f else (1f - span) * i / (n - 1)
+        return ((reveal - start) / span).coerceIn(0f, 1f)
+    }
+
     @Composable
-    private fun StandingCard(level: Level, off: List<Off>, modifier: Modifier) = com.vrca.app.Layer(modifier) {
+    private fun StandingCard(level: Level, off: List<Off>, parts: () -> Float, modifier: Modifier) = com.vrca.app.Layer(modifier) {
         Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.widenIn { stagger(parts(), 0, 5) }, verticalAlignment = Alignment.CenterVertically) {
                 BootCat(level.mark, 0, Modifier.size(52.dp))
                 Spacer(Modifier.width(14.dp))
                 Column {
@@ -161,11 +200,13 @@ object StandingMocks {
                     Text("Updated 31 Oct 14:20", style = MaterialTheme.typography.bodyMedium, color = G.TextMuted)
                 }
             }
-            Text(level.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium, color = level.color, modifier = Modifier.padding(top = 16.dp))
-            Text(level.line, style = MaterialTheme.typography.bodyMedium, color = G.Text, modifier = Modifier.padding(top = 2.dp))
-            Meter(level, Modifier.padding(top = 14.dp))
-            Text("Disabled", style = MaterialTheme.typography.labelLarge, color = G.TextMuted, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
-            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card).padding(horizontal = 14.dp, vertical = 10.dp),
+            Column(Modifier.widenIn { stagger(parts(), 1, 5) }) {
+                Text(level.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium, color = level.color, modifier = Modifier.padding(top = 16.dp))
+                Text(level.line, style = MaterialTheme.typography.bodyMedium, color = G.Text, modifier = Modifier.padding(top = 2.dp))
+            }
+            Meter(level, Modifier.padding(top = 14.dp).widenIn { stagger(parts(), 2, 5) })
+            Text("Disabled", style = MaterialTheme.typography.labelLarge, color = G.TextMuted, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp).widenIn { stagger(parts(), 3, 5) })
+            Column(Modifier.widenIn { stagger(parts(), 3, 5) }.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card).padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (off.isEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
                     BootCat(Mark.Done, 0, Modifier.size(22.dp)); Spacer(Modifier.width(12.dp))
@@ -177,15 +218,15 @@ object StandingMocks {
     }
 
     @Composable
-    private fun ActionsCard(actions: List<Action>, openFirst: Boolean, modifier: Modifier) = com.vrca.app.Layer(modifier) {
+    private fun ActionsCard(actions: List<Action>, openFirst: Boolean, parts: () -> Float, modifier: Modifier) = com.vrca.app.Layer(modifier) {
         val (active, past) = actions.partition { it.active }
         Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.widenIn { stagger(parts(), 0, 3) }, verticalAlignment = Alignment.CenterVertically) {
                 Text("Actions on your account", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium, color = G.Text, modifier = Modifier.weight(1f))
                 if (active.isNotEmpty()) Text("${active.size} active", style = MaterialTheme.typography.bodySmall, color = G.TextMuted)
             }
             // Like the website's contributions feed: one collapsed line each, tap to open the details.
-            Column(Modifier.padding(top = 12.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card)) {
+            Column(Modifier.padding(top = 12.dp).widenIn { stagger(parts(), 1, 3) }.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(G.Card)) {
                 active.forEachIndexed { k, a -> if (k > 0) Divider(); ActionRow(a, startOpen = openFirst && k == 0) }
                 if (past.isNotEmpty()) { Divider(); past.forEach { ActionRow(it, startOpen = false) } }
             }
