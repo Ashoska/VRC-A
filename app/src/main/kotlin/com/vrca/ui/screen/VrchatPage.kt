@@ -14,6 +14,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -1130,16 +1132,42 @@ private fun AvatarResultRow(ctx: android.content.Context, r: com.vrca.vrchat.Ava
     }
 }
 
-/** Headset: a grid card (5 across, 10 rows = one page of 50). Raised layer, thumbnail on top. */
+/** Headset: a compact grid card (5 across, 10 rows = one page of 50): a wide thumbnail carrying the platform
+ *  icons (bottom left) and small round clone / open buttons (top right), then the name and author. */
 @Composable
 private fun AvatarResultCard(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSearch.Result, onDead: (String) -> Unit, modifier: Modifier) {
     val shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
-    Column(modifier.background(GremlinColors.Raised, shape).border(1.dp, GremlinColors.Edge, shape).padding(6.dp)) {
-        AvatarThumb(ctx, r, onDead, Modifier.fillMaxWidth().aspectRatio(4f / 3f).clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp)), catSize = 32.dp)
-        Spacer(Modifier.height(6.dp))
-        ResultText(r, Modifier.padding(horizontal = 2.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { CloneOpenButtons(ctx, r, onDead) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var cloning by remember { mutableStateOf(false) }
+    Column(modifier.background(GremlinColors.Raised, shape).border(1.dp, GremlinColors.Edge, shape).padding(5.dp)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp))) {
+            AvatarThumb(ctx, r, onDead, Modifier.matchParentSize(), catSize = 28.dp)
+            Row(Modifier.align(Alignment.TopEnd).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                CardRound(onClick = { if (!cloning) cloneResult(ctx, scope, r, onDead) { cloning = it } }, label = "Clone avatar") {
+                    if (cloning) com.vrca.app.BootCat(com.vrca.app.Mark.Working, 0, Modifier.size(18.dp))
+                    else Icon(Icons.Filled.PeopleAlt, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                }
+                CardRound(onClick = { openResult(ctx, r) }, label = "Open in VRChat") { Icon(Icons.Filled.OpenInNew, null, Modifier.size(15.dp), tint = GremlinColors.Text) }
+            }
+            if (r.platforms.isNotEmpty()) Row(Modifier.align(Alignment.BottomStart).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                r.platforms.forEach { PlatformSymbol(it) }
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        Text(r.name.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.bodyMedium, maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 3.dp))
+        Text("by ${r.author.ifBlank { "unknown" }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 3.dp))
     }
+}
+
+/** A small round button laid over a card's thumbnail (dark Card face, Edge ring). */
+@Composable
+private fun CardRound(onClick: () -> Unit, label: String, content: @Composable () -> Unit) {
+    Box(Modifier.size(30.dp).clip(androidx.compose.foundation.shape.CircleShape).background(GremlinColors.Card.copy(alpha = 0.92f))
+        .border(1.dp, GremlinColors.Edge, androidx.compose.foundation.shape.CircleShape)
+        .clickable(onClickLabel = label, role = androidx.compose.ui.semantics.Role.Button) { onClick() }
+        .semantics { contentDescription = label }, contentAlignment = Alignment.Center) { content() }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
