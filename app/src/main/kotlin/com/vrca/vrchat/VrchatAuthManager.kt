@@ -2425,10 +2425,10 @@ object VrchatAuthManager {
     /** Catalog candidates for one log-name variant. v53: the free CDN name file (every catalog avatar
      *  with exactly this folded name, author included, filled by the bots); with a log author and no
      *  avatar of that name by them, the server's search narrowed to that author (one request, rare) so
-     *  the closest-name rule below still has that author's avatars to pick from. Before the name files
-     *  are ready (or if one can't be read), the old sharded search, exactly as before. */
+     *  the closest-name rule below still has that author's avatars to pick from. If a name file can't be
+     *  read, one server search for the name instead. */
     private suspend fun catalogNameHits(context: Context, variant: String, author: String, authorNorm: String): List<com.vrca.vrchat.AvatarGlobalDb.Entry> {
-        if (com.vrca.vrchat.AvatarGlobalDb.nameFilesReady(context)) {
+        run {
             val byName = com.vrca.vrchat.AvatarGlobalDb.entriesByName(context, fancyFold(variant))
             if (byName != null) {
                 if (authorNorm.isBlank() || byName.any { fancyFold(it.author) == authorNorm }) return byName
@@ -2436,8 +2436,8 @@ object VrchatAuthManager {
                 if (byAuthor != null) return byName + byAuthor.results
             }
         }
-        val query = if (authorNorm.isNotBlank()) "$variant $author" else variant
-        return try { com.vrca.vrchat.AvatarGlobalDb.searchSharded(context, query, 40) } catch (e: Exception) { emptyList() }
+        // Name file unreadable right now: one server search for this name (author-narrowed when known).
+        return com.vrca.vrchat.AvatarGlobalDb.searchD1(context, variant, 0, author.takeIf { authorNorm.isNotBlank() })?.results?.take(40) ?: emptyList()
     }
 
     private fun avatarNameVariants(name: String): List<String> {

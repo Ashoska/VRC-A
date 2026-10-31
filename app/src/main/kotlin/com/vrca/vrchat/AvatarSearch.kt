@@ -337,14 +337,8 @@ object AvatarSearch {
                 AvatarGlobalDb.contribute(context, fid, r.id, r.name, r.author, r.authorId, r.platforms, bulk = true)
             }
         }
-        // When the sharded index is live, OUR catalog results come from here too (there is no
-        // instant local path) — merged AHEAD of the mirror results so our entries win the dedup.
-        val ours = if (AvatarGlobalDb.isR2SearchLive())
-            AvatarGlobalDb.searchSharded(context, query).map { entryToResult(it) } else emptyList()
-        if (ours.isEmpty()) return@coroutineScope list
-        val out = LinkedHashMap<String, Result>()
-        for (r in ours + list) { val k = r.id.trim().lowercase(); if (k.startsWith("avtr_")) out.putIfAbsent(k, r) }
-        out.values.toList()
+        // Our own catalog is searched through D1 (the Search button); this only gathers the mirrors' results.
+        list
     }
 
     /** VRCX-style mirror results, parsed richly (image url + platforms) for display. */
@@ -381,39 +375,16 @@ object AvatarSearch {
     private fun catalogResults(query: String): List<Result> =
         AvatarGlobalDb.searchByName(query).map { entryToResult(it) }
 
-    /** Our catalog as results — the SHARDED index when it's the live source (post-cutover),
-     *  else the in-memory whole-map. Suspend because the sharded path is network. */
+    /** Our catalog as results for the DB seeder: none once R2 is live (search is D1 there), else the
+     *  in-memory whole-map. */
     private suspend fun ourCatalog(context: Context, query: String): List<Result> =
-        if (AvatarGlobalDb.isR2SearchLive()) AvatarGlobalDb.searchSharded(context, query).map { entryToResult(it) }
-        else catalogResults(query)
-
-    // ---- paged search (Google-style pages over the sharded catalog) -----------
-    /** One page of results + paging metadata (0-based page). */
-    data class ResultPage(val results: List<Result>, val page: Int, val total: Int, val hasMore: Boolean)
-
-    /** True when the paged sharded search is live (post-cutover). The UI uses [searchPage]
-     *  when this is true, and the legacy single-list merge (local + remoteFill) otherwise. */
-    fun pagedSearchLive(): Boolean = AvatarGlobalDb.isR2SearchLive()
-
-    /** Fetch ONE page of our sharded catalog (the "infinite avatars" path). Cost is bounded
-     *  to this page's fragment buckets; `hasMore` is exact (candidate count known up-front). */
-    suspend fun searchPage(context: Context, query: String, page: Int, pageSize: Int = 20): ResultPage {
-        val p = AvatarGlobalDb.searchShardedPage(context, query, page, pageSize)
-        return ResultPage(p.results.map { entryToResult(it) }, p.page, p.total, p.hasMore)
-    }
-
-    /** The WHOLE match set for a query (capped) in one fetch — the UI filters + paginates client-side,
-     *  so toggling a platform filter never re-searches. `total`/`hasMore` say if the cap was hit. */
-    suspend fun searchAllMatches(context: Context, query: String, cap: Int = 2000): ResultPage {
-        val p = AvatarGlobalDb.searchShardedAll(context, query, cap)
-        return ResultPage(p.results.map { entryToResult(it) }, p.page, p.total, p.hasMore)
-    }
+        if (AvatarGlobalDb.isR2SearchLive()) emptyList() else catalogResults(query)
 
     // ---- v53: Search button → the server's D1 search, 500 results per batch (the UI shows 50 a page) ----
     // One request per Search press. The last 20 searches stay in memory for 20 minutes (first batch only,
     // ~150 KB each at most, never written to storage): Back / reopening a recent search shows them with no
     // request, while pressing Search again fetches fresh once the remembered copy is over 2 minutes old.
-    // Falls back to the old sharded search files when D1 isn't live (older server / outage).
+    // When the search server can't be reached the batch is empty (no fallback: the old search files are gone).
     data class Batch(val results: List<Result>, val more: Boolean, val offset: Int)
     const val BATCH_SIZE = 500
     private class Remembered(val batch: Batch, val at: Long)
@@ -437,8 +408,7 @@ object AvatarSearch {
         labBatches?.let { f -> return f(query, offset).also { if (offset == 0) synchronized(remembered) { remembered[key] = Remembered(it, now) } } }
         val d1 = AvatarGlobalDb.searchD1(context, query, offset)
         val batch = if (d1 != null) Batch(d1.results.map { entryToResult(it) }, d1.more, offset)
-            else if (offset == 0) { val p = searchAllMatches(context, query, 2000); Batch(p.results, false, 0) }
-            else Batch(emptyList(), false, offset)
+            else Batch(emptyList(), false, offset)   // search unavailable right now: nothing (the old files are gone)
         if (offset == 0) synchronized(remembered) { remembered[key] = Remembered(batch, now) }
         return batch
     }
