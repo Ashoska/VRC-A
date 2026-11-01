@@ -141,6 +141,28 @@ internal suspend fun githubCreateRelease(
                 )
             }
 
+            // The tag already has a release: a publish cancelled or cut off after the release was made but before
+            // the APK finished uploading (2026-11-01). Reuse that release instead of failing every retry with 422.
+            if (response.code == 422 && responseBody.contains("already_exists")) {
+                response.close()
+                val tagUrl = "https://api.github.com/repos/$owner/$repo/releases/tags/" + java.net.URLEncoder.encode(tagName, "UTF-8")
+                val got = client.newCall(Request.Builder().url(tagUrl)
+                    .header("Authorization", "Bearer $pat")
+                    .header("Accept", "application/vnd.github+json")
+                    .header("X-GitHub-Api-Version", "2022-11-28").get().build()).execute()
+                val gotBody = got.body?.string().orEmpty()
+                if (got.isSuccessful) {
+                    val json = JSONObject(gotBody)
+                    return@withContext GithubReleaseResult(
+                        releaseId = json.getLong("id"),
+                        uploadUrl = json.getString("upload_url"),
+                        htmlUrl   = json.getString("html_url")
+                    )
+                }
+                lastError = Exception("GitHub release for $tagName exists but couldn't be read (${got.code}): $gotBody")
+                got.close()
+                continue
+            }
             lastError = Exception("GitHub create release failed (${response.code}): $responseBody")
             response.close()
         } catch (e: Exception) {
@@ -230,6 +252,14 @@ internal suspend fun githubUploadAsset(
                 return@withContext JSONObject(responseBody).getString("browser_download_url")
             }
 
+            // A file with this name is already on the release (an upload cut off part way, or a re-publish of the
+            // same version): delete it, then the next attempt uploads the new one.
+            if (response.code == 422 && responseBody.contains("already_exists")) {
+                response.close()
+                runCatching { deleteReleaseAsset(client, base, pat, fileName) }
+                lastError = Exception("GitHub upload: replaced the existing $fileName, retrying")
+                continue
+            }
             lastError = Exception("GitHub upload failed (${response.code}): $responseBody")
             response.close()
         } catch (e: Exception) {
@@ -246,6 +276,22 @@ internal suspend fun githubUploadAsset(
         }
     }
     throw lastError ?: Exception("GitHub upload failed after 5 attempts")
+}
+
+/** Deletes the asset named [fileName] from the release whose upload URL base is [uploadBase]
+ *  (https://uploads.github.com/repos/O/R/releases/ID/assets). */
+private fun deleteReleaseAsset(client: OkHttpClient, uploadBase: String, pat: String, fileName: String) {
+    val list = uploadBase.replace("https://uploads.github.com/", "https://api.github.com/") + "?per_page=100"
+    fun req(u: String) = Request.Builder().url(u)
+        .header("Authorization", "Bearer $pat")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+    val body = client.newCall(req(list).get().build()).execute().use { it.body?.string().orEmpty() }
+    val arr = org.json.JSONArray(body)
+    for (i in 0 until arr.length()) {
+        val a = arr.getJSONObject(i)
+        if (a.optString("name") == fileName) client.newCall(req(a.getString("url")).delete().build()).execute().close()
+    }
 }
 
 // ---- Composable ----
