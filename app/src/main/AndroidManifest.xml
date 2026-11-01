@@ -109,6 +109,11 @@
             android:name=".vrchat.NotificationActionReceiver"
             android:exported="false" />
 
+        <!-- Update installs (PackageInstaller session): the installer's answers, incl. its permission popup -->
+        <receiver
+            android:name=".update.InstallResultReceiver"
+            android:exported="false" />
+
         <!-- Device shutdown: cleanly close the Discord gateway so the RPC presence
              disappears when the device powers off (a Quest full-power-off otherwise
              leaves the socket un-closed and Discord keeps showing the RPC). -->
