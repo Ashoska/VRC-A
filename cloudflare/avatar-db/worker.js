@@ -3406,8 +3406,8 @@ function setN(k,v){if(v==null||isNaN(v))return;var from=shown[k]==null?v:shown[k
   var els=document.querySelectorAll('[data-n="'+k+'"]');for(var i=0;i<els.length;i++)els[i].textContent=fmt(c);if(u<1)requestAnimationFrame(st)}
  requestAnimationFrame(st)}
 var tip=document.getElementById('tip');
-function showTip(x,y,val,label){tip.textContent='';var b=document.createElement('b');b.textContent=val;var l=document.createElement('div');l.className='tl';l.textContent=label;
- tip.appendChild(b);tip.appendChild(l);tip.style.opacity=1;var w=tip.offsetWidth;tip.style.left=Math.min(innerWidth-w-8,Math.max(8,x-w/2))+'px';tip.style.top=(y-tip.offsetHeight-12)+'px'}
+function showTip(x,y,val,label,sub){tip.textContent='';var b=document.createElement('b');b.textContent=val;var l=document.createElement('div');l.className='tl';l.textContent=label;
+ tip.appendChild(b);tip.appendChild(l);if(sub){var s2=document.createElement('div');s2.className='tl';s2.textContent=sub;tip.appendChild(s2)}tip.style.opacity=1;var w=tip.offsetWidth;tip.style.left=Math.min(innerWidth-w-8,Math.max(8,x-w/2))+'px';tip.style.top=(y-tip.offsetHeight-12)+'px'}
 function hideTip(){tip.style.opacity=0}
 var NS='http://www.w3.org/2000/svg';function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e}
 function niceStep(m){if(m<=0)return 1;var p=Math.pow(10,Math.floor(Math.log10(m))),f=m/p;return (f<=1?1:f<=2?2:f<=5?5:10)*p}
@@ -3444,7 +3444,7 @@ function line(box,rows,opts){
  var hit=el('rect',{x:f.L,y:f.T,width:f.W-f.L-f.R,height:f.H-f.T-f.B,fill:'transparent'});f.svg.appendChild(hit);
  hit.addEventListener('pointermove',function(e){var b=f.svg.getBoundingClientRect(),px=(e.clientX-b.left)*(f.W/b.width),i=Math.round((px-f.L)/((f.W-f.L-f.R)/Math.max(1,n-1)));i=Math.max(0,Math.min(n-1,i));
   var x=X(i),y=f.y(rows[i].v);hair.setAttribute('x1',x);hair.setAttribute('x2',x);hair.setAttribute('opacity',1);dot.setAttribute('cx',x);dot.setAttribute('cy',y);dot.setAttribute('opacity',1);
-  showTip(b.left+x*(b.width/f.W),b.top+y*(b.height/f.H),fmt(rows[i].v)+' avatars',rows[i].label)});
+  showTip(b.left+x*(b.width/f.W),b.top+y*(b.height/f.H),fmt(rows[i].v)+' avatars',rows[i].label,rows[i].sub)});
  hit.addEventListener('pointerdown',function(e){hit.dispatchEvent(new PointerEvent('pointermove',{clientX:e.clientX,clientY:e.clientY}))});
  hit.addEventListener('pointerleave',function(e){if(e.pointerType!=='mouse')return;hair.setAttribute('opacity',0);dot.setAttribute('opacity',0);hideTip()});
  [0,n-1].forEach(function(i){var t=el('text',{x:X(i),y:f.H-6,'text-anchor':i?'end':'start'});t.textContent=rows[i].label;f.ax.appendChild(t)})}
@@ -3455,7 +3455,7 @@ function drawAll(){
  var started=stats.hours.length?' (since '+hourLabel(stats.hours[0].h)+')':'';
  bars(document.getElementById('cNew'),hourRows('a'),{empty:'Fills in as avatars are added'+started,unit:' new'});
  bars(document.getElementById('cRemoved'),hourRows('r'),{empty:'Fills in as avatars are removed'+started,unit:' removed'});
- var days=stats.days.slice(-30).filter(function(d){return d.e}).map(function(d){return {label:MON[+d.d.slice(5,7)-1]+' '+(+d.d.slice(8,10)),v:d.e}});
+ var days=stats.days.slice(-30).filter(function(d){return d.e}).map(function(d){return {label:MON[+d.d.slice(5,7)-1]+' '+(+d.d.slice(8,10)),v:d.e,sub:'+'+fmt(d.a||0)+' new · '+fmt(d.r||0)+' removed'}});
   line(document.getElementById('cGrowth'),days,{empty:'The line starts once there are two days of data (UTC)'})}
 function today(){var d=new Date().toISOString().slice(0,10),t=stats.days.filter(function(x){return x.d===d})[0]||{a:0,r:0,c:0};
  var hk=new Date().toISOString().slice(0,13),hh=stats.hours.filter(function(x){return x.h===hk})[0]||{a:0,r:0};
