@@ -370,6 +370,8 @@ class DiscordBotService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A safe start after a crash (CrashReport): stay down until "Start VRC-A".
+        if (com.vrca.app.CrashReport.holdService(this)) return START_NOT_STICKY
         when (intent?.action) {
             ACTION_STOP -> {
                 DiscordBotStore.setEnabled(this, false)

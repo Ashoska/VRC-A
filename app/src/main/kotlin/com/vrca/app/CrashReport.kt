@@ -171,9 +171,11 @@ object CrashReport {
      */
     fun checkAtLaunch(ctx: Context) {
         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (prefs.getString(KEY_TEXT, "").isNullOrBlank()) {
-            fromExitInfo(ctx)?.let { save(ctx, it.second, it.first) }
-        }
+        // Always read Android's record (so its "seen" mark keeps up), but only turn it into a report when none is
+        // waiting: a crash Android ended the app for without our handler running gets the crash screen + safe start
+        // too (2026-11-01: a tester crashed 7 times with no report and no crash screen).
+        val fromSystem = fromExitInfo(ctx)
+        if (fromSystem != null && prefs.getString(KEY_TEXT, "").isNullOrBlank()) save(ctx, fromSystem.second, fromSystem.first)
         safeStart = !prefs.getString(KEY_TEXT, "").isNullOrBlank()
         screenUp = safeStart
         if (safeStart) loadForScreen(ctx)
@@ -230,6 +232,8 @@ object CrashReport {
     fun whereOf(text: String): String = when {
         text.startsWith("=== VRC-A NOT RESPONDING") -> "VRC-A stopped responding"
         text.startsWith("=== VRC-A NATIVE CRASH") -> "A built-in library"
+        text.startsWith("=== VRC-A FAILED TO START") -> "Starting VRC-A"
+        text.startsWith("=== VRC-A CRASH (ended by Android)") -> field(text, "Process").ifBlank { "VRC-A" }
         else -> field(text, "Where").ifBlank { "VRC-A" }
     }
 
@@ -237,6 +241,8 @@ object CrashReport {
     fun whatOf(text: String): String = when {
         text.startsWith("=== VRC-A NOT RESPONDING") -> "The app froze and Android closed it"
         text.startsWith("=== VRC-A NATIVE CRASH") -> "A crash in native code"
+        text.startsWith("=== VRC-A FAILED TO START") -> "VRC-A couldn't start"
+        text.startsWith("=== VRC-A CRASH (ended by Android)") -> field(text, "Reason").ifBlank { "Android closed VRC-A after an error" }
         else -> field(text, "What").ifBlank { "Unexpected error" }
     }
 
@@ -270,26 +276,40 @@ object CrashReport {
             val am = ctx.getSystemService(ActivityManager::class.java) ?: return null
             val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val seen = prefs.getLong(KEY_EXIT_SEEN, 0L)
-            val info = am.getHistoricalProcessExitReasons(ctx.packageName, 0, 1).firstOrNull() ?: return null
-            if (info.timestamp <= seen) return null
-            prefs.edit().putLong(KEY_EXIT_SEEN, info.timestamp).commit()
+            // Every process's exits since the last look (newest first), not just the last one: after a crash the
+            // OSC bridge process or a normal close often ended later, and checking only the newest record missed it.
+            val all = am.getHistoricalProcessExitReasons(ctx.packageName, 0, 16).filter { it.timestamp > seen }
+            if (all.isEmpty()) return null
+            prefs.edit().putLong(KEY_EXIT_SEEN, all.maxOf { it.timestamp }).commit()
             // First run of this code: just note where Android's record is up to, show nothing old.
             if (seen == 0L) return null
+            // Crashes our own handler already saved (same moment, a few seconds apart) aren't reported twice.
+            val known = history(prefs).map { it.at }
+            val info = all.filter { it.reason in CRASH_REASONS }
+                .firstOrNull { e -> known.none { kotlin.math.abs(it - e.timestamp) < 15_000L } } ?: return null
             val title = when (info.reason) {
                 ApplicationExitInfo.REASON_CRASH_NATIVE -> "VRC-A NATIVE CRASH"
                 ApplicationExitInfo.REASON_ANR -> "VRC-A NOT RESPONDING"
-                else -> return null
+                ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "VRC-A FAILED TO START"
+                else -> "VRC-A CRASH (ended by Android)"
             }
             val sw = StringWriter()
             val pw = PrintWriter(sw)
             header(pw, title, ctx, info.timestamp)
             pw.println("Reason: ${info.description.orEmpty()}")
+            pw.println("Process: ${info.processName}")
             pw.println()
             info.traceInputStream?.use { pw.print(it.bufferedReader().readText().take(MAX_CHARS)) }
             pw.flush()
             info.timestamp to sw.toString()
         }.getOrNull()
     }
+
+    /** Android exit reasons that mean VRC-A crashed (not a swipe, low memory, or our own deliberate close). */
+    private val CRASH_REASONS = setOf(
+        ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE,
+        ApplicationExitInfo.REASON_ANR, ApplicationExitInfo.REASON_INITIALIZATION_FAILURE
+    )
 
     private const val MAX_CHARS = 80_000
 }
