@@ -1294,6 +1294,28 @@ internal fun UpdatePopup(info: ReleaseInfo, forced: Boolean, visible: Boolean, o
     var downloadLanded     by remember { mutableStateOf(false) }
     var downloadDone       by remember { mutableStateOf(false) }
     var downloadError      by remember { mutableStateOf<String?>(null) }
+    // A downloaded update waiting for "Install unknown apps" (user, 2026-11-01: on Quest, without it the APK
+    // opened in the file manager instead of the installer). Installs by itself once the app is back with it on.
+    var waitingApk         by remember { mutableStateOf<File?>(null) }
+    val updateLifecycle = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    val updateCtx = LocalContext.current
+    DisposableEffect(updateLifecycle) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            val apk = waitingApk
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME && apk != null && canInstallApks(updateCtx)) {
+                waitingApk = null; downloadError = null; downloadDone = false
+                Thread {
+                    val ok = com.vrca.update.ApkInstaller.install(updateCtx.applicationContext, apk)
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        if (!ok) downloadError = "Couldn't open the installer. Tap the download link to install manually."
+                        downloadDone = true
+                    }
+                }.start()
+            }
+        }
+        updateLifecycle.lifecycle.addObserver(obs)
+        onDispose { updateLifecycle.lifecycle.removeObserver(obs) }
+    }
 
     // Listen for DownloadManager completion
     if (downloadId >= 0L && !downloadDone) {
@@ -1363,6 +1385,18 @@ internal fun UpdatePopup(info: ReleaseInfo, forced: Boolean, visible: Boolean, o
                                 // APK into the session is off the main thread; ACTION_VIEW stays as the fallback.
                                 downloadLanded = true
                                 com.vrca.update.InstallStatus.error.value = null
+                                // Not allowed to install apps yet: open that page now (not the file manager), and
+                                // install by itself when VRC-A is back with it switched on (waitingApk, ON_RESUME).
+                                if (!canInstallApks(context)) {
+                                    waitingApk = file
+                                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                        openInstallPermission(context)
+                                        downloadError = "Allow VRC-A to install apps, then come back: the update installs by itself."
+                                        downloadDone = true
+                                    }, LANDED_HOLD_MS)
+                                    cursor.close()
+                                    return
+                                }
                                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                                     Thread {
                                         val ok = com.vrca.update.ApkInstaller.install(context.applicationContext, file)
@@ -1473,6 +1507,9 @@ internal fun UpdatePopup(info: ReleaseInfo, forced: Boolean, visible: Boolean, o
         )
     }
 }
+
+/** VRC-A may install APKs (its own updates). */
+internal fun canInstallApks(ctx: Context) = Build.VERSION.SDK_INT < 26 || ctx.packageManager.canRequestPackageInstalls()
 
 /**
  * Opens the "Install unknown apps" page for VRC-A. Some builds (seen on Quest) have no per-app page for the
