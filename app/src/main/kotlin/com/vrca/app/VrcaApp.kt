@@ -1357,13 +1357,21 @@ internal fun UpdatePopup(info: ReleaseInfo, forced: Boolean, visible: Boolean, o
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                 }
-                                // A missing FileProvider authority / no installer activity throws —
-                                // surface it instead of crashing the app mid-update.
+                                // Android's own installer (a PackageInstaller session, com.vrca.update.ApkInstaller):
+                                // ACTION_VIEW opened the Quest file manager instead. The session shows the system's
+                                // "install unknown apps" permission popup when it's off, then installs. Copying the
+                                // APK into the session is off the main thread; ACTION_VIEW stays as the fallback.
                                 downloadLanded = true
+                                com.vrca.update.InstallStatus.error.value = null
                                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                                    runCatching { context.startActivity(install) }
-                                        .onFailure { downloadError = "Couldn't open the installer. Tap the download link to install manually." }
-                                    downloadDone = true
+                                    Thread {
+                                        val ok = com.vrca.update.ApkInstaller.install(context.applicationContext, file)
+                                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                            if (!ok) runCatching { context.startActivity(install) }
+                                                .onFailure { downloadError = "Couldn't open the installer. Tap the download link to install manually." }
+                                            downloadDone = true
+                                        }
+                                    }.start()
                                 }, LANDED_HOLD_MS)
                             }
                         }
@@ -1416,18 +1424,13 @@ internal fun UpdatePopup(info: ReleaseInfo, forced: Boolean, visible: Boolean, o
             downloading = downloadId >= 0L && !downloadDone,
             progress = downloadProgress,
             landed = downloadLanded,
-            error = downloadError,
+            error = downloadError ?: com.vrca.update.InstallStatus.error.value,
             onDismiss = onDismiss,
             onDownload = { url ->
                 downloadError = null
-                // Every build (the headset too: it updates from latest_headset, not a store) installs its own APK, which
-                // needs "Install unknown apps" for VRC-A. Without it the installer refuses after the download, so ask
-                // first: open the system page and say what to do, then the next tap downloads.
-                if (Build.VERSION.SDK_INT >= 26 && !ctx.packageManager.canRequestPackageInstalls()) {
-                    openInstallPermission(ctx)
-                    downloadError = "Turn on \"Allow from this source\" for VRC-A, then come back and tap Download again."
-                    return@UpdateDialog
-                }
+                com.vrca.update.InstallStatus.error.value = null
+                // "Install unknown apps" off: the installer session asks for it with Android's own popup after the
+                // download (user, 2026-11-01: a popup, not a settings page), then installs.
                 // DownloadManager can be disabled/unavailable on some OEM builds (reported
                 // on Samsung Galaxy) — getSystemService returns null or enqueue() throws
                 // (IllegalArgumentException "Unknown URL"/SecurityException). Catch every
