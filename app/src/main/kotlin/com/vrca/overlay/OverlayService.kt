@@ -98,6 +98,8 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d("Service", "onCreate()")
+        // A safe start after a crash (CrashReport): stay down until "Start VRC-A".
+        if (com.vrca.app.CrashReport.holdService(this)) return
 
         // ✅ Keep service alive while screen off:
         startAsForeground()
